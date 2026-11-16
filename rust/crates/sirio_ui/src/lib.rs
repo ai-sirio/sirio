@@ -21,6 +21,7 @@ mod change_request_style;
 pub(crate) mod ely_ui;
 pub mod changes;
 pub mod chat;
+pub mod composer_prefs;
 pub mod controls;
 pub mod diff_annotations;
 pub mod drawer;

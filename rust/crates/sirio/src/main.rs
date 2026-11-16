@@ -47,6 +47,7 @@ use sirio_ui::{
     chat::{
         Chat, ChatControlSnapshot, ChatEvent, EffortListAction, ElicitationAct, SessionPanelAction,
     },
+    composer_prefs::ComposerPrefs,
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
@@ -9882,6 +9883,8 @@ impl SirioWorkspace {
                 ChatEvent::OpenTrace => workspace.add_trace_tab(&chat_entity, cx),
                 // The Trace tab listens to this itself.
                 ChatEvent::TraceChanged => {}
+                // A drag of the composer's top edge ended on a new maximum.
+                ChatEvent::ComposerMaxRowsChanged(rows) => workspace.save_composer_max_rows(*rows),
                 ChatEvent::SessionIdentified(session_id) => {
                     // A hook write, like `save_session_ref`: the id must
                     // survive a restart that comes before any other save.
@@ -18344,6 +18347,14 @@ impl SirioWorkspace {
                 serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
             self.session.save_settings(&stored);
         }
+    }
+
+    /// The composer's top edge was released on `rows`: stored for the next
+    /// launch. Once per drag; every open chat already follows the published value.
+    fn save_composer_max_rows(&mut self, rows: usize) {
+        let mut stored = self.session.load_settings();
+        stored.composer_max_rows = rows as i64;
+        self.session.save_settings(&stored);
     }
 
     /// Cards raised this session. Test-only counter: `offered` also holds
@@ -31431,6 +31442,8 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
+        // Not in the snapshot either: the composer's top edge owns it.
+        composer_max_rows: AppSettings::default().composer_max_rows,
         markdown_plantuml_server: snapshot.plantuml_server,
         // Not in the Settings snapshot: `ForgeHub` owns it. Callers re-apply
         // the stored value — see `app_settings_for_settings_save`.
@@ -31456,11 +31469,12 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
 /// emitted and the row that is already stored.
 ///
 /// The snapshot carries every value the surface owns, so the declined-install
-/// list comes from it — the screen is that list's only editor. Three things do
+/// list comes from it — the screen is that list's only editor. Four things do
 /// not ride in the snapshot and are re-applied from the store instead: the
 /// update opt-out (its callback owns it), the widths and centre split (the
-/// divider owns them, see `schedule_panel_width_save`), and the forge hosts
-/// (`ForgeHub` owns them). Re-applying a value
+/// divider owns them, see `schedule_panel_width_save`), the forge hosts
+/// (`ForgeHub` owns them) and the composer's maximum rows (the composer's top
+/// edge owns it, see `save_composer_max_rows`). Re-applying a value
 /// the snapshot *does* carry would silently throw away the edit that produced
 /// it, which is what this function exists to be a single place against.
 fn app_settings_for_settings_save(snapshot: SettingsSnapshot, stored: &AppSettings) -> AppSettings {
@@ -31470,6 +31484,7 @@ fn app_settings_for_settings_save(snapshot: SettingsSnapshot, stored: &AppSettin
     settings.right_panel_width = stored.right_panel_width;
     settings.center_split_ratio = stored.center_split_ratio;
     settings.forge_hosts = stored.forge_hosts.clone();
+    settings.composer_max_rows = stored.composer_max_rows;
     settings
 }
 
@@ -32942,6 +32957,8 @@ fn main() {
         );
         // The code editor's view options, before the first editor opens.
         EditorPrefs::apply(EditorPrefs::from_settings(&saved_settings), cx);
+        // The chat composer's maximum rows, before the first chat opens.
+        ComposerPrefs::apply(ComposerPrefs::from_settings(&saved_settings), cx);
         // The window below is opened with the material resolved from the
         // persisted preference; the theme's surfaces must fade to match from
         // the first frame, not only once the toggle is next flipped, or a
@@ -45767,6 +45784,7 @@ done
             sidebar_width: 325,
             right_panel_width: 405,
             center_split_ratio: 610,
+            composer_max_rows: 20,
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: "http://plantuml.test".into(),
             forge_hosts: "[]".to_string(),
@@ -45951,6 +45969,19 @@ done
         assert_eq!(
             saved.forge_hosts, stored.forge_hosts,
             "a Settings save must not erase what the change request view decided"
+        );
+    }
+
+    #[test]
+    fn a_settings_save_keeps_the_stored_composer_rows() {
+        let stored = AppSettings {
+            composer_max_rows: 20,
+            ..AppSettings::default()
+        };
+        let saved = app_settings_for_settings_save(SettingsSnapshot::default(), &stored);
+        assert_eq!(
+            saved.composer_max_rows, 20,
+            "a Settings save must not reset the dragged composer"
         );
     }
 

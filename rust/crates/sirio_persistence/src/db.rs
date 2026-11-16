@@ -1406,6 +1406,13 @@ impl AppDatabase {
                 500,
             );
         }
+        if let Some(value) = self.setting_value(settings_keys::CHAT_COMPOSER_MAX_ROWS)? {
+            defaults.composer_max_rows = clamp_setting(
+                &value,
+                crate::model::settings_ranges::CHAT_COMPOSER_MAX_ROWS,
+                defaults.composer_max_rows,
+            );
+        }
 
         Ok(defaults)
     }
@@ -1642,6 +1649,11 @@ impl AppDatabase {
             &transaction,
             settings_keys::CENTER_SPLIT_RATIO,
             &settings.center_split_ratio.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::CHAT_COMPOSER_MAX_ROWS,
+            &settings.composer_max_rows.to_string(),
         )?;
         transaction.commit()?;
         Ok(())

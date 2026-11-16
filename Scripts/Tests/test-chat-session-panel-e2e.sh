@@ -135,11 +135,35 @@ set -euo pipefail
 #                      Shift+Tab cycles the permission modes through a full lap and a bit more: the
 #                      fixture's log of set_permission_mode requests is the menu's order with Bypass left
 #                      out, no danger shield is drawn and no dialog holds the keyboard
+# The composer_resize scenario (this script's own) uses the default stub and reads `composerRow` of
+# `surface.chat.read`, which exists only once a frame paints:
+#   composer_resize    The composer's field follows the chat's height. At 2200x1000 the cap is at least
+#                      12 rows, the drawn maximum is the stored 12 and the empty field shows 3 rows; a
+#                      40-line draft fills it to 12. With the window resized to 2200x400 the chat is
+#                      under 554 px tall, so the cap (half the chat minus the band's fixed 61 px allowance, in 18 px
+#                      rows: 4 at 294 px) is below 12 and the drawn maximum and the draft's rows follow it
+#                      while the stored maximum stays 12 and the band stays within half the chat;
+#                      at 2200x1000 again the field is back to 12. Then the edge on the composer's top is
+#                      dragged with real X events: 4 rows up raises the maximum to 16 (released where
+#                      the dragged edge now is); pulled to the transcript it stops at the cap (21 at 894 px; released
+#                      over the transcript) with the band within half the chat; with the 40-line draft still in, a drag pulled down past
+#                      the window's bottom edge and released there (outside the window) ends the drag and
+#                      the rows bottom out at 3, saved; an emptied field is 3 rows; a drag held 5 rows up
+#                      pins the field at 8 and the release frees it with the maximum kept at 8; a press
+#                      that never moved changes nothing, and one held 8 px up pins the field at 3 rows
+#                      and, released, saves nothing. A real drag of the sidebar's divider follows (its
+#                      debounced save writes the whole settings row; the sidebar's new width is checked
+#                      after the relaunch, so the save did run). Last, Sirio is stopped and started
+#                      again under the same name (the same database): the chat it restores (the same
+#                      tab, read before any tab is opened) and a second chat opened beside it both read
+#                      a maximum, stored and drawn, of the 8 the drag left, and a 40-line draft in each
+#                      fills the field to 8 rows, which proves the maximum reaches the field.
+#                      Frames: rest, full, short, taller, outside, held, relaunched
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
 # whatever the code does.
-# trace_keys, file_links, clipboard_keys and composer_keys need a framed run at --window-size 2200x1000
+# trace_keys, file_links, clipboard_keys, composer_keys and composer_resize need a framed run at --window-size 2200x1000
 # (no --state-only): they click at pixels or send real keys.
 #
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
@@ -175,7 +199,7 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys
+  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
   unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet
   elicitation_form elicitation_url elicitation_withdrawn unhandled_request)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
@@ -207,10 +231,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -2359,6 +2383,274 @@ scenario_composer_keys() {
   press_key BackSpace
   composer_is "the composer is empty" ""
   echo "OK: composer_keys: Up and Down recall prompts and their mentions across a relaunch, Shift+Tab cycles the modes short of Bypass"
+  stop_app
+}
+
+# A wait on the composer row (`composerRow`) that records what it saw: the OK line is followed by
+# the numbers the expression held for, so transcript.log can be re-checked without the frames.
+wait_composer() { # desc expr [seconds]
+  local desc=$1 got
+  got=$(E2E find "$SURFACE" "$desc" "${3:-20}" "($2) and json.dumps({k: c[\"composerRow\"].get(k) for k in (\"capRows\", \"maxRows\", \"storedMaxRows\", \"fieldRows\", \"field\", \"band\", \"root\", \"resizing\")}, separators=(\",\", \":\"))") || fail "$desc"
+  echo "OK: $desc"
+  echo "  composerRow: $got"
+}
+# The composer's top edge and the chat root, in window pixels: "edge_x edge_y root_y root_h", the
+# edge's centre and the root's top and height.
+composer_edge_geometry() {
+  E2E find "$SURFACE" "the composer's top edge is drawn" 10 'c["composerRow"]["edge"] and "%d %d %d %d" % (round(c["composerRow"]["edge"][0] + c["composerRow"]["edge"][2] / 2), round(c["composerRow"]["edge"][1] + c["composerRow"]["edge"][3] / 2), round(c["composerRow"]["root"][1]), round(c["composerRow"]["root"][3]))' || fail "the composer's top edge is not drawn"
+}
+# Presses the composer's top edge, moves 3 px up (this only starts GPUI's drag: the move that starts
+# it never reaches the drag handlers), then in 9 px steps to window y $1, and releases unless $2 is
+# "hold". The pointer moves at least twice, as a drag must.
+drag_edge_to() { # window-y [hold]
+  local geometry origin ex ey ox oy target here step args
+  geometry=$(composer_edge_geometry) || fail "no composer edge to drag"
+  origin=$(window_origin)
+  ox=${origin% *}; oy=${origin#* }
+  ex=$(( ${geometry%% *} + ox ))
+  ey=$(( $(printf '%s' "$geometry" | awk '{print $2}') + oy ))
+  target=$(( $1 + oy ))
+  here=$(( ey - 3 ))
+  args=(mousemove "$ex" "$ey" sleep 0.3 mousedown 1 sleep 0.2 mousemove "$ex" "$here" sleep 0.1)
+  while [ "$here" -ne "$target" ]; do
+    if [ "$target" -gt "$here" ]; then step=$(( target - here > 9 ? 9 : target - here )); else step=$(( here - target > 9 ? -9 : target - here )); fi
+    here=$(( here + step ))
+    args+=(mousemove "$ex" "$here" sleep 0.05)
+  done
+  [ "${2:-}" = hold ] || args+=(sleep 0.3 mouseup 1)
+  echo "  drag: the edge at window pixel ${geometry%% *},$(printf '%s' "$geometry" | awk '{print $2}') (screen $ex,$ey) to window y $1" >&2
+  DISPLAY="$DISPLAY_TARGET" timeout 30 xdotool "${args[@]}" || fail "xdotool could not drag the composer's edge to window y $1"
+}
+# Drags the edge $1 rows up (a negative count is down); a row is $COMPOSER_ROW_PX px, 18 by default.
+drag_edge() { # rows [hold]
+  local geometry
+  geometry=$(composer_edge_geometry) || fail "no composer edge to drag"
+  drag_edge_to "$(( $(printf '%s' "$geometry" | awk '{print $2}') - $1 * ${COMPOSER_ROW_PX:-18} ))" "${2:-}"
+}
+
+# The sidebar panel's rect in window pixels, "x y w h" (the debug `shellRects` of `surface layout read`).
+sidebar_geometry() {
+  reply surface layout read | python3 -c 'import json, sys
+rects = json.loads(json.load(sys.stdin)[0]["shellRects"])
+left = rects["left"]
+print(*[round(v) for v in left])' || fail "the sidebar's rect is not drawn"
+}
+
+scenario_composer_resize() {
+  launch composer_resize
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  show_chat
+  wait_panel "the chat is ready" 'c["status"] in ("idle", "completed")' 30
+  compose() { E2E rpc surface.chat.compose surfaceId="$SURFACE" text="$1" >/dev/null || fail "composing failed"; }
+
+  echo "step: at 2200x1000 the cap is at least the stored 12 and the empty field shows 3 rows"
+  wait_composer "the cap holds the default 12, the stored value is 12 and the field shows 3 rows" \
+    '(c["composerRow"]["capRows"] or 0) >= 12 and c["composerRow"]["maxRows"] == 12 and c["composerRow"]["storedMaxRows"] == 12 and c["composerRow"]["fieldRows"] == 3'
+  capture composer-resize-rest
+
+  echo "step: a 40-line draft fills the field to its 12-row maximum"
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_composer "the field grew to 12 rows" 'c["composerRow"]["fieldRows"] == 12'
+  capture composer-resize-full
+
+  echo "step: a window 400 px tall caps the field at half the chat less the band's allowance, below the stored 12"
+  local window
+  window=$(find_window)
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID"
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 2200 400 || fail "could not resize the window to 2200x400"
+  # (A layout that kept the chat taller than 554 px would fail here, not further down.)
+  wait_composer "the chat shrank under 554 px" 'c["composerRow"]["root"][3] < 554'
+  wait_composer "the field follows the cap while the stored maximum stays 12" \
+    '(r := c["composerRow"])["maxRows"] == r["capRows"] and r["capRows"] < 12 and r["capRows"] == max(3, int((r["root"][3] / 2 - 61) / 18)) and r["storedMaxRows"] == 12 and r["fieldRows"] == r["capRows"]'
+  wait_composer "at the cap with no chips the band takes at most half the chat" \
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["band"][3] <= r["root"][3] / 2'
+  capture composer-resize-short
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 2200 1000 || fail "could not resize the window back to 2200x1000"
+  wait_composer "back at 2200x1000 the field is 12 rows again" 'c["composerRow"]["maxRows"] == 12 and c["composerRow"]["fieldRows"] == 12'
+
+  echo "step: dragging the edge 4 rows up (released where the dragged edge now is) raises the maximum to 16"
+  drag_edge 4
+  wait_composer "the field, the drawn maximum and the stored maximum are 16" \
+    'c["composerRow"]["fieldRows"] == 16 and c["composerRow"]["maxRows"] == 16 and c["composerRow"]["storedMaxRows"] == 16 and not c["composerRow"]["resizing"]'
+  capture composer-resize-taller
+
+  echo "step: dragging the edge far up and releasing over the transcript stops at the cap"
+  drag_edge_to "$(composer_edge_geometry | awk '{print int($3 + $4 / 4)}')"
+  wait_composer "the field and the stored maximum are the cap" \
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and r["capRows"] > 16 and not r["resizing"] and r["band"][3] <= r["root"][3] / 2'
+
+  echo "step: a release below the window ends the drag too, and the rows bottom out at 3"
+  # The screen must be taller than the window (2200x1000): window y 1080 is then outside the window
+  # and still on the screen, so X delivers the release through the press's implicit grab. On a screen
+  # too short, xdotool would clamp the pointer back into the window, so the step refuses to run there.
+  # The 40-line draft is still in: an empty field anchors at 3 rows and dragging it down would change nothing.
+  local below_origin screen_h
+  below_origin=$(window_origin)
+  screen_h=$(DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool getdisplaygeometry | awk '{print $2}')
+  [ "$(( ${below_origin#* } + 1080 ))" -lt "${screen_h:-0}" ] \
+    || fail "window y 1080 is not on the ${screen_h:-unknown} px tall screen (window origin $below_origin), so the release would land inside the window: start a taller Xvfb (Xvfb $DISPLAY_TARGET -screen 0 2400x1200x24 &)"
+  drag_edge_to 1080
+  wait_composer "released below the window, the field, the drawn maximum and the stored maximum are 3 and nothing is held" \
+    'c["composerRow"]["fieldRows"] == 3 and c["composerRow"]["maxRows"] == 3 and c["composerRow"]["storedMaxRows"] == 3 and not c["composerRow"]["resizing"]'
+  capture composer-resize-outside
+
+  echo "step: an empty field leaves nothing pinned"
+  compose ""
+  wait_composer "the empty field shows 3 rows" 'c["composerRow"]["fieldRows"] == 3'
+
+  echo "step: a held drag pins the field, the release lets go and keeps the maximum"
+  drag_edge 5 hold
+  wait_composer "the held field is pinned at 8 rows" 'c["composerRow"]["fieldRows"] == 8 and c["composerRow"]["resizing"]'
+  capture composer-resize-held
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mouseup 1 || fail "xdotool could not release the button"
+  wait_composer "the released field is 3 rows, its maximum 8" \
+    'c["composerRow"]["fieldRows"] == 3 and c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and not c["composerRow"]["resizing"]'
+
+  echo "step: a press that never moved, and one held under half a row up, change nothing"
+  local geometry origin ex ey
+  geometry=$(composer_edge_geometry) || fail "no composer edge"
+  origin=$(window_origin)
+  ex=$(( ${geometry%% *} + ${origin% *} ))
+  ey=$(( $(printf '%s' "$geometry" | awk '{print $2}') + ${origin#* } ))
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$ex" "$ey" sleep 0.3 mousedown 1 sleep 0.3 mouseup 1 || fail "xdotool could not press the edge"
+  wait_composer "a press and release without moving keeps the maximum at 8" \
+    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3 and not c["composerRow"]["resizing"]'
+  # Held 8 px up (under half a row): the drag has started, so the field is pinned at the anchor's 3 rows.
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$ex" "$ey" sleep 0.3 mousedown 1 sleep 0.2 mousemove "$ex" $((ey - 3)) sleep 0.1 mousemove "$ex" $((ey - 8)) sleep 0.3 || fail "xdotool could not nudge the edge"
+  wait_composer "held 8 px up, the field is pinned at its 3 rows" \
+    'c["composerRow"]["resizing"] and c["composerRow"]["fieldRows"] == 3 and c["composerRow"]["maxRows"] == 8'
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mouseup 1 || fail "xdotool could not release the button"
+  wait_composer "released, the 8 px drag keeps the maximum at 8" \
+    'not c["composerRow"]["resizing"] and c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3'
+
+  echo "step: a real divider drag saves the whole settings row, and the maximum survives it"
+  # The sidebar's divider saves through `app_settings_for_settings_save`, the writer that once could
+  # reset the rows to 12; the relaunch below proves the 8 survived it.
+  local sidebar_before sidebar_after sidebar_after_relaunch sx sy
+  sidebar_before=$(sidebar_geometry)
+  origin=$(window_origin)
+  sx=$(( $(printf '%s' "$sidebar_before" | awk '{print int($1 + $3 - 3)}') + ${origin% *} ))
+  sy=$(( $(printf '%s' "$sidebar_before" | awk '{print int($2 + $4 / 2)}') + ${origin#* } ))
+  echo "  drag: the sidebar's divider (screen $sx,$sy) 80 px right"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$sx" "$sy" sleep 0.5 mousedown 1 sleep 0.3 mousemove $((sx + 5)) "$sy" sleep 0.3 mousemove $((sx + 40)) "$sy" sleep 0.3 mousemove $((sx + 80)) "$sy" sleep 0.5 mouseup 1 || fail "xdotool could not drag the sidebar's divider"
+  for _ in $(seq 1 50); do
+    sidebar_after=$(sidebar_geometry)
+    [ "$(printf '%s' "$sidebar_after" | awk '{print int($3)}')" -ge "$(( $(printf '%s' "$sidebar_before" | awk '{print int($3)}') + 40 ))" ] && break
+    sleep 0.2
+  done
+  echo "  sidebar: before '$sidebar_before', after '$sidebar_after'"
+  [ "$(printf '%s' "$sidebar_after" | awk '{print int($3)}')" -ge "$(( $(printf '%s' "$sidebar_before" | awk '{print int($3)}') + 40 ))" ] \
+    || fail "the divider drag did not widen the sidebar"
+  wait_composer "the divider drag left the maximum at 8" 'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8'
+  # PANEL_WIDTH_SAVE_DEBOUNCE is 500 ms.
+  sleep 2
+  local chat_tabs_before
+  chat_tabs_before=$(tab_positions chat terminal)
+
+  echo "step: Sirio starts again; the restored chat and a second chat both keep the dragged maximum"
+  stop_app
+  launch composer_resize
+  # The relaunch restores the tabs it had: no tab is opened, closed or counted new before the chat is
+  # read, so the surface read next is the restored one.
+  local chat_tabs_after
+  for _ in $(seq 1 50); do
+    chat_tabs_after=$(tab_positions chat terminal)
+    [ -n "$chat_tabs_after" ] && break
+    sleep 0.3
+  done
+  [ "$chat_tabs_after" = "$chat_tabs_before" ] \
+    || fail "the relaunch restored tabs '$chat_tabs_after', not the '$chat_tabs_before' it had"
+  show_chat
+  SURFACE=""
+  for _ in $(seq 1 50); do
+    SURFACE=$(E2E chat-surface 2>/dev/null || true)
+    [ -n "$SURFACE" ] && break
+    sleep 0.3
+  done
+  [ -n "$SURFACE" ] || fail "no restored chat tab"
+  [ "$(tab_positions chat terminal)" = "$chat_tabs_before" ] || fail "reading the restored chat opened a tab: $(tab_positions chat terminal)"
+  echo "OK: the restored chat is surface $SURFACE, in tab $chat_tabs_before"
+  local restored=$SURFACE
+  wait_composer "the restored chat: the maximum and the stored maximum are 8 and the empty field shows 3 rows" \
+    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3' 30
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_composer "the restored chat's 40-line draft fills the field to the restored 8 rows" 'c["composerRow"]["fieldRows"] == 8'
+  capture composer-resize-relaunched
+  compose ""
+  wait_composer "the restored chat's empty field is back to 3 rows" 'c["composerRow"]["fieldRows"] == 3'
+  sidebar_after_relaunch=$(sidebar_geometry)
+  echo "  sidebar after the relaunch: '$sidebar_after_relaunch'"
+  [ "$(printf '%s' "$sidebar_after_relaunch" | awk '{print int($3)}')" -ge "$(( $(printf '%s' "$sidebar_before" | awk '{print int($3)}') + 40 ))" ] \
+    || fail "the relaunch drew the sidebar at its old width: the divider's save never ran, so it proves nothing about the maximum"
+
+  # A second chat, opened beside the first (open_chat would close every tab).
+  ctl surface open-list open --entry agent:claude >/dev/null || fail "the second chat did not open"
+  local second="" id
+  for _ in $(seq 1 50); do
+    for id in $(reply surface attention read | python3 -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+for row in json.loads(reply["sessions"]):
+    if row["kind"] == "chat":
+        print(row["id"])'); do
+      [ "$id" != "$restored" ] && second=$id
+    done
+    [ -n "$second" ] && break
+    sleep 0.2
+  done
+  [ -n "$second" ] || fail "no second chat opened beside the restored one"
+  SURFACE=$second
+  echo "OK: the second chat is surface $second, the restored one stays open as $restored"
+  wait_panel "the second chat is ready" 'c["status"] in ("idle", "completed")' 30
+  wait_composer "the second chat: the maximum and the stored maximum are 8 and the empty field shows 3 rows" \
+    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3' 30
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_composer "the second chat's 40-line draft fills the field to 8 rows" 'c["composerRow"]["fieldRows"] == 8'
+
+  echo "step: at interface font 18 the row is 23 px: the cap, the field and a drag follow it"
+  # The relaunch restores both chats; show_chat selects the one chat tab, so keep only the restored one.
+  local position remaining=""
+  for position in $(tab_positions chat); do
+    [ "$position" = "$chat_tabs_before" ] || ctl surface tabs close "$position" --confirm >/dev/null
+  done
+  for _ in $(seq 1 50); do
+    remaining=$(tab_positions chat)
+    [ "$remaining" = "$chat_tabs_before" ] && break
+    sleep 0.2
+  done
+  [ "$remaining" = "$chat_tabs_before" ] || fail "closing the second chat left the chat tabs at '$remaining', not only the restored one at $chat_tabs_before"
+  stop_app
+  # appearance.uiFontSize is stored in the setting table; 18 is the top of its 12..=18 range.
+  python3 -I - "$RUN_DIR/composer_resize.sqlite" <<'PY' || fail "could not set appearance.uiFontSize to 18"
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('appearance.uiFontSize', '18')")
+db.commit()
+db.close()
+PY
+  launch composer_resize
+  show_chat
+  SURFACE=""
+  for _ in $(seq 1 50); do
+    SURFACE=$(E2E chat-surface 2>/dev/null || true)
+    [ -n "$SURFACE" ] && break
+    sleep 0.3
+  done
+  [ -n "$SURFACE" ] || fail "no restored chat tab at interface font 18"
+  wait_composer "at font 18 the cap counts 23 px rows, the stored maximum is 8 and the empty field shows 3 rows" \
+    '(r := c["composerRow"])["capRows"] == max(3, int((r["root"][3] / 2 - 61) / 23)) and r["maxRows"] == min(8, r["capRows"]) and r["storedMaxRows"] == 8 and r["fieldRows"] == 3' 30
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_composer "the 40-line draft fills the field to its maximum, drawn on 23 px rows" \
+    '(r := c["composerRow"])["fieldRows"] == r["maxRows"] and r["field"][3] == r["maxRows"] * 23 + 10 and r["band"][3] == 61 + r["maxRows"] * 23'
+  drag_edge_to "$(composer_edge_geometry | awk '{print int($3 + $4 / 4)}')"
+  wait_composer "dragged far up, the field and the stored maximum are the cap and the band takes at most half the chat" \
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and not r["resizing"] and r["band"][3] == 61 + r["capRows"] * 23 and r["band"][3] <= r["root"][3] / 2'
+  COMPOSER_ROW_PX=23 drag_edge -2
+  wait_composer "dragged 2 rows (46 px) down, the field and the stored maximum are 2 rows under the cap" \
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] - 2 and r["storedMaxRows"] == r["capRows"] - 2 and not r["resizing"]'
+  capture composer-resize-font18
+  echo "OK: composer_resize: the field follows the stored maximum and the cap, the edge's drag sets and keeps it, a release outside the window ends a drag, a divider save keeps it, a relaunch restores it in the restored chat and in a new one, and at interface font 18 the cap, the field and a drag follow the 23 px row"
   stop_app
 }
 

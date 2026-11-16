@@ -60,7 +60,12 @@ agents get a total-only Context. The debug-only `surface.chat.panel`
 it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
 JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
 `surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full`,
-`compact`, `narrow` or `minimal`, the `band`, `root`, `send`, `chips` and `overflowButton` boxes as `[x, y, w, h]`,
+`compact`, `narrow` or `minimal`, the `band`, `root`, `send`, `chips`, `overflowButton`, `field` (the text field's box, its vertical padding
+included) and `edge` (the strip along the composer's top that a drag resizes by) boxes as `[x, y, w, h]`,
+`fieldRows` (the rows the field is drawn at, measured from the painted field), `maxRows` (the most rows it is drawn
+to grow to, at rest), `storedMaxRows` (the app-wide `chat.composerMaxRows` the chat holds, before the cap),
+`capRows` (half the chat's height minus a fixed 61 px band allowance, in rows of the field's drawn line height (18 px at the default interface font size), at least 3; null before the first paint), `resizing` (a drag
+of the edge has moved and is held, so the field is pinned to its rows),
 `docked`, `overflow` (what the layout moved into ⋯: `model` or `agent`, `attach` (both only in `minimal`), `fast`, `thinking`, `session-panel`,
 `background-tasks`, `context`), `modeIcon` and `modeDanger` (what the render drew for the permission
 pill, null and false when it drew no icon), `menu` (while ⋯ is open, the rows its render built, in order,

@@ -7,6 +7,7 @@ use std::cell::{Cell, RefCell};
 use gpui::{Bounds, Pixels, Window};
 use sirio_theme::Theme;
 
+use super::composer_height::{ROW_HEIGHT, field_rows};
 use super::controls::OverflowRow;
 use super::session_panel::COLUMN_WIDTH;
 use super::{Chat, TRANSCRIPT_WIDTH};
@@ -140,6 +141,19 @@ pub(crate) struct RowFrame {
     pub band: Cell<Option<Bounds<Pixels>>>,
     /// The send control's bounds, as the band's send probe last measured them.
     pub send: Cell<Option<Bounds<Pixels>>>,
+    /// The composer's field box (`composer-input`), as its probe last measured it.
+    pub field: Cell<Option<Bounds<Pixels>>>,
+    /// The composer's top edge (`composer-edge`), as its probe last measured it.
+    pub edge: Cell<Option<Bounds<Pixels>>>,
+    /// The field's line height the last render drew, in px; `None` before the
+    /// first render.
+    pub row_height: Cell<Option<f32>>,
+    /// The most rows the chat's height allows the field, as the root probe last
+    /// computed it; `None` before the first paint.
+    pub cap_rows: Cell<Option<usize>>,
+    /// The chat's copy of the stored maximum (`ComposerPrefs`), so a reader
+    /// with only `&self` needs no `cx`.
+    pub stored_max_rows: Cell<usize>,
     /// The bounds of the clipping container the chips sit in, as its probe last
     /// measured them.
     pub chips: Cell<Option<Bounds<Pixels>>>,
@@ -152,6 +166,17 @@ pub(crate) struct RowFrame {
     pub mode_danger: Cell<bool>,
     /// The rows of ⋯ the last render built, while the menu is open.
     pub menu: RefCell<Option<Vec<MenuRow>>>,
+}
+
+impl RowFrame {
+    /// The field's drawn line height: the one the last render recorded when it
+    /// is a finite positive number, else `ROW_HEIGHT`.
+    pub fn row_height(&self) -> f32 {
+        self.row_height
+            .get()
+            .filter(|h| h.is_finite() && *h > 0.0)
+            .unwrap_or(ROW_HEIGHT)
+    }
 }
 
 /// One row of ⋯ as the render built it.
@@ -182,6 +207,20 @@ pub struct ComposerSnapshot {
     pub send: Option<[f32; 4]>,
     /// The chips' clipping container.
     pub chips: Option<[f32; 4]>,
+    /// The field's box (`composer-input`, its vertical padding included).
+    pub field: Option<[f32; 4]>,
+    /// The top edge a drag starts from (`composer-edge`).
+    pub edge: Option<[f32; 4]>,
+    /// Whether a drag of the edge has moved and is held: the field is pinned.
+    pub resizing: bool,
+    /// The rows the field is drawn at: its height less the padding, over a row.
+    pub field_rows: Option<usize>,
+    /// The most rows the field is drawn to grow to, at rest.
+    pub max_rows: usize,
+    /// The stored maximum the chat holds, before the cap.
+    pub stored_max_rows: usize,
+    /// The most rows the chat's height allows; `None` before the first paint.
+    pub cap_rows: Option<usize>,
     /// Whether the session panel is docked beside the band.
     pub docked: bool,
     /// `model`, `agent`, `attach`, `fast`, `thinking`, `session-panel`, `background-tasks`
@@ -288,6 +327,13 @@ impl Chat {
             root: boxed(frame.root.get()),
             send: boxed(frame.send.get()),
             chips: boxed(frame.chips.get()),
+            field: boxed(frame.field.get()),
+            edge: boxed(frame.edge.get()),
+            resizing: self.composer_drag.as_ref().is_some_and(|drag| drag.dragged),
+            field_rows: frame.field.get().map(|b| field_rows(b, frame.row_height())),
+            max_rows: self.drawn_max_rows(),
+            stored_max_rows: frame.stored_max_rows.get(),
+            cap_rows: frame.cap_rows.get(),
             docked: frame.docked.get(),
             overflow: self
                 .overflowed_rows()

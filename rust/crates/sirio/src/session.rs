@@ -3843,6 +3843,9 @@ mod tests {
             sidebar_width: 300,
             right_panel_width: 500,
             center_split_ratio: 610,
+            // Off the default 12, so the round trip proves the SessionStore
+            // layer carries the composer's row cap.
+            composer_max_rows: 20,
             // Neither default nor in the Settings UI snapshot, like the
             // widths: this round trip is what proves the SessionStore layer
             // carries a silenced-language list through to its SQLite row.
@@ -3890,6 +3893,7 @@ mod tests {
                 ("appearance.theme".into(), "dark".into()),
                 ("appearance.translucency".into(), "true".into()),
                 ("appearance.uiFontSize".into(), "17".into()),
+                ("chat.composerMaxRows".into(), "20".into()),
                 ("chat.limitHistory".into(), "false".into()),
                 ("chat.retentionCount".into(), "37".into()),
                 ("controlSocket.enabled".into(), "false".into()),
