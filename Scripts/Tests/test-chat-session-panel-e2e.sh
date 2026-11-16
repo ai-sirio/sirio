@@ -2609,6 +2609,17 @@ for row in json.loads(reply["sessions"]):
   wait_composer "the second chat's 40-line draft fills the field to 8 rows" 'c["composerRow"]["fieldRows"] == 8'
 
   echo "step: at interface font 18 the row is 23 px: the cap, the field and a drag follow it"
+  # The relaunch restores both chats; show_chat selects the one chat tab, so keep only the restored one.
+  local position remaining=""
+  for position in $(tab_positions chat); do
+    [ "$position" = "$chat_tabs_before" ] || ctl surface tabs close "$position" --confirm >/dev/null
+  done
+  for _ in $(seq 1 50); do
+    remaining=$(tab_positions chat)
+    [ "$remaining" = "$chat_tabs_before" ] && break
+    sleep 0.2
+  done
+  [ "$remaining" = "$chat_tabs_before" ] || fail "closing the second chat left the chat tabs at '$remaining', not only the restored one at $chat_tabs_before"
   stop_app
   # appearance.uiFontSize is stored in the setting table; 18 is the top of its 12..=18 range.
   python3 -I - "$RUN_DIR/composer_resize.sqlite" <<'PY' || fail "could not set appearance.uiFontSize to 18"
@@ -2631,10 +2642,10 @@ PY
     '(r := c["composerRow"])["capRows"] == max(3, int((r["root"][3] / 2 - 61) / 23)) and r["maxRows"] == min(8, r["capRows"]) and r["storedMaxRows"] == 8 and r["fieldRows"] == 3' 30
   compose "$(printf 'line %d\n' $(seq 1 40))"
   wait_composer "the 40-line draft fills the field to its maximum, drawn on 23 px rows" \
-    '(r := c["composerRow"])["fieldRows"] == r["maxRows"] and r["field"][3] == r["maxRows"] * 23 + 10'
+    '(r := c["composerRow"])["fieldRows"] == r["maxRows"] and r["field"][3] == r["maxRows"] * 23 + 10 and r["band"][3] == 61 + r["maxRows"] * 23'
   drag_edge_to "$(composer_edge_geometry | awk '{print int($3 + $4 / 4)}')"
   wait_composer "dragged far up, the field and the stored maximum are the cap and the band takes at most half the chat" \
-    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and not r["resizing"] and r["band"][3] <= r["root"][3] / 2'
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and not r["resizing"] and r["band"][3] == 61 + r["capRows"] * 23 and r["band"][3] <= r["root"][3] / 2'
   COMPOSER_ROW_PX=23 drag_edge -2
   wait_composer "dragged 2 rows (46 px) down, the field and the stored maximum are 2 rows under the cap" \
     '(r := c["composerRow"])["fieldRows"] == r["capRows"] - 2 and r["storedMaxRows"] == r["capRows"] - 2 and not r["resizing"]'

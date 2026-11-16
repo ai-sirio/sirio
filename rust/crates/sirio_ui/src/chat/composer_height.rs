@@ -25,16 +25,18 @@ pub(crate) const EDGE_HEIGHT: f32 = 6.0;
 /// (2 x 5), the 8px `gap_2` between the editor and the tool row, the 24px tool
 /// row and the band's 8px bottom padding. Three of those parts (the gap, the
 /// tool row and the bottom padding) have no named constant, so this is a
-/// literal. The E2E readback measured it: `band` 115 px with 3 field rows.
+/// literal. The E2E readback measured it: `band` 115 px with 3 field rows at the
+/// default interface font size, and 61 px plus 23 px rows at font 18.
 pub(crate) const BAND_ALLOWANCE: f32 = 61.0;
 
 /// The most rows the field may take in a chat `chat_height` px tall: whole rows
 /// in what is left of half the chat after `BAND_ALLOWANCE`, never fewer than
 /// `MIN_ROWS`, so half the chat stays above the band. `row_height` is the
-/// field's drawn line height. Chips and an attach error come on top of it. A
-/// height or row height that is not a positive number gives `MIN_ROWS`.
+/// field's drawn line height; it is positive (`RowFrame::row_height` holds it
+/// so). Chips and an attach error come on top of it. A height that is not a
+/// positive number gives `MIN_ROWS`.
 pub(crate) fn cap_rows(chat_height: f32, row_height: f32) -> usize {
-    if !chat_height.is_finite() || chat_height <= 0.0 || !row_height.is_finite() || row_height <= 0.0 {
+    if !chat_height.is_finite() || chat_height <= 0.0 {
         return MIN_ROWS;
     }
     let room = chat_height / 2.0 - BAND_ALLOWANCE;
@@ -49,7 +51,8 @@ pub(crate) fn cap_rows(chat_height: f32, row_height: f32) -> usize {
 /// `anchor_rows`: dragging up grows it. The row delta, in rows of `row_height`
 /// px (the field's drawn line height), is rounded and the result stays within
 /// `MIN_ROWS..=cap`; a `cap` under `MIN_ROWS` counts as `MIN_ROWS`. `None` when
-/// either position or `row_height` is not a finite positive number.
+/// either position is not a finite number. `row_height` is positive
+/// (`RowFrame::row_height` holds it so).
 pub(crate) fn drag_rows(
     anchor_rows: usize,
     anchor_y: f32,
@@ -57,7 +60,7 @@ pub(crate) fn drag_rows(
     cap: usize,
     row_height: f32,
 ) -> Option<usize> {
-    if !anchor_y.is_finite() || !pointer_y.is_finite() || !row_height.is_finite() || row_height <= 0.0 {
+    if !anchor_y.is_finite() || !pointer_y.is_finite() {
         return None;
     }
     let delta = ((anchor_y - pointer_y) / row_height).round();
@@ -87,12 +90,9 @@ pub(super) struct ComposerDrag {
 }
 
 /// The rows a painted field box holds: its height less the padding, over
-/// `row_height`, the line height it was drawn with; 0 when that is not a
-/// finite positive number.
+/// `row_height`, the line height it was drawn with, which is positive
+/// (`RowFrame::row_height` holds it so).
 pub(super) fn field_rows(bounds: Bounds<Pixels>, row_height: f32) -> usize {
-    if !row_height.is_finite() || row_height <= 0.0 {
-        return 0;
-    }
     let height: f32 = bounds.size.height.into();
     ((height - 2.0 * FIELD_PAD_Y) / row_height).round().max(0.0) as usize
 }
@@ -228,43 +228,43 @@ mod tests {
 
     #[test]
     fn the_cap_leaves_half_the_chat_above_the_band_in_whole_rows() {
-        assert_eq!(cap_rows(554.0, ROW_HEIGHT), 12);
-        assert_eq!(cap_rows(553.0, ROW_HEIGHT), 11);
-        assert_eq!(cap_rows(1000.0, ROW_HEIGHT), 24);
-        assert_eq!(cap_rows(894.0, ROW_HEIGHT), 21);
-        assert_eq!(cap_rows(294.0, ROW_HEIGHT), 4);
-        assert_eq!(cap_rows(266.0, ROW_HEIGHT), 4, "the first height that fits a fourth row");
+        assert_eq!(cap_rows(554.0, 18.0), 12);
+        assert_eq!(cap_rows(553.0, 18.0), 11);
+        assert_eq!(cap_rows(1000.0, 18.0), 24);
+        assert_eq!(cap_rows(894.0, 18.0), 21);
+        assert_eq!(cap_rows(294.0, 18.0), 4);
+        assert_eq!(cap_rows(266.0, 18.0), 4, "the first height that fits a fourth row");
     }
 
     #[test]
     fn a_chat_too_short_or_unmeasurable_still_caps_at_three_rows() {
         for height in [265.0, 230.0, 124.0, 122.0, 50.0, 0.0, -10.0] {
-            assert_eq!(cap_rows(height, ROW_HEIGHT), 3, "height {height}");
+            assert_eq!(cap_rows(height, 18.0), 3, "height {height}");
         }
         for height in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert_eq!(cap_rows(height, ROW_HEIGHT), 3, "height {height}");
+            assert_eq!(cap_rows(height, 18.0), 3, "height {height}");
         }
     }
 
     #[test]
     fn the_field_follows_the_pointer_in_whole_rows() {
-        assert_eq!(drag_rows(3, 500.0, 464.0, 20, ROW_HEIGHT), Some(5), "36 px up is two rows");
-        assert_eq!(drag_rows(12, 500.0, 536.0, 20, ROW_HEIGHT), Some(10), "36 px down is two rows fewer");
-        assert_eq!(drag_rows(3, 500.0, 492.0, 20, ROW_HEIGHT), Some(3), "8 px is under half a row");
-        assert_eq!(drag_rows(3, 500.0, 490.0, 20, ROW_HEIGHT), Some(4), "10 px rounds to a row");
+        assert_eq!(drag_rows(3, 500.0, 464.0, 20, 18.0), Some(5), "36 px up is two rows");
+        assert_eq!(drag_rows(12, 500.0, 536.0, 20, 18.0), Some(10), "36 px down is two rows fewer");
+        assert_eq!(drag_rows(3, 500.0, 492.0, 20, 18.0), Some(3), "8 px is under half a row");
+        assert_eq!(drag_rows(3, 500.0, 490.0, 20, 18.0), Some(4), "10 px rounds to a row");
     }
 
     #[test]
     fn the_field_stops_at_three_rows_and_at_the_cap() {
-        assert_eq!(drag_rows(5, 500.0, 5000.0, 20, ROW_HEIGHT), Some(3));
-        assert_eq!(drag_rows(5, 500.0, -5000.0, 20, ROW_HEIGHT), Some(20));
-        assert_eq!(drag_rows(5, 500.0, 400.0, 1, ROW_HEIGHT), Some(3), "a cap under 3 never panics");
+        assert_eq!(drag_rows(5, 500.0, 5000.0, 20, 18.0), Some(3));
+        assert_eq!(drag_rows(5, 500.0, -5000.0, 20, 18.0), Some(20));
+        assert_eq!(drag_rows(5, 500.0, 400.0, 1, 18.0), Some(3), "a cap under 3 never panics");
     }
 
     #[test]
     fn a_pointer_that_is_not_a_number_moves_nothing() {
-        assert_eq!(drag_rows(5, 500.0, f32::NAN, 20, ROW_HEIGHT), None);
-        assert_eq!(drag_rows(5, f32::INFINITY, 500.0, 20, ROW_HEIGHT), None);
+        assert_eq!(drag_rows(5, 500.0, f32::NAN, 20, 18.0), None);
+        assert_eq!(drag_rows(5, f32::INFINITY, 500.0, 20, 18.0), None);
     }
 
     #[test]
@@ -287,19 +287,6 @@ mod tests {
             gpui::size(gpui::px(400.0), gpui::px(8.0 * 23.0 + 2.0 * FIELD_PAD_Y)),
         );
         assert_eq!(field_rows(field, 23.0), 8, "at 18 px it would be 10");
-    }
-
-    #[test]
-    fn a_row_height_that_is_not_a_positive_number_changes_nothing() {
-        let field = gpui::Bounds::new(
-            gpui::point(gpui::px(0.0), gpui::px(0.0)),
-            gpui::size(gpui::px(400.0), gpui::px(194.0)),
-        );
-        for height in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(cap_rows(894.0, height), 3, "row height {height}");
-            assert_eq!(drag_rows(3, 500.0, 400.0, 20, height), None, "row height {height}");
-            assert_eq!(field_rows(field, height), 0, "row height {height}");
-        }
     }
 
     #[gpui::test]

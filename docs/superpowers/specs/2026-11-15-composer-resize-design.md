@@ -163,6 +163,9 @@ value is one app-wide preference saved across relaunches, not one per chat.
   bottom padding (1 + 10 + 10 + 8 + 24 + 8). Chips and the attach error still come
   on top of it when shown, so then the band can pass half the chat. The field is
   what the user drags, and chips come and go.
+- The heights quoted in this spec (554 px for the default 12 rows, 266 px for a
+  fourth row, the 2200x1000 and 2200x400 caps) are at the default interface font
+  size; at a larger font each row is taller, so they grow with it.
 - Revised 2026-11-16 at the user's ruling: §1 and §3.3 disagreed; the cap now
   subtracts a fixed band allowance so §1 holds.
 - Before the chat's first paint its height is unknown, and the field uses
@@ -261,6 +264,10 @@ each asserted on `composerRow`:
 8. Relaunch: drawn maximum is the last value; a second chat opened has it too.
 9. Shrink the window below what the value needs: drawn maximum equals the new cap,
    stored value unchanged; grow it back: drawn maximum restored.
+10. At interface font 18 (23 px rows), after a relaunch: the cap counts 23 px rows, a
+    40-line draft fills the field on 23 px rows with the band exactly 61 px plus its
+    rows, a drag far up stops at the cap within half the chat, and a 2-row drag down
+    moves 46 px.
 
 Frames under the scenario's `frames/composer-resize-*.png`, the success line the
 script already prints, and the scenario added to `docs/agents/e2e-tests.md`.
