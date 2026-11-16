@@ -548,6 +548,11 @@ impl IdeBridge {
         self.running.as_ref().map(|running| &running.bridge)
     }
 
+    /// Whether any Claude is connected.
+    pub(crate) fn has_connections(&self) -> bool {
+        !self.connections.is_empty()
+    }
+
     /// Connections with no owner, with the pid each connected with.
     pub(crate) fn ownerless(&self) -> Vec<(ConnId, u32)> {
         let mut found: Vec<(ConnId, u32)> = self
@@ -820,6 +825,10 @@ impl SirioWorkspace {
     pub(crate) fn ide_selection_changed(&mut self, view: &Entity<FileView>, cx: &mut Context<Self>) {
         // A drag changes the selection on every mouse move: nobody connected, nothing to do.
         if !cx.has_global::<IdeBridge>() {
+            return;
+        }
+        // Nobody connected (the global is always installed): nothing to compute per mouse move.
+        if !cx.global::<IdeBridge>().has_connections() {
             return;
         }
         // Only the connections this file can concern: those owned in its worktree, and the

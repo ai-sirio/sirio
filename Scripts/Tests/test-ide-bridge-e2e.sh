@@ -69,9 +69,16 @@ set -eEuo pipefail
 #                    the client's pane is in a worktree that is not selected; Sirio quits and
 #                    relaunches and the client reconnects: the state shows it ownerless, in
 #                    that worktree (its cwd); six seconds later (the reconnect's retries are
-#                    over) selecting the worktree gives it an owner; one at-mention from a file
-#                    of that worktree then reaches it (nothing was focused since the relaunch),
-#                    focuses its tab and leaves the toast count as it was
+#                    over) selecting the worktree gives it an owner (no file tab is restored, so
+#                    only the selection can resolve it)
+#   at_mention_after_relaunch
+#                    the same relaunch with a file as the active tab: one at-mention from that
+#                    file reaches the reconnected client (nothing was focused since the
+#                    relaunch), focuses its tab and leaves the toast count as it was
+#   selection_not_lost_to_another_worktree
+#                    a file of another worktree sits in this worktree's strip: select in this
+#                    worktree's file, then select the other tab 60 ms later (inside the 100 ms
+#                    window): the client still gets the selection of the first file
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
@@ -388,6 +395,62 @@ if failed:
     sys.exit(failed)
 print(elapsed)
 SELBURST
+# One `surface.editor.select` and, 60 ms after it is sent (a later pass of the app's 40 ms control poll, so the selection is noted before the tab change), one `surface.tabs.select`, each on a
+# connection of its own opened beforehand, so both land inside the 100 ms coalescing window.
+# Logged like sockcall's, with `sent_ms` and `answered_ms` (from the first send) as timing
+# evidence; the two sent_ms and the answers' gap are printed.
+cat >"$RUN_DIR/selfocus.py" <<'SELFOCUS'
+import json, os, socket, sys, time
+
+ranges, tab = sys.argv[1], sys.argv[2]
+log_path = os.path.join(os.environ["RUN_DIR"], "socket.jsonl")
+requests = [
+    {"id": f"selfocus-0-{time.time_ns()}", "method": "surface.editor.select", "params": {"ranges": ranges}},
+    {"id": f"selfocus-1-{time.time_ns()}", "method": "surface.tabs.select", "params": {"index": tab}},
+]
+socks, sent, answered, answers = [], [], [], []
+try:
+    for _ in requests:
+        sock = socket.socket(socket.AF_UNIX)
+        sock.settimeout(20)
+        sock.connect(os.environ["SIRIO_SOCKET"])
+        socks.append(sock)
+    start = time.monotonic()
+    for sock, request in zip(socks, requests):
+        sent.append(int((time.monotonic() - start) * 1000))
+        sock.sendall((json.dumps(request) + "\n").encode())
+        time.sleep(0.060)
+    for sock in socks:
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        if not data:
+            raise EOFError("no answer")
+        answered.append(int((time.monotonic() - start) * 1000))
+        answers.append(json.loads(data))
+except (OSError, EOFError, ValueError) as error:
+    with open(log_path, "a", encoding="utf-8") as log:
+        for request in requests:
+            log.write(json.dumps({"via": "selfocus", "request": request, "error": type(error).__name__}, sort_keys=True) + "\n")
+    raise
+finally:
+    for sock in socks:
+        sock.close()
+failed = None
+with open(log_path, "a", encoding="utf-8") as log:
+    for request, response, at, back in zip(requests, answers, sent, answered):
+        log.write(json.dumps({"via": "selfocus", "request": request, "response": response,
+                              "sent_ms": at, "answered_ms": back}, sort_keys=True) + "\n")
+        if not response.get("ok") and failed is None:
+            failed = f"{request['method']} failed: {response.get('error')}"
+if failed:
+    sys.exit(failed)
+print(f"sent at {sent} ms, answered at {answered} ms")
+SELFOCUS
+selfocus() { python3 -I "$RUN_DIR/selfocus.py" "$@"; }
 selburst() { python3 -I "$RUN_DIR/selburst.py" "$@"; }
 # Every sirioctl call goes through a recording proxy: it listens on its own socket, forwards
 # each request line to the app's socket and the answer back, and appends both, complete, to
@@ -1162,6 +1225,38 @@ case_at_mention_to_new_terminal() {
   echo "OK: the new terminal, focused when it connected, got the at-mention"
 }
 
+# A file of another worktree can sit in this worktree's strip (surface.editor.open, the Open File
+# picker, a followed file take any path). The user selects in this worktree's file and, within
+# the 100 ms coalescing window, selects the other tab: the connection owned here must still get
+# the selection of the file it was waiting to send, not lose it to a file of another worktree.
+case_selection_not_lost_to_another_worktree() {
+  local second other_tab elapsed before got
+  second="$("$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-second"]
+print(paths[0] if paths else "")')"
+  [ -n "$second" ] || fail "$CASE: sirioctl does not list the second worktree"
+  write_sel_file "$second/other.rs" >/dev/null
+  ctl surface editor open --path "$second/other.rs" >/dev/null
+  other_tab="$(tabs_field active)"
+  ctl surface tabs select "$FILE_TAB" >/dev/null
+  sleep 0.5
+  before="$(note_count selection_changed)"
+  # "six();", line 6 of this worktree's sel.rs.
+  elapsed="$(selfocus "$((SEL_L5E + 1))..$((SEL_L5E + 7))" "$other_tab")"
+  echo "select, then the other worktree's tab: $elapsed"
+  local tries=0
+  while [ "$tries" -lt 50 ]; do
+    got="$(client_notes selection_changed | tail -n +"$((before + 1))" | grep -F "\"text\": \"six();\"" | grep -F "$SEL_FILE" || true)"
+    [ -z "$got" ] || break
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  [ -n "$got" ] || fail "$CASE: the client never got the selection of $SEL_FILE ($elapsed; last: $(client_notes selection_changed | tail -n 1))"
+  echo "OK: the selection of this worktree's file reached its client although another worktree's tab was selected at once"
+  sockcall surface.tabs.close "index=$other_tab" confirm=yes >/dev/null
+}
+
 case_no_eligible_agent_toast() {
   close_tabs_of_kind terminal
   expect_state "no connection once the clients are gone" 'len(d["connections"])' 0
@@ -1216,9 +1311,6 @@ print(paths[0] if paths else "")')"
   start_app_client
   wait_client "connected" 'r.get("event") == "connected"' 1
   expect_state "owned while its worktree is selected" 'd["connections"][0]["owner_pane"]' "$CLIENT_PANE"
-  # A file is the active tab when Sirio quits: after the relaunch nothing focuses the terminal.
-  read -r SEL_X SEL_L5S SEL_L5E SEL_L6 SEL_L7E < <(write_sel_file "$second/sel.rs")
-  ctl surface editor open --path "$second/sel.rs" >/dev/null
   ctl select-workspace --workspace "$WT_ID" >/dev/null
   app_quit
   wait_client "the old connection closed" 'r.get("event") == "closed"' 1
@@ -1236,6 +1328,34 @@ print(paths[0] if paths else "")')"
   ctl select-workspace --workspace "$second_id" >/dev/null
   expect_state "selecting the worktree gives it an owner" 'd["connections"][0]["owner_pane"] is not None' True
   expect_state "the owner's worktree is the second one" 'd["connections"][0]["worktree"]' "$second"
+  end_app_client
+}
+
+# After a relaunch nothing has been focused: one at-mention from a file of the worktree still
+# reaches the owned terminal, focuses its tab and raises no toast. A file is the active tab when
+# Sirio quits, so the restored terminal is shown (it gets its pid) without being focused.
+case_at_mention_after_relaunch() {
+  local second second_id tries=0
+  second="$("$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-second"]
+print(paths[0] if paths else "")')"
+  second_id="$(worktree_id "$second")"
+  ctl select-workspace --workspace "$second_id" >/dev/null
+  start_app_client
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  read -r SEL_X SEL_L5S SEL_L5E SEL_L6 SEL_L7E < <(write_sel_file "$second/sel.rs")
+  ctl surface editor open --path "$second/sel.rs" >/dev/null
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  app_quit
+  wait_client "the old connection closed" 'r.get("event") == "closed"' 1
+  app_start
+  select_repo
+  WT_ID="$(worktree_id "$WT")"
+  client_do "token $TOKEN"
+  wait_client "reconnected" 'r.get("event") == "connected"' 2
+  ctl select-workspace --workspace "$second_id" >/dev/null
+  expect_state "selecting the worktree gives it an owner" 'd["connections"][0]["owner_pane"] is not None' True
   # After the relaunch nothing has been focused: one at-mention still reaches the owned terminal,
   # focuses its tab and raises no toast.
   local before toasts_before toasts_after client_tab
@@ -1280,9 +1400,11 @@ case_run focus_sends_selection case_focus_sends_selection
 case_run at_mention case_at_mention
 case_run selection_while_terminal_active case_selection_while_terminal_active
 case_run at_mention_to_new_terminal case_at_mention_to_new_terminal
+case_run selection_not_lost_to_another_worktree case_selection_not_lost_to_another_worktree
 case_run no_eligible_agent_toast case_no_eligible_agent_toast
 case_run at_mention_without_focus_history case_at_mention_without_focus_history
 case_run owner_after_restart case_owner_after_restart
+case_run at_mention_after_relaunch case_at_mention_after_relaunch
 
 stop_hosts
 echo "IDE BRIDGE E2E OK ($CASES_PASSED cases, state-only $STATE_ONLY)"
