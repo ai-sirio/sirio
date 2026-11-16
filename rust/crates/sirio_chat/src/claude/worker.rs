@@ -473,7 +473,6 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         event_tx: event_tx.clone(),
         startup_tx: startup_tx.clone(),
         shared: Arc::clone(&shared),
-        child: Arc::clone(&child),
         activity: Arc::clone(&activity),
         prompt_timeout,
         permission_timeout,
@@ -532,7 +531,6 @@ struct SessionContext {
     event_tx: async_channel::Sender<ChatEvent>,
     startup_tx: mpsc::SyncSender<Startup>,
     shared: Arc<Shared>,
-    child: ChildHandle,
     activity: ActivityClock,
     prompt_timeout: Duration,
     permission_timeout: Duration,
@@ -549,7 +547,6 @@ async fn session(context: SessionContext) -> SessionOutcome {
         event_tx,
         startup_tx,
         shared,
-        child,
         activity,
         prompt_timeout,
         permission_timeout,
@@ -1401,8 +1398,10 @@ async fn session(context: SessionContext) -> SessionOutcome {
                     duration: prompt_timeout,
                 })
                 .await;
-            terminate_and_reap_blocking(&child);
             end_held_turn(&event_tx, &mut pending_context_usage).await;
+            // `run_attempt` reaps the process as soon as this returns.
+            // Reaping here would nest a `block_on` inside the one driving
+            // this future, which panics and leaves the CLI running.
             return SessionOutcome::NeverStarted;
         }
     }
