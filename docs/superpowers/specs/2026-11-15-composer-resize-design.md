@@ -264,7 +264,7 @@ each asserted on `composerRow`:
 8. Relaunch: drawn maximum is the last value; a second chat opened has it too.
 9. Shrink the window below what the value needs: drawn maximum equals the new cap,
    stored value unchanged; grow it back: drawn maximum restored.
-10. At interface font 18 (23 px rows), after a relaunch: the cap counts 23 px rows, a
+10. With the second chat closed, at interface font 18 (23 px rows), after a relaunch: the cap counts 23 px rows, a
     40-line draft fills the field on 23 px rows with the band exactly 61 px plus its
     rows, a drag far up stops at the cap within half the chat, and a 2-row drag down
     moves 46 px.

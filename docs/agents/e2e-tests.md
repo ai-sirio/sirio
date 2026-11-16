@@ -277,8 +277,9 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # moved, and one held 8 px up, save nothing. A real drag of the sidebar's divider then saves the whole
 # settings row. Last, Sirio is stopped and started again under the same name: the restored chat (the
 # same tab) and a second chat opened beside it both read a maximum, drawn and stored, of 8, a 40-line
-# draft in each fills the field to 8 rows, and the sidebar keeps its dragged width. Then, at
-# interface font 18 (23 px rows), the cap, the field and a drag follow the larger row. It needs
+# draft in each fills the field to 8 rows, and the sidebar keeps its dragged width. Then the second
+# chat is closed and Sirio starts again at interface font 18 (23 px rows): the cap, the field, the
+# band (61 px plus its rows) and a drag follow the larger row. It needs
 # --display :N --window-size 2200x1000 on a screen taller than the window (2400x1200), so a
 # release can land below it, and captures
 # frames/composer-resize-{rest,full,short,taller,outside,held,relaunched,font18}.png.
