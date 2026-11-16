@@ -61,8 +61,9 @@ impl SirioWorkspace {
     /// to the protocol's severities (`Error`, `Warning`, `Info`, `Hint`) and to 0-based lines and
     /// UTF-16 columns, read from memory (the drawer's problem store) without waiting for a
     /// server. Empty when the file lies in no worktree, its worktree has no drawer, or no server
-    /// reported it. This is the read the native chat shares (spec 6): it takes an absolute path
-    /// and never a URI.
+    /// reported it. A file no live server has reported yet reads as no findings, on purpose: an
+    /// error here would make Claude skip its after-edit snapshot. This is the read the native chat
+    /// shares (spec 6): it takes an absolute path and never a URI.
     pub(crate) fn ide_diagnostics_for(&self, path: &Path, cx: &App) -> Vec<Diagnostic> {
         let Some((root, relative)) = self.worktree_and_relative(path) else {
             return Vec::new();
@@ -78,8 +79,8 @@ impl SirioWorkspace {
             .collect()
     }
 
-    /// Every file with findings in `worktree`, or in every worktree that has a drawer when there
-    /// is none, each with its absolute path, in path order.
+    /// Every file with findings in `worktree`, or in every worktree of the sidebar that has a
+    /// drawer when there is none, each with its absolute path, in path order.
     pub(crate) fn ide_diagnostics_in(&self, worktree: Option<&Path>, cx: &App) -> Vec<FileDiagnostics> {
         let mut files = Vec::new();
         let mut collect = |root: &Path, drawer: &gpui::Entity<WorktreeDrawer>| {
@@ -100,8 +101,11 @@ impl SirioWorkspace {
                 }
             }
             None => {
-                for (root, drawer) in &self.drawers {
-                    collect(root, drawer);
+                // `drawers` is never pruned: only the worktrees the sidebar holds count.
+                for root in self.worktree_roots() {
+                    if let Some(drawer) = self.drawer_if_any(&root) {
+                        collect(&root, drawer);
+                    }
                 }
             }
         }

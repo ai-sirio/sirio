@@ -84,7 +84,8 @@ set -eEuo pipefail
 #                    after the select was sent (inside the select's send window), and the
 #                    client still gets the selection of the first file
 #   diagnostics_file the fake language server (Scripts/Tests/fake_lsp.py, the only server the run
-#                    can start: its entry replaces the built-in one for .py files) reports one
+#                    can start: entries replace the built-in ones for the .py and .rs files the
+#                    run opens, and the end of the run proves no other server ran) reports one
 #                    warning on `hello` in a.py; getDiagnostics {uri} for that file answers one
 #                    item with the uri echoed, severity "Warning", start {1, 4}, end {1, 9}
 #   diagnostics_outside_worktree
@@ -93,6 +94,14 @@ set -eEuo pipefail
 #                    a.py of a second worktree carries the same finding; getDiagnostics {} from a
 #                    client owned by the first worktree's pane answers only the first worktree's
 #                    files, the seeded one included
+#   diagnostics_ownerless_cwd
+#                    a client started outside every Sirio shell (run by the script itself) with
+#                    its cwd in the second worktree is ownerless there (the state says so);
+#                    getDiagnostics {} answers only the second worktree's files
+#   diagnostics_ownerless_elsewhere
+#                    the same with its cwd outside every worktree: ownerless with no worktree;
+#                    getDiagnostics {} answers the files of every worktree of the sidebar (both
+#                    seeded ones, a.py of each)
 #
 # Two debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
 # for every launch: SIRIO_DEBUG_IDE_START_DELAY_MS=600 holds each listener start in flight
@@ -273,15 +282,17 @@ export SIRIO_SOCKET="$RUN_DIR/c.sock"
 export SIRIO_DB="$RUN_DIR/session.sqlite"
 export SIRIO_CREDENTIALS="$RUN_DIR/credentials.json"
 export SIRIO_HOST_HOME="$RUN_DIR/host"
-unset CLAUDE_CODE_SSE_PORT
+unset CLAUDE_CODE_SSE_PORT SIRIO_CONFIG_DIR
 [ "${#SIRIO_SOCKET}" -lt 100 ] || fail "the socket path is too long for a unix socket: $SIRIO_SOCKET"
 LOCK_DIR="$HOME/.claude/ide"
 
 "$SEED" --database "$SIRIO_DB" --appearance dark
 
-# The only language server the run can start for .py: the fake one (Scripts/Tests/fake_lsp.py),
-# named by a stub first on PATH and by a languages.toml entry that replaces the built-in
-# pyright entry, so a pyright or pylsp on this machine is never looked for. It reports one
+# The only language server the run can start: the fake one (Scripts/Tests/fake_lsp.py), named
+# by a stub first on PATH and by languages.toml entries that replace the built-in ones for every
+# extension the run opens (.py and .rs), so a pyright, pylsp or rust-analyzer on this machine is
+# never looked for; the user's own languages.toml is never read (SIRIO_CONFIG_DIR is unset).
+# `assert_only_the_fake_server` proves it at the end from the app's process tree. It reports one
 # warning on the text `hello` of a.py (line 1, columns 4 to 9, 0-based UTF-16).
 mkdir -p "$XDG_CONFIG_HOME/sirio" "$RUN_DIR/fake-lsp"
 cat >"$RUN_DIR/fake-lsp/answers.json" <<'JSON'
@@ -299,6 +310,12 @@ cat >"$XDG_CONFIG_HOME/sirio/languages.toml" <<TOML
 [[language]]
 name = "python"
 extensions = ["py"]
+command = "fake-lsp"
+args = ["$RUN_DIR/fake-lsp/answers.json", "$RUN_DIR/fake-lsp/requests.log"]
+
+[[language]]
+name = "rust"
+extensions = ["rs"]
 command = "fake-lsp"
 args = ["$RUN_DIR/fake-lsp/answers.json", "$RUN_DIR/fake-lsp/requests.log"]
 TOML
@@ -1559,6 +1576,94 @@ assert not [u for u in uris if u.startswith("file://" + other + "/")], uris
   end_app_client
 }
 
+# A client run by this script itself, outside every Sirio shell (spec 4.2's `claude` started in an
+# outside terminal): its ancestry meets no pane's shell, its cwd is $1. Sets CLIENT_FIFO,
+# CLIENT_LOG and OUTSIDE_PID.
+start_outside_client() { # cwd
+  CLIENT_N=$((CLIENT_N + 1))
+  CLIENT_FIFO="$RUN_DIR/client-$CLIENT_N.fifo"
+  CLIENT_LOG="$RUN_DIR/client-$CLIENT_N.jsonl"
+  rm -f "$CLIENT_FIFO" "$CLIENT_LOG"
+  mkfifo "$CLIENT_FIFO"
+  local port
+  port="$(state_expr 'd["port"]')"
+  (cd "$1" && exec env CLAUDE_CODE_SSE_PORT="$port" python3 "$CLIENT" --fifo "$CLIENT_FIFO" --transcript "$CLIENT_LOG" >/dev/null 2>&1) &
+  OUTSIDE_PID=$!
+  wait_client_ready
+}
+end_outside_client() {
+  client_do quit
+  wait "$OUTSIDE_PID" 2>/dev/null || true
+}
+second_worktree() {
+  "$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-second"]
+print(paths[0] if paths else "")'
+}
+# The uris of a getDiagnostics {} answer, one per line.
+workspace_uris() {
+  client_do 'call tools/call {"name":"getDiagnostics","arguments":{}}'
+  wait_client "getDiagnostics answered" 'r.get("dir") == "in" and r.get("frame", {}).get("id") == "call-1"' 1 >&2
+  client_answer 1 | python3 -I -c '
+import json, sys
+for item in json.load(sys.stdin):
+    print(item["uri"])'
+}
+
+case_diagnostics_ownerless_cwd() {
+  local second uris
+  second="$(second_worktree)"
+  [ -n "$second" ] || fail "$CASE: sirioctl does not list the second worktree"
+  start_outside_client "$second"
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  # Asked at once, before anything waits for the resolution: the answer has to wait for it itself.
+  uris="$(workspace_uris)"
+  expect_state "ownerless" 'd["connections"][0]["owner_pane"]' None
+  expect_state "in the worktree its cwd is in" 'd["connections"][0]["worktree"]' "$second"
+  [ "$uris" = "file://$second/a.py" ] || fail "$CASE: expected only file://$second/a.py, got: $uris"
+  echo "OK: the ownerless client of the second worktree got that worktree's file only"
+  end_outside_client
+}
+
+case_diagnostics_ownerless_elsewhere() {
+  local second uris
+  second="$(second_worktree)"
+  start_outside_client "$RUN_DIR"
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  uris="$(workspace_uris | sort)"
+  expect_state "ownerless" 'd["connections"][0]["owner_pane"]' None
+  expect_state "in no worktree" 'd["connections"][0]["worktree"]' None
+  [ "$uris" = "$(printf 'file://%s/a.py\nfile://%s/a.py\n' "$WT" "$second" | sort)" ] \
+    || fail "$CASE: expected the a.py of $WT and of $second, got: $uris"
+  echo "OK: the ownerless client with no worktree got the files of every worktree"
+  end_outside_client
+}
+
+# The run's only language servers are the fake one: every descendant of the app that looks like a
+# language server runs fake_lsp.py, and at least one such process ran.
+assert_only_the_fake_server() {
+  CASE="only_the_fake_server"
+  local pids="$APP_PID" frontier="$APP_PID" next child cmd fake=0 other=""
+  while [ -n "$frontier" ]; do
+    next=""
+    for pid in $frontier; do
+      for child in $(pgrep -P "$pid" 2>/dev/null || true); do next="$next $child"; pids="$pids $child"; done
+    done
+    frontier="$next"
+  done
+  for pid in $pids; do
+    cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+    case "$cmd" in
+      *fake_lsp.py*) fake=$((fake + 1)) ;;
+      *rust-analyzer*|*pyright*|*pylsp*|*typescript-language-server*|*gopls*|*clangd*|*jdtls*|*zls*|*lua-language-server*) other="$other [$cmd]" ;;
+    esac
+  done
+  [ -z "$other" ] || fail "$CASE: a real language server ran:$other"
+  [ "$fake" -ge 1 ] || fail "$CASE: no fake language server was running"
+  echo "OK: $fake fake language server process(es) and no other language server under the app"
+}
+
 app_start
 select_repo
 WT_ID="$(worktree_id "$WT")"
@@ -1588,6 +1693,9 @@ case_run at_mention_after_relaunch case_at_mention_after_relaunch
 case_run diagnostics_file case_diagnostics_file
 case_run diagnostics_outside_worktree case_diagnostics_outside_worktree
 case_run diagnostics_workspace case_diagnostics_workspace
+case_run diagnostics_ownerless_cwd case_diagnostics_ownerless_cwd
+case_run diagnostics_ownerless_elsewhere case_diagnostics_ownerless_elsewhere
+assert_only_the_fake_server
 
 stop_hosts
 echo "IDE BRIDGE E2E OK ($CASES_PASSED cases, state-only $STATE_ONLY)"
