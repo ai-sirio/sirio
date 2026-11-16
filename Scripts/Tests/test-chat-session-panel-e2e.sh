@@ -2305,7 +2305,7 @@ scenario_composer_keys() {
 # the numbers the expression held for, so transcript.log can be re-checked without the frames.
 wait_composer() { # desc expr [seconds]
   local desc=$1 got
-  got=$(E2E find "$SURFACE" "$desc" "${3:-20}" "($2) and json.dumps({k: c[\"composerRow\"].get(k) for k in (\"capRows\", \"maxRows\", \"storedMaxRows\", \"fieldRows\", \"band\", \"root\", \"resizing\")}, separators=(\",\", \":\"))") || fail "$desc"
+  got=$(E2E find "$SURFACE" "$desc" "${3:-20}" "($2) and json.dumps({k: c[\"composerRow\"].get(k) for k in (\"capRows\", \"maxRows\", \"storedMaxRows\", \"fieldRows\", \"field\", \"band\", \"root\", \"resizing\")}, separators=(\",\", \":\"))") || fail "$desc"
   echo "OK: $desc"
   echo "  composerRow: $got"
 }
@@ -2336,11 +2336,11 @@ drag_edge_to() { # window-y [hold]
   echo "  drag: the edge at window pixel ${geometry%% *},$(printf '%s' "$geometry" | awk '{print $2}') (screen $ex,$ey) to window y $1" >&2
   DISPLAY="$DISPLAY_TARGET" timeout 30 xdotool "${args[@]}" || fail "xdotool could not drag the composer's edge to window y $1"
 }
-# Drags the edge $1 rows up (a negative count is down).
+# Drags the edge $1 rows up (a negative count is down); a row is $COMPOSER_ROW_PX px, 18 by default.
 drag_edge() { # rows [hold]
   local geometry
   geometry=$(composer_edge_geometry) || fail "no composer edge to drag"
-  drag_edge_to "$(( $(printf '%s' "$geometry" | awk '{print $2}') - $1 * 18 ))" "${2:-}"
+  drag_edge_to "$(( $(printf '%s' "$geometry" | awk '{print $2}') - $1 * ${COMPOSER_ROW_PX:-18} ))" "${2:-}"
 }
 
 # The sidebar panel's rect in window pixels, "x y w h" (the debug `shellRects` of `surface layout read`).
@@ -2522,7 +2522,39 @@ for row in json.loads(reply["sessions"]):
     'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3' 30
   compose "$(printf 'line %d\n' $(seq 1 40))"
   wait_composer "the second chat's 40-line draft fills the field to 8 rows" 'c["composerRow"]["fieldRows"] == 8'
-  echo "OK: composer_resize: the field follows the stored maximum and the cap, the edge's drag sets and keeps it, a release outside the window ends a drag, a divider save keeps it, and a relaunch restores it in the restored chat and in a new one"
+
+  echo "step: at interface font 18 the row is 23 px: the cap, the field and a drag follow it"
+  stop_app
+  # appearance.uiFontSize is stored in the setting table; 18 is the top of its 12..=18 range.
+  python3 -I - "$RUN_DIR/composer_resize.sqlite" <<'PY' || fail "could not set appearance.uiFontSize to 18"
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('appearance.uiFontSize', '18')")
+db.commit()
+db.close()
+PY
+  launch composer_resize
+  show_chat
+  SURFACE=""
+  for _ in $(seq 1 50); do
+    SURFACE=$(E2E chat-surface 2>/dev/null || true)
+    [ -n "$SURFACE" ] && break
+    sleep 0.3
+  done
+  [ -n "$SURFACE" ] || fail "no restored chat tab at interface font 18"
+  wait_composer "at font 18 the cap counts 23 px rows, the stored maximum is 8 and the empty field shows 3 rows" \
+    '(r := c["composerRow"])["capRows"] == max(3, int((r["root"][3] / 2 - 61) / 23)) and r["maxRows"] == min(8, r["capRows"]) and r["storedMaxRows"] == 8 and r["fieldRows"] == 3' 30
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_composer "the 40-line draft fills the field to its maximum, drawn on 23 px rows" \
+    '(r := c["composerRow"])["fieldRows"] == r["maxRows"] and r["field"][3] == r["maxRows"] * 23 + 10'
+  drag_edge_to "$(composer_edge_geometry | awk '{print int($3 + $4 / 4)}')"
+  wait_composer "dragged far up, the field and the stored maximum are the cap and the band takes at most half the chat" \
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and not r["resizing"] and r["band"][3] <= r["root"][3] / 2'
+  COMPOSER_ROW_PX=23 drag_edge -2
+  wait_composer "dragged 2 rows (46 px) down, the field and the stored maximum are 2 rows under the cap" \
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] - 2 and r["storedMaxRows"] == r["capRows"] - 2 and not r["resizing"]'
+  capture composer-resize-font18
+  echo "OK: composer_resize: the field follows the stored maximum and the cap, the edge's drag sets and keeps it, a release outside the window ends a drag, a divider save keeps it, a relaunch restores it in the restored chat and in a new one, and at interface font 18 the cap, the field and a drag follow the 23 px row"
   stop_app
 }
 

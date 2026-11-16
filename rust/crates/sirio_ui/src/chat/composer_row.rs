@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use gpui::{Bounds, Pixels, Window};
 use sirio_theme::Theme;
 
-use super::composer_height::field_rows;
+use super::composer_height::{ROW_HEIGHT, field_rows};
 use super::controls::OverflowRow;
 use super::session_panel::COLUMN_WIDTH;
 use super::{Chat, TRANSCRIPT_WIDTH};
@@ -145,6 +145,9 @@ pub(crate) struct RowFrame {
     pub field: Cell<Option<Bounds<Pixels>>>,
     /// The composer's top edge (`composer-edge`), as its probe last measured it.
     pub edge: Cell<Option<Bounds<Pixels>>>,
+    /// The field's line height the last render drew, in px; `None` before the
+    /// first render.
+    pub row_height: Cell<Option<f32>>,
     /// The most rows the chat's height allows the field, as the root probe last
     /// computed it; `None` before the first paint.
     pub cap_rows: Cell<Option<usize>>,
@@ -163,6 +166,17 @@ pub(crate) struct RowFrame {
     pub mode_danger: Cell<bool>,
     /// The rows of ⋯ the last render built, while the menu is open.
     pub menu: RefCell<Option<Vec<MenuRow>>>,
+}
+
+impl RowFrame {
+    /// The field's drawn line height: the one the last render recorded when it
+    /// is a finite positive number, else `ROW_HEIGHT`.
+    pub fn row_height(&self) -> f32 {
+        self.row_height
+            .get()
+            .filter(|h| h.is_finite() && *h > 0.0)
+            .unwrap_or(ROW_HEIGHT)
+    }
 }
 
 /// One row of ⋯ as the render built it.
@@ -316,7 +330,7 @@ impl Chat {
             field: boxed(frame.field.get()),
             edge: boxed(frame.edge.get()),
             resizing: self.composer_drag.as_ref().is_some_and(|drag| drag.dragged),
-            field_rows: frame.field.get().map(field_rows),
+            field_rows: frame.field.get().map(|b| field_rows(b, frame.row_height())),
             max_rows: self.drawn_max_rows(),
             stored_max_rows: frame.stored_max_rows.get(),
             cap_rows: frame.cap_rows.get(),

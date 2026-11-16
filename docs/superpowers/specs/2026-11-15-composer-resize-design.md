@@ -56,7 +56,7 @@ value is one app-wide preference saved across relaunches, not one per chat.
   a profile that never dragged keeps the default of 12.
 - The change request tab's composer (`sirio_ui/src/change_request_tab/composer.rs`)
   and every other text field.
-- The field's minimum (3 rows), its 13/18 px text, how it wraps, or how it scrolls
+- The field's minimum (3 rows), its 13 px text on 18 px rows (at the default interface font size), how it wraps, or how it scrolls
   once the text passes its maximum.
 - A value per chat, per worktree or per project.
 
@@ -91,7 +91,7 @@ value is one app-wide preference saved across relaunches, not one per chat.
   `rust/crates/sirio_ui/src/chat/composer_view.rs`: a `composer` div holding Ely's
   `PromptInput::custom("composer-shell", …)`, which draws the band (a 1 px top rule,
   then `BAND_TOP_PAD`, 10 px, above the content), attachment chips above the field,
-  the field in `composer-input` (13 px text on 18 px rows, `FIELD_PAD_Y` 5 px above
+  the field in `composer-input` (13 px text on 18 px rows at the default interface font size, `typography.scaled` otherwise; `FIELD_PAD_Y` 5 px above
   and below), and the tool row; plus a canvas that measures the band. A left press
   anywhere on `composer` focuses the field.
 - **The chat's size** is measured every paint by an invisible probe
@@ -134,8 +134,9 @@ value is one app-wide preference saved across relaunches, not one per chat.
 - A press on the edge takes the anchor: the pointer's y and the rows the field is
   drawn at in that moment (what the user sees, not the stored maximum).
 - While the pointer moves, the field shows exactly
-  `rows = clamp(anchor_rows + round((anchor_y − pointer_y) / 18), 3, cap)`, in whole
-  18 px rows. During the drag the field is set to `min = max = rows`, so it shows
+  `rows = clamp(anchor_rows + round((anchor_y − pointer_y) / row_height), 3, cap)`, in whole
+  rows of the field's line height (18 px at the default interface font size,
+  `typography.scaled(18)` otherwise, as the last render drew it). During the drag the field is set to `min = max = rows`, so it shows
   that height even over a short or empty draft.
 - On release, the maximum becomes the last `rows` shown and the minimum goes back
   to 3. A shorter draft then shrinks the field to fit it (the accepted trade-off of
@@ -149,7 +150,7 @@ value is one app-wide preference saved across relaunches, not one per chat.
 
 ### §3.3 The cap
 
-- `cap_rows = max(3, floor((chat_height / 2 - BAND_ALLOWANCE) / 18))`, with
+- `cap_rows = max(3, floor((chat_height / 2 - BAND_ALLOWANCE) / row_height))`, with
   `BAND_ALLOWANCE = 61` px, where `chat_height` is the chat
   root's height as the probe last measured it: the whole chat (transcript, question
   dock, queue and composer), never the composer or the transcript alone.
@@ -250,7 +251,7 @@ each asserted on `composerRow`:
 1. Fresh profile, empty draft, a chat at least 554 px tall: drawn maximum 12, field
    at 3 rows.
 2. A 40-line draft: field at 12 rows.
-3. A real drag (press on the edge's centre, move up N × 18 px in steps, release):
+3. A real drag (press on the edge's centre, move up N × the field's line height in steps (18 px at the default interface font size), release):
    field and drawn maximum at 12 + N. Capture a frame.
 4. A drag far past the cap: field at `cap_rows`, computed from the root's height.
 5. Clear the draft: field back to 3 rows.
@@ -307,7 +308,7 @@ its own.
 3. The edge shows nothing until hovered (the cursor changes), like the drawer's.
 4. A drag starts from the height the field shows, not from the stored maximum:
    dragging a 3-row field up by 2 rows sets the maximum to 5, even if it was 20.
-5. Heights snap to whole 18 px rows.
+5. Heights snap to whole rows of the field's line height (18 px at the default interface font size, `typography.scaled(18)` otherwise).
 6. No reset gesture; a profile that never dragged keeps 12.
 7. The edge works while a turn runs and while the composer is disabled.
 8. The cap applies to the default of 12 as well: in a chat under 554 px tall, a

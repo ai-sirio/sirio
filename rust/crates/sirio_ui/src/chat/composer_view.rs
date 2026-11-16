@@ -1297,6 +1297,8 @@ impl Chat {
         // composer has. The text lands on the content edge, lined up with the
         // chips and the tool row, at 13px/18px shifted by the interface font size.
         let field_frame = self.composer_row.clone();
+        let row_height = typography.scaled(ROW_HEIGHT);
+        self.composer_row.row_height.set(Some(f32::from(row_height)));
         let input_box = div()
             .id("composer-input")
             .debug_selector(|| "composer-input".into())
@@ -1304,7 +1306,7 @@ impl Chat {
             .w_full()
             .py(px(FIELD_PAD_Y))
             .text_size(typography.scaled(13.0))
-            .line_height(typography.scaled(ROW_HEIGHT))
+            .line_height(row_height)
             .when(disabled, |input| input.opacity(0.6))
             .on_mouse_down(
                 MouseButton::Right,
