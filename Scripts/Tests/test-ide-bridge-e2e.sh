@@ -83,6 +83,16 @@ set -eEuo pipefail
 #                    the case fails unless the tab change was answered less than SEND_AFTER_MS
 #                    after the select was sent (inside the select's send window), and the
 #                    client still gets the selection of the first file
+#   diagnostics_file the fake language server (Scripts/Tests/fake_lsp.py, the only server the run
+#                    can start: its entry replaces the built-in one for .py files) reports one
+#                    warning on `hello` in a.py; getDiagnostics {uri} for that file answers one
+#                    item with the uri echoed, severity "Warning", start {1, 4}, end {1, 9}
+#   diagnostics_outside_worktree
+#                    getDiagnostics {uri: file:///etc/hostname} answers [] (not an error)
+#   diagnostics_workspace
+#                    a.py of a second worktree carries the same finding; getDiagnostics {} from a
+#                    client owned by the first worktree's pane answers only the first worktree's
+#                    files, the seeded one included
 #
 # Two debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
 # for every launch: SIRIO_DEBUG_IDE_START_DELAY_MS=600 holds each listener start in flight
@@ -268,6 +278,30 @@ unset CLAUDE_CODE_SSE_PORT
 LOCK_DIR="$HOME/.claude/ide"
 
 "$SEED" --database "$SIRIO_DB" --appearance dark
+
+# The only language server the run can start for .py: the fake one (Scripts/Tests/fake_lsp.py),
+# named by a stub first on PATH and by a languages.toml entry that replaces the built-in
+# pyright entry, so a pyright or pylsp on this machine is never looked for. It reports one
+# warning on the text `hello` of a.py (line 1, columns 4 to 9, 0-based UTF-16).
+mkdir -p "$XDG_CONFIG_HOME/sirio" "$RUN_DIR/fake-lsp"
+cat >"$RUN_DIR/fake-lsp/answers.json" <<'JSON'
+{
+  "diagnostics_file": "a.py",
+  "diagnostics": [{"needle": "hello", "severity": 2, "message": "fake warning: hello is unused"}]
+}
+JSON
+cat >"$RUN_DIR/stubs/fake-lsp" <<STUB
+#!/bin/sh
+exec python3 -I "$ROOT/Scripts/Tests/fake_lsp.py" "\$@"
+STUB
+chmod +x "$RUN_DIR/stubs/fake-lsp"
+cat >"$XDG_CONFIG_HOME/sirio/languages.toml" <<TOML
+[[language]]
+name = "python"
+extensions = ["py"]
+command = "fake-lsp"
+args = ["$RUN_DIR/fake-lsp/answers.json", "$RUN_DIR/fake-lsp/requests.log"]
+TOML
 
 mkdir -p "$WT"
 git -C "$WT" init -q -b main
@@ -1430,6 +1464,101 @@ print(paths[0] if paths else "")')"
   end_app_client
 }
 
+# The text of the client's answer to its call-N: the JSON the one text item holds. A JSON-RPC
+# error is a failure.
+client_answer() { # N
+  python3 -I - "$CLIENT_LOG" "call-$1" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    r = json.loads(line)
+    frame = r.get("frame", {})
+    if r.get("dir") == "in" and frame.get("id") == sys.argv[2]:
+        if "error" in frame:
+            sys.exit("call failed: " + json.dumps(frame["error"]))
+        print(frame["result"]["content"][0]["text"])
+PY
+}
+# Waits until the drawer of the selected worktree counts WANT (errors/warnings/notes) for the
+# active file.
+expect_problems() { # want
+  local tries=0 got=""
+  while [ "$tries" -lt 100 ]; do
+    got="$("$CTL" surface editor state 2>/dev/null | sed -n 's/^problems=//p' | head -n 1)"
+    [ "$got" = "$1" ] && { echo "OK: the drawer counts $1"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$CASE: the drawer counts ${got:-nothing}, expected $1"
+}
+write_diag_file() { # path
+  printf 'import os\ndef hello():\n    pass\n' >"$1"
+}
+
+case_diagnostics_file() {
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  write_diag_file "$WT/a.py"
+  ctl surface editor open --path "$WT/a.py" >/dev/null
+  expect_problems 0/1/0
+  start_app_client
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  client_do "call tools/call {\"name\":\"getDiagnostics\",\"arguments\":{\"uri\":\"file://$WT/a.py\"}}"
+  wait_client "getDiagnostics answered" 'r.get("dir") == "in" and r.get("frame", {}).get("id") == "call-1"' 1
+  client_answer 1 | python3 -I -c '
+import json, sys
+want_uri = sys.argv[1]
+items = json.load(sys.stdin)
+assert len(items) == 1, items
+item = items[0]
+assert item["uri"] == want_uri, item["uri"]
+assert len(item["diagnostics"]) == 1, item
+d = item["diagnostics"][0]
+assert d["severity"] == "Warning", d
+assert d["range"]["start"] == {"line": 1, "character": 4}, d
+assert d["range"]["end"] == {"line": 1, "character": 9}, d
+assert "hello" in d["message"], d
+' "file://$WT/a.py" || fail "$CASE: the answer is not the seeded warning: $(client_answer 1 | cut -c1-400)"
+  echo "OK: one Warning at 1:4-1:9 for a.py, the uri echoed"
+  end_app_client
+}
+
+case_diagnostics_outside_worktree() {
+  start_app_client
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  client_do 'call tools/call {"name":"getDiagnostics","arguments":{"uri":"file:///etc/hostname"}}'
+  wait_client "getDiagnostics answered" 'r.get("dir") == "in" and r.get("frame", {}).get("id") == "call-1"' 1
+  [ "$(client_answer 1)" = "[]" ] || fail "$CASE: expected [], got $(client_answer 1 | cut -c1-300)"
+  echo "OK: a file outside every worktree answers []"
+  end_app_client
+}
+
+case_diagnostics_workspace() {
+  local second
+  second="$("$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-second"]
+print(paths[0] if paths else "")')"
+  [ -n "$second" ] || fail "$CASE: sirioctl does not list the second worktree"
+  ctl select-workspace --workspace "$(worktree_id "$second")" >/dev/null
+  write_diag_file "$second/a.py"
+  ctl surface editor open --path "$second/a.py" >/dev/null
+  expect_problems 0/1/0
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  start_app_client
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  expect_state "owned by its pane" 'd["connections"][0]["owner_pane"]' "$CLIENT_PANE"
+  client_do 'call tools/call {"name":"getDiagnostics","arguments":{}}'
+  wait_client "getDiagnostics answered" 'r.get("dir") == "in" and r.get("frame", {}).get("id") == "call-1"' 1
+  client_answer 1 | python3 -I -c '
+import json, sys
+mine, other = sys.argv[1], sys.argv[2]
+uris = [item["uri"] for item in json.load(sys.stdin)]
+assert "file://" + mine + "/a.py" in uris, uris
+assert not [u for u in uris if u.startswith("file://" + other + "/")], uris
+' "$WT" "$second" || fail "$CASE: the workspace answer is not this worktree only: $(client_answer 1 | cut -c1-400)"
+  echo "OK: the owner's worktree answers its file, and nothing of the second worktree"
+  end_app_client
+}
+
 app_start
 select_repo
 WT_ID="$(worktree_id "$WT")"
@@ -1456,6 +1585,9 @@ case_run no_eligible_agent_toast case_no_eligible_agent_toast
 case_run at_mention_without_focus_history case_at_mention_without_focus_history
 case_run owner_after_restart case_owner_after_restart
 case_run at_mention_after_relaunch case_at_mention_after_relaunch
+case_run diagnostics_file case_diagnostics_file
+case_run diagnostics_outside_worktree case_diagnostics_outside_worktree
+case_run diagnostics_workspace case_diagnostics_workspace
 
 stop_hosts
 echo "IDE BRIDGE E2E OK ($CASES_PASSED cases, state-only $STATE_ONLY)"

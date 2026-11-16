@@ -11500,6 +11500,10 @@ impl SirioWorkspace {
             while let Some(event) = events.next().await {
                 let connected = matches!(event, sirio_ide::BridgeEvent::Connected { .. });
                 let delivered = this.update(cx, |workspace, cx| {
+                    if let sirio_ide::BridgeEvent::Diagnostics { id, conn, path } = event {
+                        workspace.ide_answer_diagnostics(id, conn, path, cx);
+                        return;
+                    }
                     cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
                         bridge.on_event(event);
                     });

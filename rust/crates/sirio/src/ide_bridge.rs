@@ -42,6 +42,8 @@ use sirio_ide::{Bridge, BridgeEvent, BridgeOptions, Coalescer, ConnId, LockBody,
 use sirio_ui::chat::Chat;
 use sirio_ui::file_view::FileView;
 
+mod diagnostics;
+
 use crate::session::{ProjectCatalog, SessionStore};
 use crate::{SirioWorkspace, TabContent, paths_name_the_same_document};
 
@@ -533,9 +535,9 @@ impl IdeBridge {
         }
     }
 
-    /// One event from the bridge's threads. Requests that need the UI (diagnostics, diffs) are
-    /// answered by later tasks; until they land the bridge answers diagnostics with its own
-    /// deadline error and an `openDiff` waits for its connection to close.
+    /// One event from the bridge's threads. A `getDiagnostics` is answered by the workspace
+    /// (`ide_answer_diagnostics`), which reads the drawers; the `openDiff` requests are answered
+    /// by a later task, and until it lands an `openDiff` waits for its connection to close.
     pub(crate) fn on_event(&mut self, event: BridgeEvent) {
         match event {
             BridgeEvent::Connected { conn, pid } => {
