@@ -44,7 +44,9 @@ use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
 use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, ChatEvent, EffortListAction, SessionPanelAction},
+    chat::{
+        Chat, ChatControlSnapshot, ChatEvent, EffortListAction, ElicitationAct, SessionPanelAction,
+    },
     composer_prefs::ComposerPrefs,
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
@@ -1543,6 +1545,13 @@ enum ChatControlAction {
         surface_id: String,
         action: EffortListAction,
     },
+    /// Debug-only: what a digit key, Enter in the free-text row or Esc does
+    /// to the open question.
+    Elicitation {
+        surface_id: String,
+        request_id: u64,
+        act: ElicitationAct,
+    },
 }
 /// Cloning shares every entity handle (`PaneContent`'s `Clone`): a cloned
 /// `OpenTab` is the same terminals and the same chats, not copies of them.
@@ -1652,6 +1661,10 @@ struct SessionRef {
     title: String,
     /// The `pane-N` activity keys of the tab's panes.
     pane_keys: Vec<String>,
+    /// The adapter id of an agent tab (its `agent_id`), `None` for any other.
+    adapter_id: Option<String>,
+    /// The `pane-N` key of the tab's root pane: the one its own launch runs in.
+    root_pane: Option<String>,
 }
 
 /// The sessions of the worktrees this process holds no tab for, read from the
@@ -2340,6 +2353,17 @@ impl AppControlHandler {
             socket_info,
             database_path: None,
             host_terminal: Arc::new(HostTerminal::default()),
+        }
+    }
+
+    /// Records a pane's session ref: through the store when there is one (it keeps the same
+    /// `session_refs` map under its own database lock, so this must not hold the map's lock
+    /// while calling it), else in the in-memory map alone.
+    fn record_session_ref(&self, pane: &str, reference: &str) {
+        if let Some(store) = &self.session_store {
+            store.save_session_ref(pane, reference);
+        } else if let Ok(mut references) = self.session_refs.lock() {
+            references.insert(pane.to_string(), reference.to_string());
         }
     }
 
@@ -3728,6 +3752,66 @@ impl ControlHandler for AppControlHandler {
                     reply,
                 })
             }
+            "surface.chat.elicitation" if cfg!(debug_assertions) => {
+                let Some(surface_id) = request.params.get("surfaceId").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.elicitation requires surfaceId",
+                    );
+                };
+                let request_id = match request.params.get("requestId").map(|id| id.parse::<u64>())
+                {
+                    Some(Ok(request_id)) => request_id,
+                    Some(Err(error)) => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            format!("invalid requestId: {error}"),
+                        );
+                    }
+                    None => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.elicitation requires requestId",
+                        );
+                    }
+                };
+                let row = request.params.get("row");
+                let text = request.params.get("text");
+                let cancel = request.params.get("cancel");
+                if cancel.is_some_and(|value| value != "1") {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.elicitation cancel must be 1",
+                    );
+                }
+                let act = match (row, text, cancel) {
+                    (Some(row), None, None) => match row.parse::<usize>() {
+                        Ok(row) => ElicitationAct::Row(row),
+                        Err(error) => {
+                            return ControlResponse::failure(
+                                &request.id,
+                                format!("invalid row: {error}"),
+                            );
+                        }
+                    },
+                    (None, Some(text), None) => ElicitationAct::Text(text.clone()),
+                    (None, None, Some(_)) => ElicitationAct::Cancel,
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.elicitation requires exactly one of row, text or cancel=1",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Chat {
+                    action: ChatControlAction::Elicitation {
+                        surface_id,
+                        request_id,
+                        act,
+                    },
+                    reply,
+                })
+            }
             "surface.project_add" if cfg!(debug_assertions) => {
                 let Some(kind) = request.params.get("kind").cloned() else {
                     return ControlResponse::failure(&request.id, "surface.project_add requires kind");
@@ -3929,13 +4013,7 @@ impl ControlHandler for AppControlHandler {
                 let Some(reference) = request.params.get("ref") else {
                     return ControlResponse::failure(&request.id, "session.ref requires ref");
                 };
-                let Ok(mut references) = self.session_refs.lock() else {
-                    return ControlResponse::failure(&request.id, "session store unavailable");
-                };
-                references.insert(session.clone(), reference.clone());
-                if let Some(store) = &self.session_store {
-                    store.save_session_ref(session, reference);
-                }
+                self.record_session_ref(session, reference);
                 Self::success(
                     &request.id,
                     [
@@ -4075,13 +4153,7 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "notify has an unknown status");
                 };
                 if let Some(agent_session) = request.params.get("agentSession") {
-                    let Ok(mut references) = self.session_refs.lock() else {
-                        return ControlResponse::failure(&request.id, "session store unavailable");
-                    };
-                    references.insert(pane_id.clone(), agent_session.clone());
-                    if let Some(store) = &self.session_store {
-                        store.save_session_ref(&pane_id, agent_session);
-                    }
+                    self.record_session_ref(&pane_id, agent_session);
                 }
                 let Ok(mut actions) = self.control_actions.lock() else {
                     return ControlResponse::failure(
@@ -7428,7 +7500,106 @@ impl SirioWorkspace {
         workspace.apply_saved_sidebar_view(cx);
         workspace.session.prune_closed_chats(unix_now_ms());
         workspace.refresh_closed_sessions(cx);
+        workspace.start_opencode_version_probe(cx);
         workspace
+    }
+
+    /// Asks the installed OpenCode for its major version on the background executor, once at
+    /// startup, then runs the plugin step of the restored OpenCode panes that waited for the
+    /// answer (`hold_restored_opencode_launch`).
+    fn start_opencode_version_probe(&mut self, cx: &mut Context<Self>) {
+        // GPUI's test scheduler asserts on cross-thread activity, and the probe thread's answer
+        // would wake the task below from another thread. Under it the probe has no answer anyway
+        // (`run_version_probe` under `cfg!(test)`): that is noted, and the held panes go now.
+        if cx.background_executor().scheduler_executor().scheduler().as_test().is_some() {
+            sirio_agents::note_installed_major(None);
+            self.release_held_opencode_launches(cx);
+            return;
+        }
+        // On a thread of its own: the probe may wait seconds on the binary, which would hold a
+        // background-executor worker.
+        let (sender, finished) = futures::channel::oneshot::channel();
+        let directory = self.working_directory.clone();
+        // What Install Hooks passes to `install_global_hooks`, captured before the thread.
+        let home = user_home_dir();
+        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let spawned = std::thread::Builder::new()
+            .name("sirio-opencode-probe".into())
+            .spawn(move || {
+                opencode::probe_installed_major(&directory);
+                // A user who moved to OpenCode 2 keeps the generated global plugin Install
+                // Hooks wrote under 1.x, and OpenCode 2 reports it as "Plugin failed": it goes
+                // here, once the answer is known and never from `prepare`. Fixed text only,
+                // no path and no error text.
+                let probed = sirio_agents::installed_major_state();
+                if let (Some(home), sirio_agents::InstalledMajor::Major(major)) = (home, probed)
+                    && major >= 2
+                {
+                    match sirio_agents::remove_opencode_generated_global_plugin(&home, &environment) {
+                        Ok(Some(_)) => eprintln!(
+                            "[sirio] opencode: removed Sirio's generated global plugin (OpenCode 2 refuses it)"
+                        ),
+                        Ok(None) => {}
+                        Err(_) => eprintln!(
+                            "[sirio] opencode: Sirio's generated global plugin could not be removed"
+                        ),
+                    }
+                }
+                // After the removal attempt, so a test can wait on this line.
+                match probed {
+                    sirio_agents::InstalledMajor::Major(major) => {
+                        eprintln!("[sirio] opencode: startup version probe: major {major}");
+                    }
+                    _ => eprintln!("[sirio] opencode: startup version probe: no readable version"),
+                }
+                let _ = sender.send(());
+            });
+        if let Err(error) = spawned {
+            eprintln!("[sirio] opencode version not probed: {error}");
+        }
+        cx.spawn(async move |this, cx| {
+            // A thread that never started drops the sender: the held launches are released
+            // all the same, with the version as unknown as it was.
+            let _ = finished.await;
+            // A probe that never ran or panicked leaves the memo NotProbed, and a pane restored
+            // later would be held with nobody to release it: make it Unknown. This never
+            // overwrites a known major.
+            sirio_agents::note_installed_major(None);
+            let _ = this.update(cx, |workspace, cx| workspace.release_held_opencode_launches(cx));
+        })
+        .detach();
+    }
+
+    /// The version probe answered: each held restored OpenCode pane that is still alive gets
+    /// the plugin step under the key it holds NOW (pane ids can move while it waited), then
+    /// opens its session.
+    fn release_held_opencode_launches(&mut self, cx: &mut Context<Self>) {
+        let held = std::mem::take(&mut cx.default_global::<HeldOpenCodeLaunches>().0);
+        if held.is_empty() {
+            return;
+        }
+        let state = sirio_agents::installed_major_state();
+        for (weak, worktree) in held {
+            let Some(terminal) = weak.upgrade() else {
+                continue;
+            };
+            if let Some((_, pane_id)) = self.terminal_pane_of(&terminal) {
+                let pane_key = format!("pane-{pane_id}");
+                if let Err(error) = run_opencode_plugin_step(&worktree, &pane_key, state) {
+                    eprintln!("[sirio] {pane_key}: hooks not written: {error}");
+                }
+            } else {
+                // Parked by a worktree switch during the probe: no pane key to name, and none
+                // is needed. Under OpenCode 2 or an unknown version the step only removes
+                // Sirio's generated plugin (without it OpenCode 2 would show "Plugin failed"),
+                // and the 1.x plugin reads its pane from the `SIRIO_PANE_ID` of the process
+                // that loads it, so the file names no key either way.
+                if let Err(error) = run_opencode_plugin_step(&worktree, "", state) {
+                    eprintln!("[sirio] parked pane: hooks not written: {error}");
+                }
+            }
+            terminal.update(cx, |terminal, cx| terminal.release_launch(None, cx));
+        }
     }
 
     /// Wires the update host into a workspace: the live state seed, the
@@ -10054,10 +10225,11 @@ impl SirioWorkspace {
     /// The shell an agent pane that moved from `from` to `to` launches with
     /// (fix batch 7, I1): the launch its tab was made with, under the new key.
     /// A new agent starts fresh with its prompt, as `add_agent_terminal_tab`
-    /// starts it. A restored one resumes the session its pane saved under
-    /// `from`, which moves to `to` with it, as a restore resumes it. `None` for
-    /// a pane with no agent, or when sirioctl cannot be resolved (the command
-    /// it has keeps the old key then).
+    /// starts it. An OpenCode 2 tab Sirio created the session of resumes that
+    /// session under the new key. A restored one resumes the session its pane
+    /// saved under `from`, which moves to `to` with it, as a restore resumes it.
+    /// `None` for a pane with no agent, or when sirioctl cannot be resolved (the
+    /// command it has keeps the old key then).
     fn relaunch_agent_shell(
         &mut self,
         terminal: &Entity<TerminalView>,
@@ -10073,6 +10245,44 @@ impl SirioWorkspace {
             .iter()
             .find(|launch| launch.terminal.entity_id() == terminal.entity_id())
         {
+            // An OpenCode 2 tab Sirio created the session of resumes that session under the
+            // new key.
+            if launch.adapter.id() == "opencode"
+                && let Some(id) = launch.session.clone()
+            {
+                let prompt = launch.prompt.clone();
+                if self.pane_key_held_by_other_session(&pane_key, terminal) {
+                    // A row under the new key (an older build's, a closed pane's, another
+                    // layout's) must not stay as this tab's: it runs `--session <id>` now, and a
+                    // restore would resume that row instead.
+                    self.session.delete_session_ref(&pane_key);
+                    eprintln!(
+                        "[sirio] {pane_key}: session ref not written: pane id held by another layout"
+                    );
+                } else {
+                    self.session.save_session_ref(&pane_key, &id);
+                }
+                let (program, args) =
+                    command_shell_invocation(&sirio_agents::opencode_launch_command(Some(&id), &prompt));
+                return Some(TerminalShell::WithArguments { program, args });
+            }
+            // An OpenCode tab with no created session and a finished step: the step's own
+            // probe decides the plugin under the new key, and the plain command runs with its
+            // prompt. The memo of any other tab's probe is not consulted.
+            if launch.adapter.id() == "opencode"
+                && let Some(state) = launch.opencode_state
+            {
+                let prompt = launch.prompt.clone();
+                if let Err(error) = run_opencode_plugin_step(Path::new(&worktree), &pane_key, state) {
+                    eprintln!("[sirio] {pane_key}: hooks not written: {error}");
+                }
+                let (program, args) =
+                    command_shell_invocation(&sirio_agents::opencode_launch_command(None, &prompt));
+                return Some(TerminalShell::WithArguments { program, args });
+            }
+            // The step is still running (or the agent is not OpenCode): the fresh launch is
+            // used, and `finish_opencode_launch` re-runs the plugin step under the pane's
+            // current key with the tab's own state.
             let (shell, warning) =
                 fresh_agent_shell(launch.adapter, &pane_key, &worktree, &launch.prompt);
             if let Some(warning) = warning {
@@ -10392,6 +10602,26 @@ impl SirioWorkspace {
             self.refresh_running_after_clear(&pane_key);
             self.mark_activity_dirty();
         }
+        // An OpenCode 2 tab Sirio created the session of already sent its prompt into that
+        // session: this restart (the context menu, the debug control) resumes it without
+        // sending the prompt again. The "Session lost" overlay's Restart calls
+        // `TerminalView::restart` directly and re-runs the launch command with its prompt,
+        // as it does for every agent's fresh tab.
+        if let Some(launch) = self
+            .new_agent_launches
+            .iter_mut()
+            .find(|launch| launch.terminal.entity_id() == terminal.entity_id())
+            && launch.adapter.id() == "opencode"
+            && !launch.prompt.is_empty()
+            && let Some(id) = launch.session.as_deref()
+        {
+            let (program, args) =
+                command_shell_invocation(&sirio_agents::opencode_launch_command(Some(id), ""));
+            launch.prompt.clear();
+            terminal.update(cx, |terminal, _| {
+                terminal.set_launch_shell(TerminalShell::WithArguments { program, args })
+            });
+        }
         terminal.update(cx, |terminal, cx| terminal.restart(cx));
         cx.notify();
     }
@@ -10527,6 +10757,32 @@ impl SirioWorkspace {
             event,
             Instant::now(),
         );
+        // A tab Sirio launched as OpenCode runs `opencode` as its session's own process
+        // (`$SHELL -lc opencode`), for which the host names no program: the watch takes such a
+        // pane from its title (the TUI's, or the host's seed of it), in the tab's worktree. A
+        // typed `opencode` joins through its `Program` event, which also corrects the folder of
+        // one whose title came first. A fresh tab links to the session Sirio created for it;
+        // a restored pane has no launch here and passes none.
+        if matches!(
+            event,
+            TerminalActivityEvent::OscTitle(_) | TerminalActivityEvent::SeededTitle(_)
+        ) && self.activity.agent_id(&activity_pane_id) == Some("opencode")
+            && !self.activity.is_program_owned(&activity_pane_id)
+            && !self.opencode.tracks(&activity_pane_id)
+            && let Some(session) = self.session_for_pane(&activity_pane_id)
+            // The tab's own agent id and root pane, not a title: an `ssh` or a Show tab whose
+            // title reads `OC | ..` is not a launch Sirio made.
+            && session.adapter_id.as_deref() == Some("opencode")
+            && session.root_pane.as_deref() == Some(activity_pane_id.as_str())
+        {
+            let created = terminal.and_then(|terminal| {
+                self.new_agent_launches
+                    .iter()
+                    .find(|launch| launch.terminal.entity_id() == terminal.entity_id())
+                    .and_then(|launch| launch.session.clone())
+            });
+            self.opencode.note_launched(&activity_pane_id, &session.worktree, created);
+        }
         // OpenCode's panes: where they run, their titles, and the link to a session.
         let opencode_changed = self.opencode.note_event(
             &mut self.activity,
@@ -14923,6 +15179,8 @@ impl SirioWorkspace {
                     on_screen: self.session_on_screen(tab),
                     title: tab.title.clone(),
                     pane_keys: pane_keys(tab),
+                    adapter_id: tab.agent_id.clone(),
+                    root_pane: tab_primary_pane_id(tab).map(|id| format!("pane-{id}")),
                 },
             );
         }
@@ -14937,6 +15195,8 @@ impl SirioWorkspace {
                         on_screen: false,
                         title: tab.title.clone(),
                         pane_keys: pane_keys(tab),
+                        adapter_id: None,
+                        root_pane: None,
                     },
                 );
             }
@@ -14965,6 +15225,17 @@ impl SirioWorkspace {
                         chat,
                         on_screen: false,
                         title: tab.title.clone(),
+                        adapter_id: tab
+                            .agent_id
+                            .as_ref()
+                            .and_then(AgentRef::adapter_id)
+                            .map(str::to_owned),
+                        root_pane: parked
+                            .layout
+                            .tab_states
+                            .get(index)
+                            .and_then(|state| state.root_id)
+                            .map(|id| format!("pane-{id}")),
                         pane_keys: ids.into_iter().map(|id| format!("pane-{id}")).collect(),
                     },
                 );
@@ -14988,6 +15259,25 @@ impl SirioWorkspace {
                     .and_then(|index| unmounted.sessions.get(*index))
                     .cloned()
             })
+    }
+
+    /// Whether a session other than the tab `terminal` is in names `pane_key`: another live,
+    /// retained or parked tab, or a layout the database keeps. Pane ids are not unique across
+    /// layouts, so a ref written under such a key would be read by the other layout's pane.
+    fn pane_key_held_by_other_session(
+        &self,
+        pane_key: &str,
+        terminal: &Entity<TerminalView>,
+    ) -> bool {
+        let own = self
+            .terminal_pane_of(terminal)
+            .map(|(index, _)| self.tabs[index].persistence_id.clone());
+        let held_by_other = |session: &SessionRef| {
+            own.as_deref() != Some(session.persistence_id.as_str())
+                && session.pane_keys.iter().any(|key| key == pane_key)
+        };
+        self.live_sessions().iter().any(held_by_other)
+            || self.unmounted_sessions().sessions.iter().any(held_by_other)
     }
 
     /// Marks the index of unmounted sessions stale: the next read rebuilds it.
@@ -15033,7 +15323,7 @@ impl SirioWorkspace {
                 {
                     continue;
                 }
-                for (tab, ids) in self.session.persisted_tab_panes_for(path) {
+                for (tab, root, ids) in self.session.persisted_tab_panes_for(path) {
                     let chat = tab.kind == "chat";
                     if !chat && tab.kind != "terminal" {
                         continue;
@@ -15051,6 +15341,12 @@ impl SirioWorkspace {
                         on_screen: false,
                         title: tab.title,
                         pane_keys,
+                        adapter_id: tab
+                            .agent_id
+                            .as_ref()
+                            .and_then(AgentRef::adapter_id)
+                            .map(str::to_owned),
+                        root_pane: Some(format!("pane-{root}")),
                     });
                 }
             }
@@ -17595,6 +17891,18 @@ impl SirioWorkspace {
         });
         self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
+        // A pane id is reused: a ref a closed pane left under this key must not resume in
+        // the new one.
+        let fresh_key = format!("pane-{pane_id}");
+        self.session.delete_fresh_session_ref(&fresh_key);
+        // OpenCode names itself nowhere a fresh tab could hear it: it sends no report, and the
+        // host names no program for a tab's own process (`$SHELL -lc opencode`), so the TUI's
+        // `OC | <title>` would clear an identity read from its first title. Its tab says what it
+        // is, as a restored tab's does (`register_restored_agent`); the other agents name
+        // themselves in their reports (`app=`).
+        if agent_id.as_deref() == Some("opencode") {
+            register_restored_agent(&mut self.activity, pane_id, agent_id.as_deref());
+        }
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
@@ -19944,6 +20252,24 @@ impl SirioWorkspace {
         // Read before the agent's own tab becomes the active one.
         let opened = self.active_change_request();
         let text = match surface {
+            // OpenCode's tab finishes its launch on a thread of its own, so its warnings come
+            // later: the provisional line is set first, and `finish_opencode_launch` replaces
+            // it when the step has something to say (inline, under GPUI's test scheduler, so
+            // the provisional line must not come after the tab is made).
+            Surface::Terminal if adapter.id() == "opencode" => {
+                let provisional = format!("{name} started in a terminal with {relative}");
+                Self::report_handoff(&asked, opened.as_ref(), with_note(provisional.clone(), note), cx);
+                let line = HandoffLine {
+                    asked_generation: asked.read(cx).handoff_generation(),
+                    opened_generation: opened.as_ref().map(|tab| tab.read(cx).handoff_generation()),
+                    asked: asked.clone(),
+                    opened: opened.clone(),
+                    text: provisional,
+                    note,
+                };
+                self.add_opencode_terminal_tab(adapter, &prompt, Some(line), cx);
+                return;
+            }
             Surface::Terminal => {
                 let warning = self.add_agent_terminal_tab(adapter, &prompt, cx);
                 match warning {
@@ -20009,6 +20335,10 @@ impl SirioWorkspace {
         prompt: &str,
         cx: &mut Context<Self>,
     ) -> Option<String> {
+        if adapter.id() == "opencode" {
+            self.add_opencode_terminal_tab(adapter, prompt, None, cx);
+            return None;
+        }
         let pane_key = format!("pane-{}", self.next_pane_id);
         let worktree = self.working_directory.to_string_lossy().into_owned();
         let (shell, warning) = fresh_agent_shell(adapter, &pane_key, &worktree, prompt);
@@ -20024,11 +20354,160 @@ impl SirioWorkspace {
             terminal: terminal.downgrade(),
             adapter,
             prompt: prompt.to_string(),
+            session: None,
+            opencode_state: None,
         });
         // The agent works whether or not its tab is drawn (a hidden window,
         // another worktree), so it starts now rather than on first render.
         terminal.update(cx, |terminal, cx| terminal.start(cx));
         warning
+    }
+
+    /// A fresh OpenCode tab. Its launch waits (`TerminalView::hold_launch`) for what only
+    /// processes can tell: the installed major version, and, for OpenCode 2, a session Sirio
+    /// creates in the shared service so that its id is known (`opencode --session <id>`).
+    /// Neither may block the UI thread, so the tab is made at once with the plain command and
+    /// the rest runs on a thread of its own; `finish_opencode_launch` opens the session. A
+    /// hand-off's `handoff` line is told what the step could not do.
+    fn add_opencode_terminal_tab(
+        &mut self,
+        adapter: &'static dyn sirio_agents::AgentAdapter,
+        prompt: &str,
+        handoff: Option<HandoffLine>,
+        cx: &mut Context<Self>,
+    ) {
+        let pane_key = format!("pane-{}", self.next_pane_id);
+        let worktree = self.working_directory.clone();
+        let (program, args) = command_shell_invocation(&sirio_agents::opencode_launch_command(None, prompt));
+        let terminal = self.add_terminal_tab_with_shell_and_agent(
+            adapter.display_name(),
+            TerminalShell::WithArguments { program, args },
+            Icon::for_agent_id(adapter.id()),
+            Some(adapter.id().to_string()),
+            cx,
+        );
+        terminal.update(cx, |terminal, _| terminal.hold_launch());
+        self.new_agent_launches.retain(|launch| launch.terminal.upgrade().is_some());
+        self.new_agent_launches.push(NewAgentLaunch {
+            terminal: terminal.downgrade(),
+            adapter,
+            prompt: prompt.to_string(),
+            session: None,
+            opencode_state: None,
+        });
+        // A no-op while held; it keeps the tab's start where every agent tab has it.
+        terminal.update(cx, |terminal, cx| terminal.start(cx));
+        let weak = terminal.downgrade();
+        let prompt = prompt.to_string();
+        // GPUI's test scheduler asserts on cross-thread activity (see
+        // `start_opencode_version_probe`); under it the probe has no answer and nothing blocks,
+        // so the step runs here.
+        if cx.background_executor().scheduler_executor().scheduler().as_test().is_some() {
+            let step = prepare_and_create_opencode_session(&pane_key, &worktree);
+            self.finish_opencode_launch(&weak, &prompt, step, &pane_key, &worktree, handoff, cx);
+            return;
+        }
+        // On a thread of its own: the step is blocking calls for up to ~8 s (the version probe,
+        // then the session creation), which would hold a background-executor worker.
+        let (sender, finished) = futures::channel::oneshot::channel();
+        let step_key = pane_key.clone();
+        let step_worktree = worktree.clone();
+        let spawned = std::thread::Builder::new()
+            .name("sirio-opencode-launch".into())
+            .spawn(move || {
+                let _ = sender.send(prepare_and_create_opencode_session(&step_key, &step_worktree));
+            });
+        if let Err(error) = spawned {
+            eprintln!("[sirio] opencode session not created: {error}");
+            let step = OpenCodeLaunchStep {
+                created: None,
+                state: sirio_agents::InstalledMajor::Unknown,
+                warning: Some("the OpenCode launch step did not start, so this tab will not resume".to_string()),
+            };
+            self.finish_opencode_launch(&weak, &prompt, step, &pane_key, &worktree, handoff, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            // A thread that panicked drops the sender: nothing is known of it.
+            let step = finished.await.unwrap_or(OpenCodeLaunchStep {
+                created: None,
+                state: sirio_agents::InstalledMajor::Unknown,
+                warning: Some("the OpenCode launch step failed, so this tab will not resume".to_string()),
+            });
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.finish_opencode_launch(&weak, &prompt, step, &pane_key, &worktree, handoff, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// The background step of a fresh OpenCode tab is done: opens its session, with the id
+    /// when Sirio created one and the plain command otherwise. A closed tab drops the
+    /// outcome. The pane id is asked now, because it can move while the step ran: a v1 plugin
+    /// the step wrote names `launched_key`, so one that moved gets the plugin step again under
+    /// its key now. The step's warning goes to the hand-off line, if the tab has one.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_opencode_launch(
+        &mut self,
+        weak: &gpui::WeakEntity<TerminalView>,
+        prompt: &str,
+        step: OpenCodeLaunchStep,
+        launched_key: &str,
+        worktree: &Path,
+        handoff: Option<HandoffLine>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = weak.upgrade() else {
+            return;
+        };
+        let current_key = self
+            .terminal_pane_of(&terminal)
+            .map(|(_, pane_id)| format!("pane-{pane_id}"));
+        if let Some(current_key) = &current_key
+            && current_key != launched_key
+        {
+            if let Err(error) = run_opencode_plugin_step(worktree, current_key, step.state) {
+                eprintln!("[sirio] {current_key}: hooks not written: {error}");
+            }
+        }
+        if let (Some(handoff), Some(warning)) = (&handoff, &step.warning) {
+            let text = with_note(format!("{} · {warning}", handoff.text), handoff.note);
+            // Another hand-off opened on a tab since owns that tab's line, and `set_handoff`
+            // would also close its dialog: only a tab still on this line's generation is told.
+            let tabs = std::iter::once((&handoff.asked, Some(handoff.asked_generation)))
+                .chain(handoff.opened.as_ref().map(|tab| (tab, handoff.opened_generation)));
+            for (tab, generation) in tabs {
+                if Some(tab.read(cx).handoff_generation()) == generation {
+                    tab.update(cx, |tab, cx| tab.set_handoff(HandoffState::Done(text.clone()), cx));
+                }
+            }
+        }
+        let state = step.state;
+        let session = step.created.filter(|_| current_key.is_some());
+        let shell = session.as_deref().and_then(|id| {
+            let (_, pane_id) = self.terminal_pane_of(&terminal)?;
+            let key = format!("pane-{pane_id}");
+            if self.pane_key_held_by_other_session(&key, &terminal) {
+                // The key may have moved since the tab was made (its own row was deleted then):
+                // a row under it is not this tab's, which runs `--session <id>`.
+                self.session.delete_session_ref(&key);
+                eprintln!("[sirio] {key}: session ref not written: pane id held by another layout");
+            } else {
+                self.session.save_session_ref(&key, id);
+            }
+            let (program, args) =
+                command_shell_invocation(&sirio_agents::opencode_launch_command(Some(id), prompt));
+            Some(TerminalShell::WithArguments { program, args })
+        });
+        if let Some(launch) = self
+            .new_agent_launches
+            .iter_mut()
+            .find(|launch| launch.terminal.entity_id() == terminal.entity_id())
+        {
+            launch.session = session;
+            launch.opencode_state = Some(state);
+        }
+        terminal.update(cx, |terminal, cx| terminal.release_launch(shell, cx));
     }
 
     /// Queues `action` for the drain that runs with a window.
@@ -21800,6 +22279,7 @@ impl SirioWorkspace {
         };
         let current_exe = std::env::current_exe().unwrap_or_default();
         let make_release_copy = !cli_install::stable_is_debug();
+        let probe_directory = self.working_directory.clone();
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
@@ -21810,6 +22290,9 @@ impl SirioWorkspace {
                     {
                         return Err(error);
                     }
+                    // OpenCode's hook depends on its version: ask the binary, here and not
+                    // on the UI thread, before the install reads the memo.
+                    opencode::probe_installed_major(&probe_directory);
                     Ok(sirio_agents::install_global_hooks(
                         &home,
                         &environment,
@@ -24179,6 +24662,19 @@ impl SirioWorkspace {
                 let window = window.ok_or("the effort list needs a window")?;
                 let snapshot = chat.update(cx, |chat, cx| {
                     chat.effort_act(action, window, cx)?;
+                    Ok::<_, String>(chat.control_snapshot())
+                })?;
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
+            ChatControlAction::Elicitation {
+                surface_id,
+                request_id,
+                act,
+            } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let window = window.ok_or("the question dock needs a window")?;
+                let snapshot = chat.update(cx, |chat, cx| {
+                    chat.elicitation_act(request_id, act, window, cx)?;
                     Ok::<_, String>(chat.control_snapshot())
                 })?;
                 Ok(Self::control_chat_result(&surface_id, snapshot))
@@ -29322,6 +29818,134 @@ fn keep_agent_skill_out_of_git(adapter_id: &str, worktree: &Path) {
     }
 }
 
+/// What the background step of a fresh OpenCode tab found and did.
+struct OpenCodeLaunchStep {
+    /// The OpenCode 2 session Sirio created, if any.
+    created: Option<String>,
+    /// The version state the plugin step used, so a later run under another pane key decides
+    /// the same way (`finish_opencode_launch`).
+    state: sirio_agents::InstalledMajor,
+    /// What the tab's hand-off line should tell: the hooks that could not be written, and an
+    /// OpenCode 2 tab whose session was not created. It names no session id; a hooks
+    /// failure's text may name a path.
+    warning: Option<String>,
+}
+
+/// The plugin step of an OpenCode pane under `pane_key`, by `state`. sirioctl is resolved only
+/// for a confirmed 1.x, the one case that writes a plugin naming it; every other state passes
+/// an empty path, because `prepare_plugin` then only removes Sirio's generated file and never
+/// reads it, so a missing sirioctl cannot keep a stale plugin in place.
+fn run_opencode_plugin_step(
+    worktree: &Path,
+    pane_key: &str,
+    state: sirio_agents::InstalledMajor,
+) -> Result<(), String> {
+    let sirioctl = match state {
+        sirio_agents::InstalledMajor::Major(major) if major < 2 => resolve_sirioctl_for_process()?
+            .to_string_lossy()
+            .into_owned(),
+        _ => String::new(),
+    };
+    sirio_agents::prepare_opencode_plugin(&worktree.to_string_lossy(), pane_key, &sirioctl, state)
+        .map_err(|error| error.to_string())
+}
+
+/// Removes Sirio's generated OpenCode plugin when sirioctl cannot be resolved. Removing it
+/// needs no sirioctl, and OpenCode 2 would show "Plugin failed" for a stale one. A confirmed
+/// 1.x is skipped: it writes a plugin that names sirioctl, so the step would fail again.
+fn remove_opencode_plugin_without_sirioctl(
+    worktree: &str,
+    pane_key: &str,
+) {
+    let state = sirio_agents::installed_major_state();
+    if matches!(state, sirio_agents::InstalledMajor::Major(major) if major < 2) {
+        return;
+    }
+    if let Err(error) = run_opencode_plugin_step(Path::new(worktree), pane_key, state) {
+        eprintln!("[sirio] {pane_key}: hooks not written: {error}");
+    }
+}
+
+/// The background step of a fresh OpenCode tab: the version probe, the skill and the plugin
+/// step by what the probe found, and, for OpenCode 2, a session created in `worktree` through
+/// the shared service. No `created` (the plain command runs, no ref is written) for any other
+/// version and for every failure. The session id is never logged, only the kind of a session
+/// failure is; a hooks failure's text (`PrepareError`, which can name a path) is logged and
+/// shown, as every agent's is.
+fn prepare_and_create_opencode_session(pane_key: &str, worktree: &Path) -> OpenCodeLaunchStep {
+    let major = opencode::probe_installed_major(worktree);
+    let worktree_text = worktree.to_string_lossy().into_owned();
+    // The plugin step decides on this tab's own probe, as the session creation below does.
+    // No answer is an unreadable version for this tab, whatever an earlier probe in the run
+    // read (a worktree may pin another major), and an unreadable version writes no plugin.
+    let state = match major {
+        Some(major) => sirio_agents::InstalledMajor::Major(major),
+        None => sirio_agents::InstalledMajor::Unknown,
+    };
+    let mut warnings = Vec::new();
+    match resolve_sirioctl_for_process() {
+        Ok(sirioctl) => {
+            if let Err(error) = sirio_agents::prepare_opencode_with(
+                &worktree_text,
+                pane_key,
+                &sirioctl.to_string_lossy(),
+                state,
+            ) {
+                eprintln!("[sirio] {pane_key}: hooks not written: {error}");
+                warnings.push(format!("hooks not written: {error}"));
+            }
+        }
+        Err(error) => {
+            eprintln!("[sirio] {pane_key}: hooks not written: {error}");
+            warnings.push(format!("hooks not written: {error}"));
+            // Without sirioctl nothing can be written, but removing Sirio's generated plugin
+            // needs no sirioctl: OpenCode 2 would show "Plugin failed" for it.
+            if !matches!(state, sirio_agents::InstalledMajor::Major(major) if major < 2)
+                && let Err(error) = run_opencode_plugin_step(worktree, pane_key, state)
+            {
+                eprintln!("[sirio] {pane_key}: hooks not written: {error}");
+            }
+        }
+    }
+    keep_agent_skill_out_of_git("opencode", worktree);
+    let created = if major.is_some_and(|major| major >= 2) {
+        create_opencode_session(pane_key, worktree)
+    } else {
+        None
+    };
+    if created.is_none() && matches!(state, sirio_agents::InstalledMajor::Major(major) if major >= 2) {
+        warnings.push("no OpenCode session was created, so this tab will not resume".to_string());
+    }
+    let warning = (!warnings.is_empty()).then(|| warnings.join(" · "));
+    OpenCodeLaunchStep { created, state, warning }
+}
+
+/// Creates an OpenCode 2 session in `worktree` through the shared service; only the kind of a
+/// failure is logged.
+fn create_opencode_session(pane_key: &str, worktree: &Path) -> Option<String> {
+    let home = user_home_dir().unwrap_or_default();
+    // The folder the TUI itself records for a session it creates (its resolved cwd), which is
+    // also the one the watch compares a launched pane's folder with. Windows keeps the worktree
+    // as Sirio holds it: a canonical path there is a `\\?\` one.
+    let directory = if cfg!(unix) {
+        std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf())
+    } else {
+        worktree.to_path_buf()
+    };
+    match sirio_opencode_watch::create_session(
+        &home,
+        &|name| std::env::var(name).ok(),
+        &directory,
+        Duration::from_secs(3),
+    ) {
+        Ok(id) => Some(id),
+        Err(kind) => {
+            eprintln!("[sirio] {pane_key}: opencode session not created: {kind}");
+            None
+        }
+    }
+}
+
 /// The shell a new agent starts under `pane_key`: `prepare` writes the
 /// worktree's hooks for that pane, then the adapter's command with its prompt.
 /// The warning names what could not be written, and the command still runs.
@@ -29336,6 +29960,9 @@ fn fresh_agent_shell(
         Ok(path) => path.to_string_lossy().into_owned(),
         Err(error) => {
             warning = Some(format!("hooks not written: {error}"));
+            if adapter.id() == "opencode" {
+                remove_opencode_plugin_without_sirioctl(worktree, pane_key);
+            }
             String::new()
         }
     };
@@ -29468,6 +30095,9 @@ fn restored_agent_shell(
         Ok(path) => path,
         Err(error) => {
             eprintln!("cannot restore {}: {error}", adapter.display_name());
+            if adapter.id() == "opencode" {
+                remove_opencode_plugin_without_sirioctl(&worktree_path.to_string_lossy(), pane_key);
+            }
             return None;
         }
     };
@@ -29890,7 +30520,10 @@ fn restore_tabs_with_terminal_cache(
                     reused_terminal_panes.insert(pane_id);
                     view
                 } else {
-                    cx.new(|cx| {
+                    // The reading `prepare` (inside the closure) will see, and the hold below
+                    // decides on: the probe may answer in between.
+                    let major_state = sirio_agents::installed_major_state();
+                    let view = cx.new(|cx| {
                         match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable)
                         {
                             Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
@@ -29912,7 +30545,9 @@ fn restore_tabs_with_terminal_cache(
                                 ),
                             },
                         }
-                    })
+                    });
+                    hold_restored_opencode_launch(&view, agent_id.as_deref(), &cwd, major_state, cx);
+                    view
                 };
                 TabContent::Terminal { view }
             }
@@ -30480,6 +31115,8 @@ fn restore_tabs_in_workspace(
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
                 let agent_id = stored_adapter_id.map(str::to_owned);
+                // As in `restore_tabs`: one reading for the plugin step and for the hold.
+                let major_state = sirio_agents::installed_major_state();
                 let view = cx.new(|cx| {
                     match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable) {
                         Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
@@ -30502,6 +31139,7 @@ fn restore_tabs_in_workspace(
                         },
                     }
                 });
+                hold_restored_opencode_launch(&view, agent_id.as_deref(), &cwd, major_state, cx);
                 TabContent::Terminal { view }
             }
             Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(
@@ -31210,6 +31848,48 @@ fn ensure_windows_console() {
     }
 }
 
+/// The restored OpenCode panes whose launch waits for the version probe
+/// (`TerminalView::hold_launch`): the plugin step depends on the installed major, which is
+/// asked on a background thread at startup. Each entry is the pane's terminal and its worktree;
+/// `SirioWorkspace::release_held_opencode_launches` runs when the probe answers.
+#[derive(Default)]
+struct HeldOpenCodeLaunches(Vec<(gpui::WeakEntity<TerminalView>, PathBuf)>);
+impl gpui::Global for HeldOpenCodeLaunches {}
+
+/// Holds a just-restored terminal's launch when it is an OpenCode pane and the installed
+/// major was not known yet when its plugin step ran. `major_state` is that very reading, taken
+/// before the pane was built: a fresh one could see an answer the plugin step did not. A restore
+/// after the probe needs no hold.
+fn hold_restored_opencode_launch(
+    view: &Entity<TerminalView>,
+    agent_id: Option<&str>,
+    worktree: &Path,
+    major_state: sirio_agents::InstalledMajor,
+    cx: &mut App,
+) {
+    if agent_id != Some("opencode") || major_state != sirio_agents::InstalledMajor::NotProbed {
+        return;
+    }
+    view.update(cx, |view, _| view.hold_launch());
+    cx.default_global::<HeldOpenCodeLaunches>()
+        .0
+        .push((view.downgrade(), worktree.to_path_buf()));
+}
+
+/// The hand-off line of a change request tab whose agent is a fresh OpenCode tab: its warnings
+/// arrive after the tab is made (`finish_opencode_launch`), so the line is kept to be told.
+struct HandoffLine {
+    asked: Entity<ChangeRequestTab>,
+    opened: Option<Entity<ChangeRequestTab>>,
+    /// Each tab's `handoff_generation()` when the line was made: every opening of the dialog
+    /// bumps it, so a tab whose generation moved belongs to a newer hand-off.
+    asked_generation: u64,
+    opened_generation: Option<u64>,
+    /// `{name} started in a terminal with {relative}`, without a note.
+    text: String,
+    note: Option<&'static str>,
+}
+
 /// A new agent tab's launch, kept with its terminal (fix batch 7, I1): the
 /// adapter and the prompt it was started with. A restored agent tab has none
 /// (its launch comes from its saved tab), so only a new one is recorded here.
@@ -31219,6 +31899,13 @@ struct NewAgentLaunch {
     terminal: gpui::WeakEntity<TerminalView>,
     adapter: &'static dyn sirio_agents::AgentAdapter,
     prompt: String,
+    /// The OpenCode 2 session Sirio created for the tab (`finish_opencode_launch`): its relaunch
+    /// resumes it (`opencode --session`) instead of starting a fresh one.
+    session: Option<String>,
+    /// What this tab's own version probe found, `None` until the background step finished.
+    /// A relaunch that has no session to resume applies the plugin step by it, never by a
+    /// memo of some other tab's probe.
+    opencode_state: Option<sirio_agents::InstalledMajor>,
 }
 
 /// The subscriptions that route a terminal pane's events to the workspace,
@@ -32333,6 +33020,9 @@ fn main() {
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
         let saved_session_refs = session_store.load_session_refs();
         let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
+        // The one write path: the store's saves and deletes keep this map the same as the
+        // database, so the control handler and every app writer share it.
+        session_store.mirror_session_refs(session_refs.clone());
         // F-SET-04: only honor saved native session refs for the initial
         // restore when the resume_agent_sessions setting is on; the shared
         // `session_refs` above stays populated for the control server
@@ -48621,6 +49311,9 @@ done
             "surface.chat.read" => request_with_params(method, &[]),
             "surface.chat.panel" => request::chat_panel("chat-1", "open", None),
             "surface.chat.effort" => request::chat_effort("chat-1", "open", None),
+            "surface.chat.elicitation" => {
+                request::chat_elicitation("chat-1", 1, Some(1), None, false)
+            }
             "surface.project_add" => {
                 request::surface_project_add("path", VERBATIM_PATH, false, None)
             }

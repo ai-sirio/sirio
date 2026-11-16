@@ -238,7 +238,9 @@ impl Fold {
             CliMessage::System(system) => self.apply_system(system),
             CliMessage::Result(result) => self.apply_result(result),
             // Control traffic is the worker's business, not the fold's.
-            CliMessage::ControlRequest(_) | CliMessage::ControlResponse(_) => Vec::new(),
+            CliMessage::ControlRequest(_)
+            | CliMessage::ControlResponse(_)
+            | CliMessage::ControlCancelRequest(_) => Vec::new(),
             CliMessage::RateLimit(limit) => {
                 // The push arrives every turn and almost always says the
                 // plan has room, which is not news. Only a change to a
@@ -409,6 +411,17 @@ impl Fold {
                     self.background_tasks = count;
                     events.push(ChatEvent::OtherSessionUpdate {
                         kind: format!("BackgroundTasksUpdate({count})"),
+                    });
+                }
+            }
+            "elicitation_complete" => {
+                if let (Some(server), Some(elicitation_id)) = (
+                    system.mcp_server_name.clone(),
+                    system.elicitation_id.clone(),
+                ) {
+                    events.push(ChatEvent::ElicitationCompleted {
+                        server,
+                        elicitation_id,
                     });
                 }
             }

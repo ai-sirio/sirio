@@ -35,7 +35,11 @@ set -eEuo pipefail
 #   context           the menu's Copy, run by a right press, reaches the clipboard
 #   context_rows      a real right press opens the menu with one line per row; the pointer
 #                     resting on a disabled row (Cut, no selection) draws its reason as a
-#                     tooltip beside the pointer, and nowhere else; captured
+#                     tooltip beside the pointer, and nowhere else; the code under the row,
+#                     which answers a resting pointer with the server's card while the menu
+#                     is closed, takes no pointer while it is open (`hover=` empty), and an
+#                     answer the server still held when the menu opened draws no card; a real
+#                     click on Copy copies the selection and leaves it selected; captured
 #   breadcrumb        the row over src/shapes.rs names the file's path and the symbols the
 #                     fake server's outline puts around the caret (impl Foo > bar): none
 #                     before the first symbol, a shallower symbol closes the deeper ones,
@@ -1377,12 +1381,14 @@ scenario_context() {
 
 # A real right press at MENU_POINT in a window of CLICK_WINDOW opens the menu with
 # its corner there. For a file with no selection its first four rows are
-# disabled; MENU_DISABLED_ROW is inside Cut, and MENU_TOOLTIP is the area below
-# and right of it where the tooltip draws, clear of the menu and of the caret.
-# findme.txt has no language server: the code under the menu still takes the
-# pointer, and a server's hover card would draw in that same area.
+# disabled; MENU_DISABLED_ROW is inside Cut, MENU_COPY_ROW inside Copy, the row
+# under it, and MENU_TOOLTIP is the area below and right of Cut where its tooltip
+# draws, clear of the menu and of the caret. main.rs has the fake language
+# server, whose hover card would draw in that same area if the code under the
+# menu took the pointer (#661).
 MENU_POINT=(900 400)
 MENU_DISABLED_ROW=(960 462)
+MENU_COPY_ROW=(960 493)
 MENU_TOOLTIP=(240x60+970+472)
 # How many pixels of AREA (WxH+X+Y) differ between two captures.
 crop_pixels_differ() { # capture capture area
@@ -1393,14 +1399,21 @@ crop_pixels_differ() { # capture capture area
   printf '%s' "$diff"
 }
 scenario_context_rows() {
-  open_file "$WT/findme.txt"
+  open_file "$WT/main.rs"
   expect_state state loaded
   ctl surface editor select --ranges=0..0 >/dev/null
   focus_window
+  # The control: with the menu closed, the code under MENU_DISABLED_ROW answers a
+  # resting pointer with the server's card, so the check under the open menu below
+  # can fail. The pointer then leaves the code, which drops the card.
+  move_to "${MENU_DISABLED_ROW[@]}"
+  expect_state hover "$FAKE_HOVER"
+  move_to 700 15
+  expect_state hover ""
   DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$(find_window)" "${MENU_POINT[@]}" click 3
-  # The pointer leaves the menu's corner for a spot beside it, so the first capture
-  # has no tooltip: the menu, one line per row.
-  move_to 850 300
+  # The pointer leaves the menu's corner for a spot off the code, so the first
+  # capture has neither a tooltip nor a hover card: the menu, one line per row.
+  move_to 700 15
   capture context-menu-rows
   # Resting on Cut, past gpui's 500 ms tooltip delay: its reason draws beside the
   # pointer. A disabled row has no hover colour, so the area can change only by
@@ -1414,11 +1427,85 @@ scenario_context_rows() {
       || fail "$SCENARIO: resting on the disabled Cut drew nothing at ${MENU_TOOLTIP[0]}: no tooltip"
     echo "OK: the disabled row's reason drew as a tooltip ($changed pixels)"
   fi
+  # The pointer on the row is the menu's: past the hover delay (300 ms) and the
+  # server's reply, the code under the row has asked nothing and drawn no card.
+  sleep 1
+  expect_state_stays hover ""
+  echo "OK: resting on a row of the open menu drew no hover card from the code under it"
   # A press outside the menu closes it, in the code left of its corner; the
   # pointer then leaves the code, so no later scenario's file is hovered.
   click_at 850 400
   move_to 700 15
   echo "OK: one line per row is in context-menu-rows.png, the tooltip in context-menu-tooltip.png"
+  # An answer already on its way when the menu opens is about code the menu now
+  # covers: it draws no card. The server holds its hover answer 1.5 s. The pointer
+  # rests on the code at MENU_POINT until the request has gone, and the right press
+  # is there, with no move (a move asks about a new place, which makes the held
+  # answer stale by itself), so the menu opens while the answer is held. The
+  # pointer then rests on Cut until the server says it answered, and past that.
+  # The server was asked once: a pointer on Cut that reached the code would have
+  # asked again, and the held answer would have been stale without the fix.
+  local mark tries
+  fake_lsp_answers hover_delay_ms 1500
+  mark="$(lsp_mark)"
+  move_to "${MENU_POINT[@]}"
+  tries=0
+  until [ "$(lsp_count textDocument/hover "$mark")" -gt 0 ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "$SCENARIO: resting on the code at ${MENU_POINT[*]} asked the server for no hover"
+    sleep 0.1
+  done
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$(find_window)" "${MENU_POINT[@]}" click 3
+  move_to "${MENU_DISABLED_ROW[@]}"
+  tries=0
+  until [ "$(tail -n +"$((mark + 1))" "$RUN_DIR/fake-lsp/requests.log" | grep -cx 'held hover answered' || true)" -gt 0 ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "$SCENARIO: the server never sent the hover answer it held"
+    sleep 0.1
+  done
+  sleep 1
+  expect_state_stays hover ""
+  [ "$(lsp_count textDocument/hover "$mark")" -eq 1 ] \
+    || fail "$SCENARIO: the server was asked for $(lsp_count textDocument/hover "$mark") hovers, not 1: the pointer on Cut reached the code"
+  capture context-menu-held-hover
+  echo "OK: a hover answer the server held until the menu was open drew no card"
+  fake_lsp_answers hover_delay_ms 0
+  click_at 850 400
+  move_to 700 15
+  # A real click on a row is the row's alone. The first 25 lines selected (by
+  # position: earlier scenarios rename and add lines), a right press inside them
+  # keeps them, and a click on Copy copies them and leaves them selected: a press
+  # that reached the code under the row would have put the caret there first, and
+  # Copy would have had nothing to copy. The file is clean, so its bytes on disk
+  # are the buffer's. The view is at the top and `select` leaves it there (the
+  # head's row is visible), so MENU_POINT is on row 14, well inside the selection.
+  local start=0 end
+  expect_state dirty false
+  end="$(head -n 25 "$WT/main.rs" | wc -c | tr -d ' ')"
+  ctl surface editor select --ranges="$start..$end" >/dev/null
+  expect_state selections "$start..$end"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$(find_window)" "${MENU_POINT[@]}" click 3
+  # The menu draws on the next frame, which the state does not report: a pause,
+  # or the click could reach the code before the menu is there to take it.
+  sleep 0.5
+  click_at "${MENU_COPY_ROW[@]}"
+  move_to 700 15
+  expect_state_stays selections "$start..$end"
+  python3 - "$WT/main.rs" "$start" "$end" "$RUN_DIR/context-rows-copy.txt" <<'PY'
+import sys
+with open(sys.argv[1], "rb") as source, open(sys.argv[4], "wb") as target:
+    target.write(source.read()[int(sys.argv[2]):int(sys.argv[3])])
+PY
+  # The clipboard, read as `context` reads it: a paste into the empty scratch
+  # file, then undone.
+  open_file "$WT/empty.txt"
+  expect_state state loaded
+  ctl surface editor keys --keys=ctrl-v >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/context-rows-copy.txt")"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text ""
+  expect_state dirty false
+  echo "OK: a real click on Copy copied the first 25 lines, and the selection stayed"
 }
 
 # The composer of the workspace's chat, asked over the control socket as the chat

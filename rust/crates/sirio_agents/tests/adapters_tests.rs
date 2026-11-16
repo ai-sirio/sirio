@@ -721,6 +721,8 @@ fn claude_prepare_preserves_existing_settings_keys() {
 
 #[test]
 fn opencode_prepare_writes_the_session_plugin() {
+    // The v1 plugin step: OpenCode 1.x is the installed major.
+    sirio_agents::note_installed_major(Some(1));
     let worktree = TempDir::new();
     OpenCodeAdapter
         .prepare(worktree.path().to_str().unwrap(), PANE_ID, SIRIOCTL)
@@ -729,7 +731,9 @@ fn opencode_prepare_writes_the_session_plugin() {
     let plugin = std::fs::read_to_string(worktree.path().join(".opencode/plugin/sirio-session.js"))
         .expect("plugin written inside the worktree");
     assert!(plugin.contains(&json_string_literal(SIRIOCTL)));
-    assert!(plugin.contains(PANE_ID));
+    // One worktree file serves all its tabs: no pane is named, the opencode process's own is read.
+    assert!(!plugin.contains(PANE_ID));
+    assert!(plugin.contains("process.env.SIRIO_PANE_ID"));
     assert!(plugin.contains("session-ref"));
     assert!(plugin.contains("export const SirioSession"));
 }
@@ -751,6 +755,8 @@ fn omp_prepare_writes_the_hook_file() {
 
 #[test]
 fn each_adapter_prepare_creates_only_its_own_files() {
+    // The v1 plugin step: OpenCode 1.x is the installed major.
+    sirio_agents::note_installed_major(Some(1));
     let worktree = TempDir::new();
     let path = worktree.path().to_str().unwrap();
     ClaudeCodeAdapter
@@ -1155,6 +1161,7 @@ fn codex_global_hooks_honour_codex_home() {
 /// the session-ref plugin goes there, pane-less like the Claude hooks.
 #[test]
 fn opencode_global_plugin_lands_in_the_user_plugins_dir_without_a_pane_id() {
+    sirio_agents::note_installed_major(Some(1));
     let home = TempDir::new();
     let outcome = OpenCodeAdapter
         .install_global_hooks(home.path(), &environment(&[]), SIRIOCTL)
@@ -1179,6 +1186,7 @@ fn opencode_global_plugin_lands_in_the_user_plugins_dir_without_a_pane_id() {
 /// `XDG_CONFIG_HOME`, then `~/.config` — in that order.
 #[test]
 fn opencode_global_plugin_honours_the_config_dir_overrides() {
+    sirio_agents::note_installed_major(Some(1));
     let home = TempDir::new();
     let xdg = TempDir::new();
     let outcome = OpenCodeAdapter

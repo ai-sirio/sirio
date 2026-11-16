@@ -235,6 +235,20 @@ impl ChatClient {
         }
     }
 
+    /// Answer an MCP elicitation surfaced in [`ChatEvent::Elicitation`]. Only
+    /// the native Claude transport has them; an ACP chat never asks.
+    ///
+    /// # Errors
+    /// On the ACP arm always, and on the Claude arm when the worker is gone.
+    pub fn respond_elicitation(&self, request_id: u64, action: ElicitationAction) -> Result<()> {
+        match self {
+            Self::Acp(_) => Err(anyhow!(
+                "an ACP agent does not ask MCP elicitations (request {request_id})"
+            )),
+            Self::Claude(client) => client.respond_elicitation(request_id, action),
+        }
+    }
+
     /// Withdraw a permission request without selecting any option.
     pub fn cancel_permission(&self, request_id: u64) -> Result<()> {
         match self {

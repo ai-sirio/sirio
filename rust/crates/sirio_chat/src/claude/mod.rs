@@ -398,6 +398,17 @@ impl ClaudeClient {
             .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
     }
 
+    /// Answers an MCP elicitation card.
+    pub fn respond_elicitation(
+        &self,
+        request_id: u64,
+        action: sirio_chat_vocab::ElicitationAction,
+    ) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::RespondElicitation { request_id, action })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
     /// Withdraws a card without choosing, which the agent reads as a
     /// refusal (F-CHAT-25).
     pub fn cancel_permission(&self, request_id: u64) -> Result<()> {

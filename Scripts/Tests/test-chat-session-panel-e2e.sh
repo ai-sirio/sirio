@@ -200,7 +200,8 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
-  unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet)
+  unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet
+  elicitation_form elicitation_url elicitation_withdrawn unhandled_request)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -473,14 +474,14 @@ done
 # scenarios) or file-links (file_links). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
-use_stub() { # session-panel|session-panel-bypass|trace|file-links
+use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation
   SIRIO_E2E_CLAUDE_STUB=$1
   local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
   APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
   resolved=$(PATH="$APP_PATH" command -v claude || true)
   [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
 }
-for stub in session-panel session-panel-bypass trace file-links; do
+for stub in session-panel session-panel-bypass trace file-links elicitation; do
   use_stub "$stub"
   echo "OK: claude resolves to the $stub shim"
 done
@@ -585,6 +586,10 @@ def evaluate(expr, surface, p, c):
     def pending():
         return [(i, r["id"]) for i, r in enumerate(c["transcript"]) if r.get("kind") == "permission" and r.get("status") == "pending"]
 
+    def elicit():
+        # The newest elicitation row of the transcript, as `control_entry_row` reports it.
+        return next((r for r in reversed(c["transcript"]) if r.get("kind") == "elicitation"), {})
+
     def tab():
         result = dict(rpc("surface.trace.read", {"surfaceId": surface}))
         result["spans"] = json.loads(result.get("spans") or "[]")
@@ -596,7 +601,7 @@ def evaluate(expr, surface, p, c):
     namespace = {
         "p": p, "c": c, "S": h.S, "R": h.R, "rows": h.rows, "json": json, "re": re,
         "lane": lambda key: h.R("trace", "trace/lane/" + key), "lanes_of": lanes_of,
-        "wait_rows": wait_rows, "row_index": row_index, "drawn_index": drawn_index, "pending": pending,
+        "wait_rows": wait_rows, "row_index": row_index, "drawn_index": drawn_index, "pending": pending, "elicit": elicit,
         "tab": tab, "T": T,
     }
     return eval(expr, namespace)
@@ -972,6 +977,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_REPO=$LINKED" "SIRIO_STUB_LOG=$RUN_DIR/stub-calls.log"
     "SIRIO_CSP_E2E_RUN=$RUN_DIR" "TRACE_STEP_MS=${TRACE_STEP_MS:-400}"
     "SIRIO_FIXTURE_USER_LOG=$RUN_DIR/fixture-user.log" "SIRIO_FIXTURE_CONTROL_LOG=$RUN_DIR/fixture-control.log"
+    "SIRIO_FIXTURE_RESPONSE_LOG=$RUN_DIR/$name-responses.jsonl"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -1104,6 +1110,86 @@ answer_permission() { # option
   id=$(find_panel "a permission card is pending" 'next((r["id"] for r in c["transcript"] if r.get("kind") == "permission" and r.get("status") == "pending"), "")' 30)
   E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="$id" optionId="$1" >/dev/null || fail "answering request $id with $1 failed"
   echo "OK: request $id answered with $1"
+}
+
+# ---- the elicitation scenarios' helpers ----------------------------------------------
+# What the debug-only `surface.chat.elicitation` does to the open question: a digit key, Enter in
+# the free-text row, Esc. The dock ignores a row for half a second after a question or a step
+# appears, and the verb says so: such a refusal is tried again, any other is a failure.
+elicit_rpc() { # description, then the verb's params after requestId
+  local desc=$1 id out="" _
+  shift
+  id=$(find_panel "an elicitation is open" 'next((r["id"] for r in c["transcript"] if r.get("kind") == "elicitation" and r.get("status") == "pending"), "")' 30)
+  for _ in $(seq 1 25); do
+    if out=$(E2E rpc surface.chat.elicitation surfaceId="$SURFACE" requestId="$id" "$@" 2>&1); then
+      echo "OK: $desc (request $id)"
+      return 0
+    fi
+    case "$out" in *"not armed"*) sleep 0.2 ;; *) break ;; esac
+  done
+  fail "$desc (request $id) was refused: $(printf '%s' "$out" | tail -n 1)"
+}
+elicit_row() { elicit_rpc "row $1 chosen" row="$1"; }
+elicit_text() { elicit_rpc "text '$1' typed" text="$1"; }
+elicit_cancel() { elicit_rpc "the question cancelled" cancel=1; }
+# Chooses the Skip row of the step on screen.
+elicit_skip() {
+  local n
+  n=$(find_panel "the step offers Skip" 'elicit()["rows"].split("|").index("Skip") + 1' 10)
+  elicit_row "$n"
+}
+# A private `.bash_profile` in launch NAME's HOME that puts the harness's stub openers
+# ($RUN_DIR/bin) first on the login-shell PATH the app's `xdg-open` inherits, even if a system
+# profile prepends directories: a link the app opens lands in $RUN_DIR/browser.log and never starts
+# a real browser. Call it before `launch NAME`.
+stub_openers_lead_login_path() { # name
+  mkdir -p "$RUN_DIR/$1-home"
+  printf 'export PATH="%s/bin:$PATH"\n' "$RUN_DIR" >"$RUN_DIR/$1-home/.bash_profile"
+}
+# The Open row calls `cx.open_url`. A --state-only run has no display: the app's LIVE environment
+# (/proc/$APP_PID/environ) names neither DISPLAY nor WAYLAND_DISPLAY, so gpui runs headless and its
+# `open_uri` is a no-op (gpui_linux headless/client.rs:117); the row's accept itself is checked by
+# the responses log. A painted run (--display) must have the xdg-open stub record the URL.
+elicit_url_not_opened() {
+  local url='https://example.com/auth?x=1' _
+  if [ -z "$DISPLAY_TARGET" ]; then
+    python3 - "$APP_PID" <<'PY' || fail "the live app's environment names a display, so gpui is not headless and the link could reach a real opener"
+import sys
+names = {e.split(b"=", 1)[0] for e in open(f"/proc/{sys.argv[1]}/environ", "rb").read().split(b"\0") if e}
+sys.exit(1 if names & {b"DISPLAY", b"WAYLAND_DISPLAY"} else 0)
+PY
+    echo "OK: no display in the live app's env, so gpui runs headless and its open_uri is a no-op"
+    return 0
+  fi
+  for _ in $(seq 1 50); do
+    grep -Fxq "xdg-open $url" "$RUN_DIR/browser.log" 2>/dev/null && { echo "OK: the xdg-open stub recorded $url"; return 0; }
+    sleep 0.3
+  done
+  fail "the xdg-open stub never recorded $url (it recorded: $(cat "$RUN_DIR/browser.log" 2>/dev/null || echo nothing))"
+}
+# A fresh Sirio on the elicitation stub, a Claude chat in $LINKED, and the log its responses go to.
+elicit_chat() { # name
+  use_stub elicitation
+  launch "$1"
+  ELICIT_LOG="$RUN_DIR/$1-responses.jsonl"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+}
+# Fails unless the responses log holds exactly COUNT lines whose control_response payload is JSON;
+# prints each such payload. A line is `{"type":"control_response","response":{"subtype":...,
+# "request_id":...,"response":{...}}}`; an error answer has `error` in place of `response`.
+elicit_log_check() { # description python-predicate-over-the-list-named-answers
+  python3 - "$ELICIT_LOG" "$1" "$2" <<'PY' || fail "$1: the responses log does not say so ($ELICIT_LOG)"
+import json, sys
+path, desc, expr = sys.argv[1:4]
+lines = [json.loads(line) for line in open(path) if line.strip()]
+answers = [line["response"] for line in lines if line.get("type") == "control_response"]
+if not eval(expr, {"answers": answers, "lines": lines, "json": json}):
+    print("FAIL: " + desc + ": " + json.dumps(lines), file=sys.stderr)
+    sys.exit(1)
+print("OK: " + desc)
+PY
+  cp "$ELICIT_LOG" "$OUT_DIR/$(basename "$ELICIT_LOG")"
 }
 
 # The Secondary half's tab kinds, comma separated, as `surface layout read` lists them. A read
@@ -1902,8 +1988,7 @@ PY
   # `.bash_profile` guarantees that even if a system profile prepended directories, so any `xdg-open`
   # the app runs (a file:// as much as the web link) lands in $RUN_DIR/browser.log and never
   # starts a real browser on the display.
-  mkdir -p "$RUN_DIR/file_links-home"
-  printf 'export PATH="%s/bin:$PATH"\n' "$RUN_DIR" >"$RUN_DIR/file_links-home/.bash_profile"
+  stub_openers_lead_login_path file_links
   launch file_links
   ctl project add "$PRIMARY" >/dev/null
   open_chat
@@ -3111,6 +3196,62 @@ scenario_notification_click() {
   save_attention notification_click
   echo "OK: notification_click: one Notify reached the D-Bus server, and its click opened the parked chat ($OUT_DIR/notifications.jsonl)"
   APP_SESSION_BUS=""
+  stop_app
+}
+
+scenario_elicitation_form() {
+  elicit_chat elicitation_form
+  send_prompt form
+  wait_panel "the form is open on its first field" 'elicit().get("status") == "pending" and elicit()["mode"] == "form" and elicit()["fields"] == "colour|count|note|ok" and elicit()["rows"] == "red|blue|Decline"' 30
+  wait_attention "an open elicitation needs the user" status needs-input 10
+  elicit_row 2
+  wait_panel "the form moved to the count field" 'elicit()["step"] == "1"' 10
+  elicit_text abc
+  wait_panel "abc was refused on the count field, which stays" 'elicit()["error"] != "" and elicit()["step"] == "1" and elicit()["status"] == "pending"' 10
+  elicit_text 2
+  wait_panel "2 was taken as the count" 'elicit()["step"] == "2" and elicit()["error"] == ""' 10
+  elicit_skip
+  wait_panel "the note was skipped" 'elicit()["step"] == "3"' 10
+  elicit_skip
+  wait_panel "the review offers Accept and Decline" 'elicit()["rows"] == "Accept|Decline"' 10
+  elicit_row 1
+  wait_panel "the form was accepted" 'elicit()["status"] == "accepted"' 10
+  wait_panel "the turn ended" 'c["status"] == "completed"' 30
+  elicit_log_check "the agent heard accept with colour blue and count 2, and nothing else" 'len(answers) == 1 and answers[0]["response"] == {"action": "accept", "content": {"colour": "blue", "count": 2}}'
+  stop_app
+}
+
+scenario_elicitation_url() {
+  stub_openers_lead_login_path elicitation_url
+  elicit_chat elicitation_url
+  send_prompt url
+  wait_panel "the sign-in link is open" 'elicit().get("status") == "pending" and elicit()["mode"] == "url"' 30
+  wait_panel "the dock offers to open example.com" 'elicit()["openOffered"] == "true" and elicit()["host"] == "example.com"' 10
+  elicit_row 1
+  elicit_url_not_opened
+  wait_panel "the server's elicitation_complete closed the request" 'elicit()["status"] == "completed"' 15
+  wait_panel "the turn ended" 'c["status"] == "completed"' 30
+  elicit_log_check "the agent heard accept with no content" 'len(answers) == 1 and answers[0]["response"] == {"action": "accept"}'
+  stop_app
+}
+
+scenario_elicitation_withdrawn() {
+  elicit_chat elicitation_withdrawn
+  send_prompt withdraw
+  wait_panel "the form was withdrawn by the agent" 'elicit().get("status") == "withdrawn"' 30
+  wait_panel "the turn ended" 'c["status"] == "completed"' 30
+  wait_panel "the withdrawn form still says so after the turn" 'elicit()["status"] == "withdrawn" and elicit()["rows"] == ""' 5
+  # A late answer would land after the turn: give it a second to show in the log.
+  sleep 1
+  elicit_log_check "nothing answered the withdrawn request" 'answers == []'
+  stop_app
+}
+
+scenario_unhandled_request() {
+  elicit_chat unhandled_request
+  send_prompt unknown
+  wait_panel "the turn ended" 'c["status"] == "completed"' 30
+  elicit_log_check "the agent heard an error naming future_thing" 'len(answers) == 1 and answers[0]["subtype"] == "error" and "future_thing" in answers[0]["error"]'
   stop_app
 }
 

@@ -23,6 +23,22 @@ stops holding; like its two siblings it SKIPs without the binary and is on
 the release gate's skip list. The terminal pane is unaffected — it has
 always run `claude` interactively.
 
+**Control requests from the CLI** are answered by `sirio_chat::claude::worker`. The chat
+answers `can_use_tool` (a permission card) and `elicitation` (an MCP server's question, a form
+or a page to visit). Any other request gets an error that names its subtype,
+`Sirio does not handle <subtype>`, and a `can_use_tool` or `elicitation` line that cannot be
+read gets `Sirio could not read this … request`. An error answer to an elicitation reaches its
+MCP server as `cancel`, and the turn goes on. A `control_cancel_request` closes the matching
+card, which reads `withdrawn`, and the worker writes nothing back. An open elicitation counts as
+an open question, as a pending permission does: it holds off the prompt watchdog and, unanswered,
+expires on the permission clock (`PERMISSION_TIMEOUT`, five minutes) as `cancel`. Server text is
+shown as plain text with control and bidi characters removed. A link is offered to open only when
+it is an http(s) URL with a host, and that host is shown on its own line; a URL card completed in
+the browser before anyone answered is accepted for the user. `claude_sends_mcp_elicitation_to_its_host`
+(`sirio_agents/tests/acp_conformance.rs`) is the opt-in live check, and `elicitation_form`,
+`elicitation_url`, `elicitation_withdrawn` and `unhandled_request` in
+`Scripts/Tests/test-chat-session-panel-e2e.sh` cover the app end to end.
+
 **The session panel** is a column beside a chat's transcript and composer
 (`sirio_ui::chat::session_panel`, about 300 px, docked while the chat is at least
 640 px wide and laid over the transcript's right edge, above the composer, below that;

@@ -22,6 +22,9 @@ the editor's pointer features ask:
   positions follow the text through every edit. The positions are UTF-16 code
   units, as LSP has them.
 - `textDocument/hover` answers the `hover` text of ANSWERS for every position.
+  With `hover_delay_ms` in ANSWERS the answer goes that many milliseconds after
+  the request, from a timer while the server goes on reading, and LOG gets
+  `held hover answered` once it has gone: a server slow to answer a hover.
 - `textDocument/definition` answers the `definition` of ANSWERS: a file's
   `needle`, read from disk when asked, as one Location.
 - `textDocument/documentSymbol` answers the `symbols` of ANSWERS, but only for
@@ -386,11 +389,27 @@ def main():
             with lock:
                 documents.pop(params["textDocument"]["uri"], None)
         elif method == "textDocument/hover":
-            text = answers().get("hover")
+            config = answers()
+            text = config.get("hover")
             result = None
             if text is not None:
                 result = {"contents": {"kind": "markdown", "value": text}}
-            send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+            reply = {"jsonrpc": "2.0", "id": message["id"], "result": result}
+            hold = config.get("hover_delay_ms", 0)
+            if hold:
+                def answer_held(reply=reply):
+                    # A client gone while the answer was held is not an error.
+                    try:
+                        send(reply)
+                        log_line("held hover answered")
+                    except (OSError, ValueError):
+                        pass
+
+                timer = threading.Timer(hold / 1000, answer_held)
+                timer.daemon = True
+                timer.start()
+            else:
+                send(reply)
         elif method == "textDocument/definition":
             send({"jsonrpc": "2.0", "id": message["id"], "result": definition_for(answers())})
         elif method == "textDocument/documentSymbol":

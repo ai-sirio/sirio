@@ -25,7 +25,12 @@ pub use codex::CodexAdapter;
 pub use error::PrepareError;
 pub use hook_migrator::ClaudeHookMigrator;
 pub use omp::OhMyPiAdapter;
-pub use opencode::OpenCodeAdapter;
+pub use opencode::{
+    InstalledMajor, OpenCodeAdapter, installed_major_state, launch_command as opencode_launch_command,
+    note_installed_major, parse_version_major, prepare_plugin as prepare_opencode_plugin,
+    prepare_with as prepare_opencode_with,
+    remove_generated_global_plugin as remove_opencode_generated_global_plugin,
+};
 pub use pi::PiAdapter;
 pub use session_validator::AgentSessionValidator;
 pub use shell_quote::{json_string_literal, shell_quote};
@@ -264,6 +269,9 @@ pub enum GlobalHookInstall {
     /// mechanism; omp takes hooks only through `--hook <file>` on its
     /// command line).
     NotSupported,
+    /// The agent reports to Sirio without a hook file in the version in use, so none is
+    /// written; `removed` is the Sirio-generated file that was taken away, if there was one.
+    NotNeeded { reason: &'static str, removed: Option<PathBuf> },
 }
 
 /// One agent's outcome from [`install_global_hooks`], with the line the
@@ -284,6 +292,13 @@ impl GlobalHookReport {
             }
             Ok(GlobalHookInstall::NotSupported) => {
                 format!("{}: no user-global hook mechanism", self.display_name)
+            }
+            Ok(GlobalHookInstall::NotNeeded { reason, removed }) => {
+                let mut line = format!("{}: no hook needed — {reason}", self.display_name);
+                if let Some(path) = removed {
+                    line.push_str(&format!(" (removed {})", path.display()));
+                }
+                line
             }
             Err(error) => format!("{}: failed — {error}", self.display_name),
         }

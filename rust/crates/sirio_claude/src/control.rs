@@ -214,6 +214,93 @@ impl ControlEnvelope {
     }
 }
 
+/// The CLI relaying an MCP server's `elicitation/create`: the server wants
+/// the user to fill a form or visit a page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElicitationRequest {
+    /// The id the answer must be sent under.
+    pub request_id: String,
+    /// The MCP server asking.
+    pub server: String,
+    pub message: String,
+    /// `form` or `url`; `form` when the line names none.
+    pub mode: String,
+    pub url: Option<String>,
+    pub elicitation_id: Option<String>,
+    /// The restricted JSON schema of a form, verbatim.
+    pub requested_schema: Option<Value>,
+    /// The server's field order, which JSON object order does not carry
+    /// through every serializer.
+    pub property_order: Option<Vec<String>>,
+}
+
+impl ElicitationRequest {
+    /// Reads a `control_request` line, when it is an `elicitation` with an id.
+    #[must_use]
+    pub fn parse(line: &Value) -> Option<Self> {
+        let request = line.get("request")?;
+        if request.get("subtype")?.as_str()? != "elicitation" {
+            return None;
+        }
+        let text = |key: &str| request.get(key).and_then(Value::as_str).map(str::to_string);
+        Some(Self {
+            request_id: line.get("request_id")?.as_str()?.to_string(),
+            server: text("mcp_server_name").unwrap_or_default(),
+            message: text("message").unwrap_or_default(),
+            mode: text("mode")
+                .filter(|mode| !mode.is_empty())
+                .unwrap_or_else(|| "form".to_string()),
+            url: text("url"),
+            elicitation_id: text("elicitation_id"),
+            requested_schema: request.get("requested_schema").cloned(),
+            property_order: request
+                .get("property_order")
+                .and_then(Value::as_array)
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                }),
+        })
+    }
+}
+
+/// The complete line answering an elicitation. `action` is `accept`,
+/// `decline` or `cancel`; `content` rides along only when given.
+#[must_use]
+pub fn elicitation_response(
+    request_id: &str,
+    action: &str,
+    content: Option<serde_json::Map<String, Value>>,
+) -> Value {
+    let mut body = json!({"action": action});
+    if let Some(content) = content {
+        body["content"] = Value::Object(content);
+    }
+    json!({
+        "type": "control_response",
+        "response": {"subtype": "success", "request_id": request_id, "response": body}
+    })
+}
+
+/// The refusal of a request this client does not handle. Unanswered, the CLI
+/// would wait on it for the rest of the turn.
+#[must_use]
+pub fn control_error(request_id: &str, message: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {"subtype": "error", "request_id": request_id, "error": message}
+    })
+}
+
+/// The `request.subtype` of a `control_request` line.
+#[must_use]
+pub fn control_request_subtype(line: &Value) -> Option<&str> {
+    line.get("request")?.get("subtype")?.as_str()
+}
+
 /// The CLI asking whether a tool may run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanUseTool {
@@ -542,6 +629,106 @@ mod tests {
         assert_eq!(
             ControlRequest::mcp_authenticate("r2", "claude.ai Notion")["request"],
             serde_json::json!({"subtype": "mcp_authenticate", "serverName": "claude.ai Notion"})
+        );
+    }
+
+    // Elicitation wire, ways it can fail:
+    // - a form request loses its schema or `property_order`, so the dock
+    //   draws fields in the wrong order or none;
+    // - a missing or empty `mode` is read as something other than a form;
+    // - another subtype, or a request with no id, is taken for an
+    //   elicitation and answered under a wrong id;
+    // - the reply is not the same JSON value the CLI accepted (extra
+    //   `content` key on decline/cancel, wrong envelope; key order is not
+    //   compared);
+    // - the refusal for an unknown subtype does not name the request, so the
+    //   CLI never matches it and the session waits forever.
+
+    const FORM_LINE: &str = r#"{"type": "control_request", "request_id": "c14d6b43-15df-4502-859f-8df48cd7c5cb", "request": {"subtype": "elicitation", "mcp_server_name": "elic", "message": "Pick a colour for the probe", "mode": "form", "requested_schema": {"type": "object", "properties": {"colour": {"type": "string", "title": "Colour", "enum": ["red", "blue"]}, "count": {"type": "integer", "title": "How many", "minimum": 1}, "note": {"type": "string", "description": "free text", "format": "email"}, "ok": {"type": "boolean", "default": true}}, "required": ["colour"]}, "property_order": ["colour", "count", "note", "ok"]}}"#;
+    const URL_LINE: &str = r#"{"type": "control_request", "request_id": "1c918e92-5158-479e-a491-bd887d0f1882", "request": {"subtype": "elicitation", "mcp_server_name": "elic", "message": "Sign in to the probe service", "mode": "url", "url": "https://example.com/auth?x=1", "elicitation_id": "el-2"}}"#;
+
+    fn line(text: &str) -> Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn an_elicitation_request_is_read_with_its_schema_and_order() {
+        let request = ElicitationRequest::parse(&line(FORM_LINE)).unwrap();
+        assert_eq!(request.request_id, "c14d6b43-15df-4502-859f-8df48cd7c5cb");
+        assert_eq!(request.server, "elic");
+        assert_eq!(request.message, "Pick a colour for the probe");
+        assert_eq!(request.mode, "form");
+        assert_eq!(request.url, None);
+        assert_eq!(
+            request.requested_schema.as_ref().unwrap()["required"],
+            json!(["colour"])
+        );
+        assert_eq!(
+            request.property_order,
+            Some(vec![
+                "colour".into(),
+                "count".into(),
+                "note".into(),
+                "ok".into()
+            ])
+        );
+        assert_eq!(
+            control_request_subtype(&line(FORM_LINE)),
+            Some("elicitation")
+        );
+    }
+
+    #[test]
+    fn a_url_elicitation_carries_url_and_id() {
+        let request = ElicitationRequest::parse(&line(URL_LINE)).unwrap();
+        assert_eq!(request.mode, "url");
+        assert_eq!(request.url.as_deref(), Some("https://example.com/auth?x=1"));
+        assert_eq!(request.elicitation_id.as_deref(), Some("el-2"));
+        assert_eq!(request.requested_schema, None);
+    }
+
+    #[test]
+    fn a_missing_mode_is_a_form() {
+        let bare = json!({"type": "control_request", "request_id": "r",
+            "request": {"subtype": "elicitation", "mcp_server_name": "s", "message": "m"}});
+        assert_eq!(ElicitationRequest::parse(&bare).unwrap().mode, "form");
+        let empty = json!({"type": "control_request", "request_id": "r",
+            "request": {"subtype": "elicitation", "mode": "", "message": "m"}});
+        assert_eq!(ElicitationRequest::parse(&empty).unwrap().mode, "form");
+    }
+
+    #[test]
+    fn parse_is_none_for_other_subtypes_and_without_request_id() {
+        let other = json!({"type": "control_request", "request_id": "r",
+            "request": {"subtype": "can_use_tool"}});
+        assert_eq!(ElicitationRequest::parse(&other), None);
+        let no_id = json!({"type": "control_request", "request": {"subtype": "elicitation"}});
+        assert_eq!(ElicitationRequest::parse(&no_id), None);
+    }
+
+    #[test]
+    fn elicitation_response_matches_the_wire() {
+        let mut content = serde_json::Map::new();
+        content.insert("colour".into(), json!("blue"));
+        content.insert("count".into(), json!(2));
+        content.insert("ok".into(), json!(true));
+        assert_eq!(
+            elicitation_response("r1", "accept", Some(content)),
+            json!({"type": "control_response", "response": {"subtype": "success",
+                "request_id": "r1", "response": {"action": "accept",
+                    "content": {"colour": "blue", "count": 2, "ok": true}}}})
+        );
+        let bare = elicitation_response("r2", "decline", None);
+        assert_eq!(bare["response"]["response"], json!({"action": "decline"}));
+        assert!(bare["response"]["response"].get("content").is_none());
+    }
+
+    #[test]
+    fn control_error_names_the_request() {
+        assert_eq!(
+            control_error("r9", "Sirio does not handle future_thing"),
+            json!({"type": "control_response", "response": {"subtype": "error",
+                "request_id": "r9", "error": "Sirio does not handle future_thing"}})
         );
     }
 }

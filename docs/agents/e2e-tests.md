@@ -74,7 +74,12 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
 # mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
-# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14:
+# SIRIO_WORKTREE_ID, OpenCode's global session plugin (case 8: Install Hooks follows `opencode
+# --version` of the stub on the PATH, which a file switches between 1.18.33 and 2.3.0: for 1 it
+# rewrites the plugin, for 2 it removes it, and says so, only when it is Sirio's generated file,
+# and leaves a user's file byte for byte; the app, restarted under 2, removes the generated
+# global plugin by itself at startup and logs `removed Sirio's generated global plugin`, and
+# leaves a copy with one line of the user's added) and the flags sirioctl offers, `project add --display-name` (case 14:
 # the label, no dialog, a duplicate). Case 15 (unread sessions) drives a claude stub
 # through `surface attention read` and `act --focus`: a stop off screen marks the session
 # until it is shown, a stop in a split pane marks the tab beside the other pane's running,
@@ -113,7 +118,26 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # real v2 endpoints, Basic auth, an SSE stream; driven by lines in $RUN/oc.cmd) registers itself
 # in the world's own $XDG_STATE_HOME/opencode/service.json, and the cases cover a session linked
 # by its title and one linked by being the first in its folder (a frame at running and at done), a
-# permission ask, a link kept through a title an older session also has, a turn under a second
+# permission ask, a link kept through a title an older session also has (a typed `opencode` never
+# gets a session ref, however it is linked), two OpenCode 2 tabs Sirio launched in one folder (the
+# stub's `POST /api/session` log line gives each tab's session: the pane's ref, read from the
+# world's database, is that id before any title exists, the tab's process runs `opencode
+# --session <id>`, `system.identify` returns it; the first turn shows its status with no title
+# (the pane's created session links, +1 at its end) and a session opened inside the TUI
+# (`create ses_tui`) takes the link away; a relaunch keeps the refs and the hidden tab
+# linked), a service that cannot create the session (500, an answer later than the 3 s deadline
+# with the control socket still answering in under a second, an OpenCode 1 on the PATH: plain
+# `opencode`, no ref, and under 1 the worktree plugin written, reading its pane from the
+# environment), OpenCode 2 leaving no worktree
+# plugin (the real v1 plugin an OpenCode 1 tab made Sirio write, and the legacy one that
+# names a pane, removed; a copy of it whose
+# sirioctl line is not a JSON string literal, a user's file, and one under Sirio's header line
+# with the user's own body, untouched), an OpenCode that
+# reports no readable version (`oc-version` `garbage`, the app relaunched: plain `opencode`, no
+# POST, no ref, no plugin written and the real v1 plugin an earlier OpenCode 1 tab wrote, and
+# the legacy one, removed), a stale row under the next fresh tab's key dropped as it is made (a
+# codex tab's), and, last because it stops the
+# host, a relaunch with no host to attach to that starts `opencode --session <id>`, a turn under a second
 # (finished, +1), two panes in one folder (no guess, then each by its title), a failed turn (the
 # service's error text and password stay out of the app's stderr), a relaunch, and a service that
 # goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). Tabs no terminal
@@ -305,6 +329,20 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # summary, body, actions of every Notify) and attention-notification_click.json in the out dir.
 # Whether a real daemon (mako) invokes `default` on a body click is a hand check.
 # The script seeds only light or dark: the Onice base colour is a hand check.
+# Four scenarios run the fixture's elicitation mode (stubs/elicitation) and drive the open MCP
+# elicitation through the debug-only `surface.chat.elicitation` (row, text or cancel: the paths a
+# digit key, Enter in the free-text row and Esc take), reading the fixture's responses log
+# (SIRIO_FIXTURE_RESPONSE_LOG, copied to the out dir as <scenario>-responses.jsonl):
+# `elicitation_form` (colour blue, "abc" refused on count with an error and the step kept, 2, both
+# optionals skipped, Accept; the agent heard exactly accept with {colour: blue, count: 2}; the chat
+# read needs-input while it was open), `elicitation_url` (the link offers example.com; the row's accept
+# is answered (the responses log), and the link's open is checked per mode: a --state-only run
+# reads the live app's /proc environ, which names no display, so gpui runs headless and its open_uri
+# is a no-op; a --display run requires the xdg-open stub (first on the login PATH) to record the URL;
+# the server's elicitation_complete reads completed; the agent heard accept with no content),
+# `elicitation_withdrawn` (the agent withdraws the form: it reads withdrawn, still after the turn,
+# and nothing answered it) and `unhandled_request` (an unknown control request gets an error answer
+# naming future_thing, and the turn still ends).
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 

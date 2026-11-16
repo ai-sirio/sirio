@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use ureq::Agent;
@@ -40,6 +40,7 @@ pub(crate) const STREAM_LOST: &str = "stream_lost";
 pub(crate) const STREAM_CLOSED: &str = "stream_closed";
 pub(crate) const UNEXPECTED_STREAM: &str = "unexpected_stream";
 pub(crate) const STALLED: &str = "stalled";
+pub(crate) const NOT_V2: &str = "not_v2";
 
 /// One endpoint's calls. Both agents ignore the proxy variables (the service is on this
 /// machine), follow no redirect (the registration's URL was checked for loopback, a
@@ -122,6 +123,77 @@ impl Client {
         }
     }
 
+    /// A call of `agent` that is over by `deadline`, whatever it is waiting on: the request's
+    /// whole time is what is left of it.
+    fn within(
+        &self,
+        deadline: Instant,
+        method: Method,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<Value, &'static str> {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(UNREACHABLE)?;
+        let url = format!("{}{path}", self.base);
+        let outcome = match method {
+            Method::Get => {
+                let mut request = self
+                    .calls
+                    .get(url)
+                    .config()
+                    .timeout_global(Some(left))
+                    .build()
+                    .header("Accept-Encoding", "identity");
+                if let Some(authorization) = &self.authorization {
+                    request = request.header("Authorization", authorization);
+                }
+                request.call()
+            }
+            Method::Post => {
+                let mut request = self
+                    .calls
+                    .post(url)
+                    .config()
+                    .timeout_global(Some(left))
+                    .build()
+                    .header("Accept-Encoding", "identity")
+                    .header("Content-Type", "application/json");
+                if let Some(authorization) = &self.authorization {
+                    request = request.header("Authorization", authorization);
+                }
+                request.send(body.unwrap_or("{}"))
+            }
+        };
+        let mut body = match outcome {
+            Ok(response) => response.into_body(),
+            Err(ureq::Error::StatusCode(401 | 403)) => return Err(UNAUTHORIZED),
+            Err(ureq::Error::StatusCode(_)) => return Err(UNEXPECTED_REPLY),
+            Err(_) => return Err(UNREACHABLE),
+        };
+        let text = body.read_to_string().map_err(|_| UNREACHABLE)?;
+        serde_json::from_str(&text).map_err(|_| UNEXPECTED_REPLY)
+    }
+
+    /// Like [`Client::confirm`], inside `deadline`, and the service's major version too: only
+    /// a v2 service has the session API `create_session` uses.
+    fn confirm_v2(&self, deadline: Instant) -> Result<(), &'static str> {
+        let info = self.within(deadline, Method::Get, "/api/info", None)?;
+        match info.get("pid").and_then(Value::as_u64) {
+            Some(pid) if pid == u64::from(self.pid) => {}
+            Some(_) => return Err(MISMATCH),
+            None => return Err(UNEXPECTED_REPLY),
+        }
+        let major = info
+            .get("version")
+            .and_then(Value::as_str)
+            .and_then(|version| version.trim_start_matches('v').split('.').next())
+            .and_then(|major| major.parse::<u64>().ok())
+            .ok_or(UNEXPECTED_REPLY)?;
+        if major >= 2 { Ok(()) } else { Err(NOT_V2) }
+    }
+
     /// Opens the event stream and reads it on its own thread: whole frames go to `inbox`
     /// tagged with `connection`, then one `End` when it ends. The thread ends with the
     /// stream, or at the first line after `abandoned` is set (a heartbeat comes about
@@ -175,6 +247,66 @@ impl Client {
                 .is_some_and(|asks| !asks.is_empty())
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum Method {
+    Get,
+    Post,
+}
+
+/// Creates a session in `directory` on the service the registration names, and returns its
+/// id. The registration is confirmed (its pid answers `/api/info`, as a v2 service) before
+/// anything is created; the reply must name the same directory and an id made only of
+/// letters, digits and `_` (it ends up on a command line, quoted). One `deadline` covers the
+/// whole call. Every failure is a kind name: no id, path or credential is ever returned or
+/// logged.
+pub fn create_session(
+    home: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    directory: &Path,
+    deadline: Duration,
+) -> Result<String, &'static str> {
+    let deadline = Instant::now() + deadline;
+    let endpoint = crate::endpoint::discover(home, env).map_err(|error| error.kind())?;
+    let client = Client::new(&endpoint);
+    client.confirm_v2(deadline)?;
+    let wanted = directory.to_str().ok_or(UNEXPECTED_REPLY)?;
+    let body = serde_json::json!({ "location": { "directory": wanted } }).to_string();
+    let reply = client.within(deadline, Method::Post, "/api/session", Some(&body))?;
+    let data = reply.get("data").ok_or(UNEXPECTED_REPLY)?;
+    let id = data
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .ok_or(UNEXPECTED_REPLY)?;
+    let created = data
+        .get("location")
+        .and_then(|location| location.get("directory"))
+        .and_then(Value::as_str)
+        .ok_or(UNEXPECTED_REPLY)?;
+    // The service normalizes the path it was sent (a trailing `/`, a `.`), measured on 2.3.0;
+    // it resolves no symlink. The same components are the same directory.
+    if !same_directory(created, wanted) {
+        return Err(MISMATCH);
+    }
+    Ok(id.to_string())
+}
+
+/// Whether the service's `created` directory and the `wanted` one are the same. Elsewhere, the
+/// same path components. On Windows the service may hand the path back in the other case or
+/// with the other separator, so it is compared case-insensitively, `/` and `\` alike and with
+/// no trailing separator. Not verified against a real Windows service.
+fn same_directory(created: &str, wanted: &str) -> bool {
+    if cfg!(windows) {
+        let normal = |path: &str| {
+            path.replace('\\', "/")
+                .trim_end_matches('/')
+                .to_lowercase()
+        };
+        return normal(created) == normal(wanted);
+    }
+    Path::new(created).components().eq(Path::new(wanted).components())
 }
 
 /// `{"data":[..]}`, or a bare array.

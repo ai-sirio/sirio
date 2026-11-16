@@ -1869,6 +1869,10 @@ struct SessionInner {
     /// save, and the two edits of a worktree's persisted layout): a tab row
     /// that was missing before a count is looked for again after it moves.
     layout_saves: AtomicUsize,
+    /// The control handler's in-memory map of pane refs (`system.identify`,
+    /// `session.transcript`), set once at startup by `mirror_session_refs`: every write
+    /// below keeps it and the database the same.
+    mirror: Mutex<Option<Arc<Mutex<BTreeMap<String, String>>>>>,
     interval: Duration,
 }
 
@@ -1920,6 +1924,7 @@ impl SessionStore {
                 next_flush: Mutex::new(Instant::now()),
                 writes: AtomicUsize::new(0),
                 layout_saves: AtomicUsize::new(0),
+                mirror: Mutex::new(None),
                 interval,
             }),
         };
@@ -2122,11 +2127,11 @@ impl SessionStore {
         }
     }
 
-    /// The tabs persisted for a worktree, each with the pane ids its layout gives
-    /// it, by the same rule `persisted_pane_ids_for` reads them with. Nothing for a
+    /// The tabs persisted for a worktree, each with its root pane id and the pane ids its
+    /// layout gives it, by the same rule `persisted_pane_ids_for` reads them with. Nothing for a
     /// worktree with no row, no tabs, or a database in fallback mode. One read,
     /// for the attention funnel's index of the worktrees no tab is mounted for.
-    pub fn persisted_tab_panes_for(&self, working_directory: &Path) -> Vec<(SessionTab, Vec<usize>)> {
+    pub fn persisted_tab_panes_for(&self, working_directory: &Path) -> Vec<(SessionTab, usize, Vec<usize>)> {
         let db = self
             .inner
             .db
@@ -2158,7 +2163,7 @@ impl SessionStore {
                     None => vec![root],
                 };
                 ids.sort_unstable();
-                (tab.clone(), ids)
+                (tab.clone(), root, ids)
             })
             .collect()
     }
@@ -2694,15 +2699,68 @@ impl SessionStore {
         }
     }
 
+    /// Makes `map` follow every [`Self::save_session_ref`] and [`Self::delete_session_ref`]:
+    /// the one in-memory copy of the refs the database holds.
+    pub fn mirror_session_refs(&self, map: Arc<Mutex<BTreeMap<String, String>>>) {
+        *self
+            .inner
+            .mirror
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map);
+    }
+
+    /// Runs `change` on the mirrored map, if there is one.
+    fn with_mirror(&self, change: impl FnOnce(&mut BTreeMap<String, String>)) {
+        let mirror = self
+            .inner
+            .mirror
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(map) = mirror {
+            change(&mut map.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        }
+    }
+
+    /// Deletes the row under a key a fresh pane is about to take, but only when the mirror
+    /// holds one, so the common tab open writes nothing to the database from the UI thread.
+    /// The mirror holds every row the database had at startup and every write made through
+    /// this store since; a row another connection writes while the app runs is not in it and
+    /// stays (a limit: the E2E seeds such a row through the control socket). With no mirror
+    /// installed yet, the row is deleted.
+    pub fn delete_fresh_session_ref(&self, session: &str) {
+        let mirror = self
+            .inner
+            .mirror
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(map) = mirror
+            && !map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(session)
+        {
+            return;
+        }
+        self.delete_session_ref(session);
+    }
+
     /// Saves one pane-to-agent-session association immediately. This is a
     /// hook write rather than a layout snapshot, so it must not wait for the
-    /// layout debounce window.
+    /// layout debounce window. The mirrored map follows.
     pub fn save_session_ref(&self, session: &str, reference: &str) {
         let mut db = self
             .inner
             .db
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The mirror changes while the database lock is held, so a save and a delete of one
+        // key from two threads leave the map and the database in the same state. Lock order:
+        // the database, then the mirror; nothing holding the map takes the database.
+        self.with_mirror(|map| {
+            map.insert(session.to_string(), reference.to_string());
+        });
         let Some(db) = db.as_mut() else {
             return;
         };
@@ -2712,6 +2770,31 @@ impl SessionStore {
             }
             Err(error) => {
                 eprintln!("[session] failed to persist session reference: {error}");
+            }
+        }
+    }
+
+    /// Removes one pane's association, in the database and the mirrored map. A pane id is
+    /// reused, so a ref left behind would resume another pane's session.
+    pub fn delete_session_ref(&self, session: &str) {
+        // Under the database lock, like `save_session_ref`.
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.with_mirror(|map| {
+            map.remove(session);
+        });
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        match db.delete_session_ref(session) {
+            Ok(()) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!("[session] failed to delete session reference: {error}");
             }
         }
     }

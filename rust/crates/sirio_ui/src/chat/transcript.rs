@@ -397,6 +397,7 @@ impl Chat {
                 resolved,
                 expired,
                 dismissed,
+                withdrawn,
                 is_question,
                 ..
             } => {
@@ -412,6 +413,8 @@ impl Chat {
                     format!("Answered: {choice}")
                 } else if dismissed {
                     "Dismissed — request cancelled".to_string()
+                } else if withdrawn {
+                    "Withdrawn by the agent".to_string()
                 } else if expired {
                     // F-CHAT-27: the turn ended unanswered.
                     "No answer — the turn ended".to_string()
@@ -461,6 +464,66 @@ impl Chat {
                     .child(shell)
                     .into_any_element()
             }
+            Entry::Elicitation {
+                request_id,
+                server,
+                message,
+                resolved,
+                expired,
+                timed_out,
+                withdrawn,
+                completed,
+                ..
+            } => {
+                // The record of a request: who asked and what became of it.
+                // It is answered from the dock above the composer, so it
+                // carries no buttons in any state.
+                let status = if completed {
+                    "Completed in the browser"
+                } else if withdrawn {
+                    "Withdrawn by the agent"
+                } else if let Some(resolved) = resolved {
+                    match resolved {
+                        "cancelled" => "Cancelled",
+                        "declined" => "Answered: declined",
+                        _ => "Answered: accepted",
+                    }
+                } else if expired && timed_out {
+                    "No answer in time — cancelled"
+                } else if expired {
+                    "No answer — the turn ended"
+                } else {
+                    "Waiting for your answer below"
+                };
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(typography.callout)
+                            .text_color(theme.ely.fg)
+                            .child(selectable_text(super::question_dock::clean_text(&message))),
+                    )
+                    .child(
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(theme.ely.fg_subtle)
+                            .child(status),
+                    );
+                div()
+                    .id(("elicitation-card", request_id as usize))
+                    .debug_selector(move || format!("elicitation-card-{request_id}"))
+                    .w_full()
+                    .child(
+                        ely_gpui_component::agent::HumanInputRequest::custom(
+                            id.clone(),
+                            format!("{} asks", super::question_dock::clean_line(&server)),
+                        )
+                        .body(body),
+                    )
+                    .into_any_element()
+            }
             Entry::Plan { entries, approval } => {
                 let mut card = div()
                     .w_full()
@@ -478,6 +541,8 @@ impl Chat {
                     // keeps the plan and says what became of the approval.
                     let status = if let Some(choice) = &approval.resolved {
                         format!("Approved: {choice}")
+                    } else if approval.withdrawn {
+                        "Withdrawn by the agent".to_string()
                     } else if approval.expired {
                         "No answer — the turn ended".to_string()
                     } else {
