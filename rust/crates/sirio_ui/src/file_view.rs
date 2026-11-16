@@ -1032,6 +1032,10 @@ impl FileView {
     fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
         self.hover_offset = None;
         self.hover_task = None;
+        // An answer still on its way is stale once the pointer leaves the
+        // code, a key is pressed on it, or the menu opens over it (#661): a
+        // new number makes `set_hover` drop it.
+        self.hover_seq = self.hover_seq.wrapping_add(1);
         if self.hover_card.take().is_some() {
             cx.notify();
         }
@@ -1856,6 +1860,11 @@ impl Render for FileView {
             let mut menu = div()
                 .id("file-context-menu")
                 .debug_selector(|| "file-context-menu".to_owned())
+                // The pointer over the menu is the menu's. Without this the code
+                // under it stays hovered: resting on a row asks the language
+                // server about that code, whose card draws over the menu (#661),
+                // and a press on a row moves the caret before the row acts.
+                .occlude()
                 .w(px(240.0))
                 .p(px(6.0))
                 .rounded(theme.radii.user_pill)
