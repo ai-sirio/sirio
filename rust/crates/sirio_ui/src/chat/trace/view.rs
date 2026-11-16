@@ -482,7 +482,18 @@ impl Turn {
 
     /// The folded Trace card's title, `Live · 34s`.
     pub fn summary(&self, now: Instant) -> String {
-        let elapsed = format_duration(self.elapsed(now));
+        self.summary_for(self.state(), now)
+    }
+
+    /// The title as `state` reads it, which is the CLI's headline and may
+    /// differ from the turn's own. Shown as Live or Waiting, the elapsed time
+    /// runs on to `now` even when the turn has ended.
+    pub fn summary_for(&self, state: TurnState, now: Instant) -> String {
+        let elapsed = if matches!(state, TurnState::Live | TurnState::Waiting) {
+            format_duration(now.saturating_duration_since(self.started))
+        } else {
+            format_duration(self.elapsed(now))
+        };
         let cost = || {
             self.known_spend()
                 .and_then(|spend| {
@@ -491,7 +502,7 @@ impl Turn {
                 })
                 .unwrap_or_default()
         };
-        match self.state() {
+        match state {
             TurnState::Live => format!("Live · {elapsed}"),
             TurnState::Waiting => format!("Waiting for you · {elapsed}"),
             TurnState::Interrupted => format!("Interrupted · {elapsed}"),

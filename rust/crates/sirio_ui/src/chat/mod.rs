@@ -3739,6 +3739,16 @@ impl Chat {
             sirio_chat::ChatEvent::CliState { state } => {
                 if self.client.is_some() {
                     self.cli_state = Some(state);
+                    // The CLI can start working after the turn ended, when no
+                    // title tick runs.
+                    if !self.trace.is_running()
+                        && matches!(
+                            self.trace_headline(),
+                            Some(trace::TurnState::Live | trace::TurnState::Waiting)
+                        )
+                    {
+                        self.start_trace_title_tick(cx);
+                    }
                 }
             }
             sirio_chat::ChatEvent::Trace(trace) => {
@@ -7166,6 +7176,14 @@ impl Chat {
     /// The CLI's own account of its session, once it has sent one.
     pub fn cli_state(&self) -> Option<sirio_chat::CliState> {
         self.cli_state
+    }
+
+    /// The state the Trace card's title and pill show: the latest turn's, under
+    /// the CLI's own (`trace::headline_state`). `None` before any turn.
+    pub fn trace_headline(&self) -> Option<trace::TurnState> {
+        self.trace
+            .latest()
+            .map(|turn| trace::headline_state(turn.state(), self.cli_state))
     }
 
     /// What the chat claims about itself. The chat derives it from its turns:
@@ -14283,7 +14301,7 @@ two"
     /// A chat on a live fixture CLI that writes no state lines of its own
     /// (`silent`), so a test applies the CLI's events itself. The chat needs a
     /// client for a `CliState` to count, and a prompt it sends is heard and ignored.
-    fn silent_state_chat<'a>(
+    pub(super) fn silent_state_chat<'a>(
         cx: &'a mut TestAppContext,
     ) -> (Entity<Chat>, &'a mut VisualTestContext) {
         let (chat, cx) = claude_chat_in_session_state_mode(cx, Path::new(""));
@@ -14291,7 +14309,7 @@ two"
         (chat, cx)
     }
 
-    fn submit_silent(chat: &Entity<Chat>, cx: &mut VisualTestContext, text: &str) {
+    pub(super) fn submit_silent(chat: &Entity<Chat>, cx: &mut VisualTestContext, text: &str) {
         chat.update(cx, |chat, cx| {
             chat.submit_turn(text.into(), Vec::new(), Vec::new(), cx);
         });

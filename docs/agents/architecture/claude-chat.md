@@ -111,7 +111,10 @@ The loop runs at 30 frames a second at most while a span runs (`Turn::is_moving`
 streaming, a tool running or a subagent working, not one waiting for the user), ticks once a second
 while the turn only waits, which keeps its clock and its "now" line moving with the marks held
 still, and asks for nothing once the turn has ended or when nothing paints it. A folded card's title
-ticks once a second while it is painted.
+ticks once a second while it is painted and reads Live or Waiting. The title and the pill
+follow the CLI's session state over the turn's own, as the sidebar does: `running` reads Live
+and `requires_action` Waiting for you (the clock keeps growing past the turn's end), while `idle`,
+like no state, leaves it to the turn. The Trace tab keeps each turn's own state.
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
 trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is
