@@ -282,7 +282,8 @@ Each goal is phrased as something the end-to-end proof can show.
     the app, or making the picker reachable by keyboard (decision 7).
 *   Porting the icon picker off `bezel_theme` and `controls::card`.
 *   Fixing the orphan clone left when the Clone form closes during a clone
-    (issue [#681](https://github.com/ai-sirio/sirio/issues/681)).
+    (issue [#681](https://github.com/ai-sirio/sirio/issues/681)). It was
+    fixed later: see scenarios 23 to 26.
 *   Changing what a UI add of a duplicate does. The toast stays (decision 4).
 *   Fixing the pre-existing bug that the palette opens over the pane-close
     banner. A separate pull request fixed it
@@ -491,8 +492,10 @@ and the picker changes live in `sirio_ui`.
         itself, a truncated clone included. The `Cloned` subscriber always
         closes the form, and `clone_form_stays_open_after` goes away.
     *   The workspace never closes a form. An open form can hold a clone that
-        is still running, and closing it drops the clone (issue
-        [#681](https://github.com/ai-sirio/sirio/issues/681)).
+        is still running, and closing it used to drop the clone (issue
+        [#681](https://github.com/ai-sirio/sirio/issues/681)). The #681 fix
+        keeps the running clone in the sidebar, which adds the project or
+        reports the failure (scenarios 23 to 26).
 
 ### 3. The dialog
 
@@ -831,7 +834,9 @@ This section is the only normative statement of the rule.
 *   **After a save error.** `save_project_identity` shows the toast and
     remembers its id in `identity_error_toast`. The drain then does not open
     the next dialog until that toast expires (4 s) or the user dismisses it.
-    Ordinary toasts delay nothing.
+    Ordinary toasts delay nothing. The toast of a dismissed clone that fails
+    (#681) waits until that error toast is gone instead of replacing it,
+    since a replacement would cut it short and open the next dialog early.
 *   **Element ids.** Each dialog's element id is `("project-identity", seq)`,
     where `seq` is a per-workspace counter. Ely's focus takeover lives in keyed
     state, so a second dialog never inherits the first one's "focus already
@@ -904,7 +909,8 @@ This section is the only normative statement of the rule.
         *   the queue length;
         *   the last outcome;
         *   keys the workspace fills in: `projectForm` (`none`, `clone` or
-            `create`), `sidebarVisible`, `paletteOpen`, `pendingPaneClose`,
+            `create`), `sidebarNotice` (the sidebar's notice text, or
+            empty), `sidebarVisible`, `paletteOpen`, `pendingPaneClose`,
             `toast` (the current text, or empty) and
             `projectSettingsLabelBounds`.
     *   `surface.project_identity.act { action, value }` runs the button's
@@ -991,8 +997,9 @@ open questions. -->
     *   A pending add needs its own state.
     *   A cancelled Clone leaves a clone on disk with no project.
 *   **Reason for rejection:** The order is add first, then ask, and Esc keeps
-    the defaults. An orphan clone already exists today when the Clone form is
-    closed during a clone (issue #681), but that does not reopen this choice.
+    the defaults. An orphan clone was left when the Clone form closed during
+    a clone (issue #681, since fixed: scenarios 23 to 26), but that did not
+    reopen this choice.
 
 #### A5. The dialog for adds from the socket too [RFC 5]
 
@@ -1195,7 +1202,11 @@ crate-private.
 
 *   **Pros:** The form behind the scrim can never take the first Esc.
 *   **Cons:** A Clone form can hold a clone that is still running, and
-    closing it drops the clone (issue #681).
+    closing it used to drop the clone (issue #681). The #681 fix keeps the
+    running clone in the sidebar, which adds the project or reports the
+    failure (scenarios 23 to 26). A late success opens the dialog like any
+    clone, with focus on the dialog (decision 1, CUJ 2); a failure shows in
+    the notice and a toast (after a failed save's toast, §8).
 *   **Reason for rejection:** §7 already stops the form's Esc branch from
     running while the dialog is open, and the workspace never closes a form
     (§2).
@@ -1284,8 +1295,12 @@ Each item names a risk and says how it is handled, or that it is accepted.
 *   **Tab traversal and keyboard access to the picker** (decision 7).
 *   **Downloading GitHub and favicon avatars,** so they stop showing as a
     globe.
-*   **The orphan clone** left when the Clone form closes during a clone
-    (issue #681).
+*   **The orphan clone** left when the Clone form closed during a clone
+    (issue #681). Fixed later: the sidebar keeps the running clone, which adds
+    the project or reports the failure (scenarios 23 to 26). A late success
+    opens the dialog like any clone, with focus on the dialog (decision 1,
+    CUJ 2); a failure shows in the notice and a toast (after a failed save's
+    toast, §8).
 *   **The picker on Ely,** off `bezel_theme` and `controls::card`.
 
 --------------------------------------------------------------------------------
@@ -2079,7 +2094,8 @@ gives its full path.
                 `focused_terminal`), `root` (`root_focus`), `none`, or
                 `other`;
             *   `projectForm` (`none`, `clone` or `create`, from
-                `Sidebar::project_form_kind`), `sidebarVisible`,
+                `Sidebar::project_form_kind`), `sidebarNotice` (the
+                sidebar's notice text, or empty), `sidebarVisible`,
                 `paletteOpen`, `pendingPaneClose`, `toast` (the current
                 text, or empty) and `projectSettingsLabelBounds` (file 9, or
                 empty).
@@ -2274,6 +2290,22 @@ gives its full path.
             and runs `exec` on the real git;
         *   when the file `slow-clone` exists and `$1` is `clone`, sleeps 20 s
             and runs `exec` on the real git;
+        *   when the file `gate-clone` exists and `$1` is `clone`, waits until
+            the scenario creates the file `clone-go`, polling every 0.1 s, and
+            gives up early when the work directory is gone, then carries on.
+            It prints a git-style progress line (`Receiving objects:   0%
+            (0/1)`) to stderr every 5 s, which restarts Sirio's 60 s clone
+            stall budget (`CLONE_STALL_TIMEOUT` in
+            `rust/crates/sirio_git/src/clone.rs`), so a held clone is not
+            killed however long a scenario's steps take on a slow runner; the
+            300 s cap is only a backstop for a scenario that died without
+            releasing it;
+        *   when the file `fail-clone` exists and `$1` is `clone`, leaves a
+            half-made checkout (`<destination>/.git`), writes `Cloning into
+            'lib'...` to stderr, the way real git opens, then a `fatal:`
+            line, then a third line, `Please make sure you have the correct
+            access rights`, the way real git runs on after its fatal line, and
+            exits 128, the way a git that dies mid-clone does;
         *   when the file `slow-discovery` exists and its arguments begin with
             `worktree list`, it writes `SLOW-DISCOVERY-START` to the log,
             sleeps 3 s, writes `SLOW-DISCOVERY-END` and runs `exec` on the
@@ -2523,6 +2555,105 @@ gives its full path.
                 `act pick-glyph terminal`, then `act pick-glyph folder` (the
                 original icon), then `act save`. The read verb shows
                 `lastOutcome=unchanged`.
+        23. **`clone_dismissed` [display].** Fixture: a bare repository
+            `origin/lib`.
+            1.  Create the file `gate-clone`. Run the add verb with
+                `kind=clone`, `submit` and the local path of `origin/lib`, so
+                that a clone is running; the read verb shows
+                `projectForm=clone` and `focus=other` (the URL field holds
+                focus before Esc, so the later `focus=root` proves focus
+                moved).
+            2.  Press Esc. The read verb shows `projectForm=none` and
+                `focus=root`: the form was dismissed while git still ran (the
+                gate holds it). Create the file `clone-go` to release the
+                clone.
+            3.  The path is listed and `projects/lib/README.md`, the origin's
+                file, is on disk: the dismissed clone added the project.
+            4.  The read verb shows `open=true`, `origin=cloned`,
+                `focus=dialog`, the new project's `projectId` and an empty
+                `sidebarNotice`: its dialog opened as for any clone, with
+                focus on the dialog itself (CUJ 2).
+            5.  `act skip`. The read verb shows `open=false`,
+                `lastOutcome=skipped` and `focus=root`. The listing holds
+                exactly one project.
+        24. **`clone_replaced_fails` [state-only safe].** Fixture: none; the
+            clone's URL is `https://user:secret@example.invalid/lib.git`,
+            which the wrapper fails before any network use. It sends no X
+            input, so the failure path and the redaction run on macOS too,
+            where the script always runs with `--state-only`.
+            1.  Create `gate-clone` and `fail-clone`. Start the clone as in
+                scenario 23; the read verb shows `projectForm=clone`.
+            2.  Run the add verb with `kind=create` and a name: the read verb
+                shows `projectForm=create`. Create `clone-go` to release the
+                clone.
+            3.  `sidebarNotice` becomes non-empty and is exactly
+                `could not clone https://example.invalid/lib.git: fatal: the E2E wrapper failed this clone Please make sure you have the correct access rights`:
+                the URL's credentials are redacted, and the notice keeps git's
+                lines after the opening `Cloning into` line (and drops its
+                progress lines), joined by spaces. The `toast` value of the
+                same read is that same text, and `secret` appears nowhere in
+                the read. One capture shows the notice (skipped with
+                `--state-only`).
+            4.  `projects/lib`, the wrapper's half-made checkout, is gone, no
+                project is listed, and the read verb keeps showing
+                `open=false` and `projectForm=create` for the hold time.
+        25. **`clone_dismissed_by_click` [display].** CUJ 2 with the Clone
+            form dismissed. Fixtures: git repositories `fresh/two` and
+            `fresh/three`, and a bare repository `origin/lib`.
+            1.  Create `gate-clone`. Add `fresh/two` with the
+                `project add` verb and select its workspace. Start a clone of
+                `origin/lib` as in scenario 23; the read verb shows
+                `projectForm=clone` and `focus=other`.
+            2.  Add `fresh/three` with the path verb. Its dialog opens over
+                the form (`open=true` for its project).
+            3.  Click inside the dialog, outside the card (the `pathBounds`
+                click). The read verb shows `projectForm=none` and
+                `open=true`; the gate still holds the clone.
+            4.  `act skip`. The read verb shows `open=false`,
+                `lastOutcome=skipped` and `focus=root`: focus went back to
+                root, not to the dismissed form's field.
+            5.  Press Ctrl+T. The tab count grows: keys reach the workspace,
+                and the read verb shows `focus=terminal`. Type `ls` and press
+                Return in the terminal. Only now create `clone-go`, so the
+                clone cannot land before steps 3 to 5 are checked.
+            6.  `projects/lib` is listed and holds `README.md`: the clone
+                still added its project. The read verb shows `open=true`,
+                `origin=cloned`, `focus=dialog`, its `projectId` and
+                `nameDraft=lib`: the dialog opened with focus on the dialog
+                itself, not its field, which holds the root name, not `ls`.
+            7.  Type `ls` and press Return, before any click in the field.
+                For the key hold time the read verb keeps showing
+                `open=true`, the same `nameDraft` and `projectId`, and
+                `focus=dialog`: keys typed before a click do not act on the
+                dialog.
+            8.  `act skip`. The read verb shows `open=false`,
+                `lastOutcome=skipped` and `focus=terminal`, and keeps showing
+                `open=false` and `focus=terminal` for the hold time: focus is
+                back in the terminal. The clone's `displayName` is empty
+                (nothing was saved), and the listing holds exactly three
+                projects (`fresh/two`, `fresh/three` and the clone).
+        26. **`clone_replaced_by_create` [state-only safe].** Fixture: a bare
+            repository `origin/lib`. It sends no X input and takes no capture;
+            its focus checks run only with a display (skipped with
+            `--state-only`).
+            1.  Create `gate-clone`. Start a clone as in scenario 23; the read
+                verb shows `projectForm=clone`.
+            2.  Run the add verb with `kind=create` and a name: the Create
+                form replaces the Clone form while git still runs, and the
+                read verb shows `projectForm=create` (and `focus=other`: its
+                field holds focus). Create `clone-go` to release the clone.
+            3.  `projects/lib` is listed and holds `README.md`, and the read
+                verb shows `open=true`, `origin=cloned`, its `projectId` and
+                `projectForm=create` (and `focus=dialog`): the replaced form's
+                clone added its project and opened its dialog, as for any
+                clone, over the Create form.
+            4.  `act skip`. The read verb shows `open=false`,
+                `lastOutcome=skipped` and `projectForm=create`, and keeps
+                showing `open=false`, `projectForm=create` and an empty
+                `sidebarNotice` for the hold time: the Create form stayed
+                open. With a display, the read verb then shows and keeps
+                showing `focus=other`: focus went back to the Create form's
+                field. The listing holds exactly one project.
     *   **The artifact.** Under `--out-dir`:
         *   `transcript.log`, every `sirioctl` call and its reply, prefixed by
             the scenario name;
