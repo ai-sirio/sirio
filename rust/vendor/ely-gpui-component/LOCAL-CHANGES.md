@@ -599,6 +599,16 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   whole from `main`, which carries `self.edits` from BlockEditor `d24984c`,
   not vendored.
 - Skipped, not vendored: `collab/remote.rs` and `terminal/paint.rs`.
+- Skipped, not taken (vendored files whose hunks of these commits were left
+  out; the port documents them and does not apply them):
+  - `e2d880f`'s `select()` hunk in `src/forms/text/mod.rs`: `select` keeps its
+    `assert!` on an out-of-range selection, where upstream logs and ignores it.
+  - `e2d880f`'s part in `src/forms/files.rs`.
+  - `6d95b24`'s part in `src/layout/scroll.rs`.
+  - `6d95b24`'s part in `src/navigation/tabs.rs`: left to the Tabs port, a
+    later task of this sync.
+  - The tests of `2a18e9d` and `152d881`: they live in `forms/tests/`, which is
+    not vendored.
 
 ### Keys and hosting hooks (Task 1c)
 
