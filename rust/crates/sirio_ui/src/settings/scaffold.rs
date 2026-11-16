@@ -14,14 +14,20 @@ use ely_gpui_component::{
     theme::IconSize,
 };
 use gpui::{AnyElement, Div, Hsla, SharedString, StyleRefinement, div, prelude::*, px};
+use sirio_theme::Typography;
 
 pub(crate) trait Scaffolding {
-    /// Page headline row: a `16px` semibold title and, when there is one, a
-    /// `13px` count sharing its baseline.
-    fn page_header(&self, title: impl Into<SharedString>, count: Option<usize>) -> Div;
+    /// Page headline row: a semibold title and, when there is one, a count sharing
+    /// its baseline (16 and 13 px at the default interface font size).
+    fn page_header(
+        &self,
+        title: impl Into<SharedString>,
+        count: Option<usize>,
+        typography: &Typography,
+    ) -> Div;
 
-    /// The subtitle under the headline: `13px`, muted.
-    fn page_subtitle(&self, copy: impl Into<SharedString>) -> Div;
+    /// The subtitle under the headline: 13 px at the default size, muted.
+    fn page_subtitle(&self, copy: impl Into<SharedString>, typography: &Typography) -> Div;
 
     /// The section card: bordered, rounded, and the card tone thinned to a
     /// translucent tint over glass ([`Theme::card_glass_bg`]), so it reads as
@@ -31,16 +37,21 @@ pub(crate) trait Scaffolding {
     /// One card row. Rows past the first draw their own top border.
     fn card_row(&self, first: bool) -> Div;
 
-    /// A row's title: `13.5px` medium, truncating.
-    fn row_title(&self, title: impl Into<SharedString>) -> Div;
+    /// A row's title: 13.5 px at the default size, medium, truncating.
+    fn row_title(&self, title: impl Into<SharedString>, typography: &Typography) -> Div;
 
-    /// The quiet meta line under a row title: `11.5px`, muted, its fragments
-    /// joined by dots.
-    fn meta_line(&self, fragments: Vec<AnyElement>) -> Div;
+    /// The quiet meta line under a row title: 11.5 px at the default size, muted,
+    /// its fragments joined by dots.
+    fn meta_line(&self, fragments: Vec<AnyElement>, typography: &Typography) -> Div;
 }
 
 impl Scaffolding for Theme {
-    fn page_header(&self, title: impl Into<SharedString>, count: Option<usize>) -> Div {
+    fn page_header(
+        &self,
+        title: impl Into<SharedString>,
+        count: Option<usize>,
+        typography: &Typography,
+    ) -> Div {
         div()
             .flex()
             .flex_row()
@@ -48,7 +59,7 @@ impl Scaffolding for Theme {
             .gap(px(10.0))
             .child(
                 div()
-                    .text_size(px(16.0))
+                    .text_size(typography.scaled(16.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(self.text)
                     .child(title.into()),
@@ -56,17 +67,17 @@ impl Scaffolding for Theme {
             .when_some(count, |el, count| {
                 el.child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(typography.scaled(13.0))
                         .text_color(self.text_muted.opacity(0.7))
                         .child(format!("{count}")),
                 )
             })
     }
 
-    fn page_subtitle(&self, copy: impl Into<SharedString>) -> Div {
+    fn page_subtitle(&self, copy: impl Into<SharedString>, typography: &Typography) -> Div {
         div()
             .mt(px(4.0))
-            .text_size(px(13.0))
+            .text_size(typography.scaled(13.0))
             .text_color(self.text_muted)
             .child(copy.into())
     }
@@ -94,17 +105,17 @@ impl Scaffolding for Theme {
             .gap(px(14.0))
     }
 
-    fn row_title(&self, title: impl Into<SharedString>) -> Div {
+    fn row_title(&self, title: impl Into<SharedString>, typography: &Typography) -> Div {
         div()
             .min_w_0()
             .truncate()
-            .text_size(px(13.5))
+            .text_size(typography.scaled(13.5))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(self.text)
             .child(title.into())
     }
 
-    fn meta_line(&self, fragments: Vec<AnyElement>) -> Div {
+    fn meta_line(&self, fragments: Vec<AnyElement>, typography: &Typography) -> Div {
         let mut line = div()
             .mt(px(4.0))
             .flex()
@@ -113,7 +124,7 @@ impl Scaffolding for Theme {
             .items_center()
             .gap_x(px(8.0))
             .gap_y(px(2.0))
-            .text_size(px(11.5))
+            .text_size(typography.scaled(11.5))
             .text_color(self.text_muted.opacity(0.65));
         let mut first = true;
         for fragment in fragments {
@@ -140,6 +151,7 @@ pub(crate) fn card_row_hover(style: StyleRefinement) -> StyleRefinement {
 /// hint.
 pub(crate) fn empty_state(
     theme: &Theme,
+    typography: &Typography,
     icon: IconName,
     title: impl Into<SharedString>,
     hint: impl Into<SharedString>,
@@ -155,14 +167,14 @@ pub(crate) fn empty_state(
         .child(Icon::new(icon).size(IconSize::Xl).color(theme.text_faint))
         .child(
             div()
-                .text_size(px(13.5))
+                .text_size(typography.scaled(13.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(title.into()),
         )
         .child(
             div()
-                .text_size(px(12.5))
+                .text_size(typography.scaled(12.5))
                 .text_color(theme.text_muted)
                 .child(hint.into()),
         )

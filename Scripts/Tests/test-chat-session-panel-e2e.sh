@@ -285,7 +285,7 @@ if [ -n "$DISPLAY_TARGET" ]; then
 fi
 # clipboard_keys reads and owns the display's CLIPBOARD through GTK 3.
 if [[ " ${SCENARIOS[*]} " == *" clipboard_keys "* ]]; then
-  python3 -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0"); from gi.repository import Gtk' 2>/dev/null \
+  env -i PATH=/usr/local/bin:/usr/bin:/bin python3 -I -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0"); from gi.repository import Gtk' 2>/dev/null \
     || refuse "clipboard_keys needs python3-gi with GTK 3 (python-gobject and gtk3) to read and own the clipboard; drop it with --only"
 fi
 # notification_click starts a private session bus and a D-Bus server written with Gio.
@@ -2003,8 +2003,11 @@ PY
 # across a response, against the display's real CLIPBOARD selection. The harness reads it and
 # owns it through GTK (python3-gi), the way another application holds it. Linux's chords are
 # the ctrl ones; macOS's cmd ones resolve through the same bindings and stay a hand check.
+# The clean environment pinned to X11 keeps a caller's WAYLAND_DISPLAY or GDK_BACKEND from
+# steering GTK to the desktop's clipboard, which `own` would otherwise overwrite.
 x_clipboard() { # get | own TEXT SECONDS
-  DISPLAY="$DISPLAY_TARGET" timeout -k 2 $(( ${3:-5} + 5 )) python3 - "$@" <<'PY'
+  timeout -k 2 $(( ${3:-5} + 5 )) env -i PATH=/usr/local/bin:/usr/bin:/bin "HOME=$RUN_DIR/clipboard-home" \
+    GDK_BACKEND=x11 "DISPLAY=$DISPLAY_TARGET" python3 -I - "$@" <<'PY'
 import sys
 import gi
 gi.require_version("Gtk", "3.0")

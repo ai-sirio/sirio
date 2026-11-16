@@ -215,6 +215,7 @@ impl Settings {
         if self.git_hosting.loaded && self.git_hosting.hosts.is_empty() {
             card = card.child(empty_state(
                 &bezel_theme,
+                &theme.typography,
                 IconName::Search,
                 "No forge hosts yet",
                 "Open the change request view in the right panel on a project with a GitHub or GitLab remote.",
@@ -238,7 +239,7 @@ impl Settings {
                     div()
                         .flex()
                         .flex_col()
-                        .child(bezel_theme.row_title(host.clone()))
+                        .child(bezel_theme.row_title(host.clone(), &theme.typography))
                         .child(
                             div()
                                 .text_size(theme.typography.footnote)
@@ -369,9 +370,10 @@ impl Settings {
             .w(px(CONTENT_WIDTH))
             .pt(px(DETAIL_TOP_PADDING))
             .pb(px(DETAIL_BOTTOM_PADDING))
-            .child(bezel_theme.page_header("Git Hosting", None))
+            .child(bezel_theme.page_header("Git Hosting", None, &theme.typography))
             .child(bezel_theme.page_subtitle(
                 "The forges your projects' remotes live on, and how Sirio signs in to each: the forge's CLI (gh, glab) or a personal access token. Tokens are kept in Sirio's credential store, never in settings.",
+                &theme.typography,
             ))
             .child(card)
     }

@@ -45,6 +45,8 @@ fn start_with_shell(
             TerminalView::failed(&directory, shell.clone(), format!("{error:#}"), cx)
         })
     });
+    let font_size = settings.read(cx).snapshot().terminal_font_size;
+    terminal.update(cx, |terminal, cx| terminal.set_font_size(font_size, cx));
     let view =
         cx.new(|cx| AccountLoginTerminal::new(terminal.clone(), settings.downgrade(), request, cx));
     settings.update(cx, |settings, cx| {

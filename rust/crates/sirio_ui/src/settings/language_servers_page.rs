@@ -217,7 +217,7 @@ impl Settings {
                 div()
                     .debug_selector(move || format!("settings-language-server-command-{index}"))
                     .font_family(bezel_theme.font_mono.clone())
-                    .text_size(px(11.0))
+                    .text_size(theme.typography.scaled(11.0))
                     .child(selectable_text(row.command.clone()))
                     .into_any_element(),
             );
@@ -257,12 +257,12 @@ impl Settings {
                 .flex_col()
                 .child(
                     bezel_theme
-                        .row_title(row.language.clone())
+                        .row_title(row.language.clone(), &theme.typography)
                         .debug_selector(move || format!("settings-language-server-name-{index}")),
                 )
                 .child(
                     bezel_theme
-                        .meta_line(fragments)
+                        .meta_line(fragments, &theme.typography)
                         .debug_selector(move || format!("settings-language-server-meta-{index}")),
                 );
 
@@ -280,7 +280,7 @@ impl Settings {
                 }))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(theme.typography.scaled(12.0))
                         .text_color(bezel_theme.text_muted)
                         .child(selectable_text(row.origin.label())),
                 );
@@ -422,7 +422,7 @@ impl Settings {
                                     .gap(px(10.0))
                                     .child(
                                         bezel_theme
-                                            .page_header("Language Servers", None)
+                                            .page_header("Language Servers", None, &theme.typography)
                                             .id("language-servers-page-title")
                                             .debug_selector(|| {
                                                 "language-servers-page-title".to_string()
@@ -434,7 +434,7 @@ impl Settings {
                                             .debug_selector(|| {
                                                 "language-servers-page-count".to_string()
                                             })
-                                            .text_size(px(13.0))
+                                            .text_size(theme.typography.scaled(13.0))
                                             .text_color(bezel_theme.text_muted.opacity(0.7))
                                             .child(selectable_text(format!("{count}"))),
                                     ),
@@ -443,6 +443,7 @@ impl Settings {
                                 bezel_theme
                                     .page_subtitle(
                                         "The server Sirio names for every language the editor can open. Each row reads your PATH first, then Sirio's own installs.",
+                                        &theme.typography,
                                     )
                                     .id("language-servers-page-subtitle")
                                     .debug_selector(|| {

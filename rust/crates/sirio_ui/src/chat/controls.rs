@@ -18,7 +18,7 @@ use sirio_chat::EffortChoice;
 /// rest, wider as the text grows, so a larger setting never cuts a label
 /// the default one fits.
 pub(super) fn popup_width(theme: &Theme, at_rest: f32) -> Pixels {
-    px(at_rest * (f32::from(theme.typography.ui_size) / 13.0).max(1.0))
+    theme.typography.proportional(at_rest)
 }
 
 /// How tall step `step` of `total` stands in a level's bar, in pixels: up to

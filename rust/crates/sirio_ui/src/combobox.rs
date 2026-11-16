@@ -271,7 +271,7 @@ impl Render for Combobox {
                         cx.listener(|combobox, _, _, _| combobox.menu.note_trigger_press()),
                     )
                     .on_click(cx.listener(|combobox, _, window, cx| combobox.toggle(window, cx)))
-                    .child(select_trigger(&theme, label, open)),
+                    .child(select_trigger(&theme, label, open, sirio_theme::Theme::get(cx).typography.scaled(13.0))),
             )
             .when_some(card, |trigger, card| {
                 trigger.child(hang_below(
@@ -288,7 +288,7 @@ impl Render for Combobox {
 /// The closed face of a select: the current value and a chevron, shaped and
 /// toned like a text field so a form of fields and selects reads as one
 /// system. Ely has no such trigger, so this stays bezel-theme's.
-fn select_trigger(theme: &BezelTheme, label: SharedString, open: bool) -> Div {
+fn select_trigger(theme: &BezelTheme, label: SharedString, open: bool, text_size: gpui::Pixels) -> Div {
     div()
         .flex()
         .flex_row()
@@ -301,7 +301,7 @@ fn select_trigger(theme: &BezelTheme, label: SharedString, open: bool) -> Div {
         .bg(theme.input_bg)
         .border_1()
         .border_color(if open { theme.ring } else { theme.border })
-        .text_size(px(13.0))
+        .text_size(text_size)
         .text_color(theme.text)
         .cursor_pointer()
         .child(div().min_w_0().truncate().child(label))

@@ -1295,7 +1295,7 @@ impl Chat {
         // caret and no frame or fill, so the shell's themed surface shows
         // through (`PromptInput::custom`) and the shell is the one frame the
         // composer has. The text lands on the content edge, lined up with the
-        // chips and the tool row, in the 13px/18px the field has always had.
+        // chips and the tool row, at 13px/18px shifted by the interface font size.
         let field_frame = self.composer_row.clone();
         let input_box = div()
             .id("composer-input")
@@ -1303,8 +1303,8 @@ impl Chat {
             .relative()
             .w_full()
             .py(px(FIELD_PAD_Y))
-            .text_size(px(13.0))
-            .line_height(px(ROW_HEIGHT))
+            .text_size(typography.scaled(13.0))
+            .line_height(typography.scaled(ROW_HEIGHT))
             .when(disabled, |input| input.opacity(0.6))
             .on_mouse_down(
                 MouseButton::Right,

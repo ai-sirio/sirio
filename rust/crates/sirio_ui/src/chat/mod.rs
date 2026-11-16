@@ -6433,7 +6433,7 @@ impl Chat {
                 .py(px(1.0))
                 .font_family(typography.code_family)
                 .text_size(typography.scaled(12.0))
-                .line_height(px(18.0))
+                .line_height(typography.scaled(18.0))
                 .text_color(text_color)
                 .child(
                     // One debug selector spans both columns: existing
@@ -6446,7 +6446,7 @@ impl Chat {
                         .flex()
                         .child(
                             div()
-                                .w(px(DIFF_GUTTER_WIDTH))
+                                .w(px(DIFF_GUTTER_WIDTH * f32::from(typography.scaled(12.0)) / 12.0))
                                 .pr(px(4.0))
                                 .flex()
                                 .justify_end()
@@ -6455,7 +6455,7 @@ impl Chat {
                         )
                         .child(
                             div()
-                                .w(px(DIFF_GUTTER_WIDTH))
+                                .w(px(DIFF_GUTTER_WIDTH * f32::from(typography.scaled(12.0)) / 12.0))
                                 .pr(px(8.0))
                                 .flex()
                                 .justify_end()

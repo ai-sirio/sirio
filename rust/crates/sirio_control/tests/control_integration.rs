@@ -1784,6 +1784,22 @@ const CHAT_FIXTURE: &str = concat!(
     "/../sirio_acp/tests/fixtures/acp_fixture.py"
 );
 
+/// How long the test waits for the answer to its first `surface.chat.open`.
+///
+/// That answer comes only after `ChatSession::launch` returns: the database
+/// is opened, the agent process is started and the ACP handshake
+/// (`initialize`, then a new session) is done. So the wait covers an agent's
+/// whole startup, which production bounds at 120 s (`STARTUP_TIMEOUT` in
+/// `sirio_acp`). With a bare 5 s the open timed out once on Windows (#736);
+/// which part of the startup was slow is not known. `sirio_acp`'s unit tests
+/// moved their own fixture agents from the same 5 s to 60 s after it failed
+/// them under load.
+///
+/// Not an assertion about anything: the test goes on to assert what the open
+/// answered. No other round trip of the test waits for an agent to start, and
+/// each keeps its 5 s.
+const CHAT_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+
 struct ChatDoorHandler {
     session: Mutex<Option<ChatSession>>,
     database_path: PathBuf,
@@ -2107,7 +2123,7 @@ fn chat_door_streams_stops_and_restores_transcript_over_a_real_socket() {
     let opened = round_trip(
         &socket_path,
         &request::chat_open(Some("worktree-chat")),
-        Duration::from_secs(5),
+        CHAT_OPEN_TIMEOUT,
     )
     .expect("open chat over socket");
     assert!(opened.ok, "chat open failed: {opened:?}");
@@ -2128,12 +2144,14 @@ fn chat_door_streams_stops_and_restores_transcript_over_a_real_socket() {
     .expect("send chat turn over socket");
     assert!(sent.ok, "chat send failed: {sent:?}");
 
+    // The fixture sends `streamed` 30 ms after `first `, so a read under load can find the two
+    // already joined. Either text is mid-turn: the permission request holds the turn open.
     let first_chunk = wait_for_chat_read(&socket_path, |result| {
         result.get("status").map(String::as_str) == Some("streaming")
             && rows::decode(result.get("transcript").expect("transcript")).is_some_and(|rows| {
                 rows.iter().any(|row| {
                     row.get("kind").map(String::as_str) == Some("assistant")
-                        && row.get("text").map(String::as_str) == Some("first ")
+                        && row.get("text").is_some_and(|text| text.starts_with("first "))
                 })
             })
     });

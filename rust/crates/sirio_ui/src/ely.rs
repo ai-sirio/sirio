@@ -94,6 +94,11 @@ pub(crate) fn sync_theme_if_changed(cx: &mut App) {
             radii: [r.chip, r.control, r.code_block, r.composer],
         });
     });
+    // The vendored markdown renderer draws at fixed sizes tuned for the
+    // default; this is how far the interface size has moved from it.
+    cx.set_global(bezel_markdown::TextOffset(
+        f32::from(theme.typography.base_size) - 14.5,
+    ));
 }
 
 #[cfg(test)]

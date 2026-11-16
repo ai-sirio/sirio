@@ -109,7 +109,7 @@ impl Settings {
                                 .debug_selector(move || format!("settings-agent-path-{index}"))
                                 .tooltip(crate::controls::tooltip(full))
                                 .font_family(bezel_theme.font_mono.clone())
-                                .text_size(px(11.0))
+                                .text_size(theme.typography.scaled(11.0))
                                 .max_w(px(PATH_FRAGMENT_MAX_WIDTH))
                                 .overflow_hidden()
                                 .child(caret::field_value(text!(shown))),
@@ -219,12 +219,12 @@ impl Settings {
                 .flex_col()
                 .child(
                     bezel_theme
-                        .row_title(row.name)
+                        .row_title(row.name, &theme.typography)
                         .debug_selector(move || format!("settings-agent-name-{index}")),
                 )
                 .child(
                     bezel_theme
-                        .meta_line(fragments)
+                        .meta_line(fragments, &theme.typography)
                         .debug_selector(move || format!("settings-agent-meta-{index}")),
                 );
             // F-SET-18: a not-installed agent with a known install command
@@ -328,7 +328,7 @@ impl Settings {
                 }))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(theme.typography.scaled(12.0))
                         .text_color(bezel_theme.text_muted)
                         .child(selectable_text(availability.status_label())),
                 );
@@ -416,7 +416,7 @@ impl Settings {
                                         .gap(px(10.0))
                                         .child(
                                             bezel_theme
-                                                .page_header("Agents", None)
+                                                .page_header("Agents", None, &theme.typography)
                                                 .id("agents-page-title")
                                                 .debug_selector(|| {
                                                     "agents-page-title".to_string()
@@ -428,7 +428,7 @@ impl Settings {
                                                 .debug_selector(|| {
                                                     "agents-page-count".to_string()
                                                 })
-                                                .text_size(px(13.0))
+                                                .text_size(theme.typography.scaled(13.0))
                                                 .text_color(
                                                     bezel_theme.text_muted.opacity(0.7),
                                                 )
@@ -439,6 +439,7 @@ impl Settings {
                                     bezel_theme
                                         .page_subtitle(
                                             "The coding agents a pane can run. Each row reads its CLI from your PATH and its ACP server from the registry.",
+                                            &theme.typography,
                                         )
                                         .id("agents-page-subtitle")
                                         .debug_selector(|| {
@@ -482,7 +483,7 @@ impl Settings {
                                         .debug_selector(|| {
                                             "agents-last-refreshed".to_string()
                                         })
-                                        .text_size(px(11.5))
+                                        .text_size(theme.typography.scaled(11.5))
                                         .text_color(
                                             bezel_theme.text_muted.opacity(0.65),
                                         )
@@ -572,6 +573,7 @@ impl Settings {
                 card.child(
                     empty_state(
                         &bezel_theme,
+                        &theme.typography,
                         IconName::Search,
                         format!("No agents match \u{201c}{query}\u{201d}"),
                         format!("Clear the search to see all {agent_count} agents."),

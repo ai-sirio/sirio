@@ -177,7 +177,7 @@ impl Chat {
                             })
                             .pr(px(14.0))
                             .text_size(typography.callout)
-                            .line_height(px(19.0))
+                            .line_height(typography.scaled(19.0))
                             .text_color(theme.ely.fg_muted.opacity(0.7))
                             .child(Self::render_plain_text(
                                 text.to_string(),

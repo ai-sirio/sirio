@@ -365,7 +365,8 @@ Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
 # A change request's diff, the editor hand-off (local file or read-only
 # snapshot, across a quit and relaunch) and the fetch with its failures,
 # against a bare repository and the fake forge; includes unified/split review
-# threads, resolved folds and outdated sections; same flags as above.
+# threads, resolved folds and outdated sections. Each scenario saves its first
+# token while a stub gh holds the host's first probe (#613); same flags as above.
 Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 
 # The Changes surface on Ely against a real repository: unified and split,

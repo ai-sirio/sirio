@@ -15807,7 +15807,15 @@ impl SirioWorkspace {
         }
     }
 
-    fn tab_width_for_title(kind: TabKind, title: &str, is_file: bool) -> f32 {
+    /// The estimate below is tuned for 13 px text, so the content grows with
+    /// the Interface font size; the result stays within the unscaled bounds,
+    /// so a tab is never wider than `TAB_MAX_WIDTH`.
+    fn tab_width_for_title(
+        kind: TabKind,
+        title: &str,
+        is_file: bool,
+        typography: &sirio_theme::Typography,
+    ) -> f32 {
         let minimum = if is_file {
             180.0
         } else {
@@ -15820,11 +15828,12 @@ impl SirioWorkspace {
             + TAB_CLOSE_WIDTH;
         let estimated_title_width = title.chars().count() as f32 * TAB_TITLE_ESTIMATED_CHAR_WIDTH;
 
-        (fixed_width + estimated_title_width).clamp(minimum, TAB_MAX_WIDTH)
+        ((fixed_width + estimated_title_width) * typography.interface_scale())
+            .clamp(minimum, TAB_MAX_WIDTH)
     }
 
-    fn tab_render_width(tab: &OpenTab) -> f32 {
-        Self::tab_width_for_title(tab.kind, &tab.title, tab_has_file(tab))
+    fn tab_render_width(tab: &OpenTab, typography: &sirio_theme::Typography) -> f32 {
+        Self::tab_width_for_title(tab.kind, &tab.title, tab_has_file(tab), typography)
     }
 
     /// Activates a tab, and — when a window is supplied — hands keyboard
@@ -25246,7 +25255,7 @@ impl SirioWorkspace {
             });
             snapshot
         };
-        let width = Self::tab_render_width(tab);
+        let width = Self::tab_render_width(tab, &theme.typography);
         let close_entity = entity.clone();
         let menu_entity = entity.clone();
         let rename_entity = entity.clone();
@@ -25354,7 +25363,8 @@ impl SirioWorkspace {
             })
             .child(
                 div()
-                    .w(px(14.0))
+                    .debug_selector(move || format!("workspace-tab-icon-{id}"))
+                    .w(theme.typography.scaled(TAB_ICON_WIDTH))
                     .flex_none()
                     .relative()
                     .text_color(change_request_tint.unwrap_or(glyph_color))
@@ -25378,6 +25388,7 @@ impl SirioWorkspace {
             .when(!renaming, |this| {
                 this.child(
                     div()
+                        .debug_selector(move || format!("workspace-tab-title-{id}"))
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
@@ -25467,7 +25478,7 @@ impl SirioWorkspace {
             .child(
                 div()
                     .relative()
-                    .w(px(TAB_CLOSE_WIDTH))
+                    .w(theme.typography.scaled(TAB_CLOSE_WIDTH))
                     .h(px(20.0))
                     .flex_none()
                     .child(
@@ -25803,7 +25814,7 @@ impl SirioWorkspace {
         items
     }
 
-    fn tab_context_menu_left(&self) -> f32 {
+    fn tab_context_menu_left(&self, typography: &sirio_theme::Typography) -> f32 {
         let Some(tab_id) = self.tab_menu_tab else {
             return 0.0;
         };
@@ -25826,7 +25837,7 @@ impl SirioWorkspace {
             if tab.id == tab_id {
                 break;
             }
-            left += Self::tab_render_width(tab) + 1.0;
+            left += Self::tab_render_width(tab, typography) + 1.0;
         }
         left
     }
@@ -25868,7 +25879,7 @@ impl SirioWorkspace {
         div()
             .absolute()
             .top(px(TAB_BAR_HEIGHT - 6.0))
-            .left(px(self.tab_context_menu_left()))
+            .left(px(self.tab_context_menu_left(&theme.typography)))
             .size_0()
             .child(sirio_ui::popup::hang_below(
                 format!("workspace-tab-menu-layer-{menu_tab_id}"),
@@ -26305,7 +26316,7 @@ impl SirioWorkspace {
             .tabs
             .iter()
             .filter(|tab| tab.pane == role)
-            .map(Self::tab_render_width)
+            .map(|tab| Self::tab_render_width(tab, &theme.typography))
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
         // Each strip keeps its fixed trailing controls (`strip_trailing_width`):
@@ -28915,6 +28926,9 @@ impl Render for SirioWorkspace {
                 .size_full()
                 .bg(frame_fill)
                 .font_family(theme.typography.ui_family)
+                // Text that sets no size inherits this: gpui's 16 px default at
+                // 13, following the Interface font size like every token.
+                .text_size(theme.typography.scaled(16.0))
                 // #226: the ctrl-w binding's `!Terminal` scope can only be
                 // evaluated against a non-empty context stack (gpui disables
                 // any scoped binding on a context-less dispatch path), so the
@@ -29015,6 +29029,9 @@ impl Render for SirioWorkspace {
             .size_full()
             .bg(frame_fill)
             .font_family(theme.typography.ui_family)
+            // Text that sets no size inherits this: gpui's 16 px default at
+            // 13, following the Interface font size like every token.
+            .text_size(theme.typography.scaled(16.0))
             // #226: the ctrl-w binding's `!Terminal` scope can only be
             // evaluated against a non-empty context stack (gpui disables
             // any scoped binding on a context-less dispatch path), so the
@@ -40731,6 +40748,57 @@ done
             menu.left(),
             tab.left(),
             tab.right()
+        );
+    }
+
+    /// At the largest interface size the icon slot and the title are laid out
+    /// from scaled sizes: the title must still start a gap clear of the icon
+    /// and be wide enough to set its whole text, not an ellipsis.
+    #[gpui::test]
+    async fn tab_icon_and_title_do_not_overlap_at_the_largest_interface_size(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        cx.update(|cx| Theme::set_interface_font_size(18, cx));
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let icon_slot = cx
+            .debug_bounds("workspace-tab-icon-0")
+            .expect("the tab icon slot is drawn");
+        let glyph_size = cx.update(|_window, cx| {
+            IconSize::Small.resolve(cx.global::<Theme>().typography)
+        });
+        let title = cx
+            .debug_bounds("workspace-tab-title-0")
+            .expect("the tab title is drawn");
+        // The glyph is drawn from the slot's left edge; 5 px is the visible
+        // gap at the default size (slot 14, glyph 15, gap 6).
+        assert!(
+            icon_slot.left() + glyph_size + px(5.0) <= title.left(),
+            "the title starts at {} but the icon glyph ends at {} and 5 px must separate them",
+            title.left(),
+            icon_slot.left() + glyph_size
+        );
+
+        let title_size = cx.update(|window, cx| {
+            let theme = *cx.global::<Theme>();
+            let style = window.text_style();
+            let run = style.to_run("Terminal".len());
+            let shaped = window.text_system().shape_line(
+                "Terminal".into(),
+                theme.typography.scaled(13.0),
+                &[run],
+                None,
+            );
+            shaped.width
+        });
+        assert!(
+            title.size.width >= title_size,
+            "the title is {} wide, \"Terminal\" sets {} wide at the tab's text size",
+            title.size.width,
+            title_size
         );
     }
 
