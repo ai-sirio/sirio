@@ -574,6 +574,32 @@ applied as upstream wrote it or was rewritten against the vendored code.
   `line_colors`. Nothing else in `line.rs` changed.
   Skipped: none; the commit touches no unvendored file.
 
+### Ports from upstream main (2026-11 sync)
+
+Fixes of the text field gained on upstream `main` (`7f7a715d`) after
+`e3957f78`, one entry each, with whether it applied as upstream wrote it.
+
+- `33df23c` "caret whole device pixels": `src/primitives/caret.rs` (new) is
+  verbatim, with its inline test `a_caret_keeps_one_device_width_wherever_it_stands`.
+  `src/primitives/mod.rs` takes two lines, `mod caret;` and
+  `pub(crate) use caret::{caret_bar, caret_width};`, and nothing else of
+  upstream's `mod.rs`, which would pull in `held`, `retired` and
+  `focus::{CONTEXT, lent}`.
+- `src/forms/text/element.rs`: three-way merged (base `e3957f78`, theirs
+  `main`), with one conflict at the caret in `prepaint`. The merge also took
+  `e2d880f`'s shaping-error logging (`shape_text` errors are logged, not
+  `expect`ed) and `6d95b24`'s "an unfocused one-line field shows its start".
+  The conflict is resolved to upstream's
+  `caret_at.filter(..).map(|at| caret_bar(bounds.origin + at - scroll, caret_width, line_height, window.scale_factor()))`,
+  and Sirio's update closure is kept with its wheel line written for the
+  `Option`: `input.wheeled = input.wheeled.filter(|at| Some(*at) == caret_at);`
+  (hand-resolved).
+- `2a18e9d` and `152d881`: the `src/forms/text/ime.rs` hunks, verbatim
+  (`patch -p1` of each commit's diff of that file). `ime.rs` was not taken
+  whole from `main`, which carries `self.edits` from BlockEditor `d24984c`,
+  not vendored.
+- Skipped, not vendored: `collab/remote.rs` and `terminal/paint.rs`.
+
 ### Keys and hosting hooks (Task 1c)
 
 - `src/lib.rs`: `init_editor(cx)` runs `init_chat`, then `editor::bind_keys`,

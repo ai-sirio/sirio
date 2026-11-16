@@ -1,4 +1,5 @@
 mod backdrop;
+mod caret;
 mod disclosure;
 mod divider;
 mod files;
@@ -13,6 +14,7 @@ mod severity;
 mod tooltip;
 
 pub use backdrop::{Backdrop, Place};
+pub(crate) use caret::{caret_bar, caret_width};
 pub use disclosure::Disclosure;
 pub use divider::Divider;
 pub use files::IconTheme;

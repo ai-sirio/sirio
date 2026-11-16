@@ -8,7 +8,10 @@ use gpui::{
 };
 
 use super::{Highlight, Layout, TextInput};
-use crate::theme::ActiveTheme;
+use crate::{
+    primitives::{caret_bar, caret_width},
+    theme::ActiveTheme,
+};
 
 pub(crate) struct TextElement {
     input: Entity<TextInput>,
@@ -178,20 +181,23 @@ impl Element for TextElement {
                 AvailableSpace::Definite(width) => Some(width),
                 _ => None,
             });
-            let lines = window
-                .text_system()
-                .shape_text(
-                    SharedString::from(text.clone()),
-                    font_size,
-                    &runs,
-                    width,
-                    None,
-                )
-                .expect("text input shaping failed");
-            let rows: usize = lines
-                .iter()
-                .map(|line| line.wrap_boundaries().len() + 1)
-                .sum();
+            let shaped = window.text_system().shape_text(
+                SharedString::from(text.clone()),
+                font_size,
+                &runs,
+                width,
+                None,
+            );
+            let rows: usize = match shaped {
+                Ok(lines) => lines
+                    .iter()
+                    .map(|line| line.wrap_boundaries().len() + 1)
+                    .sum(),
+                Err(error) => {
+                    log::error!("text input: shaping failed: {error:#}");
+                    1
+                }
+            };
             size(
                 width.unwrap_or_default(),
                 line_height * rows.clamp(min, max) as f32,
@@ -211,7 +217,10 @@ impl Element for TextElement {
     ) -> Prepaint {
         let theme = cx.theme();
         let (selection_color, caret_color) = (theme.colors.selection, theme.colors.focus);
-        let caret_width = theme.caret_width().to_pixels(window.rem_size());
+        let caret_width = caret_width(
+            theme.caret_width().to_pixels(window.rem_size()),
+            window.scale_factor(),
+        );
         let input = self.input.read(cx);
         let (text, placeholder, runs) = shown_runs(input, window, cx);
         let font_size = window.text_style().font_size.to_pixels(window.rem_size());
@@ -220,7 +229,10 @@ impl Element for TextElement {
         let shaped = window
             .text_system()
             .shape_text(text.clone().into(), font_size, &runs, wrap, None)
-            .expect("text input shaping failed");
+            .unwrap_or_else(|error| {
+                log::error!("text input: shaping failed: {error:#}");
+                Default::default()
+            });
         let lines: Rc<[(usize, WrappedLine)]> =
             line_starts(&text).into_iter().zip(shaped).collect();
         let focused = input.focus().is_focused(window);
@@ -234,10 +246,13 @@ impl Element for TextElement {
             });
         });
         let input = self.input.read(cx);
-        let caret_at = input
-            .position_for(input.display_offset(input.cursor()))
-            .expect("caret offset lies inside the laid-out text");
-        let scroll = keep_in_view(input, &lines, caret_at, caret_width, bounds, line_height);
+        let caret_at = input.position_for(input.display_offset(input.cursor()));
+        let scroll = match caret_at {
+            // Unfocused, a line shows its start, as AppKit's fields do.
+            Some(_) if !focused && !input.is_multi_line() => Point::default(),
+            Some(at) => keep_in_view(input, &lines, at, caret_width, bounds, line_height),
+            None => input.scroll,
+        };
         let selection = input.selection();
         let selections = if placeholder || selection.is_empty() {
             Vec::new()
@@ -251,16 +266,16 @@ impl Element for TextElement {
                 .map(|rect| Bounds::new(rect.origin + bounds.origin - scroll, rect.size))
                 .collect()
         };
-        let caret = (focused && caret_on && selection.is_empty()).then(|| {
-            Bounds::new(
-                bounds.origin + caret_at - scroll,
-                size(caret_width, line_height),
-            )
-        });
+        let caret = caret_at
+            .filter(|_| focused && caret_on && selection.is_empty())
+            .map(|at| {
+                let at = bounds.origin + at - scroll;
+                caret_bar(at, caret_width, line_height, window.scale_factor())
+            });
         self.input.update(cx, |input, _| {
             input.scroll = scroll;
             // The wheel's hold also ends when the caret has moved by other means.
-            input.wheeled = input.wheeled.filter(|at| *at == caret_at);
+            input.wheeled = input.wheeled.filter(|at| Some(*at) == caret_at);
         });
         Prepaint {
             lines,
@@ -297,15 +312,20 @@ impl Element for TextElement {
                 top += line.size(line_height).height;
             }
             for ((_, line), origin) in prepaint.lines.iter().zip(&origins) {
-                line.paint_background(*origin, line_height, TextAlign::Left, None, window, cx)
-                    .expect("text input wash paint failed");
+                let washed =
+                    line.paint_background(*origin, line_height, TextAlign::Left, None, window, cx);
+                if let Err(error) = washed {
+                    log::error!("text input: wash paint failed: {error:#}");
+                }
             }
             for rect in prepaint.selections.drain(..) {
                 window.paint_quad(fill(rect, prepaint.selection_color));
             }
             for ((_, line), origin) in prepaint.lines.iter().zip(&origins) {
-                line.paint(*origin, line_height, TextAlign::Left, None, window, cx)
-                    .expect("text input paint failed");
+                let painted = line.paint(*origin, line_height, TextAlign::Left, None, window, cx);
+                if let Err(error) = painted {
+                    log::error!("text input: paint failed: {error:#}");
+                }
             }
             if let Some(caret) = prepaint.caret.take() {
                 window.paint_quad(fill(caret, prepaint.caret_color));
