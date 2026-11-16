@@ -2308,10 +2308,15 @@ pub struct Chat {
     mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
     effort_picker_focus: FocusHandle,
-    /// The agent-side session this tab continues across restarts, once the
-    /// agent names it. Read live at session-save time, so the tab-strip
-    /// save carries what the last flush wrote rather than a stale copy.
+    /// The agent-side session this tab continues across restarts: the one
+    /// it was restored with, then the one the agent names. Read live at
+    /// session-save time, so the tab-strip save carries what the last flush
+    /// wrote rather than a stale copy.
     agent_session_id: Option<String>,
+    /// The chat was launched to continue a stored agent session (a
+    /// restored native Claude chat, with resuming on), so a relaunch
+    /// continues the one it holds: see [`Self::continue_on_relaunch`].
+    continues_agent_session: bool,
     transcript_focus: FocusHandle,
     context_usage: Option<ContextUsage>,
     list_state: ListState,
@@ -2648,6 +2653,15 @@ impl Chat {
         })
         .detach();
 
+        // A restored native chat holds the session it resumes from the
+        // start: the tab strip's save reads it, and a CLI that names its
+        // session only on the first turn would otherwise have it saved as
+        // none, so an unused tab lost it at the next restart.
+        let resumed_session = match &launch {
+            Some(LaunchSpec::Claude(claude)) => claude.resume.clone(),
+            _ => None,
+        };
+        let continues_agent_session = resumed_session.is_some();
         Self {
             client: None,
             agent_launch: launch,
@@ -2709,7 +2723,8 @@ impl Chat {
             bypass_ask: None,
             context_popover_open: false,
             effort_picker_open: false,
-            agent_session_id: None,
+            agent_session_id: resumed_session,
+            continues_agent_session,
             context_usage: None,
             list_state,
             transcript_bar: list_scroll::ListScrollbarState::new(crate::motion::Painter::of(cx)),
@@ -3640,9 +3655,11 @@ impl Chat {
                         // signal once it names itself, with the flag down.
                         self.agent_session_id = None;
                         self.persist_agent_session_id(None);
+                        self.continue_on_relaunch(None);
                     }
                     Some((false, Some(session_id))) => {
                         self.agent_session_id = Some(session_id.clone());
+                        self.continue_on_relaunch(Some(&session_id));
                         cx.emit(ChatEvent::SessionIdentified(session_id));
                     }
                     _ => {}
@@ -3838,17 +3855,33 @@ impl Chat {
         self.recall_at = None;
     }
 
-    /// The agent-side session this tab continues, once the agent names it.
-    /// Read live at session-save time, the same pattern as [`Self::draft_text`].
+    /// The agent-side session this tab continues: the one it was restored
+    /// with, then the one the agent names. Read live at session-save time,
+    /// the same pattern as [`Self::draft_text`].
     pub fn agent_session_id(&self) -> Option<String> {
         self.agent_session_id.clone()
     }
 
+    /// Points this chat's relaunches (Retry, Restart agent) at the session
+    /// it holds now: `session_id`, or a fresh session when a refused resume
+    /// has not named its replacement yet. They reuse `agent_launch`, whose
+    /// `--resume` of the id the tab was restored with would be refused all
+    /// over again. A chat that did not continue a stored session keeps
+    /// starting fresh.
+    fn continue_on_relaunch(&mut self, session_id: Option<&str>) {
+        if self.continues_agent_session
+            && let Some(LaunchSpec::Claude(launch)) = &mut self.agent_launch
+        {
+            launch.resume = session_id.map(str::to_string);
+        }
+    }
+
     /// Clears a stale agent session id from this tab's own row at once — a
     /// hook write, like the workspace's save on [`ChatEvent::SessionIdentified`],
-    /// never batched with the tab-strip save. Only the refusal path writes
-    /// from here: a newly identified id goes through the event so the
-    /// workspace stays the one place saves originate.
+    /// never batched with the tab-strip save. Only clearing writes from
+    /// here (a refused resume, a new conversation): a newly identified id
+    /// goes through the event so the workspace stays the one place saves
+    /// originate.
     fn persist_agent_session_id(&self, session_id: Option<&str>) {
         let Some(persistence) = self.persistence.as_ref() else {
             return;
@@ -5307,6 +5340,19 @@ impl Chat {
         self.effort_user_choice = None;
         self.effort_auto_attempt = None;
         self.effort_auto_budget = EFFORT_AUTO_REQUESTS;
+        // A brand-new chat continues no session: not the one the tab was
+        // restored with, nor the one it holds now. The tab's row drops it at
+        // once, as a refused resume does, so a quit before the new session
+        // names itself does not resume the old one under an empty transcript;
+        // a chat that holds none has nothing to drop and skips the write.
+        if self.agent_session_id.take().is_some() {
+            self.persist_agent_session_id(None);
+        }
+        self.continue_on_relaunch(None);
+        // A launch still connecting belongs to the conversation being
+        // dropped: replacing its task abandons it, along with the session it
+        // would name, and the relaunch below is not skipped as a duplicate.
+        self.connecting = false;
         self.start_connection(cx);
         cx.notify();
     }
@@ -8345,10 +8391,22 @@ mod tests {
     pub(super) fn pump_chat_until(
         cx: &VisualTestContext,
         chat: &gpui::Entity<Chat>,
+        condition: impl FnMut(&Chat) -> bool,
+    ) {
+        pump_chat_until_within(cx, chat, 600, condition);
+    }
+
+    /// [`pump_chat_until`] with a budget of its own: `rounds` rounds of at
+    /// least 10 ms of real time each, for a wait on a real process that a
+    /// loaded machine is slow to start.
+    pub(super) fn pump_chat_until_within(
+        cx: &VisualTestContext,
+        chat: &gpui::Entity<Chat>,
+        rounds: usize,
         mut condition: impl FnMut(&Chat) -> bool,
     ) {
         cx.cx.executor().allow_parking();
-        for _ in 0..600 {
+        for _ in 0..rounds {
             if chat.read_with(&cx.cx, |chat, _| condition(chat)) {
                 return;
             }
@@ -14840,30 +14898,8 @@ two"
     async fn a_refused_native_resume_hands_on_the_fresh_sessions_id(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let path = dir.0.join("sessions.sqlite");
-        database_with_tabs(
-            &path,
-            &[sirio_persistence::TabRecord {
-                id: "restored-chat".into(),
-                worktree_id: "worktree".into(),
-                title: "restored-chat".into(),
-                kind: "chat".into(),
-                agent_id: None,
-                agent_session_id: Some("sess-gone".into()),
-                order_idx: 0,
-                is_active: true,
-                last_event_at: None,
-                closed_at: None,
-            }],
-        );
-        // The tab's row as read back, `None` only when the row cannot be
-        // read: a cleared id must not pass for a missing row.
-        let stored = || {
-            AppDatabase::open(&path)
-                .ok()
-                .and_then(|db| db.tabs_of_worktree("worktree").ok())
-                .and_then(|tabs| tabs.into_iter().find(|tab| tab.id == "restored-chat"))
-                .map(|tab| tab.agent_session_id)
-        };
+        restored_chat_database(&path, "sess-gone");
+        let stored = || restored_chat_session_id(&path);
         assert_eq!(stored(), Some(Some("sess-gone".to_string())));
 
         cx.update(Theme::init);
@@ -14922,6 +14958,97 @@ two"
         );
     }
 
+    /// A database at `path` whose one chat tab, `restored-chat`, names
+    /// `session_id` as the agent session to resume.
+    fn restored_chat_database(path: &Path, session_id: &str) {
+        database_with_tabs(
+            path,
+            &[sirio_persistence::TabRecord {
+                id: "restored-chat".into(),
+                worktree_id: "worktree".into(),
+                title: "restored-chat".into(),
+                kind: "chat".into(),
+                agent_id: None,
+                agent_session_id: Some(session_id.into()),
+                order_idx: 0,
+                is_active: true,
+                last_event_at: None,
+                closed_at: None,
+            }],
+        );
+    }
+
+    /// `restored-chat`'s row as read back, `None` only when the row cannot
+    /// be read: a cleared id must not pass for a missing row.
+    fn restored_chat_session_id(path: &Path) -> Option<Option<String>> {
+        AppDatabase::open(path)
+            .ok()
+            .and_then(|db| db.tabs_of_worktree("worktree").ok())
+            .and_then(|tabs| tabs.into_iter().find(|tab| tab.id == "restored-chat"))
+            .map(|tab| tab.agent_session_id)
+    }
+
+    /// The rounds a wait on fixture launches gets: a launch is a python
+    /// start-up, two after a refusal, on a machine that may be loaded.
+    const SLOW_LAUNCH_ROUNDS: usize = 3000;
+
+    /// The `--resume` of every process launched so far with
+    /// `--fixture-launch-log=<log>`, in order, as the CLI heard it; `None`
+    /// for a fresh session.
+    fn launches_in(log: &Path) -> Vec<Option<String>> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let launch: serde_json::Value =
+                    serde_json::from_str(line).expect("a launch line is JSON");
+                launch["resume"].as_str().map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// `restored-chat` reopened as a native Claude chat resuming `resume`,
+    /// saving to the database at `path`, on the fixture CLI that knows only
+    /// its own session (`refuse_unknown_resume`) and logs every launch to
+    /// `launch_log`.
+    fn open_restored_native_chat<'a>(
+        cx: &'a mut TestAppContext,
+        path: &Path,
+        resume: &str,
+        launch_log: &Path,
+    ) -> (gpui::Entity<Chat>, &'a mut VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(init);
+        cx.executor().allow_parking();
+        let launch = sirio_chat::ClaudeLaunch::fixture(
+            "python3",
+            vec![
+                CLAUDE_FIXTURE.to_string(),
+                "refuse_unknown_resume".to_string(),
+                format!("--fixture-launch-log={}", launch_log.display()),
+            ],
+        )
+        .resuming(resume);
+        let database_path = path.to_path_buf();
+        cx.add_window_view(|_, cx| {
+            Chat::launch_with_command_and_persistence(
+                LaunchSpec::Claude(launch),
+                std::env::temp_dir(),
+                database_path,
+                "restored-chat".into(),
+                "worktree".into(),
+                cx,
+            )
+        })
+    }
+
+    /// The chat holds a client, and every process its launch made has
+    /// started: the worker's fallback runs before the launch returns.
+    fn connected(chat: &Chat) -> bool {
+        chat.client.is_some() && !chat.connecting
+    }
+
     /// The same refusal from a CLI that prints its `init` before answering
     /// the handshake: the fresh session has named itself before the chat
     /// is connected, and no turn will name it again, so that early id is
@@ -14957,12 +15084,148 @@ two"
         // its session before the chat is even ready.
         chat.update(cx, |chat, cx| chat.start_connection(cx));
 
-        pump_chat_until(cx, &chat, |chat| chat.agent_session_id().is_some());
+        // The chat holds the id it was restored with until then: wait for
+        // the session to name itself, not for any id.
+        pump_chat_until(cx, &chat, |_| !handed_on.borrow().is_empty());
         assert_eq!(
             chat.read_with(&cx.cx, |chat, _| chat.agent_session_id()).as_deref(),
             Some("fixture-session-1")
         );
         assert_only_handed_on(&handed_on.borrow(), "fixture-session-1");
+    }
+
+    /// Retry after a refused native resume continues the session the chat
+    /// holds, never the dead id the tab was restored with: a fresh session
+    /// while the one that replaced the dead id has not named itself, and
+    /// that session once it has; a new conversation starts fresh. The
+    /// fixture's CLI knows only its own session, so a retry of the dead id
+    /// is refused all over again.
+    #[gpui::test]
+    async fn retry_after_a_refused_native_resume_continues_the_chats_session(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let path = dir.0.join("sessions.sqlite");
+        restored_chat_database(&path, "sess-gone");
+        let launch_log = dir.0.join("launches.jsonl");
+        let (chat, cx) = open_restored_native_chat(cx, &path, "sess-gone", &launch_log);
+
+        // The refusal reached the chat, and the fresh session has not named
+        // itself: Retry has no session to continue.
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |_| {
+            restored_chat_session_id(&path) == Some(None)
+        });
+        chat.update(cx, |chat, cx| chat.retry(cx));
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
+
+        // A turn names the session; Retry continues it.
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("hello".into(), Vec::new(), Vec::new(), cx)
+        });
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |chat| {
+            chat.agent_session_id().is_some() && !chat.streaming
+        });
+        chat.update(cx, |chat, cx| chat.retry(cx));
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
+
+        // A new conversation continues nothing.
+        chat.update(cx, |chat, cx| chat.new_conversation(cx));
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
+
+        assert_eq!(
+            launches_in(&launch_log),
+            vec![
+                Some("sess-gone".to_string()),
+                None,
+                None,
+                Some("fixture-session-1".to_string()),
+                None,
+            ],
+            "the restore, its fallback, one launch per Retry, then the new conversation"
+        );
+    }
+
+    /// A restored native chat whose resume is accepted holds the session it
+    /// was restored with before any turn names it, which is what the tab
+    /// strip's save reads, so an unused tab keeps it for the next restart.
+    /// A new conversation drops it from the chat and the tab's row at once:
+    /// a quit before the new session names itself must not resume the old
+    /// one under an empty transcript.
+    #[gpui::test]
+    async fn a_restored_native_chat_holds_its_session_until_a_new_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let path = dir.0.join("sessions.sqlite");
+        restored_chat_database(&path, "fixture-session-1");
+        let launch_log = dir.0.join("launches.jsonl");
+        let (chat, cx) = open_restored_native_chat(cx, &path, "fixture-session-1", &launch_log);
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.agent_session_id()).as_deref(),
+            Some("fixture-session-1"),
+            "nothing typed, the resume accepted: the session is still the tab's"
+        );
+
+        chat.update(cx, |chat, cx| chat.new_conversation(cx));
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.agent_session_id()),
+            None,
+            "the new conversation's session has not named itself"
+        );
+        assert_eq!(
+            restored_chat_session_id(&path),
+            Some(None),
+            "the tab's row no longer offers the old session"
+        );
+        assert_eq!(
+            launches_in(&launch_log),
+            vec![Some("fixture-session-1".to_string()), None],
+            "the restore resumed, the new conversation did not"
+        );
+    }
+
+    /// New conversation while the restored chat is still connecting: the
+    /// launch in flight belongs to the conversation being dropped, so the
+    /// chat ends up on a fresh process rather than on the session that
+    /// launch was resuming. The fixture's `echo_argv` CLI reports its argv
+    /// as its version, before the handshake is answered. The test scheduler
+    /// runs the launch on this thread, so it cannot land between the two
+    /// calls: this proves the relaunch happens and resumes nothing, not that
+    /// a launch already finished in the background is discarded.
+    #[gpui::test]
+    async fn a_new_conversation_while_connecting_starts_fresh(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(init);
+        cx.executor().allow_parking();
+        let launch = sirio_chat::ClaudeLaunch::fixture(
+            "python3",
+            vec![CLAUDE_FIXTURE.to_string(), "echo_argv".to_string()],
+        )
+        .resuming("fixture-session-1");
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(Some(LaunchSpec::Claude(launch)), std::env::temp_dir(), cx)
+        });
+        chat.update(cx, |chat, cx| {
+            chat.start_connection(cx);
+            assert!(chat.connecting, "the restore's launch has not landed");
+            chat.new_conversation(cx);
+        });
+
+        let argv = |chat: &Chat| match &chat.client {
+            Some(ChatClient::Claude(client)) => client.claude_version(),
+            _ => None,
+        };
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |chat| {
+            connected(chat) && argv(chat).is_some()
+        });
+        let argv = chat.read_with(&cx.cx, |chat, _| argv(chat)).unwrap_or_default();
+        assert!(
+            !argv.split(' ').any(|arg| arg == "--resume"),
+            "the new conversation runs on a process that resumes nothing: {argv}"
+        );
     }
 
     /// A structured question is named by its own header, not by the asking
