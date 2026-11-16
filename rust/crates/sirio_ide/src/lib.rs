@@ -4,6 +4,7 @@
 
 pub mod endpoint;
 pub mod lockfile;
+pub mod coalesce;
 mod mcp;
 pub mod owner;
 mod pending;
@@ -14,6 +15,7 @@ pub mod uri;
 
 pub use endpoint::{PORT_RANGE, bind, new_token};
 pub use lockfile::{LockBody, Lockfile};
+pub use coalesce::{Coalescer, SEND_AFTER};
 pub use owner::{WALK_DEPTH, resolve_owner};
 pub use mcp::{Diagnostic, FileDiagnostics, Notification, Pos16, Severity};
 pub use untrusted::{ReadOutcome, Refusal, read_regular_file};

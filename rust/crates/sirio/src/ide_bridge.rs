@@ -36,9 +36,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use gpui::{App, BorrowAppContext as _, Context, Entity, EntityId, Global};
+use gpui::{App, BorrowAppContext as _, Context, Entity, EntityId, Global, WeakEntity};
 use serde_json::{Value, json};
-use sirio_ide::{Bridge, BridgeEvent, BridgeOptions, ConnId, LockBody, Lockfile};
+use sirio_ide::{Bridge, BridgeEvent, BridgeOptions, Coalescer, ConnId, LockBody, Lockfile};
 use sirio_ui::chat::Chat;
 use sirio_ui::file_view::FileView;
 
@@ -379,8 +379,8 @@ pub(crate) struct IdeBridge {
     events_rx: Option<UnboundedReceiver<BridgeEvent>>,
     connections: HashMap<ConnId, Connection>,
     folders: Vec<PathBuf>,
-    /// Per connection, the file whose selection is waiting for its coalescing timer.
-    selection_pending: HashMap<ConnId, PathBuf>,
+    /// Per connection, the file view whose selection waits for its coalescing timer.
+    selection: Coalescer<ConnId, WeakEntity<FileView>>,
     /// What the commands said to the user, newest last; content-free copy only.
     toasts: Vec<String>,
 }
@@ -412,7 +412,7 @@ pub(crate) fn start_at_launch(
         events_rx: Some(events_rx),
         connections: HashMap::new(),
         folders,
-        selection_pending: HashMap::new(),
+        selection: Coalescer::default(),
         toasts: Vec::new(),
     };
     let mut next = if enabled { bridge.begin_start() } else { None };
@@ -498,7 +498,7 @@ impl IdeBridge {
         self.generation += 1;
         SSE_PORT.store(0, Ordering::SeqCst);
         self.connections.clear();
-        self.selection_pending.clear();
+        self.selection.clear();
         if let Some(running) = self.running.take() {
             running.lock.remove();
             running.bridge.shutdown();
@@ -535,7 +535,7 @@ impl IdeBridge {
             }
             BridgeEvent::Disconnected { conn } => {
                 self.connections.remove(&conn);
-                self.selection_pending.remove(&conn);
+                self.selection.forget(&conn);
             }
             BridgeEvent::Diagnostics { .. }
             | BridgeEvent::OpenDiff { .. }
@@ -546,11 +546,6 @@ impl IdeBridge {
     /// The running listener, to send a notification through.
     pub(crate) fn bridge(&self) -> Option<&Bridge> {
         self.running.as_ref().map(|running| &running.bridge)
-    }
-
-    /// Whether any Claude is connected: an editor selection has nobody to tell otherwise.
-    pub(crate) fn has_connections(&self) -> bool {
-        !self.connections.is_empty()
     }
 
     /// Connections with no owner, with the pid each connected with.
@@ -623,15 +618,20 @@ impl IdeBridge {
         found
     }
 
-    /// Notes that `path`'s selection is to be sent to `conn`. True when no timer is waiting for
-    /// that connection yet: the caller starts the 100 ms one.
-    pub(crate) fn mark_selection(&mut self, conn: ConnId, path: PathBuf) -> bool {
-        self.selection_pending.insert(conn, path).is_none()
+    /// Every connection that announced itself.
+    pub(crate) fn connection_ids(&self) -> Vec<ConnId> {
+        self.connections.keys().copied().collect()
     }
 
-    /// The file whose selection `conn`'s timer fired for, if it is still wanted.
-    pub(crate) fn take_selection(&mut self, conn: ConnId) -> Option<PathBuf> {
-        self.selection_pending.remove(&conn)
+    /// Notes that `view`'s selection is the one to send to `conn`. Returns the delay of the send
+    /// to schedule, when none is waiting for that connection yet.
+    pub(crate) fn mark_selection(&mut self, conn: ConnId, view: WeakEntity<FileView>) -> Option<Duration> {
+        self.selection.change(conn, view)
+    }
+
+    /// `conn`'s send is due: the view that changed last.
+    pub(crate) fn take_selection(&mut self, conn: ConnId) -> Option<WeakEntity<FileView>> {
+        self.selection.fire(&conn)
     }
 
     /// Records the copy of a toast the app showed.
@@ -724,23 +724,17 @@ impl SirioWorkspace {
         panes
     }
 
-    /// Resolves every ownerless connection against the terminals Sirio holds now, on the
-    /// background executor (spec 2026-11-15, 10.3). Called when a Claude connects and when a
-    /// worktree's terminals attach. A terminal that has no session pid yet cannot be matched,
-    /// so while a connection stays ownerless the resolution is tried again, half a second
-    /// apart, up to twenty times: only the newest chain goes on.
-    pub(crate) fn ide_resolve_ownerless(&mut self, cx: &mut Context<Self>) {
+    /// Runs `then` once every ownerless connection has been resolved against the terminals Sirio
+    /// holds now (spec 2026-11-15, 10.3): at once when there is none, else after the resolution
+    /// ran on the background executor. Every action that depends on who owns a connection goes
+    /// through here.
+    fn ide_when_resolved(
+        &mut self,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) {
         if !cx.has_global::<IdeBridge>() {
-            return;
-        }
-        self.ide_resolve_generation += 1;
-        self.ide_resolve_attempt(self.ide_resolve_generation, 0, cx);
-    }
-
-    fn ide_resolve_attempt(&mut self, generation: u64, attempt: u32, cx: &mut Context<Self>) {
-        const RETRIES: u32 = 20;
-        const RETRY_AFTER: Duration = Duration::from_millis(500);
-        if generation != self.ide_resolve_generation {
+            then(self, cx);
             return;
         }
         let live = self.ide_live_panes(cx);
@@ -749,6 +743,7 @@ impl SirioWorkspace {
             bridge.ownerless()
         });
         if pending.is_empty() {
+            then(self, cx);
             return;
         }
         let panes: Vec<PaneShell> = live
@@ -768,91 +763,103 @@ impl SirioWorkspace {
                 .spawn(async move { resolve(&pending, &panes, &worktrees) })
                 .await;
             let _ = this.update(cx, |workspace, cx| {
-                if !cx.has_global::<IdeBridge>() {
-                    return;
-                }
-                let owned: Vec<(usize, PathBuf)> =
-                    found.iter().filter_map(|resolved| resolved.owner.clone()).collect();
-                let found_owner = !owned.is_empty();
-                cx.update_global(|bridge: &mut IdeBridge, _| {
-                    bridge.apply_resolutions(found);
-                });
-                // An owner that is the focused pane right now becomes the one used last.
-                for (pane_id, worktree) in owned {
-                    let focused = workspace.tabs.get(workspace.active_tab).is_some_and(|tab| {
-                        tab.focused_pane == pane_id && workspace.tab_worktree_path(tab.id) == worktree
-                    });
-                    if focused {
-                        workspace
-                            .agent_focus
-                            .record(&worktree, AgentTarget::Terminal(pane_id));
-                    }
-                }
-                let still_ownerless = !cx.global::<IdeBridge>().ownerless().is_empty();
-                if still_ownerless && attempt < RETRIES {
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(RETRY_AFTER).await;
-                        let _ = this.update(cx, |workspace, cx| {
-                            workspace.ide_resolve_attempt(generation, attempt + 1, cx);
-                        });
-                    })
-                    .detach();
-                }
-                if found_owner {
-                    cx.notify();
-                }
+                workspace.ide_apply_resolutions(found, cx);
+                then(workspace, cx);
             });
         })
         .detach();
     }
 
-    /// The editor's selection of `view` moved or was focused: tell each Claude that runs in a
-    /// terminal of the file's worktree, at most once per 100 ms per connection and always ending
-    /// on the latest selection. Only the active file tab speaks, as in an IDE.
-    pub(crate) fn ide_selection_changed(&mut self, view: &Entity<FileView>, cx: &mut Context<Self>) {
-        // A drag changes the selection on every mouse move: nobody to tell, nothing to do.
-        if !cx.has_global::<IdeBridge>()
-            || !cx.global::<IdeBridge>().has_connections()
-        {
+    /// Takes what a resolution found. An owner that is the focused pane right now becomes the
+    /// one used last: a terminal made by the user is the active tab and nothing recorded it.
+    fn ide_apply_resolutions(&mut self, found: Vec<Resolved>, cx: &mut Context<Self>) {
+        if !cx.has_global::<IdeBridge>() {
             return;
         }
-        if self.active_file_view().is_none_or(|active| active.entity_id() != view.entity_id()) {
-            return;
-        }
-        let path = view.read(cx).path().to_path_buf();
-        let Some(worktree) = self.worktree_root_for(&path) else {
-            return;
-        };
-        let live = self.ide_live_panes(cx);
-        let owned = cx
-            .global::<IdeBridge>()
-            .owned_in(&worktree, &live, paths_name_the_same_document);
-        for (conn, _) in owned {
-            let start_timer = cx.update_global(|bridge: &mut IdeBridge, _| {
-                bridge.mark_selection(conn, path.clone())
+        let owned: Vec<(usize, PathBuf)> =
+            found.iter().filter_map(|resolved| resolved.owner.clone()).collect();
+        cx.update_global(|bridge: &mut IdeBridge, _| bridge.apply_resolutions(found));
+        for (pane_id, worktree) in owned {
+            let focused = self.tabs.get(self.active_tab).is_some_and(|tab| {
+                tab.focused_pane == pane_id && self.tab_worktree_path(tab.id) == worktree
             });
-            if start_timer {
+            if focused {
+                self.agent_focus.record(&worktree, AgentTarget::Terminal(pane_id));
+            }
+        }
+    }
+
+    /// A Claude connected, or a worktree's terminals attached: resolve what is still ownerless.
+    /// The terminals of a worktree just selected have no session pid for a moment (a restored
+    /// one attaches to its host session first), so a connection still ownerless afterwards is
+    /// tried again every 500 ms, ten times at most, newest chain only. The actions (an
+    /// at-mention, a selection) do not depend on this: they resolve for themselves.
+    pub(crate) fn ide_resolve_ownerless(&mut self, cx: &mut Context<Self>) {
+        self.ide_resolve_generation += 1;
+        self.ide_resolve_retry(self.ide_resolve_generation, 0, cx);
+    }
+
+    fn ide_resolve_retry(&mut self, generation: u64, attempt: u32, cx: &mut Context<Self>) {
+        const RETRIES: u32 = 10;
+        if generation != self.ide_resolve_generation {
+            return;
+        }
+        self.ide_when_resolved(cx, move |_, cx| {
+            let left = cx.has_global::<IdeBridge>() && !cx.global::<IdeBridge>().ownerless().is_empty();
+            cx.notify();
+            if left && attempt < RETRIES {
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(Duration::from_millis(100)).await;
-                    let _ = this.update(cx, |workspace, cx| workspace.ide_flush_selection(conn, cx));
+                    cx.background_executor().timer(Duration::from_millis(500)).await;
+                    let _ = this.update(cx, |workspace, cx| {
+                        workspace.ide_resolve_retry(generation, attempt + 1, cx);
+                    });
+                })
+                .detach();
+            }
+        });
+    }
+
+    /// The selection of `view` moved or was focused: tell each connection, at most once per
+    /// 100 ms and always ending on the latest selection, from the view that changed, whatever
+    /// tab is active (a file in the other half stays visible while a terminal is active).
+    pub(crate) fn ide_selection_changed(&mut self, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        // A drag changes the selection on every mouse move: nobody connected, nothing to do.
+        if !cx.has_global::<IdeBridge>() {
+            return;
+        }
+        for conn in cx.global::<IdeBridge>().connection_ids() {
+            let delay = cx.update_global(|bridge: &mut IdeBridge, _| {
+                bridge.mark_selection(conn, view.downgrade())
+            });
+            if let Some(delay) = delay {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |workspace, cx| workspace.ide_selection_due(conn, cx));
                 })
                 .detach();
             }
         }
     }
 
-    /// A connection's coalescing timer fired: send the active file's selection as it is now.
-    fn ide_flush_selection(&mut self, conn: sirio_ide::ConnId, cx: &mut Context<Self>) {
-        let Some(path) = cx.update_global(|bridge: &mut IdeBridge, _| bridge.take_selection(conn))
+    /// A connection's coalescing timer fired: resolve owners, then send the view's selection as
+    /// it is now. A view that is gone sends nothing.
+    fn ide_selection_due(&mut self, conn: sirio_ide::ConnId, cx: &mut Context<Self>) {
+        let Some(view) = cx
+            .update_global(|bridge: &mut IdeBridge, _| bridge.take_selection(conn))
+            .and_then(|weak| weak.upgrade())
         else {
             return;
         };
-        let Some(view) = self.active_file_view() else {
-            return;
-        };
-        if view.read(cx).path() != path.as_path() {
+        self.ide_when_resolved(cx, move |workspace, cx| {
+            workspace.ide_send_selection(conn, &view, cx);
+        });
+    }
+
+    fn ide_send_selection(&mut self, conn: sirio_ide::ConnId, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        if !cx.has_global::<IdeBridge>() {
             return;
         }
+        let path = view.read(cx).path().to_path_buf();
         let Some(worktree) = self.worktree_root_for(&path) else {
             return;
         };
@@ -882,9 +889,7 @@ impl SirioWorkspace {
         }
     }
 
-    /// The first agent of `worktree` the user used last that can take an at-mention: a chat, or a
-    /// terminal pane that owns a live connection. A chat never focused is the last resort, as
-    /// before; none at all leaves a toast.
+    /// "Add to Agent Thread": resolve owners, then deliver.
     pub(crate) fn send_selection_to_agent(
         &mut self,
         path: &Path,
@@ -893,11 +898,23 @@ impl SirioWorkspace {
         language: &'static str,
         cx: &mut Context<Self>,
     ) {
-        if cx.has_global::<IdeBridge>() {
-            // A connection that is not owned yet may be one of the panes of a worktree that
-            // attached since: look again for the next command.
-            self.ide_resolve_ownerless(cx);
-        }
+        let (path, text) = (path.to_path_buf(), text.to_owned());
+        self.ide_when_resolved(cx, move |workspace, cx| {
+            workspace.deliver_at_mention(&path, lines, &text, language, cx);
+        });
+    }
+
+    /// The agent of the file's worktree an at-mention goes to: the first of those the user
+    /// focused, most recent first, that can take it (a chat, or a pane that owns a live
+    /// connection); else the owned terminal that connected last; else a chat; else a toast.
+    fn deliver_at_mention(
+        &mut self,
+        path: &Path,
+        lines: (usize, usize),
+        text: &str,
+        language: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         let worktree = self.worktree_root_for(path);
         let candidates = worktree
             .as_deref()
@@ -928,6 +945,11 @@ impl SirioWorkspace {
             if chosen.is_some() {
                 break;
             }
+        }
+        // Nothing focused qualifies (after a relaunch nothing has been focused): the owned
+        // terminal that connected last, and only then a chat.
+        if chosen.is_none() {
+            chosen = owned.last().map(|found| Err(*found));
         }
         if chosen.is_none() {
             chosen = self.active_chat_for(path).map(Ok);

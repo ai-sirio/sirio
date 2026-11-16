@@ -6240,7 +6240,7 @@ struct SirioWorkspace {
     /// The (tab id, pane id) an at-mention chose to bring to the front. Focus needs a window,
     /// which an event handler lacks, so `render` drains it.
     pending_ide_focus: Option<(usize, usize)>,
-    /// Bumped by every owner-resolution trigger, so only the newest chain of retries goes on.
+    /// Bumped by every `ide_resolve_ownerless`, so only the newest chain of retries goes on.
     ide_resolve_generation: u64,
     /// The id of the toast that reports a failed identity save. The drain
     /// waits until it is gone, so the next dialog does not cover it.
@@ -9378,6 +9378,13 @@ impl SirioWorkspace {
                         }
                         workspace.refresh_git_diff(path, &view, cx);
                         workspace.push_language_server_status(path, &view, cx);
+                        // Opening a file focuses its tab, and a focused file says its selection.
+                        if workspace
+                            .active_file_view()
+                            .is_some_and(|active| active.entity_id() == view.entity_id())
+                        {
+                            workspace.ide_selection_changed(&view, cx);
+                        }
                     }
                     FileViewEvent::GitDiffStale(path) => {
                         workspace.refresh_git_diff(path, &view, cx);

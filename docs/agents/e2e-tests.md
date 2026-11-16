@@ -715,16 +715,21 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # switch_flap (off, on, off, on from one process while a start is held in flight: the original
 # port, one lockfile), port_survives_catalog_change, restart_keeps_port (same port and token across a quit; the old
 # client reconnects) and inherited_port (a launch's CLAUDE_CODE_SSE_PORT never reaches a pane),
-# then, with the client in a real application terminal tab (`surface.terminal.open`): owner_resolved
-# (the state names the pane the client runs in and its worktree), selection_utf16 (selecting the
-# `x` of `let s = "<emoji>x";` sends start {2,11}, end {2,12}), selection_coalesced (20 back-to-back
-# selections send at most one notification per 100 ms of the burst, plus one, the last being the
-# final selection), focus_sends_selection (a terminal tab sends nothing, the file tab again exactly
-# one), at_mention (lines 5 to 7 sent with "Add to Agent Thread" arrive as at_mentioned lineStart 4,
-# lineEnd 6, the client's tab is focused and nothing is typed into the pane), no_eligible_agent_toast
-# (with no Claude terminal or chat the state's toasts hold "No Claude terminal or chat in this
-# worktree") and owner_after_restart (a client whose pane is in a worktree not selected after a
-# relaunch is ownerless, in the worktree its cwd is in, until that worktree is selected): fifteen cases.
+# then, with the clients in real application terminal tabs (`surface.terminal.open`): owner_resolved
+# (the state names the pane the client runs in and its worktree), selection_utf16 (opening a file
+# sends its selection once; selecting the `x` of `let s = "<emoji>x";` sends start {2,11}, end
+# {2,12}), selection_coalesced (20 selections 25 ms apart: the bound of one notification per 100 ms
+# plus one, and the last is the final selection; the coalescing itself is proved by the unit tests
+# of `sirio_ide::coalesce`), focus_sends_selection (a terminal tab sends nothing, the file tab
+# again exactly one), at_mention (two Claude terminals, the first focused before its client
+# starts: lines 5 to 7 reach it as at_mentioned lineStart 4, lineEnd 6, its tab is focused and
+# nothing is typed into the pane), selection_while_terminal_active (a mouse click and Shift+Down
+# in the file of the Secondary half, with the Primary's terminal active, reach the client),
+# at_mention_to_new_terminal, no_eligible_agent_toast (with no Claude terminal or chat the state's
+# toasts hold "No Claude terminal or chat in this worktree"), at_mention_without_focus_history (an
+# owned terminal in no focus history still gets it) and owner_after_restart (a client whose pane is
+# in a worktree not selected after a relaunch is ownerless, in the worktree its cwd is in, until
+# that worktree is selected): eighteen cases.
 # --xvfb or --display :N picks the display (never your own $DISPLAY); --state-only takes no
 # captures; --out-dir DIR keeps transcript.log, app.log, client-*.jsonl (every frame), socket.jsonl,
 # the lockfile with authToken redacted and the PID-matched captures. socket.jsonl is one line per

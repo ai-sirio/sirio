@@ -34,29 +34,42 @@ set -eEuo pipefail
 #                     with the switch off a new pane has none
 #   owner_resolved    the state shows the client's connection owned by the pane it runs in
 #                     (the pane id panel create returned) and by that pane's worktree
-#   selection_utf16   a file whose line 3 is `let s = "<emoji>x";` is opened and its `x` selected
-#                     with surface.editor.select: the client receives selection_changed with
-#                     start {2, 11}, end {2, 12} (UTF-16 columns), isEmpty false, text "x"
+#   selection_utf16  opening a file sends its selection once (a focused file says it); in a
+#                    file whose line 3 is `let s = "<emoji>x";` the `x`, selected with
+#                    surface.editor.select, arrives as selection_changed with start {2, 11},
+#                    end {2, 12} (UTF-16 columns), isEmpty false, text "x"
 #   selection_coalesced
-#                     20 surface.editor.select calls 25 ms apart: at most one notification per
-#                     100 ms of the burst's duration, plus one, and the last one is the final
-#                     selection (the control poll alone keeps a burst under that bound; see
-#                     the comment at selburst.py)
+#                    20 surface.editor.select calls 25 ms apart: at most one notification per
+#                    100 ms of the burst's duration, plus one, and the last one is the final
+#                    selection (the 100 ms coalescing itself is proved by sirio_ide's unit
+#                    tests; the control poll alone keeps this burst under the bound)
 #   focus_sends_selection
-#                     selecting a terminal tab sends nothing; selecting the file tab again sends
-#                     exactly one notification, the current selection
-#   at_mention        in the real order (the client's pane focused, then the client started, then
-#                     the file opened): lines 5 to 7 selected and "Add to Agent Thread"
-#                     (surface.editor.context ... send-to-agent) sends at_mentioned with
-#                     lineStart 4 and lineEnd 6, focuses the client's tab and writes nothing
-#                     into the pane
+#                    selecting a terminal tab sends nothing; selecting the file tab again sends
+#                    exactly one notification, the current selection
+#   at_mention       two Claude terminals: the first one's pane is focused before its client
+#                    starts, the second is created after it, the file is opened, both clients
+#                    connect and lines 5 to 7 are sent with "Add to Agent Thread"
+#                    (surface.editor.context ... send-to-agent): at_mentioned lineStart 4,
+#                    lineEnd 6 reaches the first (the one used last), not the second; its tab is
+#                    focused and nothing is written into the pane
+#   selection_while_terminal_active
+#                    with the file in the Secondary half and the Claude terminal the active tab,
+#                    a click and Shift+Down (xdotool) in the file reach the client as
+#                    selection_changed for the new lines
+#   at_mention_to_new_terminal
+#                    a terminal created after the others, focused when its client connects, gets
+#                    the next at-mention
 #   no_eligible_agent_toast
-#                     with the client gone, the same command leaves the toast "No Claude
-#                     terminal or chat in this worktree" in the state's toasts
+#                    with every terminal and the chat closed, the same command leaves the toast
+#                    "No Claude terminal or chat in this worktree" in the state's toasts
+#   at_mention_without_focus_history
+#                    in a fresh worktree, a terminal nobody focused (another tab was active when
+#                    its client connected) still gets the at-mention
 #   owner_after_restart
-#                     the client's pane is in a worktree that is not selected; Sirio quits and
-#                     relaunches and the client reconnects: the state shows it ownerless, in
-#                     that worktree (its cwd); selecting the worktree gives it an owner
+#                    the client's pane is in a worktree that is not selected; Sirio quits and
+#                    relaunches and the client reconnects: the state shows it ownerless, in
+#                    that worktree (its cwd); six seconds later (the reconnect's retries are
+#                    over) selecting the worktree gives it an owner
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
@@ -317,10 +330,9 @@ sockburst() { python3 -I "$RUN_DIR/sockburst.py" "$@"; }
 # Sent without a gap they would be one pass of the app's control poll and one change of the
 # editor's selection (gpui merges the notifies of a pass), so they are spread over several
 # passes. Be clear about what that proves: the app takes about 100 ms per pass here, so the
-# bound the case asserts also holds for a Sirio that does not coalesce (checked by making the app
-# send at once: 5 notifications for the same burst). The case proves the contract (the bound and
-# the last notification being the final selection); a drag, which outpaces the poll, is what the
-# coalescing is for. Logged like sockcall's, in request order; the ranges are the arguments, the
+# bound the case asserts also holds for a Sirio that does not coalesce. The case proves the
+# contract (the bound and the last notification being the final selection); the 100 ms coalescing
+# is proved by the unit tests of sirio_ide::coalesce. Logged like sockcall's, in request order; the ranges are the arguments, the
 # elapsed milliseconds from the first send to the last answer are printed.
 cat >"$RUN_DIR/selburst.py" <<'SELBURST'
 import json, os, socket, sys, time
@@ -599,15 +611,21 @@ start_client() { # worktree-id
 # The client in an application terminal tab of the selected worktree (`surface.terminal.open`:
 # a real pane Sirio holds a view of, which `panel create`'s host-only session is not), run by
 # `sh -c` as the shell's child. Sets CLIENT_FIFO, CLIENT_LOG, CLIENT_PANE and CLIENT_TAB.
-start_app_client() {
+start_app_client() { # [gate file: the client starts when it exists]
   CLIENT_N=$((CLIENT_N + 1))
   CLIENT_FIFO="$RUN_DIR/client-$CLIENT_N.fifo"
   CLIENT_LOG="$RUN_DIR/client-$CLIENT_N.jsonl"
   rm -f "$CLIENT_FIFO" "$CLIENT_LOG"
   mkfifo "$CLIENT_FIFO"
-  CLIENT_PANE="$(sockcall surface.terminal.open "cmd=$(command -v python3) $CLIENT --fifo $CLIENT_FIFO --transcript $CLIENT_LOG; :" | jq_py 'd["pane"]')"
+  local wait_for=""
+  [ -z "${1:-}" ] || wait_for="while [ ! -e $1 ]; do sleep 0.1; done; "
+  CLIENT_PANE="$(sockcall surface.terminal.open "cmd=${wait_for}$(command -v python3) $CLIENT --fifo $CLIENT_FIFO --transcript $CLIENT_LOG; :" | jq_py 'd["pane"]')"
   [ -n "$CLIENT_PANE" ] || fail "$CASE: surface.terminal.open named no pane"
   CLIENT_TAB="$(tabs_field count)"
+  [ -z "${1:-}" ] || return 0
+  wait_client_ready
+}
+wait_client_ready() {
   local tries=0
   while ! grep -q '"event": "ready"' "$CLIENT_LOG" 2>/dev/null && [ "$tries" -lt 150 ]; do
     tries=$((tries + 1))
@@ -618,6 +636,13 @@ start_app_client() {
 end_app_client() {
   client_do quit
   sockcall surface.tabs.close "index=$CLIENT_TAB" confirm=yes >/dev/null
+}
+# Closes every tab of a kind (file, chat, terminal): their clients end with them.
+close_tabs_of_kind() { # kind
+  local index
+  while index="$(tab_index "$1")" && [ "$index" != 0 ]; do
+    sockcall surface.tabs.close "index=$index" confirm=yes >/dev/null
+  done
 }
 client_do() { printf '%s\n' "$*" >"$CLIENT_FIFO"; }
 # How many transcript records match a Python expression over `r`.
@@ -675,7 +700,7 @@ tab_index() { # kind
   "$CTL" surface tabs read --json | python3 -I -c '
 import json, sys
 d = json.load(sys.stdin)[0]
-print(max(int(k[4:]) for k, v in d.items() if k.startswith("tab.") and v.startswith(sys.argv[1] + "|")))' "$1"
+print(max([int(k[4:]) for k, v in d.items() if k.startswith("tab.") and v.startswith(sys.argv[1] + "|")] or [0]))' "$1"
 }
 file_tab_index() { tab_index file; }
 tabs_field() { "$CTL" surface tabs read --json | jq_py "d[0][\"$1\"]"; }
@@ -964,11 +989,15 @@ case_owner_resolved() {
 case_selection_utf16() {
   CLIENT_FIFO="$HELD_CLIENT_FIFO" CLIENT_LOG="$HELD_CLIENT_LOG" CLIENT_PANE="$HELD_CLIENT_PANE"
   read -r SEL_X SEL_L5S SEL_L5E SEL_L6 SEL_L7E < <(write_sel_file "$SEL_FILE")
+  local before
+  before="$(note_count selection_changed)"
   ctl surface editor open --path "$SEL_FILE" >/dev/null
   FILE_TAB="$(tabs_field active)"
-  # Opening a file may say its caret; let that settle before the baseline.
-  sleep 1
-  local before
+  # Opening a file focuses its tab, and focusing a file tab says its selection (spec 4.4).
+  wait_notes selection_changed "$((before + 1))"
+  sleep 0.5
+  [ "$(note_count selection_changed)" = "$((before + 1))" ] || fail "$CASE: opening the file said its selection more than once"
+  echo "OK: opening the file sent its selection once"
   before="$(note_count selection_changed)"
   select_ranges "$SEL_X..$((SEL_X + 1))"
   wait_notes selection_changed "$((before + 1))"
@@ -1031,18 +1060,35 @@ case_focus_sends_selection() {
   echo "OK: focusing the file tab sends exactly one notification, the current selection"
 }
 
+# Two Claude terminals: the first one's pane is focused while its client has not started yet (so
+# the focus is recorded before the pane is eligible), the second is created after it (active,
+# never focused by a click), the file is opened (so neither terminal is focused when its client
+# connects) and both clients start; then lines 5 to 7 are selected and sent: the first terminal gets the at-mention (the one used
+# last), the second does not, though it connected later.
 case_at_mention() {
-  # The real order: the client's pane focused first, the client started, the file opened after.
   CLIENT_FIFO="$HELD_CLIENT_FIFO" CLIENT_LOG="$HELD_CLIENT_LOG" CLIENT_PANE="$HELD_CLIENT_PANE"
-  sockcall surface.tabs.close "index=$(file_tab_index)" confirm=yes >/dev/null
+  close_tabs_of_kind file
   end_app_client
-  start_app_client
-  ctl surface tabs select "$CLIENT_TAB" >/dev/null
-  wait_client "connected" 'r.get("event") == "connected"' 1
-  expect_state "the new client is owned by its pane" 'd["connections"][0]["owner_pane"]' "$CLIENT_PANE"
+  local gate_a="$RUN_DIR/gate-a" gate_b="$RUN_DIR/gate-b"
+  rm -f "$gate_a" "$gate_b"
+  start_app_client "$gate_a"
+  A_FIFO="$CLIENT_FIFO" A_LOG="$CLIENT_LOG" A_PANE="$CLIENT_PANE" A_TAB="$CLIENT_TAB"
+  ctl surface tabs select "$A_TAB" >/dev/null
+  start_app_client "$gate_b"
+  B_FIFO="$CLIENT_FIFO" B_LOG="$CLIENT_LOG" B_PANE="$CLIENT_PANE" B_TAB="$CLIENT_TAB"
+  # The file becomes the active tab: neither terminal is focused when its client connects.
   ctl surface editor open --path "$SEL_FILE" >/dev/null
   FILE_TAB="$(tabs_field active)"
-  [ "$FILE_TAB" != "$CLIENT_TAB" ] || fail "$CASE: opening the file did not leave the client's tab"
+  touch "$gate_a"
+  CLIENT_FIFO="$A_FIFO" CLIENT_LOG="$A_LOG" CLIENT_PANE="$A_PANE" CLIENT_TAB="$A_TAB"
+  wait_client_ready
+  wait_client "A connected" 'r.get("event") == "connected"' 1
+  touch "$gate_b"
+  CLIENT_FIFO="$B_FIFO" CLIENT_LOG="$B_LOG" CLIENT_PANE="$B_PANE" CLIENT_TAB="$B_TAB"
+  wait_client_ready
+  wait_client "B connected" 'r.get("event") == "connected"' 1
+  expect_state "A and B are owned by their panes" 'sorted(c["owner_pane"] for c in d["connections"])' "$(python3 -I -c 'import sys; print(sorted(sys.argv[1:]))' "$A_PANE" "$B_PANE")"
+  CLIENT_FIFO="$A_FIFO" CLIENT_LOG="$A_LOG" CLIENT_PANE="$A_PANE" CLIENT_TAB="$A_TAB"
   select_ranges "$SEL_L5S..$SEL_L7E"
   sockcall surface.editor.context "offset=$SEL_L6" action=send-to-agent >/dev/null
   wait_notes at_mentioned 1
@@ -1051,28 +1097,109 @@ import json, sys
 n = json.loads(sys.argv[1])
 sys.exit(0 if (n == {"filePath": sys.argv[2], "lineStart": 4, "lineEnd": 6}) else 1)
 PY
-  echo "OK: at_mentioned lineStart 4, lineEnd 6"
+  echo "OK: the terminal used last got at_mentioned lineStart 4, lineEnd 6"
+  [ "$(CLIENT_LOG="$B_LOG" note_count at_mentioned)" = 0 ] || fail "$CASE: the other terminal got the at-mention too"
   local tries=0
-  while [ "$(tabs_field active)" != "$CLIENT_TAB" ] && [ "$tries" -lt 50 ]; do
+  while [ "$(tabs_field active)" != "$A_TAB" ] && [ "$tries" -lt 50 ]; do
     tries=$((tries + 1))
     sleep 0.1
   done
-  [ "$(tabs_field active)" = "$CLIENT_TAB" ] || fail "$CASE: the client's tab ($CLIENT_TAB) is not focused (active: $(tabs_field active))"
-  echo "OK: the client's tab is focused"
-  case "$("$CTL" panel read "$CLIENT_PANE" 2>&1)" in *sel.rs*) fail "$CASE: something was written into the client's pane" ;; esac
+  [ "$(tabs_field active)" = "$A_TAB" ] || fail "$CASE: the terminal's tab ($A_TAB) is not focused (active: $(tabs_field active))"
+  echo "OK: the terminal's tab is focused"
+  case "$("$CTL" panel read "$A_PANE" 2>&1)" in *sel.rs*) fail "$CASE: something was written into the pane" ;; esac
   echo "OK: nothing was written into the pane"
   capture ide-at-mention
 }
 
+# The file sits in the Secondary half, the Claude terminal of the Primary half is the active tab
+# (as after an at-mention), and the user selects new lines in the file with the mouse and keys:
+# the selection must reach Claude though the file's tab is not the active one.
+case_selection_while_terminal_active() {
+  CLIENT_FIFO="$A_FIFO" CLIENT_LOG="$A_LOG" CLIENT_PANE="$A_PANE" CLIENT_TAB="$A_TAB"
+  [ "$(tabs_field active)" = "$A_TAB" ] || fail "$CASE: the terminal is not the active tab"
+  local window geometry width height before
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  before="$(note_count selection_changed)"
+  # Line 3 of the file, in the middle of the Secondary half (measured on ide-at-mention.png).
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 62 / 100))" "$((height * 18 / 100))" click 1
+  sleep 0.3
+  DISPLAY="$DISPLAY_TARGET" xdotool key shift+Down
+  [ "$(tabs_field active)" = "$A_TAB" ] || fail "$CASE: the click made the file's tab the active one; the layout under test is gone"
+  local tries=0 got=""
+  while [ "$tries" -lt 50 ]; do
+    got="$(client_notes selection_changed | tail -n 1)"
+    python3 -I - "$got" <<'PY' && break
+import json, sys
+try:
+    s = json.loads(sys.argv[1])["selection"]
+except (ValueError, KeyError, IndexError):
+    sys.exit(1)
+sys.exit(0 if (s["start"]["line"] == 2 and s["end"]["line"] == 3 and s["isEmpty"] is False) else 1)
+PY
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  [ "$tries" -lt 50 ] || fail "$CASE: no selection_changed for the new lines reached the client (last: $got; $before before)"
+  echo "OK: the selection of the visible, inactive file reached the client: $got"
+}
+
+# A terminal created after another one is the active tab and has had no click, so nothing
+# recorded it: its client connecting while it is focused makes it the one used last.
+case_at_mention_to_new_terminal() {
+  start_app_client
+  wait_client "C connected" 'r.get("event") == "connected"' 1
+  expect_state "C is owned by its pane" '"'"$CLIENT_PANE"'" in [c["owner_pane"] for c in d["connections"]]' True
+  ctl surface tabs select "$FILE_TAB" >/dev/null
+  select_ranges "$SEL_L5S..$SEL_L7E"
+  sockcall surface.editor.context "offset=$SEL_L6" action=send-to-agent >/dev/null
+  wait_notes at_mentioned 1
+  [ "$(CLIENT_LOG="$A_LOG" note_count at_mentioned)" = 1 ] || fail "$CASE: the earlier terminal got a second at-mention"
+  echo "OK: the new terminal, focused when it connected, got the at-mention"
+}
+
 case_no_eligible_agent_toast() {
-  end_app_client
-  expect_state "no connection once the client is gone" 'len(d["connections"])' 0
+  close_tabs_of_kind terminal
+  expect_state "no connection once the clients are gone" 'len(d["connections"])' 0
   # A new worktree opens with a chat tab, which can take an at-mention: close it.
-  sockcall surface.tabs.close "index=$(tab_index chat)" confirm=yes >/dev/null
+  close_tabs_of_kind chat
   ctl surface tabs select "$(file_tab_index)" >/dev/null
   select_ranges "$SEL_L5S..$SEL_L7E"
   sockcall surface.editor.context "offset=$SEL_L6" action=send-to-agent >/dev/null
   expect_state "the toast is in the state" '"No Claude terminal or chat in this worktree" in d["toasts"]' True
+}
+
+# A terminal nobody focused (created, then another tab made active before its client connects) is
+# owned but is in no focus history: the at-mention reaches it, and leaves no toast.
+case_at_mention_without_focus_history() {
+  local project third third_id gate="$RUN_DIR/gate-third"
+  project="$(project_id "$WT")"
+  ctl new-workspace --project "$project" --branch ide-third >/dev/null
+  third="$("$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-third"]
+print(paths[0] if paths else "")')"
+  [ -n "$third" ] || fail "$CASE: sirioctl does not list the third worktree"
+  third_id="$(worktree_id "$third")"
+  write_sel_file "$third/sel.rs" >/dev/null
+  ctl select-workspace --workspace "$third_id" >/dev/null
+  rm -f "$gate"
+  start_app_client "$gate"
+  ctl surface editor open --path "$third/sel.rs" >/dev/null
+  touch "$gate"
+  wait_client_ready
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  expect_state "owned by its pane" '"'"$CLIENT_PANE"'" in [c["owner_pane"] for c in d["connections"]]' True
+  read -r SEL_X SEL_L5S SEL_L5E SEL_L6 SEL_L7E < <(write_sel_file "$third/sel.rs")
+  select_ranges "$SEL_L5S..$SEL_L7E"
+  sockcall surface.editor.context "offset=$SEL_L6" action=send-to-agent >/dev/null
+  wait_notes at_mentioned 1
+  echo "OK: the owned terminal nobody focused got the at-mention"
+  end_app_client
+  expect_state "no connection once that client is gone" 'len(d["connections"])' 0
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
 }
 
 case_owner_after_restart() {
@@ -1098,6 +1225,9 @@ print(paths[0] if paths else "")')"
   expect_state "the reconnected client is a connection" 'len(d["connections"])' 1
   expect_state "ownerless while its worktree is not mounted" 'd["connections"][0]["owner_pane"]' None
   expect_state "its worktree is found from its cwd" 'd["connections"][0]["worktree"]' "$second"
+  # The reconnect's own retries end within five seconds: select the worktree after that, so only
+  # the selection can resolve the owner.
+  sleep 6
   ctl select-workspace --workspace "$second_id" >/dev/null
   expect_state "selecting the worktree gives it an owner" 'd["connections"][0]["owner_pane"] is not None' True
   expect_state "the owner's worktree is the second one" 'd["connections"][0]["worktree"]' "$second"
@@ -1123,7 +1253,10 @@ case_run selection_utf16 case_selection_utf16
 case_run selection_coalesced case_selection_coalesced
 case_run focus_sends_selection case_focus_sends_selection
 case_run at_mention case_at_mention
+case_run selection_while_terminal_active case_selection_while_terminal_active
+case_run at_mention_to_new_terminal case_at_mention_to_new_terminal
 case_run no_eligible_agent_toast case_no_eligible_agent_toast
+case_run at_mention_without_focus_history case_at_mention_without_focus_history
 case_run owner_after_restart case_owner_after_restart
 
 stop_hosts
