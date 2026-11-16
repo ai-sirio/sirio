@@ -74,10 +74,18 @@ impl LaunchLine {
             args,
             // Checkpointing is what makes `rewind_files` able to restore
             // anything; without it the CLI has no backups to restore from.
-            env: vec![(
-                "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_string(),
-                "true".to_string(),
-            )],
+            env: vec![
+                (
+                    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_string(),
+                    "true".to_string(),
+                ),
+                // The CLI's own running / waiting / idle, which outranks
+                // Sirio's derivation in the chat.
+                (
+                    "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".to_string(),
+                    "1".to_string(),
+                ),
+            ],
         }
     }
 
@@ -106,7 +114,7 @@ mod tests {
     const SESSION: &str = "5bbcaeb8-e523-4087-b33c-559163f2dc07";
 
     #[test]
-    fn a_chat_launch_is_the_six_flags_and_one_environment_variable() {
+    fn a_chat_launch_is_the_six_flags_and_its_environment() {
         let line = LaunchLine::chat(ChatSession::New(SESSION));
         assert_eq!(
             line.args,
@@ -125,13 +133,16 @@ mod tests {
                 SESSION,
             ]
         );
-        assert_eq!(
-            line.env,
-            [(
-                "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_string(),
-                "true".to_string()
-            )]
-        );
+        for pair in [
+            ("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true"),
+            ("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1"),
+        ] {
+            assert!(
+                line.env.contains(&(pair.0.to_string(), pair.1.to_string())),
+                "{pair:?} missing from {:?}",
+                line.env
+            );
+        }
     }
 
     #[test]

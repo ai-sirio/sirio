@@ -12,7 +12,7 @@ use sirio_claude::message::{CliMessage, Delta, ResultPayload, SystemPayload};
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
 use sirio_chat_vocab::{
-    ChatEvent, PlanEntryInfo, SessionNotice, ToolCallContentInfo, ToolCallDiff,
+    ChatEvent, CliState, PlanEntryInfo, SessionNotice, ToolCallContentInfo, ToolCallDiff,
     ToolCallLocationInfo,
 };
 
@@ -425,6 +425,11 @@ impl Fold {
                     });
                 }
             }
+            "session_state_changed" => {
+                if let Some(state) = system.state.as_deref().and_then(CliState::parse) {
+                    events.push(ChatEvent::CliState { state });
+                }
+            }
             other => events.push(ChatEvent::OtherSessionUpdate {
                 kind: format!("system/{other}"),
             }),
@@ -600,6 +605,33 @@ mod tests {
 
     fn parse(line: serde_json::Value) -> CliMessage {
         CliMessage::parse(&line.to_string()).expect("fixture line parses")
+    }
+
+    #[test]
+    fn only_the_three_known_states_become_events() {
+        let state_line = |state: Option<&str>| {
+            let mut line = json!({"type": "system", "subtype": "session_state_changed"});
+            if let Some(state) = state {
+                line["state"] = json!(state);
+            }
+            parse(line)
+        };
+        for (word, state) in [
+            ("running", CliState::Running),
+            ("idle", CliState::Idle),
+            ("requires_action", CliState::RequiresAction),
+        ] {
+            let mut fold = Fold::new();
+            assert_eq!(
+                fold.apply(state_line(Some(word))),
+                vec![ChatEvent::CliState { state }],
+                "{word}"
+            );
+        }
+        for unknown in [Some("paused"), None] {
+            let mut fold = Fold::new();
+            assert_eq!(fold.apply(state_line(unknown)), vec![], "{unknown:?}");
+        }
     }
 
     #[test]

@@ -1113,12 +1113,184 @@ def resume_arg():
     return sys.argv[at + 1] if at + 1 < len(sys.argv) else ""
 
 
+# ---------------------------------------------------------------------------
+# `session_state`: the CLI's own `session_state_changed` lines. The real CLI
+# writes them only when CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS is set, so this
+# mode does too: a host that does not set the variable sees none. Line shapes
+# copy a live probe (plain, a permission, a background agent). `requires_action`
+# is written BEFORE the `can_use_tool` request it announces, and the last
+# `idle` after the last `result`.
+#
+# The first word of a prompt picks the script: `plain`, `ask` or `background`.
+# `--fixture-gate=<path>` holds `background` after its main `result` until
+# `<path>` exists, and again before its second `result` until `<path>.2`
+# does; an empty or missing value means do not wait. A script runs on its own
+# thread so the main thread keeps answering control requests.
+# ---------------------------------------------------------------------------
+
+GATE_PATH = next(
+    (arg[len("--fixture-gate="):] for arg in sys.argv if arg.startswith("--fixture-gate=")),
+    "",
+)
+STATE_EMITS = bool(os.environ.get("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS"))
+STATE_PROMPTS = queue.Queue()
+STATE_ANSWERED = threading.Event()
+STATE_EOF = threading.Event()
+
+
+def state_line(state):
+    if STATE_EMITS:
+        send({"type": "system", "subtype": "session_state_changed", "state": state,
+              "uuid": trace_uuid(), "session_id": SESSION_ID})
+
+
+def state_text(body):
+    # The fold reads text from the stream deltas; the `assistant` line is the
+    # complete message that follows them.
+    text(body)
+    send({"type": "assistant",
+          "message": {"id": "msg-state", "type": "message", "role": "assistant",
+                      "model": "claude-fable-5-1", "content": [{"type": "text", "text": body}],
+                      "stop_reason": None},
+          "parent_tool_use_id": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
+def state_tool_result(tool_use_id, body):
+    send({"type": "user",
+          "message": {"role": "user", "content": [
+              {"tool_use_id": tool_use_id, "type": "tool_result", "content": body}]},
+          "parent_tool_use_id": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
+def state_gate(suffix):
+    """True once the gate is open (or there is none); False when stdin closed
+    first, and the script must then write nothing more."""
+    if not GATE_PATH:
+        return True
+    path = GATE_PATH + suffix
+    while not os.path.exists(path):
+        if STATE_EOF.is_set():
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def state_plain():
+    state_line("running")
+    init_line()
+    state_text("Hello there")
+    result()
+    state_line("idle")
+
+
+def state_ask():
+    state_line("running")
+    init_line()
+    tool_input = {"command": "ls", "description": "List"}
+    assistant_tool_use("toolu_state_1", "Bash", tool_input)
+    state_line("requires_action")
+    ask_permission("cli-state-1", "Bash", "toolu_state_1", tool_input)
+    while not STATE_ANSWERED.wait(0.2):
+        if STATE_EOF.is_set():
+            return
+    state_line("running")
+    state_tool_result("toolu_state_1", "ran")
+    state_text("Listed")
+    result()
+    state_line("idle")
+
+
+def state_background():
+    state_line("running")
+    init_line()
+    assistant_tool_use("toolu_bg_1", "Agent", {
+        "description": "bg task", "prompt": "do the thing",
+        "subagent_type": "general-purpose", "run_in_background": True})
+    send({"type": "system", "subtype": "background_tasks_changed",
+          "tasks": [{"task_id": "bg-task-1", "run_id": "run-bg-task-1",
+                     "task_type": "local_agent", "subagent_type": "general-purpose",
+                     "description": "bg task"}],
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
+    task_started_background("bg-task-1", "toolu_bg_1", "bg task")
+    state_tool_result("toolu_bg_1", "Async agent launched successfully.")
+    state_text("ok")
+    result()
+    if not state_gate(""):
+        return
+    task_ended("bg-task-1", "toolu_bg_1", 1200)
+    send({"type": "system", "subtype": "background_tasks_changed", "tasks": [],
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
+    init_line()
+    state_text("agent reported done")
+    if not state_gate(".2"):
+        return
+    result()
+    state_line("idle")
+
+
+STATE_SCRIPTS = {"plain": state_plain, "ask": state_ask, "background": state_background}
+
+
+def state_turns():
+    while True:
+        prompt = STATE_PROMPTS.get()
+        if prompt is None:
+            return
+        STATE_ANSWERED.clear()
+        first = prompt.split(None, 1)[0].lower() if prompt.split() else ""
+        STATE_SCRIPTS.get(first, state_plain)()
+
+
+def state_main():
+    init_line()
+    turns = threading.Thread(target=state_turns, daemon=True)
+    turns.start()
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = message.get("type")
+        if kind == "control_request":
+            request = message.get("request", {})
+            subtype = request.get("subtype")
+            request_id = message.get("request_id")
+            if subtype == "initialize":
+                control_response(request_id, initialize_payload())
+            elif subtype == "interrupt":
+                control_response(request_id, {"still_queued": 0})
+            elif subtype == "get_context_usage":
+                control_response(request_id, {
+                    "totalTokens": 48000, "rawMaxTokens": 200000, "maxTokens": 180000,
+                    "percentage": 24, "model": TRACE_MODEL, "categories": []})
+            elif subtype == "mcp_status":
+                control_response(request_id, {"mcpServers": []})
+            elif subtype == "set_permission_mode":
+                control_response(request_id, {"mode": request.get("mode")})
+            else:
+                control_response(request_id, {})
+        elif kind == "control_response":
+            cli_request_id = message.get("response", {}).get("request_id")
+            if cli_request_id in PENDING:
+                # The script writes what follows the answer, in its own order.
+                PENDING.pop(cli_request_id, None)
+                STATE_ANSWERED.set()
+        elif kind == "user":
+            STATE_PROMPTS.put(trace_prompt_text(message))
+    STATE_EOF.set()
+    STATE_PROMPTS.put(None)
+    turns.join()
+
+
 def main():
     if LAUNCH_LOG_PATH:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
             log.write(json.dumps({"resume": resume_arg()}) + "\n")
     if MODE == "trace":
         trace_main()
+        return
+    if MODE == "session_state":
+        state_main()
         return
     if MODE == "refuse_unknown_resume" and resume_arg() not in (None, SESSION_ID):
         # Only this fixture's own session exists: the resume of any other id

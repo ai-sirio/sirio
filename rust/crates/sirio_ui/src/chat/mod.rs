@@ -3710,6 +3710,8 @@ impl Chat {
                 self.session_connectors_init(cx);
             }
             sirio_chat::ChatEvent::OtherSessionUpdate { .. } => {}
+            // Task 3 reads the CLI's own state here.
+            sirio_chat::ChatEvent::CliState { .. } => {}
             sirio_chat::ChatEvent::Trace(trace) => {
                 let started = matches!(trace, TraceEvent::TurnStarted { .. });
                 let changed = self.trace.apply(trace);
