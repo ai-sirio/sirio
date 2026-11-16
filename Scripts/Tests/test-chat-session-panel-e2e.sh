@@ -2390,12 +2390,15 @@ scenario_composer_resize() {
     '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and r["capRows"] > 16 and not r["resizing"]'
 
   echo "step: a release below the window ends the drag too, and the rows bottom out at 3"
-  # The screen (2400x1200) is taller than the window (2200x1000): window y 1080 is outside the window
-  # and still on the screen, so X delivers the release through the press's implicit grab. The 40-line
-  # draft is still in: an empty field anchors at 3 rows and dragging it down would change nothing.
-  local below_origin
+  # The screen must be taller than the window (2200x1000): window y 1080 is then outside the window
+  # and still on the screen, so X delivers the release through the press's implicit grab. On a screen
+  # too short, xdotool would clamp the pointer back into the window, so the step refuses to run there.
+  # The 40-line draft is still in: an empty field anchors at 3 rows and dragging it down would change nothing.
+  local below_origin screen_h
   below_origin=$(window_origin)
-  [ "$(( ${below_origin#* } + 1080 ))" -lt 1200 ] || fail "window y 1080 is off the screen (window origin $below_origin)"
+  screen_h=$(DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool getdisplaygeometry | awk '{print $2}')
+  [ "$(( ${below_origin#* } + 1080 ))" -lt "${screen_h:-0}" ] \
+    || fail "window y 1080 is not on the ${screen_h:-unknown} px tall screen (window origin $below_origin), so the release would land inside the window: start a taller Xvfb (Xvfb $DISPLAY_TARGET -screen 0 2400x1200x24 &)"
   drag_edge_to 1080
   wait_composer "released below the window, the field, the drawn maximum and the stored maximum are 3 and nothing is held" \
     'c["composerRow"]["fieldRows"] == 3 and c["composerRow"]["maxRows"] == 3 and c["composerRow"]["storedMaxRows"] == 3 and not c["composerRow"]["resizing"]'

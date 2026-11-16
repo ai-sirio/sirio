@@ -253,7 +253,8 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # settings row. Last, Sirio is stopped and started again under the same name: the restored chat (the
 # same tab) and a second chat opened beside it both read a maximum, drawn and stored, of 8, a 40-line
 # draft in each fills the field to 8 rows, and the sidebar keeps its dragged width. It needs
-# --display :N --window-size 2200x1000 and captures
+# --display :N --window-size 2200x1000 on a screen taller than the window (2400x1200), so a
+# release can land below it, and captures
 # frames/composer-resize-{rest,full,short,taller,outside,held,relaunched}.png.
 # The four unread scenarios run in the default set and need no display: `unread_parked_chat` (a
 # turn that ends while its worktree is not selected marks the chat unread, posts one notification
