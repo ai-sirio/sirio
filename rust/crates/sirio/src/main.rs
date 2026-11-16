@@ -5130,6 +5130,10 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
             "resumeAgentSessions".to_string(),
             report.resume_agent_sessions.to_string(),
         ),
+        (
+            "claudeIdeBridge".to_string(),
+            snapshot.claude_ide_bridge.to_string(),
+        ),
         ("autoNaming".to_string(), report.auto_naming.to_string()),
         (
             "limitChatHistory".to_string(),
@@ -11529,13 +11533,22 @@ impl SirioWorkspace {
         }) else {
             return;
         };
+        Self::ide_run_start(job, cx);
+    }
+
+    /// Runs a start on the background executor and installs it; a start that finds the switch
+    /// moved on hands back the job for the next one.
+    fn ide_run_start(job: ide_bridge::StartJob, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let started = cx.background_executor().spawn(async move { job.run() }).await;
             let _ = this.update(cx, |workspace, cx| {
                 let session = workspace.session.clone();
-                cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
-                    bridge.finish_start(started, &session);
+                let next = cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+                    bridge.finish_start(started, &session)
                 });
+                if let Some(next) = next {
+                    Self::ide_run_start(next, cx);
+                }
                 cx.notify();
             });
         })

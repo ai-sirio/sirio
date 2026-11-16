@@ -230,11 +230,11 @@ pub(crate) struct Started {
 pub(crate) struct IdeBridge {
     enabled: bool,
     running: Option<Running>,
-    /// The generation of the start now on the background executor, if any: a second request
-    /// to switch on, in the same generation, waits for it.
-    starting: Option<u64>,
+    /// A start is on the background executor. No second one is handed out while it runs: its
+    /// listener holds the saved port, and a second bind would find it taken and move the port.
+    starting: bool,
     /// Bumped by every switch off, so a start that finishes after the switch moved on is
-    /// dropped.
+    /// dropped (and, if the switch is on again, started afresh).
     generation: u64,
     /// The port saved last, tried first by the next bind.
     saved_port: Option<u16>,
@@ -264,7 +264,7 @@ pub(crate) fn start_at_launch(
     let mut bridge = IdeBridge {
         enabled,
         running: None,
-        starting: None,
+        starting: false,
         generation: 0,
         saved_port,
         token,
@@ -273,9 +273,9 @@ pub(crate) fn start_at_launch(
         connections: HashMap::new(),
         folders,
     };
-    if enabled && let Some(job) = bridge.begin_start() {
-        let started = job.run();
-        bridge.finish_start(started, db);
+    let mut next = if enabled { bridge.begin_start() } else { None };
+    while let Some(job) = next {
+        next = bridge.finish_start(job.run(), db);
     }
     bridge
 }
@@ -295,13 +295,14 @@ impl IdeBridge {
     }
 
     fn begin_start(&mut self) -> Option<StartJob> {
-        if self.running.is_some()
-            || self.starting == Some(self.generation)
-            || self.token.is_empty()
-        {
+        if self.token.is_empty() {
+            eprintln!("[ide] the bridge has no token and stays off");
             return None;
         }
-        self.starting = Some(self.generation);
+        if self.running.is_some() || self.starting {
+            return None;
+        }
+        self.starting = true;
         Some(StartJob {
             saved_port: self.saved_port,
             token: self.token.clone(),
@@ -311,27 +312,27 @@ impl IdeBridge {
         })
     }
 
-    /// Installs what a start produced, unless the switch moved on while it ran (then the
-    /// listener it bound is closed again, its lockfile first).
-    pub(crate) fn finish_start(&mut self, started: Started, db: &SessionStore) {
+    /// Installs what a start produced. When the switch moved on while it ran, the listener it
+    /// bound is closed again (its lockfile first) and, if the switch is on again, the job for a
+    /// fresh start is returned: it binds the saved port once this one has let go of it.
+    #[must_use]
+    pub(crate) fn finish_start(&mut self, started: Started, db: &SessionStore) -> Option<StartJob> {
         let Started {
             generation,
             outcome,
         } = started;
-        if self.starting == Some(generation) {
-            self.starting = None;
-        }
+        self.starting = false;
         let running = match outcome {
             Ok(running) => running,
             Err(error) => {
                 eprintln!("[ide] the bridge did not start: {}", error.kind());
-                return;
+                return None;
             }
         };
         if !self.enabled || generation != self.generation || self.running.is_some() {
             running.lock.remove();
             running.bridge.shutdown();
-            return;
+            return if self.enabled { self.begin_start() } else { None };
         }
         self.saved_port = Some(running.port);
         db.save_ide_bridge_endpoint(running.port, &self.token);
@@ -339,6 +340,7 @@ impl IdeBridge {
         // The catalog may have changed while the lockfile was being written.
         running.lock.rewrite(lock_body(&self.token, &self.folders));
         self.running = Some(running);
+        None
     }
 
     /// Turns the switch off: no new terminal gets the port, the lockfile goes, and only then

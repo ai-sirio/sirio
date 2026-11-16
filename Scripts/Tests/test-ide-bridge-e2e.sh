@@ -20,6 +20,8 @@ set -eEuo pipefail
 #   switch_off        `surface.ide.switch on=false`: the lockfile is gone, the client's connection
 #                     is closed, the state says enabled:false with no port; on=true: the same
 #                     port and token are back
+#   switch_flap       the switch sent off, on, off, on back to back (no wait for a start): the
+#                     port is the original, the state agrees, and exactly one lockfile exists
 #   port_survives_catalog_change
 #                     a worktree added with workspace.create joins the lockfile's workspace
 #                     folders, and a pane in it still gets the port
@@ -31,7 +33,8 @@ set -eEuo pipefail
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), socket.jsonl
-# (every control-socket request and answer), the lockfile with its authToken redacted, and the
+# (every control-socket request and answer: the state and switch calls as sent, and each sirioctl
+# call as its --dry-run prints the request it would send, with its exit status and output), the lockfile with its authToken redacted, and the
 # PID-matched window captures in frames/. Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--out-dir DIR]
@@ -230,6 +233,30 @@ else:
 PY
 export RUN_DIR
 sockcall() { python3 -I "$RUN_DIR/sockcall.py" "$@"; }
+# Every sirioctl call goes through this wrapper, which appends the request it makes (as
+# --dry-run prints it), its exit status and its output to socket.jsonl.
+cat >"$RUN_DIR/ctl-logged.py" <<'LOGGED'
+import json, os, subprocess, sys
+
+real, args = os.environ["CTL_REAL"], sys.argv[1:]
+dry = subprocess.run([real, "--dry-run", *args], capture_output=True, text=True)
+done = subprocess.run([real, *args], capture_output=True, text=True)
+try:
+    request = json.loads(dry.stdout)
+except ValueError:
+    request = dry.stdout.strip() or None
+with open(os.path.join(os.environ["RUN_DIR"], "socket.jsonl"), "a", encoding="utf-8") as log:
+    log.write(json.dumps({"sirioctl": args, "request": request, "exit": done.returncode,
+                          "output": done.stdout.strip()[:2000], "error": done.stderr.strip()[:500]},
+                         sort_keys=True) + "\n")
+sys.stdout.write(done.stdout)
+sys.stderr.write(done.stderr)
+sys.exit(done.returncode)
+LOGGED
+printf '#!/bin/sh\nexec python3 -I "%s/ctl-logged.py" "$@"\n' "$RUN_DIR" >"$RUN_DIR/ctl-logged"
+chmod +x "$RUN_DIR/ctl-logged"
+export CTL_REAL="$CTL"
+CTL="$RUN_DIR/ctl-logged"
 ctl() { echo "+ sirioctl $*"; "$CTL" "$@"; }
 say() { echo "--- $*"; }
 
@@ -237,6 +264,19 @@ say() { echo "--- $*"; }
 jq_py() { python3 -I -c 'import json, sys; d = json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
 ide_state() { sockcall surface.ide.state; }
 state_expr() { ide_state | jq_py "$1"; }
+
+# Polls `surface.settings.read` until it reports claudeIdeBridge=WANT (the Settings switch).
+expect_settings_switch() { # want
+  local tries=0 got=""
+  "$CTL" surface settings open >/dev/null 2>&1 || true
+  while [ "$tries" -lt 50 ]; do
+    got="$(sockcall surface.settings.read 2>/dev/null | jq_py 'd.get("claudeIdeBridge")' 2>/dev/null || true)"
+    [ "$got" = "$1" ] && { echo "OK: surface.settings.read: claudeIdeBridge=$1"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$CASE: surface.settings.read never reported claudeIdeBridge=$1 (last: ${got:-none})"
+}
 
 # Polls until `state_expr EXPR` prints WANT.
 expect_state() { # label expr want
@@ -264,7 +304,7 @@ app_start() { # [NAME=value...]: extra variables for the app
   done
   [ -S "$SIRIO_SOCKET" ] || fail "sirio never opened its control socket"
   for _ in $(seq 1 600); do
-    "$CTL" surface tabs read >/dev/null 2>&1 && return 0
+    "$CTL_REAL" surface tabs read >/dev/null 2>&1 && return 0
     sleep 0.1
   done
   fail "sirio's control actions never became ready"
@@ -532,6 +572,7 @@ case_switch_off() {
   echo "OK: the lockfile is gone"
   wait_client "the connection closed" 'r.get("event") == "closed"' 1
   expect_state "the state says off" 'd["enabled"]' False
+  expect_settings_switch false
   expect_state "no port while off" 'd["port"]' None
   expect_state "no connections while off" 'len(d["connections"])' 0
   [ "$(pane_port "$WT_ID")" = "-" ] || fail "$CASE: a pane started with the switch off has a port"
@@ -542,9 +583,28 @@ case_switch_off() {
   [ "$(basename "$file" .lock)" = "$PORT" ] || fail "$CASE: the port changed from $PORT to $(basename "$file" .lock)"
   [ "$(lock_field "$file" authToken)" = "$TOKEN" ] || fail "$CASE: the token changed with the switch"
   expect_state "back on, the same port" 'd["port"]' "$PORT"
+  expect_settings_switch true
   [ "$(pane_port "$WT_ID")" = "$PORT" ] || fail "$CASE: a pane started after the switch came back lacks the port"
   echo "OK: on again: port $PORT and the token are the same, panes get the port"
   end_client
+}
+
+case_switch_flap() {
+  local file count
+  sockcall surface.ide.switch on=false >/dev/null
+  sockcall surface.ide.switch on=true >/dev/null
+  sockcall surface.ide.switch on=false >/dev/null
+  sockcall surface.ide.switch on=true >/dev/null
+  file="$(wait_lockfile)"
+  expect_state "the flapped switch is on" 'd["enabled"]' True
+  expect_state "the flapped bridge has a port" 'd["port"] is not None' True
+  [ "$(basename "$file" .lock)" = "$PORT" ] || fail "$CASE: the port moved from $PORT to $(basename "$file" .lock)"
+  expect_state "the state's port is still the original" 'd["port"]' "$PORT"
+  sleep 1
+  count="$(ls "$LOCK_DIR"/*.lock | wc -l)"
+  [ "$count" = 1 ] || fail "$CASE: $count lockfiles exist: $(ls "$LOCK_DIR")"
+  [ "$(lock_field "$(lock_file)" authToken)" = "$TOKEN" ] || fail "$CASE: the token changed"
+  echo "OK: after off, on, off, on: port $PORT, one lockfile"
 }
 
 case_port_survives_catalog_change() {
@@ -626,6 +686,7 @@ case_run lockfile_and_env case_lockfile_and_env
 case_run token_refused case_token_refused
 case_run handshake case_handshake
 case_run switch_off case_switch_off
+case_run switch_flap case_switch_flap
 case_run port_survives_catalog_change case_port_survives_catalog_change
 case_run restart_keeps_port case_restart_keeps_port
 case_run inherited_port case_inherited_port
