@@ -3955,7 +3955,8 @@ impl Render for Sidebar {
         // the next frame without scheduling one, so a cached mount would
         // replay the row as it was until some unrelated frame came: a tab
         // closed while nothing else redraws, such as the last Primary tab
-        // under the rail, kept its pill.
+        // under the rail, kept its pill. The Sessions cards below follow the
+        // same rule, or a card would keep its old status, time or cursor.
         let cache_rows = self.cache_rows;
         let mut rendered_rows = Vec::new();
         if view == SidebarView::Projects {
@@ -4124,11 +4125,13 @@ impl Render for Sidebar {
                     cursor: walk_index == session_cursor,
                 };
                 let key = inputs.row.key.clone();
+                let mut changed = false;
                 let view = match previous.remove(&key) {
                     Some(view) => {
                         view.update(cx, |view, cx| {
                             if view.inputs != inputs {
                                 view.inputs = inputs;
+                                changed = true;
                                 cx.notify();
                             }
                         });
@@ -4140,7 +4143,7 @@ impl Render for Sidebar {
                         render_count: 0,
                     }),
                 };
-                session_elements.push(if self.cache_rows {
+                session_elements.push(if cache_rows && !changed {
                     view.clone()
                         .cached(StyleRefinement::default().w_full().h(px(card_height)))
                         .into_any_element()
@@ -8386,6 +8389,62 @@ mod tests {
                 assert_eq!(now, was, "session {key} must be replayed, not re-rendered");
             }
         }
+    }
+
+    #[gpui::test]
+    async fn a_cached_session_row_is_redrawn_in_the_frame_its_status_changes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        // Nothing animates: a running row's bloom asks for frames of its own,
+        // and any frame after the change would hide a stale replay.
+        let tab = |id: usize, at: i64, status| SidebarTab {
+            tab: SidebarTabRef::Open(id),
+            title: format!("Chat {id}"),
+            selected: false,
+            kind: TabKind::AgentChat,
+            agent: AgentMark::for_agent_id("claude"),
+            persistence_id: format!("tab-{id}"),
+            status: Some(status),
+            last_event_at: Some(at),
+            unread: false,
+        };
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = tests_support::sidebar_with_one_project(cx);
+            sidebar.set_worktree_tabs(
+                1,
+                vec![tab(1, 1_000, ActivityStatus::Done), tab(2, 5_000, ActivityStatus::Done)],
+                cx,
+            );
+            sidebar.set_cache_rows(true);
+            sidebar.set_view(SidebarView::Sessions, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("session-status-settled-1").is_some());
+        assert!(cx.debug_bounds("session-idle-1").is_none());
+
+        // The change's own frame is the last one drawn: nothing else asks for
+        // another. A row replayed from its cache records no debug bounds, so
+        // its new selector proves it was drawn in that frame from its new
+        // inputs; a stale replay leaves the row with none.
+
+        window
+            .update(&mut cx, |sidebar, _window, cx| {
+                sidebar.set_worktree_tabs(
+                    1,
+                    vec![tab(1, 1_000, ActivityStatus::Idle), tab(2, 5_000, ActivityStatus::Done)],
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("session-idle-1").is_some(),
+            "the changed row is drawn anew, not replayed from its cache"
+        );
     }
 
     /// An archived chat in worktree row 1 of `sidebar_with_one_project` —
