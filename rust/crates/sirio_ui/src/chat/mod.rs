@@ -71,6 +71,7 @@ pub use session_panel::{
 use composer_view::{
     TokenPopup, assemble_prompt, effort_target, mention_token, normalized_record, slash_token,
 };
+pub use question_dock::ElicitationAct;
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use trace::{RevealTarget, TraceStore};
 

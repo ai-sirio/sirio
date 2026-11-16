@@ -19,6 +19,18 @@ actions!(
     [DockPrevious, DockNext, DockConfirm, DockCancel]
 );
 
+/// What the debug control verb does to the open question's dock, by the
+/// path the matching key takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ElicitationAct {
+    /// A digit key or a click on the 1-based row.
+    Row(usize),
+    /// Enter in the free-text row.
+    Text(String),
+    /// Esc.
+    Cancel,
+}
+
 use super::{AnswerOption, AnswerTextInput, Chat, Entry, PlanApproval, TRANSCRIPT_WIDTH};
 
 /// What the dock draws for the open question.
@@ -954,6 +966,49 @@ impl Chat {
             DockRow::Dismiss => self.dismiss_permission(view.request_id, cx),
             DockRow::Skip => {}
         }
+    }
+
+    /// Debug control verb: does to the open question `request_id` what a
+    /// user's key does. Refuses a request that is not the question the dock is
+    /// showing, and a row key the dock would still ignore as unarmed.
+    pub fn elicitation_act(
+        &mut self,
+        request_id: u64,
+        act: ElicitationAct,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let view = question_view(&self.entries)
+            .filter(|view| view.request_id == request_id)
+            .ok_or_else(|| format!("request {request_id} is not the open question"))?;
+        match act {
+            ElicitationAct::Row(number) => {
+                let index = number
+                    .checked_sub(1)
+                    .filter(|index| *index < view.rows.len())
+                    .ok_or_else(|| {
+                        format!("the dock has {} rows, not row {number}", view.rows.len())
+                    })?;
+                // A frame shows the dock and starts its arming clock; a run
+                // that paints none (E2E --state-only) gets the same from here.
+                // On a painted run this is a no-op: the frame did it already.
+                self.sync_question_dock(Some(&view), window, cx);
+                if matches!(view.rows[index], DockRow::Option(_) | DockRow::Skip)
+                    && !self.dock_armed(&view, cx)
+                {
+                    return Err("the dock is not armed yet; retry".to_string());
+                }
+                self.activate_dock_row(index, window, cx);
+            }
+            ElicitationAct::Text(text) => {
+                if !view.rows.iter().any(|row| matches!(row, DockRow::FreeText(_))) {
+                    return Err("the dock has no free-text row".to_string());
+                }
+                self.answer_question_text(request_id, &text, cx);
+            }
+            ElicitationAct::Cancel => self.dock_cancel(&DockCancel, window, cx),
+        }
+        Ok(())
     }
 
     /// The transcript index of the open question the dock is on, when its

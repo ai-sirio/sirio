@@ -288,6 +288,20 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # summary, body, actions of every Notify) and attention-notification_click.json in the out dir.
 # Whether a real daemon (mako) invokes `default` on a body click is a hand check.
 # The script seeds only light or dark: the Onice base colour is a hand check.
+# Four scenarios run the fixture's elicitation mode (stubs/elicitation) and drive the open MCP
+# elicitation through the debug-only `surface.chat.elicitation` (row, text or cancel: the paths a
+# digit key, Enter in the free-text row and Esc take), reading the fixture's responses log
+# (SIRIO_FIXTURE_RESPONSE_LOG, copied to the out dir as <scenario>-responses.jsonl):
+# `elicitation_form` (colour blue, "abc" refused on count with an error and the step kept, 2, both
+# optionals skipped, Accept; the agent heard exactly accept with {colour: blue, count: 2}; the chat
+# read needs-input while it was open), `elicitation_url` (the link offers example.com; the row's accept
+# is answered (the responses log), and the link's open is checked per mode: a --state-only run
+# reads the live app's /proc environ, which names no display, so gpui runs headless and its open_uri
+# is a no-op; a --display run requires the xdg-open stub (first on the login PATH) to record the URL;
+# the server's elicitation_complete reads completed; the agent heard accept with no content),
+# `elicitation_withdrawn` (the agent withdraws the form: it reads withdrawn, still after the turn,
+# and nothing answered it) and `unhandled_request` (an unknown control request gets an error answer
+# naming future_thing, and the turn still ends).
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 
