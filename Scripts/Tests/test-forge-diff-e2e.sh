@@ -15,6 +15,9 @@ set -euo pipefail
 # snapshot tabs come back with the same text, and the startup sweep keeps
 # their refs. B3a adds review-thread counts and reveals, unified/split
 # anchors, resolved folds, outdated sections and cards after a relaunch.
+# Every scenario saves its first token while a stub gh holds the host's first
+# probe (#613): the tab opened afterwards resolves from the cache, so it proves
+# the cache kept the answer read after the save, not the one read before it.
 #
 # The artifact: --out-dir DIR (default artifacts/forge-diff-e2e-<stamp>-<pid>)
 # keeps transcript.log, one app log per launch and one fake-forge request log
@@ -116,6 +119,22 @@ wait_for() { # key value sirioctl-args...
   done
   reply "$@" || true
   fail "$key never became '$want' (last: '$got') for: $*"
+}
+wait_path() { # path -- waits up to 15 s for it to exist
+  for _ in $(seq 1 75); do
+    [ -e "$1" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+wait_count() { # fixed-string file count -- waits up to 15 s for that many lines with it
+  local n
+  for _ in $(seq 1 75); do
+    n=$(grep -cF -- "$1" "$2" 2>/dev/null || true)
+    [ "${n:-0}" -ge "$3" ] && return 0
+    sleep 0.2
+  done
+  return 1
 }
 assert_contains() { # key needle sirioctl-args...
   local key=$1 needle=$2
@@ -419,6 +438,41 @@ make_worktree() { # dir remote-url fetch-url
   git -C "$1" config "url.$3.insteadOf" "$2"
 }
 
+# gh as every app of this run sees it: installed, never signed in. The first
+# `auth status` of a scenario (its first host probe) waits on the fifo
+# $GH_GATE until connect_and_open opens it. The guard shell is the app's SHELL:
+# it drops login profiles, which would put a real gh back ahead of the stub.
+install_gh_stub() {
+  mkdir -p "$RUN_DIR/bin"
+  cat >"$RUN_DIR/bin/gh" <<'STUB'
+#!/bin/bash
+# The held probe claims the gate, names its pid and waits for one line. It
+# opens the fifo read-write, which never blocks, and waits at most 20 s, so a
+# run that fails while it waits leaves nothing behind.
+if [ "$1 $2" = "auth status" ] && [ -p "$GH_GATE" ] && mkdir "$GH_GATE.entered" 2>/dev/null; then
+  echo $$ >"$GH_GATE.pid.new" && mv "$GH_GATE.pid.new" "$GH_GATE.pid"
+  exec 3<>"$GH_GATE"
+  read -r -t 20 _ <&3 && touch "$GH_GATE.done"
+fi
+echo "gh (e2e stub): not signed in" >&2
+exit 1
+STUB
+  chmod +x "$RUN_DIR/bin/gh"
+  cat >"$RUN_DIR/guard-shell" <<GUARD
+#!/bin/sh
+PATH="$RUN_DIR/bin:$PATH"
+export PATH
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -c|-[!-]*c*) shift; exec /bin/sh -c "\$1" ;;
+    *) shift ;;
+  esac
+done
+exec /bin/sh
+GUARD
+  chmod +x "$RUN_DIR/guard-shell"
+}
+
 launch_app() { # host [log-name]
   local log="$RUN_DIR/${2:-$SCENARIO-app}.log"
   export SIRIO_SOCKET="$RUN_DIR/$SCENARIO.sock"
@@ -426,14 +480,15 @@ launch_app() { # host [log-name]
   export SIRIO_CREDENTIALS="$RUN_DIR/$SCENARIO-credentials.json"
   export SIRIO_FORGE_TEST_ENDPOINTS="$1=http://127.0.0.1:$PORT"
   export GH_CONFIG_DIR="$RUN_DIR/gh-$SCENARIO" GLAB_CONFIG_DIR="$RUN_DIR/glab-$SCENARIO"
+  export GH_GATE="$RUN_DIR/$SCENARIO-gh-gate"
   mkdir -p "$GH_CONFIG_DIR" "$GLAB_CONFIG_DIR"
   chmod 700 "$GLAB_CONFIG_DIR"
   unset GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy || true
   rm -f "$SIRIO_SOCKET"
   if [ "$STATE_ONLY" -eq 1 ]; then
-    (cd "$WT" && exec env -u DISPLAY -u WAYLAND_DISPLAY "$BIN" >"$log" 2>&1) &
+    (cd "$WT" && exec env -u DISPLAY -u WAYLAND_DISPLAY PATH="$RUN_DIR/bin:$PATH" SHELL="$RUN_DIR/guard-shell" "$BIN" >"$log" 2>&1) &
   else
-    (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 "$BIN" >"$log" 2>&1) &
+    (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 PATH="$RUN_DIR/bin:$PATH" SHELL="$RUN_DIR/guard-shell" "$BIN" >"$log" 2>&1) &
   fi
   APP_PID=$!
   for _ in $(seq 1 75); do
@@ -456,20 +511,40 @@ quit_app() { # the graceful quit a user makes, which flushes the session
 }
 
 connect_and_open() { # host forge number
+  # The token is saved while the first host probe still runs (#613): the stub
+  # gh holds that probe at the gate until the save has connected the list.
+  local requests="$RUN_DIR/$SCENARIO-forge-requests.log" account writer stub metas
+  mkfifo "$GH_GATE"
   ctl project add "$WT"
   ctl select-workspace --workspace "$WT"
   ctl surface change-requests show
-  # Let the initial host probe settle before saving a token, as the sign-in UI does.
-  if [ "$2" = github ]; then
-    wait_for state not-connected surface change-requests read
-  else
-    wait_for state unknown-forge surface change-requests read
-  fi
-  wait_for host "$1" surface change-requests read
-  local account
+  wait_path "$GH_GATE.pid" || fail "the first host probe never reached the stub gh"
+  stub=$(cat "$GH_GATE.pid")
+  echo "OK: the first host probe is held at the gate"
   account=$(read_field account surface change-requests token --host "$1" --forge "$2" --token good) || fail "the token was not accepted"
   [ "$account" = "fake-user" ] || fail "the token signed in as '$account'"
   wait_for state ready surface change-requests read
+  # The app kills a probe after 10 s. That ends the stub's shell, which then
+  # never reports .done, so a save slower than that is named here instead.
+  kill -0 "$stub" 2>/dev/null || fail "the app's 10 s probe timeout ended the held probe before it could be released"
+  # Only now does the held probe answer, from what it read before the save.
+  # It then asks the forge's metadata, which no other probe of this scenario
+  # does once a token is stored, and its answer reaches the cache right after.
+  metas=$(grep -cF 'GET /api/v3/meta ' "$requests" || true)
+  (echo open >"$GH_GATE") &
+  writer=$!
+  if ! wait_path "$GH_GATE.done"; then
+    kill "$writer" 2>/dev/null || true
+    kill -0 "$stub" 2>/dev/null || fail "the app's 10 s probe timeout ended the held probe before it could be released"
+    fail "the held probe never finished"
+  fi
+  wait "$writer" 2>/dev/null || true
+  wait_count 'GET /api/v3/meta ' "$requests" $((metas + 1)) || fail "the held probe never asked the forge's metadata"
+  echo "OK: the held probe answered after the save"
+  # A margin for that answer to land. Too short a one could only let a build
+  # without the fix pass; a fixed build drops the stale answer whenever it lands.
+  sleep 0.5
+  wait_for host "$1" surface change-requests read
   ctl surface change-request open "$3"
   wait_for state loaded surface change-request read
 }
@@ -1042,6 +1117,7 @@ PY
   quit_app; stop_forge
 }
 
+install_gh_stub
 scenario_success github ghe.test github 101 '#101' https://ghe.test/acme/widgets.git commit-first
 scenario_failure 401 'http://127.0.0.1:@PORT@/acme/widgets.git' 'terminal prompts disabled' 15
 scenario_failure hang 'ssh://hang.invalid/acme/widgets.git' 'did not answer' 25

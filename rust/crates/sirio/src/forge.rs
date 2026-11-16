@@ -266,6 +266,10 @@ pub(crate) struct ForgeHub {
     credentials: Option<CredentialStore>,
     resolutions: Mutex<HashMap<String, Resolution>>,
     clients: Mutex<HashMap<ClientKey, Arc<ForgeClient>>>,
+    /// How many times `drop_host` has run for each host. A cache fill read
+    /// under an older count may predate a saved token or a changed setting,
+    /// so it is not kept.
+    drops: Mutex<HashMap<String, u64>>,
     revisions: RevisionFetcher,
 }
 
@@ -276,6 +280,7 @@ impl ForgeHub {
             credentials,
             resolutions: Mutex::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
+            drops: Mutex::new(HashMap::new()),
             revisions: RevisionFetcher::default(),
         }
     }
@@ -311,16 +316,38 @@ impl ForgeHub {
         resolve(host, setting.as_ref(), stored, probes)
     }
 
-    fn resolution(&self, host: &str) -> Resolution {
-        if let Some(found) = self.resolutions.lock().expect("resolutions lock").get(host) {
-            return *found;
-        }
-        let resolution = self.detect(host, &SystemProbes);
-        self.resolutions
+    /// How many times `drop_host` has run for `host`.
+    fn drops_of(&self, host: &str) -> u64 {
+        self.drops
             .lock()
-            .expect("resolutions lock")
-            .insert(host.to_string(), resolution);
-        resolution
+            .expect("drops lock")
+            .get(host)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// What `host` resolves to, and the count of `drop_host` calls for it
+    /// that this holds for: a client built from it is kept only while that
+    /// count stands. Detection runs outside the lock, so a `drop_host` can
+    /// land meanwhile; what it read may then predate that drop, and it asks
+    /// again rather than keep it.
+    fn resolution(&self, host: &str) -> (Resolution, u64) {
+        loop {
+            let seen = {
+                let resolutions = self.resolutions.lock().expect("resolutions lock");
+                let drops = self.drops_of(host);
+                if let Some(found) = resolutions.get(host) {
+                    return (*found, drops);
+                }
+                drops
+            };
+            let resolution = self.detect(host, &SystemProbes);
+            let mut resolutions = self.resolutions.lock().expect("resolutions lock");
+            if self.drops_of(host) == seen {
+                resolutions.insert(host.to_string(), resolution);
+                return (resolution, seen);
+            }
+        }
     }
 
     fn client(
@@ -328,6 +355,7 @@ impl ForgeHub {
         forge: Forge,
         means: Means,
         target: ForgeTarget,
+        seen: u64,
     ) -> Result<Arc<ForgeClient>, Connection> {
         let key = client_key(&target, means);
         if let Some(client) = self.clients.lock().expect("clients lock").get(&key) {
@@ -349,19 +377,33 @@ impl ForgeHub {
             },
         };
         let client = Arc::new(ForgeClient::new(forge, target, transport));
-        self.clients
-            .lock()
-            .expect("clients lock")
-            .insert(key, client.clone());
+        let mut clients = self.clients.lock().expect("clients lock");
+        // A `drop_host` for this host since `seen` may have changed the forge,
+        // the means or the token this client was built from: it then serves
+        // this call only.
+        if self.drops_of(&key.0) == seen {
+            clients.insert(key, client.clone());
+        }
         Ok(client)
     }
 
     /// Drop what was resolved and built for `host`; the next call asks again.
+    /// Its count moves under the `resolutions` lock, which is held through
+    /// both removals: a resolution read under the new count is read after
+    /// this drop, and a fill read under the old one is not kept. Moved
+    /// outside that lock, the count would let a stale resolution or client
+    /// back in. A writer calls this after its write, never before: a fill
+    /// starting between the two would read the old state under the new count,
+    /// and be kept.
     fn drop_host(&self, host: &str) {
-        self.resolutions
+        let mut resolutions = self.resolutions.lock().expect("resolutions lock");
+        *self
+            .drops
             .lock()
-            .expect("resolutions lock")
-            .remove(host);
+            .expect("drops lock")
+            .entry(host.to_string())
+            .or_default() += 1;
+        resolutions.remove(host);
         self.clients
             .lock()
             .expect("clients lock")
@@ -375,7 +417,8 @@ impl ChangeRequestSource for ForgeHub {
         let Some(target) = target else {
             return Connection::NoForgeRemote;
         };
-        match self.resolution(&target.host) {
+        let (resolution, seen) = self.resolution(&target.host);
+        match resolution {
             Resolution::UnknownForge => Connection::UnknownForge { host: target.host },
             Resolution::NotConnected { forge } => Connection::NotConnected {
                 forge,
@@ -398,7 +441,7 @@ impl ChangeRequestSource for ForgeHub {
                             && branch.as_deref() == Some(linked_branch.as_str())
                     })
                     .map(|(reference, _)| reference);
-                match self.client(forge, means, target) {
+                match self.client(forge, means, target, seen) {
                     Ok(client) => Connection::Ready(ReadyConnection {
                         client,
                         means,
@@ -442,7 +485,8 @@ impl ChangeRequestSource for ForgeHub {
     }
 
     fn client_for(&self, reference: &ChangeRef) -> Result<Arc<ForgeClient>, Connection> {
-        match self.resolution(&reference.host) {
+        let (resolution, seen) = self.resolution(&reference.host);
+        match resolution {
             Resolution::Ready { forge, means } if forge == reference.forge => self.client(
                 forge,
                 means,
@@ -450,6 +494,7 @@ impl ChangeRequestSource for ForgeHub {
                     host: reference.host.clone(),
                     project: reference.project.clone(),
                 },
+                seen,
             ),
             Resolution::UnknownForge => Err(Connection::UnknownForge {
                 host: reference.host.clone(),
@@ -555,7 +600,8 @@ impl ChangeRequestSource for ForgeHub {
             .into_iter()
             .map(|host| {
                 let setting = settings.iter().find(|setting| setting.host == host);
-                let (forge, means) = match self.resolution(&host) {
+                let (resolution, seen) = self.resolution(&host);
+                let (forge, means) = match resolution {
                     Resolution::Ready { forge, means } => (Some(forge), Some(means)),
                     Resolution::NotConnected { forge } => (Some(forge), None),
                     Resolution::UnknownForge => (setting.map(|setting| setting.forge), None),
@@ -569,6 +615,7 @@ impl ChangeRequestSource for ForgeHub {
                                 host: host.clone(),
                                 project: String::new(),
                             },
+                            seen,
                         )
                         .ok(),
                     _ => None,
