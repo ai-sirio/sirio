@@ -243,7 +243,7 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # frames/composer-keys-*.png.
 # The composer_resize scenario (this script's own, default stub) proves the composer's resizable
 # maximum on the `composerRow` of `surface.chat.read` (`capRows`, `maxRows`, `storedMaxRows`,
-# `fieldRows`, `resizing`, `edge`, `root`), which exists only once a frame paints. At 2200x1000 the
+# `fieldRows`, `band`, `resizing`, `edge`, `root`), which exists only once a frame paints. At 2200x1000 the
 # stored 12 is drawn and the empty field shows 3 rows; a 40-line draft fills it to 12; a 2200x400
 # window caps the field at half the chat minus the band's fixed 61 px allowance (4 rows) while the stored
 # maximum stays 12, and the band takes at most half the chat. Then real X drags on the

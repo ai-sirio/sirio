@@ -29,7 +29,8 @@ Decided with the user, in order:
    setter. Presented as the one sensible way; the user said "procedi".
 
 Calls made in the brainstorm, stated to the user and not contested, listed again in
-§9 with the other calls for checking: the cap is half the chat's height; the chosen
+§9 with the other calls for checking: the cap is half the chat's height minus a fixed
+band allowance (revised 2026-11-16, see §3.3); the chosen
 value is one app-wide preference saved across relaunches, not one per chat.
 
 ## §1 Goals, non-goals, anti-goals
@@ -37,7 +38,8 @@ value is one app-wide preference saved across relaunches, not one per chat.
 **Goals**
 
 - A drag on the composer's top edge sets how many rows the field may grow to, from
-  3 rows up to the cap of §3.3, which keeps half the chat above the band.
+  3 rows up to the cap of §3.3, which keeps half the chat above the band
+  (bar the 3-row floor).
 - The value holds for every chat, those open and those opened later, and survives a
   relaunch.
 - A user who never drags sees today's behaviour, 3 rows growing to 12, in any chat
@@ -61,7 +63,7 @@ value is one app-wide preference saved across relaunches, not one per chat.
 **Anti-goals** (it fails even if it works)
 
 - The composer takes the transcript's room: the cap keeps at least half the chat
-  for everything above the field.
+  for everything above the band.
 - Changing the maximum touches the draft: text, caret, selection, undo history and
   IME composition stay as they were. The field is never rebuilt.
 - The field stays pinned at the dragged height after the drag is over, whichever way
@@ -151,7 +153,9 @@ value is one app-wide preference saved across relaunches, not one per chat.
   `BAND_ALLOWANCE = 61` px, where `chat_height` is the chat
   root's height as the probe last measured it: the whole chat (transcript, question
   dock, queue and composer), never the composer or the transcript alone.
-- The cap leaves half the chat for everything above the band. `BAND_ALLOWANCE` is a
+- The cap leaves half the chat for everything above the band, with one exception: under
+  230 px of chat the 3-row floor wins, so the band can then pass half the chat.
+  `BAND_ALLOWANCE` is a
   fixed constant, not a measurement: the band's height minus its field rows' text
   height when no chips and no attach error are shown. It covers the band's rule,
   its top padding, the field's padding, the gap to the tool row, the tool row and the
@@ -297,7 +301,7 @@ its own.
 
 ## §9 Calls made in the brainstorm, for the user to check
 
-1. The cap keeps half the chat above the band: half the chat's height minus a fixed
+1. The cap keeps half the chat above the band (bar the 3-row floor): half the chat's height minus a fixed
    61 px band allowance, in rows (revised 2026-11-16, see §3.3).
 2. One app-wide value, saved across relaunches; not per chat.
 3. The edge shows nothing until hovered (the cursor changes), like the drawer's.
@@ -309,4 +313,4 @@ its own.
 8. The cap applies to the default of 12 as well: in a chat under 554 px tall, a
    profile that never dragged gets fewer than 12 rows, where today it gets 12. Raised
    by the builder check; settled this way because it keeps one rule (the transcript
-   always keeps half the chat above the band) and needs no "never dragged" state.
+   keeps half the chat above the band, bar the 3-row floor) and needs no "never dragged" state.

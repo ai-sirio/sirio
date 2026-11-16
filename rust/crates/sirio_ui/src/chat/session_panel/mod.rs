@@ -584,7 +584,7 @@ impl Chat {
                     let entity = entity.clone();
                     cx.defer(move |cx| entity.update(cx, |_, cx| cx.notify()));
                 }
-                // The field may grow to half the chat; a new cap re-syncs it.
+                // The field may grow to half the chat less the band's allowance; a new cap re-syncs it.
                 let cap = cap_rows(f32::from(bounds.size.height));
                 if row.cap_rows.get() != Some(cap) {
                     row.cap_rows.set(Some(cap));

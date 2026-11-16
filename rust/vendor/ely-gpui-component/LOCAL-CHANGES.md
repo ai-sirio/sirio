@@ -1017,7 +1017,7 @@ A sync with upstream must keep the four readers.
 ### A multi-line field's rows, changed live (composer resize)
 
 Sirio lets the user drag the chat composer's top edge to set how many rows its
-field may grow to, and caps that at half the chat's height, which changes as the
+field may grow to, and caps that at half the chat's height less the band's fixed allowance, which changes as the
 window is resized. `multi_line(min, max)` only builds the field with its rows.
 
 - `src/forms/text/mod.rs`: `TextInput::set_rows(min, max, cx)` replaces the rows

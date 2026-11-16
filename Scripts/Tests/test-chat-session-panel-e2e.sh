@@ -2366,7 +2366,7 @@ scenario_composer_resize() {
   wait_composer "the field grew to 12 rows" 'c["composerRow"]["fieldRows"] == 12'
   capture composer-resize-full
 
-  echo "step: a window 400 px tall caps the field at half the chat, below the stored 12"
+  echo "step: a window 400 px tall caps the field at half the chat less the band's allowance, below the stored 12"
   local window
   window=$(find_window)
   [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID"
