@@ -14565,6 +14565,47 @@ two"
     }
 
     #[gpui::test]
+    async fn a_form_arriving_mid_message_leaves_the_typed_text_out_of_the_answer(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        // The prompt is sent and the user goes on typing before the CLI's
+        // form comes back: the composer holds focus and text on arrival.
+        chat.update(cx, |chat, cx| {
+            chat.set_composer_text("form", cx);
+            chat.send(cx);
+            chat.set_composer_text("half a message", cx);
+        });
+        cx.update(|window, cx| {
+            let handle = chat.read(cx).composer_field.read(cx).focus_handle(cx);
+            handle.focus(window, cx);
+        });
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Elicitation { .. }))
+        });
+        arm_dock(cx);
+        cx.simulate_input("1 more file");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let_the_agent_answer(cx);
+
+        assert!(elicitation_answers(&log).is_empty(), "nothing reached the CLI");
+        let (step, values, _, resolved) = elicitation_state(&chat, cx);
+        assert_eq!((step, resolved), (0, None), "the form is still open on its first step");
+        assert_eq!(values, serde_json::json!({}));
+        chat.read_with(&cx.cx, |chat, _| {
+            assert_eq!(chat.question_answer.draft, "");
+        });
+        assert!(!cx.update(|window, cx| chat.read(cx).question_answer.focus.is_focused(window)));
+    }
+
+    #[gpui::test]
     async fn escape_on_a_free_text_step_still_cancels_the_form(cx: &mut TestAppContext) {
         let (chat, cx) = open_integer_form(cx);
         cx.simulate_keystrokes("escape");

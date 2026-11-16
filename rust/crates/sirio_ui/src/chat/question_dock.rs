@@ -552,7 +552,19 @@ impl Chat {
                 let focus_in_chat = dock_or_field_focused
                     || composer.contains_focused(window, cx)
                     || self.transcript_focus.is_focused(window);
-                if focus_in_chat {
+                // A message half typed in the composer stays there, and focus
+                // with it: handing focus to the dock or the field would let
+                // the rest of the message (a digit, an Enter) answer an MCP
+                // server. The composer is disabled while a question is
+                // pending: it reverts every edit, and no key typed there
+                // reaches the dock or the field. The user answers by
+                // clicking the dock.
+                let typing_a_message = matches!(
+                    self.entries.get(view.entry_index),
+                    Some(Entry::Elicitation { .. })
+                ) && composer.contains_focused(window, cx)
+                    && !self.composer_field.read(cx).text().is_empty();
+                if focus_in_chat && !typing_a_message {
                     // A free-text step starts on its field: typed characters
                     // are text there, never the dock's row shortcuts.
                     let free_text = match self.entries.get(view.entry_index) {
