@@ -45,7 +45,8 @@ use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{
-        Chat, ChatControlSnapshot, ChatEvent, EffortListAction, ElicitationAct, SessionPanelAction,
+        Chat, ChatClaim, ChatControlSnapshot, ChatEvent, EffortListAction, ElicitationAct,
+        SessionPanelAction,
     },
     composer_prefs::ComposerPrefs,
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
@@ -12984,22 +12985,16 @@ impl SirioWorkspace {
         }
     }
 
-    /// What a chat claims about itself: waiting on the user while its turn
-    /// streams and holds an open question, running while the turn streams, done
-    /// once a turn has completed, and nothing before that. Both the per-frame
-    /// sync and the chat's own observer read it, so the two cannot disagree.
+    /// What a chat claims about itself, mapped onto an `AgentStatus`: the chat
+    /// decides (`Chat::claim`: the CLI's own state when it reports one,
+    /// otherwise its turns). Both the per-frame sync and the chat's own
+    /// observer read it, so the two cannot disagree.
     fn chat_status_evidence(chat: &Chat) -> Option<AgentStatus> {
-        if chat.is_streaming() {
-            Some(if chat.awaits_user() {
-                AgentStatus::NeedsInput
-            } else {
-                AgentStatus::Running
-            })
-        } else if chat.has_completed_turn() {
-            Some(AgentStatus::Done)
-        } else {
-            None
-        }
+        chat.claim().map(|claim| match claim {
+            ChatClaim::Running => AgentStatus::Running,
+            ChatClaim::NeedsInput => AgentStatus::NeedsInput,
+            ChatClaim::Done => AgentStatus::Done,
+        })
     }
 
     /// What a live surface claims about itself — the evidence
@@ -24823,6 +24818,8 @@ impl SirioWorkspace {
             ),
             // The effort level in force, by its wire value; empty when the session has none.
             ("effort".to_string(), snapshot.effort.unwrap_or_default()),
+            // The CLI's own session state; empty until it reports one.
+            ("sessionState".to_string(), snapshot.session_state),
         ]
     }
 

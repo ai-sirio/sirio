@@ -1121,7 +1121,8 @@ def resume_arg():
 # is written BEFORE the `can_use_tool` request it announces, and the last
 # `idle` after the last `result`.
 #
-# The first word of a prompt picks the script: `plain`, `ask` or `background`.
+# The first word of a prompt picks the script: `plain`, `ask`, `background` or
+# `silent` (writes nothing).
 # `--fixture-gate=<path>` holds `background` after its main `result` until
 # `<path>` exists, and again before its second `result` until `<path>.2`
 # does; an empty or missing value means do not wait. A script runs on its own
@@ -1228,7 +1229,14 @@ def state_background():
     state_line("idle")
 
 
-STATE_SCRIPTS = {"plain": state_plain, "ask": state_ask, "background": state_background}
+def state_silent():
+    # Writes nothing: a host test that applies the CLI's lines itself, with a
+    # live client, uses it so the fixture adds none of its own.
+    pass
+
+
+STATE_SCRIPTS = {"plain": state_plain, "ask": state_ask, "background": state_background,
+                 "silent": state_silent}
 
 
 def state_turns():
