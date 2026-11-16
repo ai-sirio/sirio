@@ -11,7 +11,8 @@
 //! - **Unfolded**, the body carries a canvas that asks for the next frame
 //!   from its own prepaint (`trace_frame::frame_driver`, the loop the Trace tab
 //!   shares). A chat that is not painted never prepaints, so a hidden chat asks
-//!   for nothing, and a turn that has ended arms nothing.
+//!   for nothing, and a turn whose headline is neither Live nor Waiting arms
+//!   nothing.
 //!   One delayed frame is pending at a time, which keeps it at 30 frames a
 //!   second or fewer, as gpui's own `Animation::with_max_fps` does. While
 //!   the turn only waits, with no span running (`Turn::is_moving`), the delay

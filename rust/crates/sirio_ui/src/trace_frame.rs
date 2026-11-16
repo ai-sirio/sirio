@@ -24,11 +24,14 @@ pub(crate) const TICK: Duration = Duration::from_secs(1);
 /// How often a drawn turn asks to be painted again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pace {
-    /// The turn has ended: nothing is asked for.
+    /// Nothing is asked for: the turn the tab shows has ended, or the card's
+    /// headline (`headline_state`) is neither Live nor Waiting.
     Still,
     /// The turn is open and nothing in it runs: it waits for the user, or
     /// sits between two calls. Once a second keeps its clock, its duration
-    /// and the "now" line moving.
+    /// and the "now" line moving. On the card it also covers a turn that
+    /// ended while the CLI still shows it as Live or Waiting; only the
+    /// title's seconds move then.
     Tick,
     /// A model call streams, a tool runs or a subagent works: 30 a second
     /// at most.
@@ -36,7 +39,8 @@ pub(crate) enum Pace {
 }
 
 impl Pace {
-    /// `open` is whether the turn has not ended and `moving` whether some
+    /// `open` is whether the tab's turn has not ended, or whether the card's
+    /// headline reads Live or Waiting, and `moving` whether some
     /// span is running (`Turn::is_moving`). Reduced motion keeps an open turn
     /// at a tick.
     pub(crate) fn of(open: bool, moving: bool, reduced: bool) -> Self {
@@ -73,7 +77,8 @@ pub(crate) fn is_pending(pending: &Pending) -> bool {
 /// does.
 ///
 /// An element that is not drawn is never prepainted, so a hidden chat or tab
-/// asks for nothing, and a turn that ended draws the canvas unarmed.
+/// asks for nothing, and a turn that ended draws the canvas unarmed (on the
+/// card, unless the CLI still shows it as Live or Waiting).
 pub(crate) fn frame_driver(
     pending: Pending,
     counted: Rc<Cell<u32>>,

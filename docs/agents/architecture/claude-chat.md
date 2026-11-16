@@ -110,11 +110,44 @@ as a `trace.frame` event in the performance trace).
 The loop runs at 30 frames a second at most while a span runs (`Turn::is_moving`: a model call
 streaming, a tool running or a subagent working, not one waiting for the user), ticks once a second
 while the turn only waits, which keeps its clock and its "now" line moving with the marks held
-still, and asks for nothing once the turn has ended or when nothing paints it. A folded card's title
-ticks once a second while it is painted and reads Live or Waiting. The title and the pill
-follow the CLI's session state over the turn's own, as the sidebar does: `running` reads Live
-and `requires_action` Waiting for you (the clock keeps growing past the turn's end), while `idle`,
-like no state, leaves it to the turn. The Trace tab keeps each turn's own state.
+still, and asks for nothing when nothing paints it or when the turn has ended and the CLI does not
+show it as Live or Waiting (the paragraph below). Only the card follows that headline: the Trace
+tab's loop still stops once its turn has ended, whatever the CLI says. A folded card's title ticks once a second while it
+is painted and reads Live or Waiting.
+**The CLI's own session state** is the second source of a chat's status, next to the turns Sirio
+derives. Sirio launches the CLI with `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`, which makes it write
+`system` / `session_state_changed` lines (`running`, `idle`, `requires_action`; an unknown value is
+ignored and the last known state stands). `ChatEvent::CliState` carries them to the chat, and
+`surface.chat.read` reports the last one as `sessionState` (`""` until one arrives, and again after every clear below).
+`Chat::claim()` reads it so that a chat stays Running while the CLI's background agent works after the
+main `result`, which no turn shows: `running` and `requires_action` override the turn-derived
+status (Running and NeedsInput), while `idle`, like no state at all, only hands the decision back
+to the turns. `idle` cannot win outright because one can land before the turn's held `TurnEnded` (the
+worker holds it for the `get_context_usage` answer), or be stale from a turn that ended while a
+queued prompt streams; read as Done it would fake a stop and a desktop notification between two
+queued turns. The cost is that Done lands with `TurnEnded`, at most `CONTEXT_USAGE_GRACE` (2 s)
+after the result, as before. A CLI that writes no state lines (one launched without the variable, or
+older than the event) keeps today's derivation; the 2.1.257 floor already writes them under the
+variable. `initialize`'s own `session_state` is ignored: the CLI reports it (`idle`) even without the
+variable, so reading it would make `sessionState` read `"idle"` on a CLI that never sends state
+lines, against the empty-when-none rule. The CLI does not resend `running` while it is already
+running, for example while a background agent works, so a prompt typed or dequeued then clears the
+state only if it is `idle`; `running` and `requires_action` stand. The state clears on a transport
+error, a timeout, a failed send, the event source closing and a new connection
+(`start_connection`, the path retry, a new conversation, a launch and a failed launch share), so a CLI that dies
+never leaves the chat Running; it does not clear on `TurnEnded`, Stop or a history open, since the
+same process lives on, and a line that arrives after the client was taken is ignored. The Trace
+card's title, pill and tick follow the same rule (`headline_state`): `running` reads Live and
+`requires_action` Waiting for you, and an ended turn the CLI still shows so keeps its title's
+elapsed seconds running to now, folded or open (an open card's Duration stat and "now" line follow
+the turn). The Trace tab keeps each turn's own state, as it is a history of turns, so
+a Live card can sit above a Done row during the CLI's follow-up turn. Accepted costs: a card that
+`TurnEnded` expires while the CLI still waits on it (a background agent's permission) leaves the
+dot at needs-input with no dock, until the CLI's next state line or `permission_timeout` (#761);
+Stop pressed during `requires_action` and a history open with a pending card can do the same;
+and closing a chat tab asks for confirmation only while `is_streaming()`, so it can close while the
+CLI's background agent runs (#762). The watchdog (#699: `turn_in_flight`, `open_permissions`,
+`idle_for`) never reads the CLI state.
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
 trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is

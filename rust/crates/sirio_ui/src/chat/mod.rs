@@ -3637,7 +3637,7 @@ impl Chat {
             }
             sirio_chat::ChatEvent::TransportError(message) => {
                 self.client.take();
-                // R2: the CLI that said it was running is gone.
+                // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
@@ -3657,7 +3657,7 @@ impl Chat {
                 // belongs in the transcript like any other error rather than
                 // leaving the composer stuck in its streaming state.
                 self.client.take();
-                // R2: the CLI that said it was running is gone.
+                // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.expire_unanswered();
                 let message = format!(
@@ -5535,7 +5535,7 @@ impl Chat {
             at: Some(chrono::Local::now()),
         });
         self.streaming = true;
-        // R1: a new prompt ends an idle CLI's rest, and the CLI has not said
+        // A new prompt ends an idle CLI's rest, and the CLI has not said
         // so yet. A running or waiting CLI stays so: it does not say it twice.
         if self.cli_state == Some(sirio_chat::CliState::Idle) {
             self.cli_state = None;
@@ -5545,7 +5545,7 @@ impl Chat {
                 client.prompt_content(text, mention_paths, images, self.agent_cwd.clone())
         {
             self.client.take();
-            // R2: the CLI that said it was running is gone.
+            // The CLI that said it was running is gone.
             self.cli_state = None;
             let message = format!("send failed: {error:#}");
             self.fail_trace_turn(&message, cx);
@@ -6034,7 +6034,7 @@ impl Chat {
         // still open here would never hear of its end.
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
-        // R2: a new process has said nothing yet; retry, a new conversation,
+        // A new process has said nothing yet; retry, a new conversation,
         // launch and a failed launch all pass here.
         self.cli_state = None;
         // A new process is a new agent to ask: the guard only stops one
@@ -6128,7 +6128,7 @@ impl Chat {
             return;
         }
         self.client.take();
-        // R2: the CLI is gone, whatever it last said.
+        // The CLI is gone, whatever it last said.
         self.cli_state = None;
         if self.streaming {
             self.expire_unanswered();
