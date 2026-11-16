@@ -135,12 +135,77 @@ enum CloneWorkerMessage {
     Finished(Result<(PathBuf, bool), String>),
 }
 
+/// A clone that has started, held apart from the form that started it: the
+/// form can be dismissed while git runs, and whoever then holds the job
+/// still learns how the clone ended (#681). Dropping the job stops the
+/// listening, not git: the worker thread runs to its end either way.
+pub struct CloneJob {
+    url: String,
+    _task: Task<()>,
+}
+
+pub enum CloneJobEvent {
+    /// Receiving objects, from zero to one.
+    Progress(f64),
+    /// `Ok` carries the destination and whether the diagnostic capture was
+    /// truncated (see `CloneWorkerMessage::Finished`).
+    Finished(Result<(PathBuf, bool), String>),
+}
+
+impl EventEmitter<CloneJobEvent> for CloneJob {}
+
+impl CloneJob {
+    fn start(url: String, destination: PathBuf, cx: &mut Context<Self>) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let worker_url = url.clone();
+        std::thread::spawn(move || {
+            let result = clone_repository(&worker_url, &destination, |progress| {
+                let _ = sender.send(CloneWorkerMessage::Progress(progress));
+            })
+            .map(|truncated| (destination, truncated))
+            .map_err(|error| error.to_string());
+            let _ = sender.send(CloneWorkerMessage::Finished(result));
+        });
+        let task = cx.spawn(async move |job, cx| {
+            loop {
+                loop {
+                    let event = match receiver.try_recv() {
+                        Ok(CloneWorkerMessage::Progress(progress)) => {
+                            CloneJobEvent::Progress(progress)
+                        }
+                        Ok(CloneWorkerMessage::Finished(result)) => CloneJobEvent::Finished(result),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => CloneJobEvent::Finished(Err(
+                            "clone worker stopped unexpectedly".to_string(),
+                        )),
+                    };
+                    let finished = matches!(event, CloneJobEvent::Finished(_));
+                    let _ = job.update(cx, |_, cx| cx.emit(event));
+                    if finished {
+                        return;
+                    }
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(20))
+                    .await;
+            }
+        });
+        Self { url, _task: task }
+    }
+
+    /// The URL the clone started from; the form's field may have been edited
+    /// since.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
 /// A GPUI surface for cloning a repository from a URL.
 pub struct CloneForm {
     parent: PathBuf,
     state: CloneFormState,
     url_field: Entity<TextInput>,
-    task: Option<Task<()>>,
+    job: Option<Entity<CloneJob>>,
 }
 
 impl CloneForm {
@@ -168,7 +233,7 @@ impl CloneForm {
             parent,
             state: CloneFormState::default(),
             url_field,
-            task: None,
+            job: None,
         }
     }
 
@@ -222,67 +287,39 @@ impl CloneForm {
             return;
         };
         let url = self.state.url().to_owned();
-        let (sender, receiver) = mpsc::channel();
-        let worker_destination = destination.clone();
-        std::thread::spawn(move || {
-            let result = clone_repository(&url, &worker_destination, |progress| {
-                let _ = sender.send(CloneWorkerMessage::Progress(progress));
-            })
-            .map(|truncated| (worker_destination, truncated))
-            .map_err(|error| error.to_string());
-            let _ = sender.send(CloneWorkerMessage::Finished(result));
-        });
-
-        self.task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                loop {
-                    let message = match receiver.try_recv() {
-                        Ok(message) => message,
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            let _ = this.update(cx, |form, cx| {
-                                form.task = None;
-                                form.state.fail("clone worker stopped unexpectedly");
-                                cx.notify();
+        let job = cx.new(|cx| CloneJob::start(url, destination, cx));
+        cx.subscribe(&job, |form, job, event: &CloneJobEvent, cx| {
+            // A job taken by the host is the host's to finish.
+            if form.job.as_ref() != Some(&job) {
+                return;
+            }
+            match event {
+                CloneJobEvent::Progress(progress) => form.state.set_progress(*progress),
+                CloneJobEvent::Finished(result) => {
+                    form.job = None;
+                    match result {
+                        Ok((destination, truncated)) => {
+                            form.state.complete(destination.clone(), *truncated);
+                            cx.emit(CloneFormEvent::Cloned {
+                                destination: destination.clone(),
+                                truncated: *truncated,
                             });
-                            return;
                         }
-                    };
-                    let finished = match message {
-                        CloneWorkerMessage::Progress(progress) => {
-                            let _ = this.update(cx, |form, cx| {
-                                form.state.set_progress(progress);
-                                cx.notify();
-                            });
-                            false
-                        }
-                        CloneWorkerMessage::Finished(result) => {
-                            let _ = this.update(cx, |form, cx| {
-                                form.task = None;
-                                match result {
-                                    Ok((destination, truncated)) => {
-                                        form.state.complete(destination.clone(), truncated);
-                                        cx.emit(CloneFormEvent::Cloned {
-                                            destination,
-                                            truncated,
-                                        });
-                                    }
-                                    Err(error) => form.state.fail(error),
-                                }
-                                cx.notify();
-                            });
-                            true
-                        }
-                    };
-                    if finished {
-                        return;
+                        Err(error) => form.state.fail(sirio_git::redact_credentials(error)),
                     }
                 }
-                cx.background_executor()
-                    .timer(Duration::from_millis(20))
-                    .await;
             }
-        }));
+            cx.notify();
+        })
+        .detach();
+        self.job = Some(job);
+    }
+
+    /// Hands the clone in progress to a host that dismisses the form
+    /// mid-clone (#681). The form then ignores that job's events, so the
+    /// clone's end is handled once, by the host.
+    pub fn take_running_job(&mut self) -> Option<Entity<CloneJob>> {
+        self.job.take()
     }
 }
 
@@ -475,12 +512,41 @@ pub enum CreateFormEvent {
     Created(PathBuf),
 }
 
+/// A Create that has started, held apart from the form that started it, like
+/// a `CloneJob`: the form can be dismissed while the folder is still being
+/// made (a slow or stalled filesystem), and whoever then holds the job still
+/// learns how it ended (#681).
+pub struct CreateJob {
+    _task: Task<()>,
+}
+
+pub enum CreateJobEvent {
+    /// `Ok` carries the new folder, `Err` `create_project`'s message.
+    Finished(Result<PathBuf, String>),
+}
+
+impl EventEmitter<CreateJobEvent> for CreateJob {}
+
+impl CreateJob {
+    fn start(parent: PathBuf, name: String, cx: &mut Context<Self>) -> Self {
+        let task = cx.spawn(async move |job, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    create_project(&parent, &name).map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = job.update(cx, |_, cx| cx.emit(CreateJobEvent::Finished(result)));
+        });
+        Self { _task: task }
+    }
+}
+
 /// A GPUI surface for creating a new project directory.
 pub struct CreateForm {
     parent: PathBuf,
     state: CreateFormState,
     name_field: Entity<TextInput>,
-    task: Option<Task<()>>,
+    job: Option<Entity<CreateJob>>,
 }
 
 impl CreateForm {
@@ -504,7 +570,7 @@ impl CreateForm {
             parent,
             state: CreateFormState::default(),
             name_field,
-            task: None,
+            job: None,
         }
     }
 
@@ -549,24 +615,32 @@ impl CreateForm {
         }
         let parent = self.parent.clone();
         let name = self.state.name().to_owned();
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    create_project(&parent, &name).map_err(|error| error.to_string())
-                })
-                .await;
-            let _ = this.update(cx, |form, cx| {
-                form.task = None;
-                match result {
-                    Ok(destination) => {
-                        form.state.complete(destination.clone());
-                        cx.emit(CreateFormEvent::Created(destination));
-                    }
-                    Err(error) => form.state.fail(error),
+        let job = cx.new(|cx| CreateJob::start(parent, name, cx));
+        cx.subscribe(&job, |form, job, event: &CreateJobEvent, cx| {
+            // A job taken by the host is the host's to finish.
+            if form.job.as_ref() != Some(&job) {
+                return;
+            }
+            let CreateJobEvent::Finished(result) = event;
+            form.job = None;
+            match result {
+                Ok(destination) => {
+                    form.state.complete(destination.clone());
+                    cx.emit(CreateFormEvent::Created(destination.clone()));
                 }
-                cx.notify();
-            });
-        }));
+                Err(error) => form.state.fail(error.clone()),
+            }
+            cx.notify();
+        })
+        .detach();
+        self.job = Some(job);
+    }
+
+    /// Hands the Create in progress to a host that dismisses the form before
+    /// the folder is made (#681). The form then ignores that job's events, so
+    /// the Create's end is handled once, by the host.
+    pub fn take_running_job(&mut self) -> Option<Entity<CreateJob>> {
+        self.job.take()
     }
 }
 
@@ -710,6 +784,34 @@ fn destination_for(parent: &Path, url: &str) -> Option<PathBuf> {
         return None;
     }
     Some(parent.join(name))
+}
+
+/// The notice for a clone that failed after its form was dismissed. git's
+/// cause can sit before its `fatal:` line and a hint after it, so the notice
+/// keeps git's own lines minus the opening `Cloning into` line and progress
+/// lines, the last eight of them joined on one line. A URL may carry
+/// `user:token@`, which a notice left on screen must not show. git's stderr
+/// capture can run to megabytes, so the notice is cut after redaction (a cut
+/// before it could split a URL's `user:token@` and keep the token).
+pub fn clone_failure_notice(url: &str, error: &str) -> String {
+    const MAX_CHARS: usize = 1000;
+    let lines: Vec<&str> = error
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !line.contains("Cloning into '") && !line.contains("% (")
+        })
+        .collect();
+    let reason = if lines.is_empty() {
+        error.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        lines[lines.len().saturating_sub(8)..].join(" ")
+    };
+    let notice = sirio_git::redact_credentials(&format!("could not clone {url}: {reason}"));
+    match notice.char_indices().nth(MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &notice[..cut]),
+        None => notice,
+    }
 }
 
 /// The notice for a clone whose progress output was cut short: the clone

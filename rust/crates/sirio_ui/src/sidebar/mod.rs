@@ -33,7 +33,10 @@ use crate::loading;
 use crate::popup::{
     HANG_GAP, Popup, hang_below, leaving, menu_card, menu_label, menu_row, reap_popup,
 };
-use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
+use crate::project_forms::{
+    CloneForm, CloneFormEvent, CloneJob, CloneJobEvent, CreateForm, CreateFormEvent, CreateJob,
+    CreateJobEvent, clone_failure_notice,
+};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::{NewTabAction, chat_agent_row, launches_a_chat};
@@ -465,10 +468,12 @@ pub enum AddOrigin {
     AddedWithoutGit,
     /// A folder with no `.git` that Sirio initialized with `git init`.
     InitializedGit,
-    /// A repository cloned by the Clone form. `truncated` is set when the
+    /// A repository cloned by the Clone form, also one whose form was
+    /// dismissed before git finished (#681). `truncated` is set when the
     /// clone's progress output hit its byte cap; the clone itself completed.
     Cloned { truncated: bool },
-    /// A project made by the Create form.
+    /// A project made by the Create form, also one whose form was dismissed
+    /// before its folder was made (#681).
     Created,
 }
 
@@ -478,6 +483,11 @@ pub enum SidebarEvent {
     /// `project.add` must not, because only this path opens the "Project
     /// added" dialog.
     AddProject { path: PathBuf, origin: AddOrigin },
+    /// An add whose form was dismissed failed: a clone, or a Create whose
+    /// folder could not be made (#681). The workspace shows the message as the
+    /// sidebar notice and, as an add that fails does, as a toast (the sidebar
+    /// may be hidden), shown after a failed identity save's toast if one is up.
+    AddFailed { message: String },
     /// The not-a-git-repository prompt was answered, whatever the answer
     /// (Cancel included). It lets the host re-render and retry anything it
     /// held back while the prompt was open.
@@ -685,6 +695,15 @@ pub struct Sidebar {
     /// the agents the + menu does.
     chat_launch_sources: std::collections::BTreeMap<String, LaunchSource>,
     project_form: Option<ProjectFormSurface>,
+    /// Clones whose form was dismissed while git still ran. Each job is what
+    /// learns how its clone ended, and dropping the form would drop it (#681),
+    /// so the sidebar holds the job until it finishes. A list: a second clone
+    /// can start while a dismissed one still runs.
+    clones_in_flight: Vec<gpui::Entity<CloneJob>>,
+    /// Creates whose form was dismissed while the folder was still being made.
+    /// Same reason as `clones_in_flight`: dropping the form would drop the
+    /// job, and with it the project that was never added (#681).
+    creates_in_flight: Vec<gpui::Entity<CreateJob>>,
     /// Whether the not-a-git-repository prompt is up. `window.has_active_prompt()`
     /// sees only prompts gpui draws inside the window, and on macOS and
     /// Windows this one is native, so the sidebar tracks it itself.
@@ -1033,6 +1052,8 @@ impl Sidebar {
             add_project_menu: Popup::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
+            clones_in_flight: Vec::new(),
+            creates_in_flight: Vec::new(),
             prompt_open: false,
             debug_prompt_answer: None,
             pending_reorder: None,
@@ -1134,6 +1155,8 @@ impl Sidebar {
             add_project_menu: Popup::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
+            clones_in_flight: Vec::new(),
+            creates_in_flight: Vec::new(),
             prompt_open: false,
             debug_prompt_answer: None,
             pending_reorder: None,
@@ -1750,9 +1773,67 @@ impl Sidebar {
 
     /// Dismisses the open project-entry form, if any.
     pub fn close_project_surface(&mut self, cx: &mut Context<Self>) {
-        if self.project_form.take().is_some() {
+        if self.replace_project_form(None, cx) {
             cx.notify();
         }
+    }
+
+    /// Replaces the open project-entry form (`None` dismisses it). A Clone or
+    /// Create form dismissed before its add finished hands its running job to
+    /// `clones_in_flight` / `creates_in_flight`, so the project is still added,
+    /// or the failure told, when it ends; the form itself drops as usual.
+    /// Returns whether a form was open.
+    fn replace_project_form(
+        &mut self,
+        next: Option<ProjectFormSurface>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let previous = std::mem::replace(&mut self.project_form, next);
+        if let Some(ProjectFormSurface::Clone(form)) = &previous
+            && let Some(job) = form.update(cx, |form, _| form.take_running_job())
+        {
+            cx.subscribe(&job, |sidebar, job, event: &CloneJobEvent, cx| {
+                let CloneJobEvent::Finished(result) = event else {
+                    return;
+                };
+                sidebar.clones_in_flight.retain(|held| *held != job);
+                match result {
+                    Ok((destination, truncated)) => cx.emit(SidebarEvent::AddProject {
+                        path: destination.clone(),
+                        origin: AddOrigin::Cloned {
+                            truncated: *truncated,
+                        },
+                    }),
+                    Err(error) => cx.emit(SidebarEvent::AddFailed {
+                        message: clone_failure_notice(job.read(cx).url(), error),
+                    }),
+                }
+                cx.notify();
+            })
+            .detach();
+            self.clones_in_flight.push(job);
+        }
+        if let Some(ProjectFormSurface::Create(form)) = &previous
+            && let Some(job) = form.update(cx, |form, _| form.take_running_job())
+        {
+            cx.subscribe(&job, |sidebar, job, event: &CreateJobEvent, cx| {
+                let CreateJobEvent::Finished(result) = event;
+                sidebar.creates_in_flight.retain(|held| *held != job);
+                match result {
+                    Ok(path) => cx.emit(SidebarEvent::AddProject {
+                        path: path.clone(),
+                        origin: AddOrigin::Created,
+                    }),
+                    Err(error) => cx.emit(SidebarEvent::AddFailed {
+                        message: error.clone(),
+                    }),
+                }
+                cx.notify();
+            })
+            .detach();
+            self.creates_in_flight.push(job);
+        }
+        previous.is_some()
     }
 
     pub fn set_notice(&mut self, notice: impl Into<String>, cx: &mut Context<Self>) {
@@ -2061,7 +2142,7 @@ impl Sidebar {
                     destination,
                     truncated,
                 } => {
-                    sidebar.project_form = None;
+                    sidebar.replace_project_form(None, cx);
                     cx.emit(SidebarEvent::AddProject {
                         path: destination.clone(),
                         origin: AddOrigin::Cloned {
@@ -2073,7 +2154,7 @@ impl Sidebar {
             },
         )
         .detach();
-        self.project_form = Some(ProjectFormSurface::Clone(form));
+        self.replace_project_form(Some(ProjectFormSurface::Clone(form)), cx);
         cx.notify();
     }
 
@@ -2084,7 +2165,9 @@ impl Sidebar {
             &form,
             |sidebar, _, event: &CreateFormEvent, cx| match event {
                 CreateFormEvent::Created(path) => {
-                    sidebar.project_form = None;
+                    // Through the helper: should the open form be a Clone form
+                    // by now, its running clone is kept, not dropped (#681).
+                    sidebar.replace_project_form(None, cx);
                     cx.emit(SidebarEvent::AddProject {
                         path: path.clone(),
                         origin: AddOrigin::Created,
@@ -2094,7 +2177,7 @@ impl Sidebar {
             },
         )
         .detach();
-        self.project_form = Some(ProjectFormSurface::Create(form));
+        self.replace_project_form(Some(ProjectFormSurface::Create(form)), cx);
         cx.notify();
     }
 
@@ -3720,8 +3803,7 @@ impl Sidebar {
                             .hover(|style| style.bg(theme.ely.hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |sidebar, cx| {
-                                    sidebar.project_form = None;
-                                    cx.notify();
+                                    sidebar.close_project_surface(cx);
                                 });
                             })
                             .child("Cancel"),

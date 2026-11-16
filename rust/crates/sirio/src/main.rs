@@ -11759,6 +11759,11 @@ impl SirioWorkspace {
             SidebarEvent::AddProject { path, origin } => {
                 self.add_project(path.clone(), *origin, cx)
             }
+            SidebarEvent::AddFailed { message } => {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.set_notice(message.clone(), cx));
+                self.show_toast_after_identity_error(message.clone(), cx);
+            }
             SidebarEvent::PromptClosed => cx.notify(),
             SidebarEvent::RemoveProject(id) => {
                 self.remove_project(id, cx);
@@ -14458,6 +14463,35 @@ impl SirioWorkspace {
                 display_absolute_path(&snapshot.working_directory),
             ),
         ])
+    }
+
+    /// Whether the toast on screen is the one that reports a failed identity
+    /// save, which holds the dialog queue until it is gone.
+    fn identity_error_toast_showing(&self) -> bool {
+        self.identity_error_toast
+            .is_some_and(|id| self.toast.as_ref().is_some_and(|toast| toast.id == id))
+    }
+
+    /// Shows `message` as a toast, once a failed identity save's toast is
+    /// gone: replacing that toast would cut it short and let the next dialog
+    /// open over it. A clone dismissed mid-clone (#681) can fail at any time.
+    fn show_toast_after_identity_error(&mut self, message: String, cx: &mut Context<Self>) {
+        if !self.identity_error_toast_showing() {
+            self.show_toast(message, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                match this.update(cx, |workspace, _| workspace.identity_error_toast_showing()) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(_) => return,
+                }
+            }
+            let _ = this.update(cx, |workspace, cx| workspace.show_toast(message, cx));
+        })
+        .detach();
     }
 
     /// F-WIN-10: raises a transient, floating notice that clears itself
@@ -22990,6 +23024,10 @@ impl SirioWorkspace {
                 "projectForm".to_string(),
                 self.sidebar.read(cx).project_form_kind().to_string(),
             ),
+            (
+                "sidebarNotice".to_string(),
+                self.sidebar.read(cx).notice().unwrap_or_default().to_string(),
+            ),
             ("sidebarVisible".to_string(), self.sidebar_visible.to_string()),
             ("paletteOpen".to_string(), self.palette_open.to_string()),
             (
@@ -29339,9 +29377,7 @@ impl Render for SirioWorkspace {
                 dialog.update(cx, |dialog, cx| dialog.reclaim_focus(window, cx));
             }
         }
-        let error_toast_showing = self
-            .identity_error_toast
-            .is_some_and(|id| self.toast.as_ref().is_some_and(|toast| toast.id == id));
+        let error_toast_showing = self.identity_error_toast_showing();
         if self.identity_dialog.is_none()
             && !self.identity_queue.is_empty()
             && !self.identity_open_scheduled
