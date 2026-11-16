@@ -558,4 +558,93 @@ mod tests {
         assert_ne!(dark.background, light.background);
         assert!(light.background.starts_with('#') && light.background.len() == 7);
     }
+
+    /// Draws one heading and one paragraph through the renderer the preview
+    /// uses and reports each block's height.
+    struct Page {
+        doc: bezel_markdown::Doc,
+        layouts: bezel_markdown::BlockLayouts,
+    }
+
+    impl gpui::Render for Page {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement, Styled};
+            gpui::div().w(gpui::px(600.0)).child(bezel_markdown::render_with_selection(
+                &self.doc,
+                None,
+                Some(&self.layouts),
+                None,
+                bezel_markdown::Caption::Shown,
+                window,
+                cx,
+            ))
+        }
+    }
+
+    fn heights(layouts: &bezel_markdown::BlockLayouts) -> [f32; 3] {
+        let height = |ix| {
+            f32::from(
+                layouts
+                    .block_bounds(ix)
+                    .expect("the block was drawn")
+                    .size
+                    .height,
+            )
+        };
+        [height(0), height(1), height(2)]
+    }
+
+    #[gpui::test]
+    async fn rendered_markdown_follows_the_interface_font_size(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            crate::ely::init(cx);
+        });
+        let layouts = bezel_markdown::BlockLayouts::default();
+        let shared = layouts.clone();
+        let (_, _, cx) = crate::text_selection::testing::host(cx, move |_, _| Page {
+            doc: bezel_markdown::parse(
+                "# Title\n\nBody paragraph.\n\n```rust\nlet x = 1;\n```\n",
+            ),
+            layouts: shared,
+        });
+        cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
+        cx.run_until_parked();
+        let at_13 = heights(&layouts);
+
+        cx.update(|_, cx| {
+            Theme::set_interface_font_size(18, cx);
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(gpui::px(801.0), gpui::px(400.0)));
+        cx.run_until_parked();
+        let at_18 = heights(&layouts);
+        let [heading_growth, body_growth, code_growth] =
+            std::array::from_fn(|ix| at_18[ix] - at_13[ix]);
+        // The offset is +5; applied twice it would be +10.
+        assert!(
+            (heading_growth - 5.0).abs() <= 0.5,
+            "heading grew {heading_growth}"
+        );
+        assert!(
+            (body_growth - 5.0).abs() <= 0.5,
+            "paragraph grew {body_growth}"
+        );
+        // Its one code line grows by 5, and its header band grows besides.
+        assert!(code_growth >= 9.0, "code block grew {code_growth}");
+
+        cx.update(|_, cx| {
+            Theme::set_interface_font_size(13, cx);
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
+        cx.run_until_parked();
+        assert_eq!(heights(&layouts), at_13);
+    }
 }

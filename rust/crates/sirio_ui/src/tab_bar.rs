@@ -757,7 +757,7 @@ impl Render for TabBar {
             .items_center()
             .justify_center()
             .rounded(theme.radii.control)
-            .text_size(px(14.0))
+            .text_size(theme.typography.scaled(14.0))
             .text_color(theme.ely.fg_subtle)
             .hover(|style| style.bg(theme.ely.hover))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, _| {

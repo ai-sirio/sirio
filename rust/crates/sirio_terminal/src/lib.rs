@@ -4748,7 +4748,7 @@ impl gpui::Render for TerminalView {
                         div()
                             .id("terminal-connecting")
                             .debug_selector(|| "terminal-connecting".to_owned())
-                            .text_size(px(13.0))
+                            .text_size(theme.typography.scaled(13.0))
                             .text_color(theme.ely.fg_muted)
                             .child("Connecting to the session host…"),
                     )
@@ -4771,7 +4771,7 @@ impl gpui::Render for TerminalView {
                     .gap(px(10.0))
                     .child(
                         div()
-                            .text_size(px(15.0))
+                            .text_size(theme.typography.scaled(15.0))
                             .text_color(theme.ely.fg)
                             .child("No terminal in this pane"),
                     )
@@ -4836,7 +4836,7 @@ impl gpui::Render for TerminalView {
                                 .px(px(12.0))
                                 .py(px(6.0))
                                 .bg(theme.ely.surface)
-                                .text_size(px(12.0))
+                                .text_size(theme.typography.scaled(12.0))
                                 .text_color(theme.ely.fg_muted)
                                 .child(selectable_text(format!(
                                     "This terminal will not survive closing Sirio — {reason}"
@@ -4934,7 +4934,7 @@ impl gpui::Render for TerminalView {
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .bg(theme.ely.surface)
-                                .text_size(px(12.0))
+                                .text_size(theme.typography.scaled(12.0))
                                 .text_color(theme.ely.warning)
                                 .child("Running"),
                         )
@@ -4947,7 +4947,7 @@ impl gpui::Render for TerminalView {
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .bg(theme.ely.surface)
-                                .text_size(px(12.0))
+                                .text_size(theme.typography.scaled(12.0))
                                 .text_color(theme.ely.fg_muted)
                                 .child(label),
                         )
@@ -4995,7 +4995,7 @@ impl gpui::Render for TerminalView {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .text_size(px(12.0))
+                            .text_size(theme.typography.scaled(12.0))
                             .text_color(theme.ely.fg)
                             .child("Session lost")
                             .children(offers_restart.then(|| {
@@ -5032,7 +5032,7 @@ impl gpui::Render for TerminalView {
                     .px(px(24.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(theme.typography.scaled(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.ely.warning)
                             .child(if self.attached || self.restored {
@@ -5044,7 +5044,7 @@ impl gpui::Render for TerminalView {
                     .child(
                         div()
                             .w_full()
-                            .text_size(px(13.0))
+                            .text_size(theme.typography.scaled(13.0))
                             .text_color(theme.ely.fg_muted)
                             .child(message.clone()),
                     )
@@ -5056,7 +5056,7 @@ impl gpui::Render for TerminalView {
                             .py(px(6.0))
                             .rounded(px(6.0))
                             .bg(theme.ely.surface)
-                            .text_size(px(13.0))
+                            .text_size(theme.typography.scaled(13.0))
                             .text_color(theme.ely.fg)
                             .hover(|style| style.bg(theme.ely.hover))
                             .cursor(gpui::CursorStyle::PointingHand)

@@ -2576,7 +2576,7 @@ impl Settings {
 
     fn render_categories(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
         let mut list = div()
-            .w(px(CATEGORY_WIDTH))
+            .w(theme.typography.proportional(CATEGORY_WIDTH))
             .h_full()
             .p(px(8.0))
             .flex()
@@ -2592,7 +2592,7 @@ impl Settings {
                     .id(format!("settings-category-{:?}", category))
                     .debug_selector(move || format!("settings-category-{:?}", category))
                     .w_full()
-                    .h(px(30.0))
+                    .h(theme.typography.scaled(30.0))
                     .px(px(10.0))
                     .flex()
                     .items_center()
@@ -2630,10 +2630,14 @@ impl Settings {
                                 ),
                             ),
                     )
-                    .child(text!(
-                        id = ("settings-category-title", category_index),
-                        category.title()
-                    )),
+                    .child(
+                        div()
+                            .debug_selector(move || format!("settings-category-title-{category:?}"))
+                            .child(text!(
+                                id = ("settings-category-title", category_index),
+                                category.title()
+                            )),
+                    ),
             );
         }
 
@@ -2688,7 +2692,8 @@ impl Settings {
             .child(
                 div()
                     .id("settings-appearance-base-color-row")
-                    .child(controls::row("Base color", None, base_control, theme)),
+                    .debug_selector(|| "settings-appearance-base-color-row".into())
+                    .child(controls::row_wrapping("Base color", base_control, theme)),
             )
             .child(controls::separator(theme));
         theme_card = theme_card.child(
@@ -3553,7 +3558,7 @@ impl Settings {
                     .when(is_selected, |this| {
                         this.child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(theme.typography.scaled(12.0))
                                 .text_color(theme.ely.fg)
                                 .child(text!("✓")),
                         )
@@ -4217,7 +4222,7 @@ impl Settings {
             .child(status_dot(tone))
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(theme.typography.scaled(12.0))
                     .text_color(theme.ely.fg_muted)
                     .child(selectable_text(word).id(format!("settings-permission-state-{slug}"))),
             );
@@ -7098,6 +7103,119 @@ mod tests {
             px(14.0),
             "the interface font size updates the shared typography"
         );
+    }
+
+    /// A debug selector built at run time; the test process is short-lived.
+    fn leak(selector: String) -> &'static str {
+        Box::leak(selector.into_boxed_str())
+    }
+
+    /// Sets the interface font size through the method the Appearance
+    /// stepper calls, and draws the settings window again at it.
+    fn set_interface_size(cx: &mut VisualTestContext, settings: &Entity<Settings>, size: i32) {
+        settings.update(&mut cx.cx, |settings, cx| {
+            settings.set_interface_font_size(size, cx)
+        });
+        cx.run_until_parked();
+    }
+
+    /// As the interface font grows the "Base color" label keeps its one line,
+    /// at 12, 13 and 18. At 12 and 13 the last swatch also stays inside the
+    /// row: in the test font the nine swatches alone fit the row there but
+    /// the label and the swatches do not, so without wrapping the swatches
+    /// would be pushed out of it. At 18 the test font makes the swatches
+    /// wider than the row, so only the label is checked; the screenshot
+    /// sweep covers the real font.
+    #[gpui::test]
+    async fn base_color_label_stays_on_one_line_as_the_interface_font_grows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+        let appearance = cx
+            .debug_bounds("settings-category-Appearance")
+            .expect("Appearance is offered as a category");
+        cx.simulate_click(appearance.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        for size in [12, 13, 18] {
+            set_interface_size(&mut cx, &settings, size);
+            // "Appearance" is one short word in the same row style: its
+            // label height is what one line measures at this size.
+            let one_line = cx
+                .debug_bounds("settings-row-label-Appearance")
+                .expect("the theme row label is drawn")
+                .size
+                .height;
+            let label = cx
+                .debug_bounds("settings-row-label-Base color")
+                .expect("the Base color label is drawn");
+            assert!(
+                label.size.height < one_line * 1.5,
+                "size {size}: the Base color label is {:?} tall, one line is {one_line:?}",
+                label.size.height
+            );
+            if size <= 13 {
+                let row = cx
+                    .debug_bounds("settings-appearance-base-color-row")
+                    .expect("the Base color row is drawn");
+                let last = cx
+                    .debug_bounds(leak(format!(
+                        "appearance-base-color-{}",
+                        SEGMENTED_BASE_COLOR.len() - 1
+                    )))
+                    .expect("the last base colour swatch is drawn");
+                assert!(
+                    last.right() <= row.right() && last.bottom() <= row.bottom(),
+                    "size {size}: the last swatch {last:?} sticks out of its row {row:?}"
+                );
+            }
+        }
+    }
+
+    /// Every settings category title ends inside its item, left of the item's
+    /// horizontal padding, as the interface font grows.
+    #[gpui::test]
+    async fn category_titles_fit_their_column_as_the_interface_font_grows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        // The item's own horizontal padding, `.px(px(10.0))` in
+        // `render_categories`.
+        let item_padding = px(10.0);
+        // 13 is left out: the test font is wider than any installed one, and
+        // "Language Servers" does not fit the default column in it (it does
+        // in the real one). 12 shares the default's column, 18 is the case
+        // that overflowed.
+        for size in [12, 18] {
+            set_interface_size(&mut cx, &settings, size);
+            for category in SettingsCategory::ALL {
+                let item = cx
+                    .debug_bounds(leak(format!("settings-category-{category:?}")))
+                    .expect("the category item is drawn");
+                let title = cx
+                    .debug_bounds(leak(format!("settings-category-title-{category:?}")))
+                    .expect("the category title is drawn");
+                assert!(
+                    title.right() <= item.right() - item_padding,
+                    "size {size}: {category:?} title {title:?} overflows its item {item:?}"
+                );
+            }
+        }
     }
 
     /// The Editor screen's controls drive every `EditorPrefs` field: eight

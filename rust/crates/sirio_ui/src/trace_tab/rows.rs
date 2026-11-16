@@ -34,9 +34,15 @@ const BAR_HEIGHT: f32 = 12.0;
 const LABEL_GAP: f32 = 6.0;
 const LABEL_CHAR: f32 = 6.5;
 /// The most characters of an error that its label counts on (it is cut at
-/// 240 px), and the width of the `Slowest` tag.
+/// 240 px at the default size), and the width of the `Slowest` tag.
 const NOTE_CHARS: usize = 34;
 const SLOWEST_WIDTH: f32 = 60.0;
+/// How much taller a line of text is at the interface font size than at the
+/// default: a row grows by it once for each line it holds.
+fn line_growth(theme: &Theme) -> f32 {
+    f32::from(theme.typography.scaled(ROW_HEIGHT)) - ROW_HEIGHT
+}
+
 /// The share of a bar's colour that a running agent's bar takes.
 const RUNNING_AGENT: f32 = 0.55;
 const NAME_SHARE: f32 = 0.34;
@@ -239,7 +245,7 @@ fn render_name(rows: &[TreeRow], at: usize, style: &RowStyle) -> AnyElement {
         .name_column()
         .debug_selector(selector("trace-row-name", &row.span))
         .when(style.stacked, |cell| cell.w_full().max_w_full().min_w_0())
-        .h(px(if style.stacked { 22.0 } else { ROW_HEIGHT }))
+        .h(px(if style.stacked { 22.0 } else { ROW_HEIGHT } + line_growth(theme)))
         .flex()
         .items_center()
         .gap(px(5.0))
@@ -290,14 +296,15 @@ enum Place {
 }
 
 /// About how wide a label is: its duration, then the error of a failed span
-/// and the `Slowest` tag when it has them.
-fn label_width(took: &str, note: Option<&str>, slowest: bool) -> f32 {
-    let mut width = took.chars().count() as f32 * LABEL_CHAR;
+/// and the `Slowest` tag when it has them. `char_width` is `LABEL_CHAR` at the
+/// label's drawn size.
+fn label_width(took: &str, note: Option<&str>, slowest: bool, char_width: f32) -> f32 {
+    let mut width = took.chars().count() as f32 * char_width;
     if let Some(note) = note {
-        width += LABEL_GAP + note.chars().count().min(NOTE_CHARS) as f32 * LABEL_CHAR;
+        width += LABEL_GAP + note.chars().count().min(NOTE_CHARS) as f32 * char_width;
     }
     if slowest {
-        width += LABEL_GAP + SLOWEST_WIDTH;
+        width += LABEL_GAP + SLOWEST_WIDTH * char_width / LABEL_CHAR;
     }
     width
 }
@@ -313,7 +320,10 @@ fn render_track(row: &TreeRow, style: &RowStyle) -> AnyElement {
     let end = style.across(end_offset);
     let color = style.bar_color(row);
     let open_end = row.state == SpanState::Interrupted && row.end.is_some();
-    let band = |track: gpui::Div| track.absolute().top(px(BAR_TOP)).h(px(BAR_HEIGHT));
+    // The track grows by `line_growth`; half of it above the bar keeps the bar
+    // where it sits against the vertically centred label at 13.
+    let bar_top = BAR_TOP + line_growth(theme) / 2.0;
+    let band = move |track: gpui::Div| track.absolute().top(px(bar_top)).h(px(BAR_HEIGHT));
 
     let bar = band(div())
         .debug_selector(selector("trace-bar", span))
@@ -375,7 +385,8 @@ fn render_track(row: &TreeRow, style: &RowStyle) -> AnyElement {
     let took = end_offset.saturating_sub(row.start);
     let took_text = short_duration(took);
     let is_slowest = style.slowest.as_deref() == Some(span);
-    let room = label_width(&took_text, row.note.as_deref(), is_slowest);
+    let char_width = LABEL_CHAR * f32::from(theme.typography.scaled(11.0)) / 11.0;
+    let room = label_width(&took_text, row.note.as_deref(), is_slowest, char_width);
     let after = if open_end { 2.0 * LABEL_GAP + 2.0 } else { LABEL_GAP };
     let place = if style.track * (1.0 - end) >= room + after {
         Place::After
@@ -393,7 +404,7 @@ fn render_track(row: &TreeRow, style: &RowStyle) -> AnyElement {
         .items_center()
         .gap(px(LABEL_GAP))
         .whitespace_nowrap()
-        .text_size(px(11.0))
+        .text_size(theme.typography.scaled(11.0))
         .text_color(if place == Place::On {
             theme.ely.fg
         } else {
@@ -408,7 +419,7 @@ fn render_track(row: &TreeRow, style: &RowStyle) -> AnyElement {
         .children(row.note.as_ref().map(|note| {
             div()
                 .debug_selector(selector("trace-note", span))
-                .max_w(px(240.0))
+                .max_w(px(240.0 * char_width / LABEL_CHAR))
                 .truncate()
                 .text_color(if place == Place::On {
                     theme.ely.fg
@@ -433,8 +444,8 @@ fn render_track(row: &TreeRow, style: &RowStyle) -> AnyElement {
         .debug_selector(selector("trace-row-track", span))
         .relative()
         .overflow_hidden()
-        .when(style.stacked, |track| track.w_full().h(px(20.0)))
-        .when(!style.stacked, |track| track.flex_1().h(px(ROW_HEIGHT)))
+        .when(style.stacked, |track| track.w_full().h(px(20.0 + line_growth(theme))))
+        .when(!style.stacked, |track| track.flex_1().h(px(ROW_HEIGHT + line_growth(theme))))
         .children(grid)
         .child(bar)
         .children(waits)
@@ -458,9 +469,10 @@ pub(super) fn render_row(rows: &[TreeRow], at: usize, style: &RowStyle) -> AnyEl
         .debug_selector(selector("trace-row", &row.span))
         .w_full()
         .h(px(if style.stacked {
-            STACKED_ROW_HEIGHT
+            // The name line and the track, each a line of text.
+            STACKED_ROW_HEIGHT + 2.0 * line_growth(theme)
         } else {
-            ROW_HEIGHT
+            ROW_HEIGHT + line_growth(theme)
         }))
         .px(px(ROW_PADDING))
         .flex()

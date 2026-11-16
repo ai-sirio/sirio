@@ -189,6 +189,7 @@ impl TurnPreview {
 
     /// The card and its contents.
     pub(crate) fn card(&self, cx: &App) -> Stateful<gpui::Div> {
+        let typography = sirio_theme::Theme::get(cx).typography;
         // Wider and airier than a tooltip: this holds prose, not a label.
         menu_card("turn-preview-card", cx)
             .debug_selector(|| "turn-preview".into())
@@ -198,14 +199,14 @@ impl TurnPreview {
             .child(
                 div()
                     .debug_selector(|| "turn-preview-message".into())
-                    .text_size(px(13.0))
+                    .text_size(typography.scaled(13.0))
                     .font_weight(FontWeight::MEDIUM)
                     .child(self.message.clone()),
             )
             .child(
                 div()
-                    .text_size(px(12.5))
-                    .line_height(px(18.0))
+                    .text_size(typography.scaled(12.5))
+                    .line_height(typography.scaled(18.0))
                     .text_color(cx.theme().colors.fg_muted)
                     .child(self.when.clone()),
             )

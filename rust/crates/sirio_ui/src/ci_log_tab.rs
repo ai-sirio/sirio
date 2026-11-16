@@ -409,6 +409,11 @@ fn now_unix() -> i64 {
 /// Every row the same height: the list measures one and trusts it.
 const ROW_HEIGHT: f32 = 18.0;
 
+/// `ROW_HEIGHT` at the interface font size, where the line's text is drawn.
+fn row_height(theme: &Theme) -> gpui::Pixels {
+    theme.typography.scaled(ROW_HEIGHT)
+}
+
 fn colour(colour: LogColor, theme: &Theme) -> Hsla {
     match colour {
         LogColor::Ansi(index) => theme.ely.ansi[usize::from(index.min(15))],
@@ -471,8 +476,8 @@ impl CiLogTab {
         let complete = self.log.value().is_some_and(|log| log.complete);
         div().flex().items_center().px(px(12.0)).py(px(6.0)).gap(px(8.0))
             .border_b_1().border_color(theme.ely.border)
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(self.name.clone()))
-            .child(div().text_sm().text_color(if complete { theme.ely.fg_subtle } else { theme.ely.warning })
+            .child(div().text_size(theme.typography.scaled(14.0)).font_weight(FontWeight::SEMIBOLD).child(self.name.clone()))
+            .child(div().text_size(theme.typography.scaled(14.0)).text_color(if complete { theme.ely.fg_subtle } else { theme.ely.warning })
                 .child(if complete { "complete" } else { "running" }))
             .child(div().flex_1())
             .child(ely_ui::icon_button("ci-log-refresh", IconName::RefreshCw, "Refresh", true, {
@@ -580,8 +585,8 @@ impl CiLogTab {
         .track_scroll(&self.scroll)
         .size_full()
         .font_family(theme.typography.code_family)
-        .text_size(px(12.0))
-        .line_height(px(ROW_HEIGHT));
+        .text_size(theme.typography.scaled(12.0))
+        .line_height(row_height(theme));
         let handle = self.scroll.0.borrow().base_handle.clone();
         body.child(div().flex_1().min_h(px(0.0)).relative()
             .child(list)
@@ -600,8 +605,8 @@ impl CiLogTab {
         view: &gpui::Entity<Self>,
     ) -> AnyElement {
         let row = &doc.lines[line];
-        let mut rendered = div().h(px(ROW_HEIGHT)).flex().items_center().gap(px(12.0)).whitespace_nowrap()
-            .child(div().w(px(digits as f32 * 8.0 + 12.0)).flex_none().text_right()
+        let mut rendered = div().h(row_height(theme)).flex().items_center().gap(px(12.0)).whitespace_nowrap()
+            .child(div().w(px(digits as f32 * 8.0 * f32::from(theme.typography.scaled(12.0)) / 12.0 + 12.0)).flex_none().text_right()
                 .text_color(theme.ely.fg_subtle).child((line + 1).to_string()));
         if let Some(group) = row.opens {
             let folded = self.folded.contains(&group);

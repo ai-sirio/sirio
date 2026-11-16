@@ -18,8 +18,8 @@ via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the Beze
 (`gpui`, `gpui_platform`, and the rest) still comes straight from the published crates.io releases,
 unpatched.
 
-Each override changes one thing about its crate and nothing else (`bezel_markdown` changes two, both
-in `src/render.rs`); the three are unrelated fixes that happen to need the same mechanism.
+Each override changes one thing about its crate and nothing else (`bezel_markdown` changes three, all
+in `src/render.rs`, plus the one-line `src/lib.rs` re-export of the third); the three are unrelated fixes that happen to need the same mechanism.
 `gpui_linux` is described first and at length because it established the arrangement; `gpui_windows` and `bezel_markdown`
 follow it, each with its own short section at the end.
 
@@ -165,9 +165,9 @@ Bumping the pinned `bezel-gpui-windows` version means re-applying that one descr
 hand — or dropping the override, if upstream's no-DirectComposition path has become
 translucency-capable by then (worth checking first, as for `gpui_linux`).
 
-## `bezel_markdown` — a selection that covers each wrapped row from its first glyph, and a bar under wide blocks
+## `bezel_markdown` — a selection that covers each wrapped row from its first glyph, a bar under wide blocks, and text that follows the interface size
 
-`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with two changes. The first:
+`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with three changes. The first:
 `range_rects` in `src/render.rs`, the function that turns a byte range into one rectangle per
 visual row for the selection, the inline-code wash and the chips. Upstream 0.1.4 walked a range
 row by row through `TextLayout::position_for_index`, finding each row's last index by bisection
@@ -178,7 +178,7 @@ Copy read them. The function is upstream 0.2.16's, which walks each line's `wrap
 directly, with one difference: the origin comes from `position_for_index(0)` rather than
 `TextLayout::bounds`, which panics in gpui 0.3.8 on a layout with no bounds. 0.2.16 itself is out
 of reach as a bump — it builds on gpui 0.3.19 and moves the whole bezel family off `=0.1.4`.
-Every other file is byte-for-byte the released source, plus the MIT `LICENSE` from the repository's
+Every other file except `src/lib.rs` (which re-exports `TextOffset`, below) is byte-for-byte the released source, plus the MIT `LICENSE` from the repository's
 `v0.1.4` tag, which the published crate does not ship.
 
 Same manifest conventions as `gpui_windows` (`[workspace]` table, `publish = false`, package name kept
@@ -205,3 +205,20 @@ drops both changes, since 0.2.x carries the function and the viewport. The secon
 `Scripts/Tests/test-markdown-scroll-probe.sh --xvfb` (`MARKDOWN SCROLL PROBE OK`), next to the
 selection probe's: it draws `sirio_ui`'s `markdown_scroll_probe` example and drags the real thumb under
 a fence and a table, in dark and light.
+
+The third is the text size. Upstream 0.1.4 draws every size and line height at a fixed pixel value
+(body 14/22, code 12.5/18, headings 19 to 14, the captions smaller at 11.5 and the cards at 12), so Sirio's
+Interface font size changed everything around a chat reply or a Markdown Preview and left the text
+itself alone. `render.rs` now has a `TextOffset(f32)` gpui `Global` (default 0), re-exported from the
+crate root, which `render_with_selection` (the one `render` and `markdown` go through) reads once per call into a thread-local; the
+private `sized(points)` helper turns each of those constants into `points + offset` (never below 6 px)
+at every text size and text line height, and the list marker column widens in proportion so numbers,
+bullets and checkboxes keep lining up, list indents widen with it so a nested level still clears its
+marker, the code block's Copy button grows with the text and stays centred on the header band, and a bookmark card's fixed height grows by the offset once
+for each of its four lines so its footer is not clipped. Spacing, paddings, radii and the
+glyphs inside fixed boxes (the checkbox tick, the favicon initial) stay as they were. Sirio's theme bridge,
+`sirio_ui::ely::sync_theme_if_changed`, sets it to `base_size - 14.5`, so the offset is 0 at the default
+size and the markdown draws pixel for pixel as before. The check is the unit test
+`rendered_markdown_follows_the_interface_font_size` in `sirio_ui`'s `markdown_preview.rs`. Bumping
+bezel past 0.1.4 means re-applying this change by hand, unless upstream has its own way to set the
+size by then (worth checking first).

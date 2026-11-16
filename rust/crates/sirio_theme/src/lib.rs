@@ -896,6 +896,19 @@ impl Typography {
         typography
     }
 
+    /// How much wider than at the 13pt default a box holding text must be:
+    /// 1.0 at the default, never below it, so a smaller interface keeps the
+    /// default layout.
+    pub fn interface_scale(&self) -> f32 {
+        (f32::from(self.ui_size) / 13.0).max(1.0)
+    }
+
+    /// A width that holds text: `points` at the default size and below,
+    /// wider in proportion as the text grows.
+    pub fn proportional(&self, points: f32) -> Pixels {
+        px(points * self.interface_scale())
+    }
+
     /// Shifts an explicit UI text size by the persisted interface-size delta.
     pub fn scaled(&self, points: f32) -> Pixels {
         px((points + f32::from(self.base_size) - 14.5).max(6.0))

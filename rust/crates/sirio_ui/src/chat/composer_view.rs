@@ -1301,8 +1301,8 @@ impl Chat {
             .relative()
             .w_full()
             .py(px(FIELD_PAD_Y))
-            .text_size(px(13.0))
-            .line_height(px(18.0))
+            .text_size(typography.scaled(13.0))
+            .line_height(typography.scaled(18.0))
             .when(disabled, |input| input.opacity(0.6))
             .on_mouse_down(
                 MouseButton::Right,

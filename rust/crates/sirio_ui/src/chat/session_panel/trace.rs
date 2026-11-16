@@ -451,7 +451,7 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
             })
             .child(
                 div()
-                    .text_size(px(9.5))
+                    .text_size(theme.typography.scaled(9.5))
                     .text_color(theme.ely.fg_subtle)
                     .child(label.to_uppercase()),
             )
@@ -499,13 +499,13 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
     let last = axis.ticks.len().saturating_sub(1);
     let ticks = div()
         .relative()
-        .h(px(17.0))
+        .h(theme.typography.scaled(17.0))
         .children(axis.ticks.iter().enumerate().map(|(at, tick)| {
             let label = div()
                 .absolute()
                 .top_0()
-                .text_size(px(10.0))
-                .line_height(px(12.0))
+                .text_size(theme.typography.scaled(10.0))
+                .line_height(theme.typography.scaled(12.0))
                 .text_color(theme.ely.fg_subtle)
                 .whitespace_nowrap()
                 .child(format_duration(*tick));

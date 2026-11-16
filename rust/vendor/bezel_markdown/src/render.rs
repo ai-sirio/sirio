@@ -28,6 +28,51 @@ use crate::{
     select::{Cursor, Selection},
 };
 
+/// How many points every text size and text line height here is raised (or
+/// lowered) by, kept in step with the host's interface font size.
+///
+/// The constants below are the sizes at the default; a host that lets its user
+/// change the size sets this once and every surface that draws markdown
+/// follows without a relaunch. Spacing, paddings and radii stay fixed; list indents
+/// widen with the marker column they must clear.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextOffset(pub f32);
+
+impl gpui::Global for TextOffset {}
+
+thread_local! {
+    /// The offset in force for the frame being built, read from the global once
+    /// at the render entry so the many helpers below need not carry `cx`.
+    static OFFSET: Cell<f32> = const { Cell::new(0.0) };
+}
+
+/// A text size or text line height at the default, as drawn now.
+fn sized(points: f32) -> Pixels {
+    px((points + OFFSET.get()).max(6.0))
+}
+
+/// The list marker column, widened with the body text so a number, a bullet and
+/// a checkbox keep lining up with the first line.
+fn marker_width() -> Pixels {
+    px(MARKER_WIDTH * text_scale())
+}
+
+/// Each nesting level of a list, widened with the marker column it must clear.
+fn indent_width() -> f32 {
+    INDENT_WIDTH * text_scale()
+}
+
+/// How much larger than the default the body text is drawn now.
+fn text_scale() -> f32 {
+    (TEXT_SIZE + OFFSET.get()).max(6.0) / TEXT_SIZE
+}
+
+/// A bookmark card's fixed height, grown with the four lines of text it holds
+/// (title, two of blurb, footer) so the footer is not clipped at a larger size.
+fn card_height() -> Pixels {
+    px(CARD_HEIGHT + 4.0 * OFFSET.get())
+}
+
 /// Space between two ordinary blocks, and the tighter space inside a list.
 const BLOCK_GAP: f32 = 12.0;
 const LIST_GAP: f32 = 4.0;
@@ -451,6 +496,7 @@ pub fn render_with_selection(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    OFFSET.set(cx.try_global::<TextOffset>().map_or(0.0, |offset| offset.0));
     // Refilled every frame, in paint order — and emptied in *prepaint*, not
     // here. An editor reads last frame's positions while building this frame's
     // tree (a menu anchored at the caret, a handle beside a block), and
@@ -495,7 +541,7 @@ pub fn render_with_selection(
         column = column.child(
             div()
                 .mt(px(gap))
-                .pl(px(block.indent as f32 * INDENT_WIDTH))
+                .pl(px(block.indent as f32 * indent_width()))
                 .relative()
                 .children(frame)
                 // What a caret cannot enter still has to show it is inside the
@@ -547,9 +593,9 @@ fn block_element(
         BlockKind::Ordered { number, text } => marker_row(
             div()
                 .flex_none()
-                .w(px(MARKER_WIDTH))
-                .text_size(px(TEXT_SIZE))
-                .line_height(px(LINE_HEIGHT))
+                .w(marker_width())
+                .text_size(sized(TEXT_SIZE))
+                .line_height(sized(LINE_HEIGHT))
                 .text_color(theme.text_muted)
                 .child(SharedString::from(format!("{number}.")))
                 .into_any_element(),
@@ -613,8 +659,8 @@ fn heading_metrics(level: u8) -> (f32, f32) {
 fn disc(theme: &Theme) -> AnyElement {
     div()
         .flex_none()
-        .w(px(MARKER_WIDTH))
-        .h(px(LINE_HEIGHT))
+        .w(marker_width())
+        .h(sized(LINE_HEIGHT))
         .flex()
         .items_center()
         .child(
@@ -649,8 +695,8 @@ fn checkbox(checked: bool, theme: &Theme) -> AnyElement {
 
     div()
         .flex_none()
-        .w(px(MARKER_WIDTH))
-        .h(px(LINE_HEIGHT))
+        .w(marker_width())
+        .h(sized(LINE_HEIGHT))
         .flex()
         .items_center()
         .child(box_)
@@ -925,8 +971,8 @@ fn painted_text(
     .size_full();
 
     div()
-        .text_size(px(size))
-        .line_height(px(line_height))
+        .text_size(sized(size))
+        .line_height(sized(line_height))
         .relative()
         .child(underlay)
         .children(hint)
@@ -1117,7 +1163,7 @@ fn code_block(
                 .border_b_1()
                 .border_color(theme.border)
                 .bg(theme.ink(0.02))
-                .text_size(px(11.0))
+                .text_size(sized(11.0))
                 .text_color(match language {
                     Some(_) => theme.text_muted,
                     None => theme.text_faint,
@@ -1159,8 +1205,8 @@ fn code_block(
                 .flex()
                 .flex_row()
                 .py(px(CODE_PADDING_Y))
-                .text_size(px(CODE_TEXT_SIZE))
-                .line_height(px(CODE_LINE_HEIGHT))
+                .text_size(sized(CODE_TEXT_SIZE))
+                .line_height(sized(CODE_LINE_HEIGHT))
                 .whitespace_nowrap()
                 .child(underlay)
                 .child(
@@ -1361,15 +1407,16 @@ fn copy_button(
     div()
         .id(ElementId::named_usize("md-copy", ix))
         .absolute()
-        .top(px(3.0))
+        // The header band grows ~1.6x the offset, the button 1x: move down by half the difference to stay centred.
+        .top(px(3.0 + 0.3 * OFFSET.get()))
         .right(px(5.0))
-        .h(px(20.0))
+        .h(sized(20.0))
         .px(px(6.0))
         .rounded(px(5.0))
         .flex()
         .items_center()
         .cursor_pointer()
-        .text_size(px(10.5))
+        .text_size(sized(10.5))
         .text_color(theme.text_muted)
         .hover(|el| el.bg(theme.ink(0.08)))
         .child(if showing { "Copied" } else { "Copy" })
@@ -1416,7 +1463,7 @@ fn image(url: &str, alt: &Text, width: Option<u32>, overlay: Overlay, theme: &Th
             .border_1()
             .border_dashed()
             .border_color(theme.border)
-            .text_size(px(TEXT_SIZE))
+            .text_size(sized(TEXT_SIZE))
             .text_color(theme.text_muted)
             .child(IMAGE_EMPTY)
     } else {
@@ -1530,8 +1577,8 @@ fn bookmark(ix: usize, url: &str, form: Form, theme: &Theme, cx: &App) -> AnyEle
             .border_1()
             .border_color(theme.border)
             .bg(theme.element_hover)
-            .text_size(px(TEXT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .text_size(sized(TEXT_SIZE))
+            .line_height(sized(LINE_HEIGHT))
             .text_color(theme.text)
             .cursor(CursorStyle::PointingHand)
             .hover(|el| el.bg(theme.element_active))
@@ -1554,22 +1601,22 @@ fn bookmark(ix: usize, url: &str, form: Form, theme: &Theme, cx: &App) -> AnyEle
         .flex()
         .flex_col()
         .min_w_0()
-        .h(px(CARD_HEIGHT))
+        .h(card_height())
         .px(px(CARD_PADDING))
         .py(px(CARD_PADDING - 2.0))
         .child(
             div()
                 .truncate()
-                .text_size(px(TEXT_SIZE))
-                .line_height(px(LINE_HEIGHT))
+                .text_size(sized(TEXT_SIZE))
+                .line_height(sized(LINE_HEIGHT))
                 .text_color(theme.text)
                 .child(title),
         )
         .children(preview.description.map(|blurb| {
             div()
                 .line_clamp(2)
-                .text_size(px(CARD_TEXT_SIZE))
-                .line_height(px(CARD_LINE_HEIGHT))
+                .text_size(sized(CARD_TEXT_SIZE))
+                .line_height(sized(CARD_LINE_HEIGHT))
                 .text_color(theme.text_muted)
                 .child(blurb)
         }))
@@ -1580,7 +1627,7 @@ fn bookmark(ix: usize, url: &str, form: Form, theme: &Theme, cx: &App) -> AnyEle
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .text_size(px(CARD_TEXT_SIZE))
+                .text_size(sized(CARD_TEXT_SIZE))
                 .text_color(theme.text_muted)
                 .child(mark(CARD_ICON))
                 .child(div().truncate().child(label)),
@@ -1620,7 +1667,7 @@ fn bookmark(ix: usize, url: &str, form: Form, theme: &Theme, cx: &App) -> AnyEle
             .child(picture.w_full().h(px(CARD_COVER_HEIGHT)))
             .child(words.w_full())
     } else {
-        card.h(px(CARD_HEIGHT))
+        card.h(card_height())
             .child(words.flex_1())
             .child(picture.flex_none().w(px(CARD_IMAGE_WIDTH)).h_full())
     }
@@ -1694,7 +1741,7 @@ fn table(
             if !flat.text.is_empty() {
                 let width = f32::from(
                     text_system
-                        .shape_line(flat.text.clone(), px(TEXT_SIZE), &flat.runs, None)
+                        .shape_line(flat.text.clone(), sized(TEXT_SIZE), &flat.runs, None)
                         .width(),
                 );
                 *natural = natural.max(width);
@@ -1731,8 +1778,8 @@ fn table(
                 .flex_basis(px(0.0))
                 .min_w(px(minimums[c]))
                 .p(px(TABLE_CELL_PADDING))
-                .text_size(px(TEXT_SIZE))
-                .line_height(px(LINE_HEIGHT));
+                .text_size(sized(TEXT_SIZE))
+                .line_height(sized(LINE_HEIGHT));
             cell_el = match align.get(c).copied().unwrap_or_default() {
                 Align::Left => cell_el,
                 Align::Center => cell_el.text_center(),
