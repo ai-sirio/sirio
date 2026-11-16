@@ -37,12 +37,12 @@ value is one app-wide preference saved across relaunches, not one per chat.
 **Goals**
 
 - A drag on the composer's top edge sets how many rows the field may grow to, from
-  3 rows up to half the chat's height.
+  3 rows up to the cap of §3.3, which keeps half the chat above the band.
 - The value holds for every chat, those open and those opened later, and survives a
   relaunch.
 - A user who never drags sees today's behaviour, 3 rows growing to 12, in any chat
-  at least 432 px tall. In a shorter chat the cap of §3.3 applies to the default
-  too, so the field stops at half the chat's height (§9, call 8).
+  at least 554 px tall. In a shorter chat the cap of §3.3 applies to the default
+  too, so the field stops at the cap (§9, call 8).
 - Every agent gets it: there is one composer (`Chat::render_composer`) for Claude's
   native transport and every ACP agent.
 
@@ -147,12 +147,19 @@ value is one app-wide preference saved across relaunches, not one per chat.
 
 ### §3.3 The cap
 
-- `cap_rows = max(3, floor(chat_height / 2 / 18))`, where `chat_height` is the chat
+- `cap_rows = max(3, floor((chat_height / 2 - BAND_ALLOWANCE) / 18))`, with
+  `BAND_ALLOWANCE = 61` px, where `chat_height` is the chat
   root's height as the probe last measured it: the whole chat (transcript, question
   dock, queue and composer), never the composer or the transcript alone.
-- The cap applies to the field only. Chips, the attach error, the tool row and the
-  band's padding come on top, so the whole band can be a little more than half the
-  chat. The field is what the user drags, and chips come and go.
+- The cap leaves half the chat for everything above the band. `BAND_ALLOWANCE` is a
+  fixed constant, not a measurement: the band's height minus its field rows' text
+  height when no chips and no attach error are shown. It covers the band's rule,
+  its top padding, the field's padding, the gap to the tool row, the tool row and the
+  bottom padding (1 + 10 + 10 + 8 + 24 + 8). Chips and the attach error still come
+  on top of it when shown, so then the band can pass half the chat. The field is
+  what the user drags, and chips come and go.
+- Revised 2026-11-16 at the user's ruling: §1 and §3.3 disagreed; the cap now
+  subtracts a fixed band allowance so §1 holds.
 - Before the chat's first paint its height is unknown, and the field uses
   `min(stored, 12)` until the probe has measured it. A chat shown for the first
   time then grows into its cap instead of overshooting it for a frame. This was a
@@ -168,7 +175,7 @@ value is one app-wide preference saved across relaunches, not one per chat.
 - **Drawn:** each chat draws its maximum as `min(stored, its cap_rows)`. Two chats of
   different heights draw different maxima from the one stored value. The default is
   not exempt: a profile that never dragged stores 12 like any other, and a chat
-  under 432 px tall draws less. So nothing needs to tell "never dragged" from
+  under 554 px tall draws less. So nothing needs to tell "never dragged" from
   "dragged to 12", and the plain `i64` default of §5 is enough.
 - A smaller window or pane lowers the drawn maximum and leaves the stored value
   alone; growing it back gives the stored value back.
@@ -236,7 +243,7 @@ X keys and relaunches. Read `docs/agents/e2e-tests.md` first; the scroll-drag pr
 (`Scripts/Tests/test-scroll-drag-probe.sh`) has real `xdotool` drags to copy. Steps,
 each asserted on `composerRow`:
 
-1. Fresh profile, empty draft, a chat at least 432 px tall: drawn maximum 12, field
+1. Fresh profile, empty draft, a chat at least 554 px tall: drawn maximum 12, field
    at 3 rows.
 2. A 40-line draft: field at 12 rows.
 3. A real drag (press on the edge's centre, move up N × 18 px in steps, release):
@@ -290,7 +297,8 @@ its own.
 
 ## §9 Calls made in the brainstorm, for the user to check
 
-1. The cap is half the chat's height, applied to the field only.
+1. The cap keeps half the chat above the band: half the chat's height minus a fixed
+   61 px band allowance, in rows (revised 2026-11-16, see §3.3).
 2. One app-wide value, saved across relaunches; not per chat.
 3. The edge shows nothing until hovered (the cursor changes), like the drawer's.
 4. A drag starts from the height the field shows, not from the stored maximum:
@@ -298,7 +306,7 @@ its own.
 5. Heights snap to whole 18 px rows.
 6. No reset gesture; a profile that never dragged keeps 12.
 7. The edge works while a turn runs and while the composer is disabled.
-8. The cap applies to the default of 12 as well: in a chat under 432 px tall, a
+8. The cap applies to the default of 12 as well: in a chat under 554 px tall, a
    profile that never dragged gets fewer than 12 rows, where today it gets 12. Raised
    by the builder check; settled this way because it keeps one rule (the transcript
-   always keeps half the chat) and needs no "never dragged" state.
+   always keeps half the chat above the band) and needs no "never dragged" state.

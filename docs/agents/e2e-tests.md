@@ -245,8 +245,9 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # maximum on the `composerRow` of `surface.chat.read` (`capRows`, `maxRows`, `storedMaxRows`,
 # `fieldRows`, `resizing`, `edge`, `root`), which exists only once a frame paints. At 2200x1000 the
 # stored 12 is drawn and the empty field shows 3 rows; a 40-line draft fills it to 12; a 2200x400
-# window caps the field at half the chat while the stored maximum stays 12. Then real X drags on the
-# composer's top edge: 4 rows up sets 16 and stores it; pulled to the transcript it stops at the cap;
+# window caps the field at half the chat minus the band's fixed 61 px allowance (4 rows) while the stored
+# maximum stays 12, and the band takes at most half the chat. Then real X drags on the
+# composer's top edge: 4 rows up sets 16 and stores it; pulled to the transcript it stops at the cap (21 rows at 2200x1000) with the band within half the chat;
 # with the 40-line draft still in, a drag released below the window (outside it) ends too and the rows
 # bottom out at 3; a drag held 5 rows up pins the field at 8 and its release keeps 8; a press that never
 # moved, and one held 8 px up, save nothing. A real drag of the sidebar's divider then saves the whole

@@ -48,7 +48,7 @@ JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` assert
 included) and `edge` (the strip along the composer's top that a drag resizes by) boxes as `[x, y, w, h]`,
 `fieldRows` (the rows the field is drawn at, measured from the painted field), `maxRows` (the most rows it is drawn
 to grow to, at rest), `storedMaxRows` (the app-wide `chat.composerMaxRows` the chat holds, before the cap),
-`capRows` (half the chat's height in 18 px rows, at least 3; null before the first paint), `resizing` (a drag
+`capRows` (half the chat's height minus a fixed 61 px band allowance, in 18 px rows, at least 3; null before the first paint), `resizing` (a drag
 of the edge has moved and is held, so the field is pinned to its rows),
 `docked`, `overflow` (what the layout moved into ⋯: `model` or `agent`, `attach` (both only in `minimal`), `fast`, `thinking`, `session-panel`,
 `background-tasks`, `context`), `modeIcon` and `modeDanger` (what the render drew for the permission

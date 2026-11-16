@@ -140,12 +140,13 @@ set -euo pipefail
 #   composer_resize    The composer's field follows the chat's height. At 2200x1000 the cap is at least
 #                      12 rows, the drawn maximum is the stored 12 and the empty field shows 3 rows; a
 #                      40-line draft fills it to 12. With the window resized to 2200x400 the chat is
-#                      under 432 px tall, so the cap (half the chat, in 18 px rows) is below 12 and the
-#                      drawn maximum and the draft's rows follow it while the stored maximum stays 12;
+#                      under 554 px tall, so the cap (half the chat minus the band's fixed 61 px allowance, in 18 px
+#                      rows: 4 at 294 px) is below 12 and the drawn maximum and the draft's rows follow it
+#                      while the stored maximum stays 12 and the band stays within half the chat;
 #                      at 2200x1000 again the field is back to 12. Then the edge on the composer's top is
 #                      dragged with real X events: 4 rows up raises the maximum to 16 (released where
-#                      the dragged edge now is); pulled to the transcript it stops at the cap (released
-#                      over the transcript); with the 40-line draft still in, a drag pulled down past
+#                      the dragged edge now is); pulled to the transcript it stops at the cap (21 at 894 px; released
+#                      over the transcript) with the band within half the chat; with the 40-line draft still in, a drag pulled down past
 #                      the window's bottom edge and released there (outside the window) ends the drag and
 #                      the rows bottom out at 3, saved; an emptied field is 3 rows; a drag held 5 rows up
 #                      pins the field at 8 and the release frees it with the maximum kept at 8; a press
@@ -2301,7 +2302,7 @@ scenario_composer_keys() {
 # the numbers the expression held for, so transcript.log can be re-checked without the frames.
 wait_composer() { # desc expr [seconds]
   local desc=$1 got
-  got=$(E2E find "$SURFACE" "$desc" "${3:-20}" "($2) and json.dumps({k: c[\"composerRow\"].get(k) for k in (\"capRows\", \"maxRows\", \"storedMaxRows\", \"fieldRows\", \"root\", \"resizing\")}, separators=(\",\", \":\"))") || fail "$desc"
+  got=$(E2E find "$SURFACE" "$desc" "${3:-20}" "($2) and json.dumps({k: c[\"composerRow\"].get(k) for k in (\"capRows\", \"maxRows\", \"storedMaxRows\", \"fieldRows\", \"band\", \"root\", \"resizing\")}, separators=(\",\", \":\"))") || fail "$desc"
   echo "OK: $desc"
   echo "  composerRow: $got"
 }
@@ -2370,10 +2371,12 @@ scenario_composer_resize() {
   window=$(find_window)
   [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID"
   DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 2200 400 || fail "could not resize the window to 2200x400"
-  # (A layout that kept the chat taller than 432 px would fail here, not further down.)
-  wait_composer "the chat shrank under 432 px" 'c["composerRow"]["root"][3] < 432'
+  # (A layout that kept the chat taller than 554 px would fail here, not further down.)
+  wait_composer "the chat shrank under 554 px" 'c["composerRow"]["root"][3] < 554'
   wait_composer "the field follows the cap while the stored maximum stays 12" \
-    '(r := c["composerRow"])["maxRows"] == r["capRows"] and r["capRows"] < 12 and r["capRows"] == max(3, int(r["root"][3] / 2 / 18)) and r["storedMaxRows"] == 12 and r["fieldRows"] == r["capRows"]'
+    '(r := c["composerRow"])["maxRows"] == r["capRows"] and r["capRows"] < 12 and r["capRows"] == max(3, int((r["root"][3] / 2 - 61) / 18)) and r["storedMaxRows"] == 12 and r["fieldRows"] == r["capRows"]'
+  wait_composer "at the cap with no chips the band takes at most half the chat" \
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["band"][3] <= r["root"][3] / 2'
   capture composer-resize-short
   DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 2200 1000 || fail "could not resize the window back to 2200x1000"
   wait_composer "back at 2200x1000 the field is 12 rows again" 'c["composerRow"]["maxRows"] == 12 and c["composerRow"]["fieldRows"] == 12'
@@ -2387,7 +2390,7 @@ scenario_composer_resize() {
   echo "step: dragging the edge far up and releasing over the transcript stops at the cap"
   drag_edge_to "$(composer_edge_geometry | awk '{print int($3 + $4 / 4)}')"
   wait_composer "the field and the stored maximum are the cap" \
-    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and r["capRows"] > 16 and not r["resizing"]'
+    '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and r["capRows"] > 16 and not r["resizing"] and r["band"][3] <= r["root"][3] / 2'
 
   echo "step: a release below the window ends the drag too, and the rows bottom out at 3"
   # The screen must be taller than the window (2200x1000): window y 1080 is then outside the window

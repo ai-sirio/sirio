@@ -17,14 +17,28 @@ pub(crate) const DEFAULT_MAX_ROWS: usize = 12;
 /// The height of the strip along the composer's top edge that starts a drag.
 pub(crate) const EDGE_HEIGHT: f32 = 6.0;
 
+/// The band's height minus its field rows' text height, when no chips and no
+/// attach error are shown: a fixed allowance, not a measurement. 61 px is the
+/// 1px rule, `BAND_TOP_PAD` (10), the field's `FIELD_PAD_Y` above and below
+/// (2 x 5), the 8px `gap_2` between the editor and the tool row, the 24px tool
+/// row and the band's 8px bottom padding. Three of those parts (the gap, the
+/// tool row and the bottom padding) have no named constant, so this is a
+/// literal. The E2E readback measured it: `band` 115 px with 3 field rows.
+pub(crate) const BAND_ALLOWANCE: f32 = 61.0;
+
 /// The most rows the field may take in a chat `chat_height` px tall: whole rows
-/// in half the chat, never fewer than `MIN_ROWS`. A height that is not a
-/// positive number gives `MIN_ROWS`.
+/// in what is left of half the chat after `BAND_ALLOWANCE`, never fewer than
+/// `MIN_ROWS`, so half the chat stays above the band. Chips and an attach error
+/// come on top of it. A height that is not a positive number gives `MIN_ROWS`.
 pub(crate) fn cap_rows(chat_height: f32) -> usize {
     if !chat_height.is_finite() || chat_height <= 0.0 {
         return MIN_ROWS;
     }
-    ((chat_height / 2.0 / ROW_HEIGHT).floor() as usize).max(MIN_ROWS)
+    let room = chat_height / 2.0 - BAND_ALLOWANCE;
+    if room <= 0.0 {
+        return MIN_ROWS;
+    }
+    ((room / ROW_HEIGHT).floor() as usize).max(MIN_ROWS)
 }
 
 /// The rows the field takes when the pointer moves from `anchor_y` to
@@ -201,15 +215,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_cap_is_half_the_chat_in_whole_rows() {
-        assert_eq!(cap_rows(432.0), 12);
-        assert_eq!(cap_rows(431.0), 11);
-        assert_eq!(cap_rows(1000.0), 27);
+    fn the_cap_leaves_half_the_chat_above_the_band_in_whole_rows() {
+        assert_eq!(cap_rows(554.0), 12);
+        assert_eq!(cap_rows(553.0), 11);
+        assert_eq!(cap_rows(1000.0), 24);
+        assert_eq!(cap_rows(894.0), 21);
+        assert_eq!(cap_rows(294.0), 4);
+        assert_eq!(cap_rows(266.0), 4, "the first height that fits a fourth row");
     }
 
     #[test]
     fn a_chat_too_short_or_unmeasurable_still_caps_at_three_rows() {
-        for height in [0.0, 50.0, -10.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for height in [265.0, 230.0, 124.0, 122.0, 50.0, 0.0, -10.0] {
+            assert_eq!(cap_rows(height), 3, "height {height}");
+        }
+        for height in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert_eq!(cap_rows(height), 3, "height {height}");
         }
     }
