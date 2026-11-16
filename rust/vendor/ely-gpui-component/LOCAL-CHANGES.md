@@ -598,6 +598,19 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   (`patch -p1` of each commit's diff of that file). `ime.rs` was not taken
   whole from `main`, which carries `self.edits` from BlockEditor `d24984c`,
   not vendored.
+- Tab strip (the Tabs port): `src/navigation/tabs.rs` and `src/layout/narrow.rs`
+  (new) are verbatim from `main`, with no local line in either. They carry the
+  `tabs.rs` hunks of `9977785`, `919f26f`, `4580e3b`, `6d95b24`, `cb5e35f`,
+  `e56a343`, `3a68d1b` and `7d704d9`: the strip scrolls sideways and keeps the
+  chosen tab in view when it is too narrow for every label, and a long label is
+  cut to fit. `src/layout/mod.rs` takes two lines, `mod narrow;` and
+  `pub(crate) use narrow::{measure_width, text_width};`. `src/theme/tokens.rs`
+  is merged: it gains `Theme::hairline` (`px(1.0)`) with no conflict. The port
+  adds no public API Sirio calls and no inline test.
+  Skipped from `6d95b24`: its other files, namely the narrow `ScrollArea`
+  (`layout/scroll.rs` keeps Sirio's hover change), the property rows, the
+  segments, and the status items in the vendored `src/shell/bars.rs` (items
+  that shrink and end in an ellipsis).
 - Skipped, not vendored: `collab/remote.rs` and `terminal/paint.rs`.
 - Skipped, not taken (vendored files whose hunks of these commits were left
   out; the port documents them and does not apply them):
@@ -605,8 +618,6 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
     `assert!` on an out-of-range selection, where upstream logs and ignores it.
   - `e2d880f`'s part in `src/forms/files.rs`.
   - `6d95b24`'s part in `src/layout/scroll.rs`.
-  - `6d95b24`'s part in `src/navigation/tabs.rs`: left to the Tabs port, a
-    later task of this sync.
   - The tests of `2a18e9d` and `152d881`: they live in `forms/tests/`, which is
     not vendored.
 

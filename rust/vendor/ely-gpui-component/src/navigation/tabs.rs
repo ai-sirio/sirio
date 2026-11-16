@@ -2,14 +2,15 @@ use std::rc::Rc;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ElementId, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement,
-    Styled, Window, div, prelude::*,
+    IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, Role, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, prelude::*,
 };
 
 use crate::{
     forms::{Choice, Pick, step},
+    layout::{measure_width, text_width},
     motion::{self, Axis, Marker, glide, measure_item, measure_origin, slide},
-    primitives::{Icon, tab_stop},
+    primitives::{Icon, Tooltip, tab_stop},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 
@@ -23,6 +24,7 @@ pub enum TabPlacement {
 }
 
 type OnValue = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
+type OnContext = Rc<dyn Fn(&SharedString, Point<Pixels>, &mut Window, &mut App)>;
 
 /// A strip of tabs and the chosen tab's panel. A line slides to the chosen tab; arrows move it.
 #[derive(IntoElement)]
@@ -33,6 +35,7 @@ pub struct Tabs {
     placement: TabPlacement,
     panel: Option<AnyElement>,
     on_change: Option<OnValue>,
+    on_context: Option<OnContext>,
 }
 
 impl Tabs {
@@ -48,6 +51,7 @@ impl Tabs {
             placement: TabPlacement::default(),
             panel: None,
             on_change: None,
+            on_context: None,
         }
     }
 
@@ -71,13 +75,21 @@ impl Tabs {
     }
 }
 
+impl Tabs {
+    /// A right click on a tab: its value and the pointer.
+    pub fn on_context(
+        mut self,
+        handler: impl Fn(&SharedString, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_context = Some(Rc::new(handler));
+        self
+    }
+}
+
 impl RenderOnce for Tabs {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let values: Vec<SharedString> = self.tabs.iter().map(|tab| tab.value.clone()).collect();
-        let chosen = values
-            .iter()
-            .position(|value| *value == self.selected)
-            .unwrap_or_else(|| panic!("tabs {:?} have no tab {}", self.id, self.selected));
+        let chosen = values.iter().position(|value| *value == self.selected);
         let placement = self.placement;
         let axis = match placement {
             TabPlacement::Left => Axis::Vertical,
@@ -96,6 +108,16 @@ impl RenderOnce for Tabs {
             window,
             cx,
         );
+        // The chosen tab scrolls in per choice and width.
+        let scroll = window
+            .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
+        let followed = window.use_keyed_state((self.id.clone(), "followed"), cx, |_, _| {
+            None::<(SharedString, Pixels)>
+        });
+        let follow =
+            (axis == Axis::Horizontal).then(|| (followed, self.selected.clone(), scroll.clone()));
         let focus = tab_stop((self.id.clone(), "focus").into(), true, window, cx);
         let focused = focus.is_focused(window);
         let tabs = Rc::new(self.tabs);
@@ -109,6 +131,14 @@ impl RenderOnce for Tabs {
                 }
             })
         };
+        // Last frame's strip width decides icons only.
+        let strip_width =
+            window.use_keyed_state((self.id.clone(), "strip-width"), cx, |_, _| Pixels::ZERO);
+        let shown = *strip_width.read(cx);
+        let compact = axis == Axis::Horizontal
+            && tabs.iter().all(|tab| tab.icon.is_some())
+            && shown > Pixels::ZERO
+            && shown < natural(&tabs, window, cx);
         let theme = cx.theme();
         let colors = &theme.colors;
         let (thickness, duration) = (theme.tab_indicator(), motion::duration(motion::SLOW, cx));
@@ -141,15 +171,21 @@ impl RenderOnce for Tabs {
             .iter()
             .enumerate()
             .map(|(ix, tab)| {
-                let on = ix == chosen;
+                let on = Some(ix) == chosen;
                 let fg = match (tab.disabled, on) {
                     (true, _) => colors.fg_disabled,
                     (false, true) => colors.fg,
                     (false, false) => colors.fg_muted,
                 };
                 let pick = pick.clone();
+                let context = self.on_context.clone().filter(|_| !tab.disabled);
+                let value = tab.value.clone();
                 div()
                     .id(("tab", ix))
+                    .debug_selector(move || format!("tab-{ix}"))
+                    .role(Role::Tab)
+                    .aria_selected(on)
+                    .aria_label(tab.label.clone())
                     .relative()
                     .flex()
                     .items_center()
@@ -182,11 +218,25 @@ impl RenderOnce for Tabs {
                                 }
                             })
                     })
+                    .when_some(context, |item, context| {
+                        item.on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            log::info!("tabs: context on {value}");
+                            context(&value, event.position, window, cx);
+                        })
+                    })
                     .when_some(tab.icon, |item, icon| {
                         item.child(Icon::new(icon).size(IconSize::Sm).color(fg))
                     })
-                    .child(tab.label.clone())
-                    .when_some(tab.note.clone(), |item, note| {
+                    .when(compact, |item| {
+                        item.tooltip(Tooltip::text(tab.label.clone()))
+                    })
+                    .when(axis == Axis::Horizontal, |item| item.max_w_full())
+                    .when(!compact, |item| {
+                        item.child(div().min_w_0().truncate().child(tab.label.clone()))
+                    })
+                    .when_some(tab.note.clone().filter(|_| !compact), |item, note| {
                         item.child(div().text_color(colors.fg_subtle).child(note))
                     })
                     .child(measure_item(state.clone(), ix, axis))
@@ -195,10 +245,14 @@ impl RenderOnce for Tabs {
         let (keys, key_pick) = (tabs.clone(), pick.clone());
         let strip = div()
             .id((self.id.clone(), "strip"))
+            .role(Role::TabList)
             .track_focus(&focus)
             .relative()
             .flex()
             .when(axis == Axis::Vertical, |strip| strip.flex_col())
+            .when(axis == Axis::Horizontal, |strip| {
+                strip.min_w_0().overflow_x_scroll().track_scroll(&scroll)
+            })
             .gap_1()
             .border_color(colors.border)
             .map(|strip| match placement {
@@ -207,6 +261,9 @@ impl RenderOnce for Tabs {
                 TabPlacement::Left => strip.border_r_1().pr_1(),
             })
             .on_key_down(move |event, window, cx| {
+                if keys.is_empty() {
+                    return;
+                }
                 let back = if axis == Axis::Vertical { "up" } else { "left" };
                 let ahead = if axis == Axis::Vertical {
                     "down"
@@ -214,21 +271,44 @@ impl RenderOnce for Tabs {
                     "right"
                 };
                 let key = event.keystroke.key.as_str();
+                let (from_back, from_ahead) = match chosen {
+                    Some(at) => (at, at),
+                    None => (0, keys.len() - 1),
+                };
                 let to = match key {
-                    key if key == back => step(&keys, chosen, -1),
-                    key if key == ahead => step(&keys, chosen, 1),
+                    key if key == back => step(&keys, from_back, -1),
+                    key if key == ahead => step(&keys, from_ahead, 1),
                     "home" => step(&keys, keys.len() - 1, 1),
                     "end" => step(&keys, 0, -1),
                     _ => return,
                 };
                 cx.stop_propagation();
-                if to != chosen {
+                if Some(to) != chosen && !keys[to].disabled {
                     key_pick(to, window, cx);
                 }
             })
+            // Items first: a child's index is its tab's.
+            .children(items)
+            .child(measure_width(strip_width))
             .child(measure_origin(state, axis))
             .children(indicator)
-            .children(items);
+            .children(follow.map(|(followed, selected, scroll)| {
+                canvas(
+                    move |_, window, cx| {
+                        let now = (selected, scroll.bounds().size.width);
+                        if now.1 <= Pixels::ZERO || followed.read(cx).as_ref() == Some(&now) {
+                            return;
+                        }
+                        followed.update(cx, |followed, _| *followed = Some(now));
+                        if let Some(ix) = chosen {
+                            scroll.scroll_to_item(ix);
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+            }));
         let panel = self.panel.map(|panel| {
             div().flex_1().min_w_0().child(panel).with_animation(
                 ("tab-panel", turn),
@@ -237,11 +317,33 @@ impl RenderOnce for Tabs {
                 move |panel, t| if turn == 0 { panel } else { panel.opacity(t) },
             )
         });
-        let frame = div().id(self.id).flex().gap_4();
+        let frame = div().id(self.id).flex().min_w_0().gap_4();
         match placement {
             TabPlacement::Top => frame.flex_col().child(strip).children(panel),
             TabPlacement::Bottom => frame.flex_col().children(panel).child(strip),
             TabPlacement::Left => frame.child(strip).children(panel),
         }
     }
+}
+
+/// Every tab's icon, label and note in full: the width that cuts none.
+fn natural(tabs: &[Choice], window: &Window, cx: &App) -> Pixels {
+    let theme = cx.theme();
+    let rem = window.rem_size();
+    let pad = (gpui::rems(0.75).to_pixels(rem) + theme.hairline()) * 2.0;
+    let glyph = theme.icon_size(IconSize::Sm).to_pixels(rem) + gpui::rems(0.375).to_pixels(rem);
+    let gap = gpui::rems(0.25).to_pixels(rem);
+    tabs.iter().fold(Pixels::ZERO, |sum, tab| {
+        let text =
+            |text: &SharedString| text_width(text, TextSize::Sm, FontWeight::MEDIUM, window, cx);
+        let note = tab.note.as_ref().map_or(Pixels::ZERO, |note| {
+            text(note) + gpui::rems(0.375).to_pixels(rem)
+        });
+        let icon = if tab.icon.is_some() {
+            glyph
+        } else {
+            Pixels::ZERO
+        };
+        sum + pad + icon + text(&tab.label) + note + gap
+    })
 }
