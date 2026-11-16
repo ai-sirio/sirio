@@ -279,6 +279,8 @@ pub struct FileView {
     /// breadcrumb names the symbols around. The code editor tells this view
     /// nothing about a caret move, so an observer of it keeps this current.
     caret_line: usize,
+    /// The code editor's primary selection (anchor, head) as `note_selection` last saw it.
+    ide_selection_seen: Option<(usize, usize)>,
     /// The file's diff against HEAD, as the app last pushed it (`set_git_diff`):
     /// the gutter's marks and the hunk drawn in place. `None` for a file that is
     /// not in a repository, is clean, or is a snapshot.
@@ -415,6 +417,10 @@ pub enum FileViewEvent {
     /// a save or a reload that succeeded, and after a check that adopted a
     /// change from disk or found one.
     GitDiffStale(PathBuf),
+    /// The code editor's primary selection or caret moved, or the code editor took the
+    /// keyboard. What it is now is read with [`FileView::ide_selection`]; the shell coalesces
+    /// these before it says anything to a connected Claude (spec 2026-11-15, section 10.1).
+    SelectionChanged { path: PathBuf },
     /// A save succeeded: the file's symbols may have moved. Apart from
     /// `GitDiffStale`, which also fires when the editor takes focus.
     Saved(PathBuf),
@@ -491,6 +497,42 @@ pub struct FileDiagnostic {
 // opens it with the replace row. `ToggleDrawer` opens the worktree's drawer or
 // closes it to its header; `SearchInWorktree` opens it on Search.
 actions!(file_view, [Find, Replace, ToggleDrawer, SearchInWorktree]);
+
+/// The editor's primary selection as Claude Code's IDE protocol reads it (spec 2026-11-15,
+/// section 6, shared with the native chat): 0-based line, character in UTF-16 code units, end
+/// exclusive, and the selected text cut by [`cap_utf16`] to [`IDE_SELECTION_TEXT_UNITS`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdeSelection {
+    pub path: PathBuf,
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    pub text: String,
+}
+
+/// The most UTF-16 code units of selected text a notification carries (spec 10.2).
+pub const IDE_SELECTION_TEXT_UNITS: usize = 4096;
+
+/// The 0-based line and UTF-16 character of byte `offset` in `text` (LF line ends).
+fn position_utf16(text: &str, offset: usize) -> (u32, u32) {
+    let before = &text[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let character = before[line_start..].encode_utf16().count();
+    (line as u32, character as u32)
+}
+
+/// The longest prefix of `text` that is at most `units` UTF-16 code units, cut on a character
+/// boundary: a character that would straddle the limit (a surrogate pair) is dropped whole.
+pub fn cap_utf16(text: &str, units: usize) -> &str {
+    let mut used = 0;
+    for (index, character) in text.char_indices() {
+        used += character.len_utf16();
+        if used > units {
+            return &text[..index];
+        }
+    }
+    text
+}
 
 /// Installs the file tab's key bindings: Find and Replace, in the tab's
 /// `FileEditor` context so they reach neither a terminal nor a chat.
@@ -605,6 +647,7 @@ impl FileView {
             symbols: Vec::new(),
             location: None,
             caret_line: 0,
+            ide_selection_seen: None,
             git_diff: None,
             open_hunk: None,
             git_diff_in_flight: false,
@@ -1303,6 +1346,10 @@ impl FileView {
         if !self.check_external(cx) {
             cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
         }
+        // Focusing the file says its selection again (a focus notifies nothing).
+        cx.emit(FileViewEvent::SelectionChanged {
+            path: self.path.clone(),
+        });
     }
 
     /// The buffer's text and its conflict: what a disk check can change.
@@ -2735,6 +2782,37 @@ mod tests {
     use crate::editor::markdown_links_in_line;
     use gpui::{Focusable, Modifiers, VisualTestContext};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    mod cap_utf16 {
+        use super::super::{IDE_SELECTION_TEXT_UNITS, cap_utf16};
+
+        #[test]
+        fn short_text_is_unchanged() {
+            assert_eq!(cap_utf16("let s = \"x\";", 4096), "let s = \"x\";");
+            assert_eq!(cap_utf16("", 4096), "");
+        }
+
+        #[test]
+        fn cut_at_4096_units() {
+            let text = "a".repeat(5000);
+            let capped = cap_utf16(&text, IDE_SELECTION_TEXT_UNITS);
+            assert_eq!(capped.encode_utf16().count(), 4096);
+            // Two-byte characters count one unit each, whatever their bytes.
+            let text = "é".repeat(5000);
+            assert_eq!(cap_utf16(&text, 4096).encode_utf16().count(), 4096);
+        }
+
+        #[test]
+        fn surrogate_pair_is_not_split() {
+            // 4095 units, then an emoji (two units) that straddles unit 4096: dropped whole.
+            let text = format!("{}😀tail", "a".repeat(4095));
+            let capped = cap_utf16(&text, 4096);
+            assert_eq!(capped, "a".repeat(4095));
+            // One unit further and it fits whole.
+            let text = format!("{}😀tail", "a".repeat(4094));
+            assert_eq!(cap_utf16(&text, 4096), format!("{}😀", "a".repeat(4094)));
+        }
+    }
 
     /// Sets the code editor's selection to `range`, as a drag or a keystroke
     /// would. `mounted_file_view` has drawn two frames, so the editor exists.
@@ -4732,7 +4810,13 @@ mod tests {
             });
         });
 
-        let seen = events.borrow().clone();
+        // Selecting the line was itself a `SelectionChanged`; this is about the two menu entries.
+        let seen: Vec<FileViewEvent> = events
+            .borrow()
+            .iter()
+            .filter(|event| !matches!(event, FileViewEvent::SelectionChanged { .. }))
+            .cloned()
+            .collect();
         assert_eq!(
             seen,
             vec![

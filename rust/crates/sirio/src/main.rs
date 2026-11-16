@@ -6234,6 +6234,14 @@ struct SirioWorkspace {
     /// Set when `render` defers `open_next_identity_dialog` and cleared by it,
     /// so two renders before the deferred call runs cannot pop two entries.
     identity_open_scheduled: bool,
+    /// The agents of each worktree in the order the user focused them (spec 2026-11-15, 4.5):
+    /// an at-mention goes to the first of them that can take it.
+    agent_focus: ide_bridge::AgentFocus,
+    /// The (tab id, pane id) an at-mention chose to bring to the front. Focus needs a window,
+    /// which an event handler lacks, so `render` drains it.
+    pending_ide_focus: Option<(usize, usize)>,
+    /// Bumped by every owner-resolution trigger, so only the newest chain of retries goes on.
+    ide_resolve_generation: u64,
     /// The id of the toast that reports a failed identity save. The drain
     /// waits until it is gone, so the next dialog does not cover it.
     identity_error_toast: Option<u64>,
@@ -7527,6 +7535,9 @@ impl SirioWorkspace {
             identity_queue: VecDeque::new(),
             identity_dialog: None,
             identity_open_scheduled: false,
+            agent_focus: ide_bridge::AgentFocus::default(),
+            pending_ide_focus: None,
+            ide_resolve_generation: 0,
             identity_error_toast: None,
             identity_last_outcome: None,
             identity_seq: 0,
@@ -9397,16 +9408,9 @@ impl SirioWorkspace {
                         lines,
                         text,
                         language,
-                    } => {
-                        if let Some(chat) = workspace.active_chat_for(path) {
-                            let label = workspace
-                                .repo_relative(path)
-                                .unwrap_or_else(|| path.display().to_string());
-                            let payload = sirio_ui::file_context_menu::agent_payload(
-                                &label, *lines, text, language,
-                            );
-                            chat.update(cx, |chat, cx| chat.control_append(&payload, cx));
-                        }
+                    } => workspace.send_selection_to_agent(path, *lines, text, language, cx),
+                    FileViewEvent::SelectionChanged { .. } => {
+                        workspace.ide_selection_changed(&view, cx);
                     }
                     FileViewEvent::CopyPermalink { path, lines } => {
                         if let Some(url) = workspace.permalink_for(path, *lines) {
@@ -9615,7 +9619,10 @@ impl SirioWorkspace {
         FileContextFacts {
             in_git_repo: worktree.is_some(),
             has_github_remote,
-            has_agent_chat: self.active_chat_for(path).is_some(),
+            // A chat, or any agent an at-mention can reach: with the IDE bridge on, the row is
+            // ready and says so when no terminal or chat of the worktree can take it (a toast).
+            has_agent_chat: self.active_chat_for(path).is_some()
+                || ide_bridge::SSE_PORT.load(Ordering::SeqCst) != 0,
             definition_available: worktree
                 .as_deref()
                 .is_some_and(|root| self.lsp.definition_available(path, root)),
@@ -9685,27 +9692,35 @@ impl SirioWorkspace {
     /// agent's PTY is interference Sirio avoids everywhere else.
     fn active_chat_for(&self, path: &Path) -> Option<Entity<Chat>> {
         let worktree = self.worktree_root_for(path)?;
-        self.tabs.iter().find_map(|tab| {
-            if tab.kind != TabKind::AgentChat {
-                return None;
-            }
-            let owned = self
-                .tab_worktree_paths
-                .get(&tab.id)
-                .is_some_and(|owner| paths_name_the_same_document(owner, &worktree));
-            if !owned {
-                return None;
-            }
-            let mut chat = None;
-            tab.panes.for_each(&mut |_, content| {
-                if chat.is_none()
-                    && let TabContent::Chat(entity) = content
-                {
-                    chat = Some(entity.clone());
+        self.chats_in(&worktree).into_iter().next()
+    }
+
+    /// The chats open in `worktree`'s tabs, in tab order.
+    fn chats_in(&self, worktree: &Path) -> Vec<Entity<Chat>> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| {
+                if tab.kind != TabKind::AgentChat {
+                    return None;
                 }
-            });
-            chat
-        })
+                let owned = self
+                    .tab_worktree_paths
+                    .get(&tab.id)
+                    .is_some_and(|owner| paths_name_the_same_document(owner, worktree));
+                if !owned {
+                    return None;
+                }
+                let mut chat = None;
+                tab.panes.for_each(&mut |_, content| {
+                    if chat.is_none()
+                        && let TabContent::Chat(entity) = content
+                    {
+                        chat = Some(entity.clone());
+                    }
+                });
+                chat
+            })
+            .collect()
     }
 
     /// Reveals the History panel for the worktree `path` belongs to. The path
@@ -11476,10 +11491,14 @@ impl SirioWorkspace {
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             while let Some(event) = events.next().await {
-                let delivered = this.update(cx, |_, cx| {
+                let connected = matches!(event, sirio_ide::BridgeEvent::Connected { .. });
+                let delivered = this.update(cx, |workspace, cx| {
                     cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
                         bridge.on_event(event);
                     });
+                    if connected {
+                        workspace.ide_resolve_ownerless(cx);
+                    }
                     cx.notify();
                 });
                 if delivered.is_err() {
@@ -11560,7 +11579,8 @@ impl SirioWorkspace {
         if !cx.has_global::<ide_bridge::IdeBridge>() {
             return vec![("state".to_string(), "{\"enabled\":false}".to_string())];
         }
-        vec![("state".to_string(), cx.global::<ide_bridge::IdeBridge>().state_json())]
+        let live = self.ide_live_panes(cx);
+        vec![("state".to_string(), cx.global::<ide_bridge::IdeBridge>().state_json(&live))]
     }
 
     /// What OpenCode's watch says, onto the UI thread. The watch lives on a thread of its
@@ -14478,6 +14498,9 @@ impl SirioWorkspace {
         if rescan_in_background {
             self.refresh_project_for_path_in_background(&selected_path, cx);
         }
+        // The worktree's terminals are attached again: a Claude that connected while they were
+        // not is owned now (the resolution retries while their sessions come up).
+        self.ide_resolve_ownerless(cx);
         cx.notify();
         Ok(())
     }
@@ -16618,6 +16641,7 @@ impl SirioWorkspace {
             if let Some(window) = window {
                 self.focus_active_pane(window, cx);
             }
+            self.ide_tab_focused(index, cx);
             self.schedule_save(cx);
             self.mark_activity_dirty();
             cx.notify();
@@ -25309,6 +25333,7 @@ impl SirioWorkspace {
                 .into_owned();
             self.terminal_pane_cache
                 .focus(&worktree_id, &format!("terminal-{pane_id}"));
+            self.record_agent_focus(tab_id, pane_id);
             self.mark_activity_dirty();
             cx.notify();
         }
@@ -29961,6 +29986,14 @@ impl Render for SirioWorkspace {
             self.identity_open_scheduled = true;
             cx.defer_in(window, |workspace, window, cx| {
                 workspace.open_next_identity_dialog(window, cx);
+            });
+        }
+        // An at-mention that went to a Claude terminal brings that terminal forward; focus needs
+        // a window, which the handler that chose it did not have.
+        if let Some((tab_id, pane_id)) = self.pending_ide_focus.take() {
+            cx.defer_in(window, move |workspace, window, cx| {
+                workspace.select_tab(tab_id, Some(window), cx);
+                workspace.select_pane(pane_id, Some(window), cx);
             });
         }
         // The Set Title modal's caret shares the workspace's render pass:

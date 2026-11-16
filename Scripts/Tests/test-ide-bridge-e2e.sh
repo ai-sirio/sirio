@@ -32,12 +32,37 @@ set -eEuo pipefail
 #                     lockfile is back, and the old pane's client reconnects with that token
 #   inherited_port    Sirio launched with CLAUDE_CODE_SSE_PORT=1 hands its own port to panes;
 #                     with the switch off a new pane has none
+#   owner_resolved    the state shows the client's connection owned by the pane it runs in
+#                     (the pane id panel create returned) and by that pane's worktree
+#   selection_utf16   a file whose line 3 is `let s = "<emoji>x";` is opened and its `x` selected
+#                     with surface.editor.select: the client receives selection_changed with
+#                     start {2, 11}, end {2, 12} (UTF-16 columns), isEmpty false, text "x"
+#   selection_coalesced
+#                     20 surface.editor.select calls 25 ms apart: at most one notification per
+#                     100 ms of the burst's duration, plus one, and the last one is the final
+#                     selection (the control poll alone keeps a burst under that bound; see
+#                     the comment at selburst.py)
+#   focus_sends_selection
+#                     selecting a terminal tab sends nothing; selecting the file tab again sends
+#                     exactly one notification, the current selection
+#   at_mention        in the real order (the client's pane focused, then the client started, then
+#                     the file opened): lines 5 to 7 selected and "Add to Agent Thread"
+#                     (surface.editor.context ... send-to-agent) sends at_mentioned with
+#                     lineStart 4 and lineEnd 6, focuses the client's tab and writes nothing
+#                     into the pane
+#   no_eligible_agent_toast
+#                     with the client gone, the same command leaves the toast "No Claude
+#                     terminal or chat in this worktree" in the state's toasts
+#   owner_after_restart
+#                     the client's pane is in a worktree that is not selected; Sirio quits and
+#                     relaunches and the client reconnects: the state shows it ownerless, in
+#                     that worktree (its cwd); selecting the worktree gives it an owner
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
 # with its authToken redacted, the PID-matched window captures in frames/ and socket.jsonl: one
 # JSON line per request this script sent to the app's control socket, with the app's complete
-# answer. The state, settings and switch calls go straight to the socket; every sirioctl call
+# answer. The state, settings, switch and selection-burst calls go straight to the socket; every sirioctl call
 # (the app-ready poll's attempts included) goes through a recording proxy that forwards it
 # unchanged. A request that got no answer (a connect error, an EOF, a timeout, an answer that is
 # not JSON) is a line with the request and an `error` and no `response`. NOT recorded: the
@@ -113,6 +138,7 @@ XVFB_PID=""
 CASE="setup"
 CASES_PASSED=0
 CLIENT_N=0
+CLIENT_TAB=""
 
 is_a_host() {
   local comm
@@ -287,6 +313,68 @@ with open(os.path.join(os.environ["RUN_DIR"], "socket.jsonl"), "a", encoding="ut
             sys.exit(f"switch {value} failed: {response.get('error')}")
 BURST
 sockburst() { python3 -I "$RUN_DIR/sockburst.py" "$@"; }
+# N `surface.editor.select` calls 25 ms apart, each on a connection of its own opened beforehand.
+# Sent without a gap they would be one pass of the app's control poll and one change of the
+# editor's selection (gpui merges the notifies of a pass), so they are spread over several
+# passes. Be clear about what that proves: the app takes about 100 ms per pass here, so the
+# bound the case asserts also holds for a Sirio that does not coalesce (checked by making the app
+# send at once: 5 notifications for the same burst). The case proves the contract (the bound and
+# the last notification being the final selection); a drag, which outpaces the poll, is what the
+# coalescing is for. Logged like sockcall's, in request order; the ranges are the arguments, the
+# elapsed milliseconds from the first send to the last answer are printed.
+cat >"$RUN_DIR/selburst.py" <<'SELBURST'
+import json, os, socket, sys, time
+
+log_path = os.path.join(os.environ["RUN_DIR"], "socket.jsonl")
+requests = [{"id": f"selburst-{i}-{time.time_ns()}", "method": "surface.editor.select",
+             "params": {"ranges": ranges}} for i, ranges in enumerate(sys.argv[1:])]
+
+
+def write_line(entry):
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+socks = []
+try:
+    for _ in requests:
+        sock = socket.socket(socket.AF_UNIX)
+        sock.settimeout(20)
+        sock.connect(os.environ["SIRIO_SOCKET"])
+        socks.append(sock)
+    started = time.monotonic()
+    for sock, request in zip(socks, requests):
+        sock.sendall((json.dumps(request) + "\n").encode())
+        time.sleep(0.025)
+    answers = []
+    for sock in socks:
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        if not data:
+            raise EOFError("no answer")
+        answers.append(json.loads(data))
+    elapsed = int((time.monotonic() - started) * 1000)
+except (OSError, EOFError, ValueError) as error:
+    for request in requests:
+        write_line({"via": "selburst", "request": request, "error": type(error).__name__})
+    raise
+finally:
+    for sock in socks:
+        sock.close()
+failed = None
+for request, response in zip(requests, answers):
+    write_line({"via": "selburst", "request": request, "response": response})
+    if not response.get("ok") and failed is None:
+        failed = f"select {request['params']['ranges']} failed: {response.get('error')}"
+if failed:
+    sys.exit(failed)
+print(elapsed)
+SELBURST
+selburst() { python3 -I "$RUN_DIR/selburst.py" "$@"; }
 # Every sirioctl call goes through a recording proxy: it listens on its own socket, forwards
 # each request line to the app's socket and the answer back, and appends both, complete, to
 # socket.jsonl. The `system.ping` route probe sirioctl sends before a `panel.*` call is forwarded
@@ -508,6 +596,29 @@ start_client() { # worktree-id
   done
   grep -q '"event": "ready"' "$CLIENT_LOG" 2>/dev/null || fail "$CASE: the client never started in pane $CLIENT_PANE (pane: $("$CTL" panel read "$CLIENT_PANE" 2>&1 | head -c 600))"
 }
+# The client in an application terminal tab of the selected worktree (`surface.terminal.open`:
+# a real pane Sirio holds a view of, which `panel create`'s host-only session is not), run by
+# `sh -c` as the shell's child. Sets CLIENT_FIFO, CLIENT_LOG, CLIENT_PANE and CLIENT_TAB.
+start_app_client() {
+  CLIENT_N=$((CLIENT_N + 1))
+  CLIENT_FIFO="$RUN_DIR/client-$CLIENT_N.fifo"
+  CLIENT_LOG="$RUN_DIR/client-$CLIENT_N.jsonl"
+  rm -f "$CLIENT_FIFO" "$CLIENT_LOG"
+  mkfifo "$CLIENT_FIFO"
+  CLIENT_PANE="$(sockcall surface.terminal.open "cmd=$(command -v python3) $CLIENT --fifo $CLIENT_FIFO --transcript $CLIENT_LOG; :" | jq_py 'd["pane"]')"
+  [ -n "$CLIENT_PANE" ] || fail "$CASE: surface.terminal.open named no pane"
+  CLIENT_TAB="$(tabs_field count)"
+  local tries=0
+  while ! grep -q '"event": "ready"' "$CLIENT_LOG" 2>/dev/null && [ "$tries" -lt 150 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  grep -q '"event": "ready"' "$CLIENT_LOG" 2>/dev/null || fail "$CASE: the client never started in $CLIENT_PANE (tab $CLIENT_TAB)"
+}
+end_app_client() {
+  client_do quit
+  sockcall surface.tabs.close "index=$CLIENT_TAB" confirm=yes >/dev/null
+}
 client_do() { printf '%s\n' "$*" >"$CLIENT_FIFO"; }
 # How many transcript records match a Python expression over `r`.
 client_count() { # expr
@@ -534,6 +645,67 @@ wait_client() { # label expr count
 end_client() {
   client_do quit
   "$CTL" panel close "$CLIENT_PANE" >/dev/null 2>&1 || true
+}
+
+# The params of every notification METHOD the client received, one JSON object per line.
+client_notes() { # method
+  python3 -I - "$CLIENT_LOG" "$1" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    r = json.loads(line)
+    frame = r.get("frame", {})
+    if r.get("dir") == "in" and frame.get("method") == sys.argv[2]:
+        print(json.dumps(frame["params"], sort_keys=True))
+PY
+}
+note_count() { client_notes "$1" | wc -l | tr -d ' '; }
+# Polls until the client holds COUNT notifications of METHOD.
+wait_notes() { # method count
+  local tries=0 got=""
+  while [ "$tries" -lt 100 ]; do
+    got="$(note_count "$1")"
+    [ "$got" = "$2" ] && return 0
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  fail "$CASE: the client holds $got $1 notifications, expected $2 (last: $(client_notes "$1" | tail -n 2 | cut -c1-300))"
+}
+# The position of the last tab of a kind (file, chat, terminal).
+tab_index() { # kind
+  "$CTL" surface tabs read --json | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)[0]
+print(max(int(k[4:]) for k, v in d.items() if k.startswith("tab.") and v.startswith(sys.argv[1] + "|")))' "$1"
+}
+file_tab_index() { tab_index file; }
+tabs_field() { "$CTL" surface tabs read --json | jq_py "d[0][\"$1\"]"; }
+# The file the selection cases use: line 3 is `let s = "<emoji>x";` (the x is column 11 in UTF-16
+# units, 13 bytes in). Prints the byte offsets: x, start of line 5, end of line 5, a point inside
+# line 6, end of line 7.
+write_sel_file() {
+  python3 -I - "$1" <<'PY'
+import sys
+lines = ["fn main() {", "// keep", 'let s = "\U0001F600x";', "// four", "five();", "six();", "seven();", "}"]
+text = "\n".join(lines) + "\n"
+open(sys.argv[1], "w", encoding="utf-8").write(text)
+data = text.encode("utf-8")
+starts = [0]
+for i, byte in enumerate(data):
+    if byte == 0x0A:
+        starts.append(i + 1)
+x = starts[2] + len('let s = "'.encode()) + len("\U0001F600".encode())
+assert data[x:x + 1] == b"x"
+print(x, starts[4], starts[4] + len("five();"), starts[5] + 2, starts[6] + len("seven();"))
+PY
+}
+# Selects RANGES on the active file tab, waiting for a file that is still loading.
+select_ranges() { # ranges
+  local tries=0
+  while ! sockcall surface.editor.select "ranges=$1" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "$CASE: surface.editor.select $1 never succeeded: $(sockcall surface.editor.select "ranges=$1" 2>&1 | tail -n 1)"
+    sleep 0.2
+  done
 }
 
 find_window() {
@@ -771,6 +943,167 @@ case_inherited_port() {
   capture ide-final
 }
 
+SEL_FILE="$WT/sel.rs"
+SEL_X=""; SEL_L5S=""; SEL_L5E=""; SEL_L6=""; SEL_L7E=""
+FILE_TAB=""
+
+case_owner_resolved() {
+  # The switch was turned back on by the last case: a terminal made now needs the port.
+  wait_lockfile >/dev/null
+  expect_state "the bridge is back on its port" 'd["port"]' "$PORT"
+  start_app_client
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  expect_state "one connection" 'len(d["connections"])' 1
+  expect_state "the connection is owned by the pane the client runs in" 'd["connections"][0]["owner_pane"]' "$CLIENT_PANE"
+  expect_state "the owner's worktree is the repository" 'd["connections"][0]["worktree"]' "$WT"
+  HELD_CLIENT_FIFO="$CLIENT_FIFO"
+  HELD_CLIENT_LOG="$CLIENT_LOG"
+  HELD_CLIENT_PANE="$CLIENT_PANE"
+}
+
+case_selection_utf16() {
+  CLIENT_FIFO="$HELD_CLIENT_FIFO" CLIENT_LOG="$HELD_CLIENT_LOG" CLIENT_PANE="$HELD_CLIENT_PANE"
+  read -r SEL_X SEL_L5S SEL_L5E SEL_L6 SEL_L7E < <(write_sel_file "$SEL_FILE")
+  ctl surface editor open --path "$SEL_FILE" >/dev/null
+  FILE_TAB="$(tabs_field active)"
+  # Opening a file may say its caret; let that settle before the baseline.
+  sleep 1
+  local before
+  before="$(note_count selection_changed)"
+  select_ranges "$SEL_X..$((SEL_X + 1))"
+  wait_notes selection_changed "$((before + 1))"
+  local got
+  got="$(client_notes selection_changed | tail -n 1)"
+  python3 -I - "$got" "$SEL_FILE" <<'PY' || fail "$CASE: the notification is not the selected x: $got"
+import json, sys
+n = json.loads(sys.argv[1])
+s = n["selection"]
+ok = (n["text"] == "x" and n["filePath"] == sys.argv[2] and n["fileUrl"] == "file://" + sys.argv[2]
+      and s["start"] == {"line": 2, "character": 11} and s["end"] == {"line": 2, "character": 12}
+      and s["isEmpty"] is False)
+sys.exit(0 if ok else 1)
+PY
+  echo "OK: selection_changed: start {2,11}, end {2,12}, isEmpty false, text x"
+}
+
+case_selection_coalesced() {
+  CLIENT_FIFO="$HELD_CLIENT_FIFO" CLIENT_LOG="$HELD_CLIENT_LOG" CLIENT_PANE="$HELD_CLIENT_PANE"
+  local before elapsed ranges="" i got bound
+  before="$(note_count selection_changed)"
+  for i in $(seq 1 19); do ranges="$ranges 0..$i"; done
+  # shellcheck disable=SC2086
+  elapsed="$(selburst $ranges "$SEL_L5S..$SEL_L5E")"
+  bound=$((elapsed / 100 + 1))
+  echo "the burst of 20 selections took ${elapsed} ms: at most $bound notifications"
+  local tries=0
+  while [ "$tries" -lt 100 ]; do
+    got="$(client_notes selection_changed | tail -n 1)"
+    case "$got" in *'"text": "five();"'*|*'"text":"five();"'*) break ;; esac
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  python3 -I - "$got" <<'PY' || fail "$CASE: the last notification is not the final selection: $got"
+import json, sys
+n = json.loads(sys.argv[1])
+s = n["selection"]
+sys.exit(0 if (n["text"] == "five();" and s["start"] == {"line": 4, "character": 0}
+               and s["end"] == {"line": 4, "character": 7}) else 1)
+PY
+  sleep 0.5
+  got="$(($(note_count selection_changed) - before))"
+  [ "$got" -ge 1 ] && [ "$got" -le "$bound" ] || fail "$CASE: $got notifications for a ${elapsed} ms burst, expected 1 to $bound"
+  echo "OK: $got notifications for the burst (bound $bound), the last is the final selection"
+}
+
+case_focus_sends_selection() {
+  CLIENT_FIFO="$HELD_CLIENT_FIFO" CLIENT_LOG="$HELD_CLIENT_LOG" CLIENT_PANE="$HELD_CLIENT_PANE"
+  local before
+  before="$(note_count selection_changed)"
+  ctl surface tabs select "$CLIENT_TAB" >/dev/null
+  sleep 0.6
+  [ "$(note_count selection_changed)" = "$before" ] || fail "$CASE: focusing a terminal tab sent a selection"
+  echo "OK: focusing a terminal tab sends nothing"
+  ctl surface tabs select "$FILE_TAB" >/dev/null
+  wait_notes selection_changed "$((before + 1))"
+  sleep 0.6
+  [ "$(note_count selection_changed)" = "$((before + 1))" ] || fail "$CASE: focusing the file tab sent more than one notification"
+  case "$(client_notes selection_changed | tail -n 1)" in *five*) ;; *) fail "$CASE: the focus notification is not the current selection" ;; esac
+  echo "OK: focusing the file tab sends exactly one notification, the current selection"
+}
+
+case_at_mention() {
+  # The real order: the client's pane focused first, the client started, the file opened after.
+  CLIENT_FIFO="$HELD_CLIENT_FIFO" CLIENT_LOG="$HELD_CLIENT_LOG" CLIENT_PANE="$HELD_CLIENT_PANE"
+  sockcall surface.tabs.close "index=$(file_tab_index)" confirm=yes >/dev/null
+  end_app_client
+  start_app_client
+  ctl surface tabs select "$CLIENT_TAB" >/dev/null
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  expect_state "the new client is owned by its pane" 'd["connections"][0]["owner_pane"]' "$CLIENT_PANE"
+  ctl surface editor open --path "$SEL_FILE" >/dev/null
+  FILE_TAB="$(tabs_field active)"
+  [ "$FILE_TAB" != "$CLIENT_TAB" ] || fail "$CASE: opening the file did not leave the client's tab"
+  select_ranges "$SEL_L5S..$SEL_L7E"
+  sockcall surface.editor.context "offset=$SEL_L6" action=send-to-agent >/dev/null
+  wait_notes at_mentioned 1
+  python3 -I - "$(client_notes at_mentioned | tail -n 1)" "$SEL_FILE" <<'PY' || fail "$CASE: the at_mentioned params are wrong: $(client_notes at_mentioned | tail -n 1)"
+import json, sys
+n = json.loads(sys.argv[1])
+sys.exit(0 if (n == {"filePath": sys.argv[2], "lineStart": 4, "lineEnd": 6}) else 1)
+PY
+  echo "OK: at_mentioned lineStart 4, lineEnd 6"
+  local tries=0
+  while [ "$(tabs_field active)" != "$CLIENT_TAB" ] && [ "$tries" -lt 50 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  [ "$(tabs_field active)" = "$CLIENT_TAB" ] || fail "$CASE: the client's tab ($CLIENT_TAB) is not focused (active: $(tabs_field active))"
+  echo "OK: the client's tab is focused"
+  case "$("$CTL" panel read "$CLIENT_PANE" 2>&1)" in *sel.rs*) fail "$CASE: something was written into the client's pane" ;; esac
+  echo "OK: nothing was written into the pane"
+  capture ide-at-mention
+}
+
+case_no_eligible_agent_toast() {
+  end_app_client
+  expect_state "no connection once the client is gone" 'len(d["connections"])' 0
+  # A new worktree opens with a chat tab, which can take an at-mention: close it.
+  sockcall surface.tabs.close "index=$(tab_index chat)" confirm=yes >/dev/null
+  ctl surface tabs select "$(file_tab_index)" >/dev/null
+  select_ranges "$SEL_L5S..$SEL_L7E"
+  sockcall surface.editor.context "offset=$SEL_L6" action=send-to-agent >/dev/null
+  expect_state "the toast is in the state" '"No Claude terminal or chat in this worktree" in d["toasts"]' True
+}
+
+case_owner_after_restart() {
+  local second second_id tries=0
+  second="$("$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-second"]
+print(paths[0] if paths else "")')"
+  [ -n "$second" ] || fail "$CASE: sirioctl does not list the second worktree"
+  second_id="$(worktree_id "$second")"
+  ctl select-workspace --workspace "$second_id" >/dev/null
+  start_app_client
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  expect_state "owned while its worktree is selected" 'd["connections"][0]["owner_pane"]' "$CLIENT_PANE"
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  app_quit
+  wait_client "the old connection closed" 'r.get("event") == "closed"' 1
+  app_start
+  select_repo
+  WT_ID="$(worktree_id "$WT")"
+  client_do "token $TOKEN"
+  wait_client "reconnected" 'r.get("event") == "connected"' 2
+  expect_state "the reconnected client is a connection" 'len(d["connections"])' 1
+  expect_state "ownerless while its worktree is not mounted" 'd["connections"][0]["owner_pane"]' None
+  expect_state "its worktree is found from its cwd" 'd["connections"][0]["worktree"]' "$second"
+  ctl select-workspace --workspace "$second_id" >/dev/null
+  expect_state "selecting the worktree gives it an owner" 'd["connections"][0]["owner_pane"] is not None' True
+  expect_state "the owner's worktree is the second one" 'd["connections"][0]["worktree"]' "$second"
+  end_app_client
+}
+
 app_start
 select_repo
 WT_ID="$(worktree_id "$WT")"
@@ -785,6 +1118,13 @@ case_run switch_flap case_switch_flap
 case_run port_survives_catalog_change case_port_survives_catalog_change
 case_run restart_keeps_port case_restart_keeps_port
 case_run inherited_port case_inherited_port
+case_run owner_resolved case_owner_resolved
+case_run selection_utf16 case_selection_utf16
+case_run selection_coalesced case_selection_coalesced
+case_run focus_sends_selection case_focus_sends_selection
+case_run at_mention case_at_mention
+case_run no_eligible_agent_toast case_no_eligible_agent_toast
+case_run owner_after_restart case_owner_after_restart
 
 stop_hosts
 echo "IDE BRIDGE E2E OK ($CASES_PASSED cases, state-only $STATE_ONLY)"

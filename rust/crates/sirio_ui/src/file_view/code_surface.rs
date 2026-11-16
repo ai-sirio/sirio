@@ -23,8 +23,9 @@ use sirio_git::FileDiff;
 use sirio_theme::Theme;
 
 use super::{
-    CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, FileViewEvent, MarkdownMode, code_spans,
-    RevealTarget, git_marks, line_highlights,
+    CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, FileViewEvent, IDE_SELECTION_TEXT_UNITS,
+    IdeSelection, MarkdownMode, RevealTarget, cap_utf16, code_spans, git_marks, line_highlights,
+    position_utf16,
 };
 use crate::editor::{Language, LoadStatus, Selection, markdown_links_in_line};
 use crate::editor_prefs::EditorPrefs;
@@ -105,6 +106,7 @@ impl FileView {
                 if view.refresh_caret_line(cx) {
                     cx.notify();
                 }
+                view.note_selection(cx);
             }),
             // Any key on the code dismisses the hover card. An observer, not a
             // key-down listener: gpui runs a bound key's action (arrows, Enter,
@@ -121,6 +123,9 @@ impl FileView {
             }),
         ];
         self.code_subscriptions.extend(subscriptions);
+        // A fresh editor starts at its own caret: opening a file is not a selection change.
+        let primary = code.read(cx).primary();
+        self.ide_selection_seen = Some((primary.anchor, primary.head));
         self.code_editor = Some(code);
         self.refresh_caret_line(cx);
         // Diagnostics may have arrived before the first draw.
@@ -521,6 +526,40 @@ impl FileView {
         let text = text.to_owned();
         code.update(cx, |code, cx| code.reset_keeping_view(text, cx));
         cx.notify();
+    }
+
+    /// Says so when the code editor's primary selection (anchor and head) is not the one last
+    /// seen: the one app-level event of a selection or caret moving (spec 2026-11-15, section
+    /// 10.1). The editor tells this view nothing of it, but it notifies; what the event stands
+    /// for is read on demand by [`Self::ide_selection`], so a drag costs a comparison per move.
+    pub(super) fn note_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(code) = &self.code_editor else {
+            return;
+        };
+        let primary = code.read(cx).primary();
+        let now = Some((primary.anchor, primary.head));
+        if self.ide_selection_seen != now {
+            self.ide_selection_seen = now;
+            cx.emit(FileViewEvent::SelectionChanged {
+                path: self.path.clone(),
+            });
+        }
+    }
+
+    /// The code editor's primary selection as Claude Code's IDE protocol (and the native chat)
+    /// reads it: 0-based line, UTF-16 character, end exclusive, and the text cut to
+    /// [`IDE_SELECTION_TEXT_UNITS`]. `None` while no code editor exists.
+    pub fn ide_selection(&self, cx: &App) -> Option<IdeSelection> {
+        let code = self.code_editor.as_ref()?.read(cx);
+        let text = code.text();
+        let range = code.primary().range();
+        let selected = text.get(range.clone())?;
+        Some(IdeSelection {
+            path: self.path.clone(),
+            start: position_utf16(text, range.start),
+            end: position_utf16(text, range.end),
+            text: cap_utf16(selected, IDE_SELECTION_TEXT_UNITS).to_owned(),
+        })
     }
 
     /// The code editor's primary selection, in its own byte offsets. `None`
