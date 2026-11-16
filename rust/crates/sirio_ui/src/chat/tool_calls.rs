@@ -37,6 +37,7 @@ const OUTPUT_MAX_HEIGHT: f32 = 256.0;
 /// selected.
 pub(crate) fn output_well(
     theme: &bezel_theme::Theme,
+    text_size: gpui::Pixels,
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
 ) -> gpui::Stateful<Div> {
@@ -49,7 +50,7 @@ pub(crate) fn output_well(
         .px(px(OUTPUT_PAD_X))
         .py(px(OUTPUT_PAD_Y))
         .font_family(theme.font_mono.clone())
-        .text_size(px(12.0))
+        .text_size(text_size)
         .text_color(theme.text_muted)
         .child(selectable_text(text))
 }
@@ -399,6 +400,7 @@ impl Chat {
                     let debug_id = output_id.clone();
                     let mut well = output_well(
                         bezel_theme,
+                        typography.scaled(12.0),
                         SharedString::from(output_id.clone()),
                         text.clone(),
                     );

@@ -2162,7 +2162,9 @@ impl ChangeRequestTab {
                     })
                     .child(
                         div()
-                            .w(px(14.0))
+                            // The letter inherits the shell's size, so its slot
+                            // grows with it (14 at 13).
+                            .w(theme.typography.scaled(14.0))
                             .flex_none()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(tint)

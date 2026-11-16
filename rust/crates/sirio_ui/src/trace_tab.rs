@@ -557,7 +557,7 @@ impl TraceTab {
                 let label = div()
                     .absolute()
                     .top(px(5.0))
-                    .text_size(px(10.0))
+                    .text_size(theme.typography.scaled(10.0))
                     .text_color(theme.ely.fg_subtle)
                     .whitespace_nowrap()
                     .child(format_duration(*tick));
@@ -570,7 +570,7 @@ impl TraceTab {
         div()
             .flex()
             .flex_none()
-            .h(px(24.0))
+            .h(theme.typography.scaled(24.0))
             .px(px(12.0))
             .border_b_1()
             .border_color(theme.ely.border)

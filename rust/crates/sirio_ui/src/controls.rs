@@ -80,21 +80,16 @@ pub fn card(theme: Theme) -> Div {
         .bg(theme.ely.surface)
 }
 
-/// Creates one labelled row. `description` adds the secondary line used by
-/// controls such as the font-size steppers.
-pub fn row(
-    label: &'static str,
-    description: Option<String>,
-    control: impl IntoElement,
-    theme: Theme,
-) -> impl IntoElement {
+/// The label column of a settings row: the text, and `description` as the
+/// secondary line under it.
+fn row_label(label: &'static str, description: Option<String>, theme: Theme) -> Div {
     let mut label_view = div()
         .flex()
         .flex_col()
         .justify_center()
-        .flex_1()
         .text_size(theme.typography.headline)
         .text_color(theme.ely.fg)
+        .debug_selector(move || format!("settings-row-label-{label}"))
         .child(selectable_text(label).id(format!("settings-row-label-{label}")));
 
     if let Some(description) = description {
@@ -107,16 +102,11 @@ pub fn row(
         );
     }
 
-    div()
-        .id(format!("settings-row-{label}"))
-        .w_full()
-        .child(row_view(label_view, control, theme))
+    label_view
 }
 
-/// Creates a row from a pre-built label view. This is used when a row needs
-/// an icon or a status marker before its text, while retaining the same row
-/// geometry as [`row`].
-pub fn row_view(label_view: Div, control: impl IntoElement, _theme: Theme) -> Div {
+/// The frame every settings row shares: its height, padding and gaps.
+fn row_frame() -> Div {
     div()
         // 44px minimum touch target — component geometry, not spacing;
         // frozen the same way `titlebar.rs`'s `CONTROL_SIZE` is.
@@ -127,6 +117,44 @@ pub fn row_view(label_view: Div, control: impl IntoElement, _theme: Theme) -> Di
         .flex()
         .items_center()
         .gap(px(BezelTheme::SPACE_MD))
+}
+
+/// Creates one labelled row. `description` adds the secondary line used by
+/// controls such as the font-size steppers.
+pub fn row(
+    label: &'static str,
+    description: Option<String>,
+    control: impl IntoElement,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .id(format!("settings-row-{label}"))
+        .w_full()
+        .child(row_view(row_label(label, description, theme), control, theme))
+}
+
+/// A settings row whose control drops below the label when the two do not
+/// fit side by side. The label keeps its one-line width instead of being
+/// squeezed; when both fit it draws exactly like [`row`].
+pub fn row_wrapping(
+    label: &'static str,
+    control: impl IntoElement,
+    theme: Theme,
+) -> impl IntoElement {
+    div().id(format!("settings-row-{label}")).w_full().child(
+        row_frame()
+            .flex_wrap()
+            .justify_between()
+            .child(row_label(label, None, theme).flex_none().whitespace_nowrap())
+            .child(control),
+    )
+}
+
+/// Creates a row from a pre-built label view. This is used when a row needs
+/// an icon or a status marker before its text, while retaining the same row
+/// geometry as [`row`].
+pub fn row_view(label_view: Div, control: impl IntoElement, _theme: Theme) -> Div {
+    row_frame()
         // A flex child's `min-width` defaults to `auto` — its own
         // min-content width (the CSS flexbox rule gpui inherits) — so
         // `flex_1` alone does NOT let a long label shrink. It pushes
