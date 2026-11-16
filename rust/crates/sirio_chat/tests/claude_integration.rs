@@ -475,15 +475,31 @@ fn cancelling_a_turn_produces_a_terminal_outcome() {
 
 #[test]
 fn a_turn_that_goes_silent_is_reaped_and_reported() {
-    let (_client, events) = ClaudeClient::launch_with_timeouts(
-        fixture_launch("silent_turn"),
+    // Not `shutdown_reaps_the_process`'s file: under `cargo test` both are
+    // threads of one process.
+    let pid_path =
+        std::env::temp_dir().join(format!("sirio-claude-silent-{}.pid", std::process::id()));
+    let _ = std::fs::remove_file(&pid_path);
+    let launch = ClaudeLaunch::fixture(
+        PathBuf::from("python3"),
+        vec![
+            FIXTURE.into(),
+            "silent_turn".into(),
+            pid_path.to_string_lossy().into_owned(),
+        ],
+    );
+    let (client, events) = ClaudeClient::launch_with_timeouts(
+        launch,
         std::env::temp_dir(),
         Duration::from_secs(10),
         Duration::from_millis(400),
         Duration::from_secs(60),
     )
     .expect("handshake succeeds; it is the turn that hangs");
-    _client.prompt("hello").expect("prompt is accepted");
+    let pid = std::fs::read_to_string(&pid_path).expect("fixture publishes its pid");
+    // Without this, a `ps` that cannot answer would pass the check below.
+    assert!(process_exists(pid.trim()), "the fixture runs before the turn");
+    client.prompt("hello").expect("prompt is accepted");
     let event = loop {
         match next_event(&events) {
             event @ (ChatEvent::Timeout { .. } | ChatEvent::TransportError(_)) => break event,
@@ -500,6 +516,18 @@ fn a_turn_that_goes_silent_is_reaped_and_reported() {
         ),
         "an idle turn must be reported as a prompt timeout, got {event:?}"
     );
+    // The client is still alive: its drop would kill the process too, and
+    // then this would pass on a watchdog that only reported.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while process_exists(pid.trim()) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_exists(pid.trim()),
+        "the watchdog must reap the silent agent, not leave it to the client's drop"
+    );
+    drop(client);
+    let _ = std::fs::remove_file(&pid_path);
 }
 
 #[test]
