@@ -24,10 +24,11 @@ use sirio_chat_child::{
 use sirio_claude::{
     Catalog, ChatSession, CliMessage, ContextBreakdown, ContextUsageReport, ControlEnvelope,
     ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer, McpServerStatus,
-    PermissionRules, RewindOutcome, TaskOutput, parse_mcp_status, parse_permission_rules,
+    PermissionRules, PluginsReloaded, RewindOutcome, TaskOutput, parse_mcp_status,
+    parse_permission_rules, parse_plugins_reload,
 };
 
-use super::ClaudeLaunch;
+use super::{ClaudeLaunch, ReloadError};
 use super::events::{Fold, ResultSummary};
 use super::permission;
 use super::trace::TraceFold;
@@ -108,6 +109,23 @@ pub(super) enum Command {
     McpAuthenticate {
         server: String,
         reply: mpsc::SyncSender<Result<McpAuthStart, String>>,
+    },
+    /// Switch one connector on or off. The CLI answers with no body on
+    /// success.
+    McpToggle {
+        server: String,
+        enabled: bool,
+        reply: mpsc::SyncSender<Result<(), String>>,
+    },
+    /// Reload plugins. `hold` asks the CLI to leave a session alone when the
+    /// reload would change its tool list.
+    ReloadPlugins {
+        hold: bool,
+        reply: mpsc::SyncSender<Result<PluginsReloaded, ReloadError>>,
+    },
+    /// Reload the skills on disk.
+    ReloadSkills {
+        reply: mpsc::SyncSender<Result<(), ReloadError>>,
     },
 }
 
@@ -715,6 +733,14 @@ async fn session(context: SessionContext) -> SessionOutcome {
         HashMap::new();
     let mut pending_mcp_auths: HashMap<String, mpsc::SyncSender<Result<McpAuthStart, String>>> =
         HashMap::new();
+    let mut pending_mcp_toggles: HashMap<String, mpsc::SyncSender<Result<(), String>>> =
+        HashMap::new();
+    let mut pending_plugin_reloads: HashMap<
+        String,
+        mpsc::SyncSender<Result<PluginsReloaded, ReloadError>>,
+    > = HashMap::new();
+    let mut pending_skill_reloads: HashMap<String, mpsc::SyncSender<Result<(), ReloadError>>> =
+        HashMap::new();
 
     // The handshake. Its answer is the whole catalogue, so every picker is
     // populated before the user can type into the composer.
@@ -1085,6 +1111,54 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     (None, None) => Err(
                                         "the agent refused the sign-in request".to_string(),
                                     ),
+                                });
+                            }
+                            if let Some(reply) = pending_mcp_toggles.remove(&envelope.request_id) {
+                                // Success has no body: only an error fails it.
+                                let _ = reply.send(match &envelope.error {
+                                    None => Ok(()),
+                                    Some(error) => Err(error.clone()),
+                                });
+                            }
+                            if let Some(reply) = pending_plugin_reloads.remove(&envelope.request_id)
+                            {
+                                let answer = match (&envelope.payload, &envelope.error) {
+                                    (_, Some(error)) => Err(reload_error(
+                                        error,
+                                        envelope.error_code.as_deref(),
+                                    )),
+                                    (Some(payload), None) => parse_plugins_reload(payload)
+                                        .ok_or_else(|| {
+                                            ReloadError::Failed(
+                                                "the reload answer could not be read".to_string(),
+                                            )
+                                        }),
+                                    (None, None) => Err(ReloadError::Failed(
+                                        "the reload answer could not be read".to_string(),
+                                    )),
+                                };
+                                // An applied reload carries the new command
+                                // list; a held one describes the old session.
+                                if let (Ok(reloaded), Some(payload)) = (&answer, &envelope.payload)
+                                    && !reloaded.held
+                                    && let Some(commands) = payload.get("commands")
+                                    && commands.is_array()
+                                {
+                                    catalog.replace_commands(commands);
+                                    let _ = event_tx
+                                        .send(ChatEvent::AvailableCommands(command_list(&catalog)))
+                                        .await;
+                                }
+                                let _ = reply.send(answer);
+                            }
+                            if let Some(reply) = pending_skill_reloads.remove(&envelope.request_id)
+                            {
+                                let _ = reply.send(match &envelope.error {
+                                    None => Ok(()),
+                                    Some(error) => Err(reload_error(
+                                        error,
+                                        envelope.error_code.as_deref(),
+                                    )),
                                 });
                             }
                             if let Some(title) = pending_renames.remove(&envelope.request_id) {
@@ -1713,6 +1787,57 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             );
                         }
                     }
+                    Ok(Command::McpToggle {
+                        server,
+                        enabled,
+                        reply,
+                    }) => {
+                        let id = next_request_id();
+                        pending_mcp_toggles.insert(id.clone(), reply);
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::mcp_toggle(&id, &server, enabled),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the connector switch".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::ReloadPlugins { hold, reply }) => {
+                        let id = next_request_id();
+                        pending_plugin_reloads.insert(id.clone(), reply);
+                        let refuse_if_busy =
+                            catalog.has_capability("reload_plugins_refuse_if_busy_v1");
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::reload_plugins(&id, hold, refuse_if_busy),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the plugin reload".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::ReloadSkills { reply }) => {
+                        let id = next_request_id();
+                        pending_skill_reloads.insert(id.clone(), reply);
+                        if write_line(&mut stdin, &ControlRequest::reload_skills(&id))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the skill reload".into(),
+                            );
+                        }
+                    }
                     Ok(Command::Shutdown(ack)) => {
                         // Closing stdin is how a stream-json session ends.
                         drop(stdin);
@@ -2003,8 +2128,21 @@ fn catalogue_events(
     events
 }
 
-/// The command list as the surface takes it. Two callers: the handshake,
-/// and a `commands_changed` line later in the session.
+/// How a failed reload reads: busy by the CLI's own code, never by its text,
+/// then a refused verb, then any other sentence.
+fn reload_error(error: &str, code: Option<&str>) -> ReloadError {
+    if code == Some("reload_plugins_busy") {
+        ReloadError::Busy
+    } else if sirio_claude::is_refusal(error) {
+        ReloadError::Refused
+    } else {
+        ReloadError::Failed(error.to_string())
+    }
+}
+
+/// The command list as the surface takes it. Three callers: the handshake,
+/// a `commands_changed` line later in the session, and an applied plugin
+/// reload.
 fn command_list(catalog: &Catalog) -> Vec<sirio_chat_vocab::AvailableCommandInfo> {
     catalog
         .commands()

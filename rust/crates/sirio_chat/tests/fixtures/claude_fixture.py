@@ -131,6 +131,25 @@ RULES_LOG_PATH = flag_value("fixture-rules-log")
 RULES_GATE_PATH = flag_value("fixture-rules-gate")
 PERMISSION_FIELDS_PATH = flag_value("fixture-permission-fields")
 RESULT_GATE_PATH = flag_value("fixture-result-gate")
+# The connector switch and the reloads, in the main-loop modes only; the other
+# three loops refuse `mcp_toggle`, `reload_plugins` and `reload_skills` as
+# unsupported subtypes. `--fixture-floor` (the flag `background_tasks` reads
+# too) is the 2.1.257 floor: no `capabilities` in the handshake, no `held` and
+# no `refuse_if_busy` handling. `--fixture-reload=<kind>` picks the
+# `reload_plugins` answer (apply, held, busy, busy-text, refused, errors);
+# `--fixture-toggle=<kind>` makes every `mcp_toggle` fail (`refused` answers an
+# unsupported subtype, `missing` a server not found); `--fixture-reload-gate`
+# and `--fixture-toggle-gate` hold each answer until the file exists, checked
+# when the request arrives, while later requests are still read;
+# `--fixture-cli-busy-gate=<path>` has the CLI report a running turn after the
+# handshake and an idle one once the file exists.
+RELOAD_KIND = flag_value("fixture-reload") or "apply"
+RELOAD_GATE_PATH = flag_value("fixture-reload-gate")
+TOGGLE_KIND = flag_value("fixture-toggle")
+TOGGLE_GATE_PATH = flag_value("fixture-toggle-gate")
+CLI_BUSY_GATE_PATH = flag_value("fixture-cli-busy-gate")
+# `--fixture-skills=refused` answers `reload_skills` as an unsupported subtype.
+SKILLS_KIND = flag_value("fixture-skills")
 HELD_RULES = []
 HELD_RULES_LOCK = threading.Lock()
 # True from the first held rules request until the release thread has answered them all.
@@ -190,6 +209,14 @@ def initialize_payload():
         "account": account,
         "hooks_applied": True,
     }
+
+
+def main_initialize_payload():
+    """The handshake answer of a main-loop mode: the floor says no capabilities."""
+    payload = initialize_payload()
+    if not BG_FLOOR:
+        payload["capabilities"] = ["reload_plugins_refuse_if_busy_v1"]
+    return payload
 
 
 def init_line(version="2.1.273"):
@@ -312,19 +339,169 @@ def session_panel_context():
     }
 
 
+# The connector switch and the reloads: which servers `mcp_toggle` has turned
+# off, which it has turned on (their next status read says `pending`, as a
+# server starting again does), whether a reload has applied the plugin, and the
+# slash list the CLI would send now.
+PANEL_LOCK = threading.Lock()
+DISABLED = set()
+RESTARTING = set()
+PLUGIN_APPLIED = False
+PLUGIN_READ = False
+CURRENT_COMMANDS = []
+PLUGIN_SERVER = "plugin:pa:m"
+RLO = "\u202e"
+
+
 def session_panel_servers():
+    global PLUGIN_READ
     if STARTS_AFTER is None:
         codegraph = "pending"
     elif STARTS_AFTER:
         codegraph = "pending" if STATUS_ANSWERS <= STARTS_AFTER else "connected"
     else:
         codegraph = "connected" if "codegraph" in RECONNECTED else "failed"
-    return [
+    servers = [
         {"name": "claude.ai Notion", "status": "needs-auth",
          "source": "claudeai", "scope": "claudeai"},
         {"name": "codegraph", "status": codegraph,
          "source": "user", "scope": "user"},
     ]
+    with PANEL_LOCK:
+        if PLUGIN_APPLIED:
+            servers.append({"name": PLUGIN_SERVER,
+                            "status": "connected" if PLUGIN_READ else "pending",
+                            "source": "plugin", "scope": "plugin"})
+            PLUGIN_READ = True
+        shown = []
+        for server in servers:
+            name = server["name"]
+            if name in DISABLED:
+                server = {**server, "status": "disabled", "tools": []}
+            elif name in RESTARTING:
+                RESTARTING.discard(name)
+                server = {**server, "status": "pending"}
+            shown.append(server)
+    return shown
+
+
+def control_ok(request_id):
+    """A success with no body, as the real CLI answers `mcp_toggle`."""
+    send({
+        "type": "control_response",
+        "response": {"subtype": "success", "request_id": request_id},
+    })
+
+
+def control_error_code(request_id, error, code=None):
+    response = {"subtype": "error", "request_id": request_id, "error": error}
+    if code:
+        response["error_code"] = code
+    send({"type": "control_response", "response": response})
+
+
+def toggle_when_gated(request_id, request):
+    while not os.path.exists(TOGGLE_GATE_PATH):
+        time.sleep(0.02)
+    answer_toggle(request_id, request)
+
+
+def answer_toggle(request_id, request):
+    name = request.get("serverName")
+    if TOGGLE_KIND == "refused":
+        control_error(request_id, "Unsupported control request subtype: mcp_toggle")
+        return
+    if not isinstance(request.get("enabled"), bool):
+        control_error(request_id, "mcp_toggle: enabled must be a boolean")
+        return
+    with PANEL_LOCK:
+        known = ["claude.ai Notion", "codegraph"] + ([PLUGIN_SERVER] if PLUGIN_APPLIED else [])
+        if TOGGLE_KIND == "missing" or name not in known:
+            control_error(request_id, f"Server not found: {name}")
+            return
+        if request.get("enabled") is True:
+            DISABLED.discard(name)
+            RESTARTING.add(name)
+        else:
+            DISABLED.add(name)
+    control_ok(request_id)
+
+
+def reload_when_gated(request_id, request):
+    while not os.path.exists(RELOAD_GATE_PATH):
+        time.sleep(0.02)
+    answer_reload_plugins(request_id, request)
+
+
+def answer_reload_plugins(request_id, request):
+    global PLUGIN_APPLIED
+    hold = request.get("hold_on_cache_impact") is True and not BG_FLOOR
+    refuse_if_busy = request.get("refuse_if_busy") is True and not BG_FLOOR
+    busy_text = "The session is busy, so plugins were not reloaded. Ask again once it is idle."
+    if RELOAD_KIND == "refused":
+        # The floor sends the refusal text and no code (FINDINGS Q4).
+        control_error_code(request_id,
+                           "Unsupported control request subtype: reload_plugins",
+                           None if BG_FLOOR else "unsupported_request")
+        return
+    if RELOAD_KIND == "busy-text":
+        control_error_code(request_id, busy_text)
+        return
+    if RELOAD_KIND == "busy" and refuse_if_busy:
+        control_error_code(request_id, busy_text, "reload_plugins_busy")
+        return
+    with PANEL_LOCK:
+        if RELOAD_KIND == "held" and hold:
+            control_response(request_id, {
+                "commands": list(CURRENT_COMMANDS), "agents": [], "plugins": [],
+                "mcpServers": [], "error_count": 0, "held": True,
+                "cache_impact": {
+                    "mcp_servers_added": [PLUGIN_SERVER, "plugin:pa:" + RLO + "x"],
+                    "mcp_servers_removed": ["old-server"],
+                    "lsp_tool_change": "may-add",
+                },
+            })
+            return
+        if not any(command["name"] == "pa:hello" for command in CURRENT_COMMANDS):
+            CURRENT_COMMANDS.append({"name": "pa:hello",
+                                     "description": "probe plugin command",
+                                     "argumentHint": ""})
+        PLUGIN_APPLIED = True
+        payload = {
+            "commands": list(CURRENT_COMMANDS), "agents": [],
+            "plugins": [{"name": "pa"}], "mcpServers": [],
+            "error_count": 2 if RELOAD_KIND == "errors" else 0,
+        }
+        if hold:
+            payload["held"] = False
+    control_response(request_id, payload)
+
+
+def answer_reload_skills(request_id):
+    if SKILLS_KIND == "refused":
+        control_error(request_id, "Unsupported control request subtype: reload_skills")
+        return
+    with PANEL_LOCK:
+        added = not any(command["name"] == "lateskill" for command in CURRENT_COMMANDS)
+        if added:
+            CURRENT_COMMANDS.append({"name": "lateskill", "description": "late skill",
+                                     "argumentHint": ""})
+        commands = list(CURRENT_COMMANDS)
+    control_response(request_id, {"skills": [{"name": "lateskill",
+                                              "description": "late skill"}]})
+    # The CLI sends the full list only when it changed.
+    if added:
+        send({"type": "system", "subtype": "commands_changed", "commands": commands,
+              "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
+def cli_busy_until_gate():
+    send({"type": "system", "subtype": "session_state_changed", "state": "running",
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
+    while not os.path.exists(CLI_BUSY_GATE_PATH):
+        time.sleep(0.02)
+    send({"type": "system", "subtype": "session_state_changed", "state": "idle",
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
 
 
 def assistant_tool_use(tool_use_id, tool_name, tool_input, parent=None):
@@ -1034,6 +1211,8 @@ def trace_main():
                 control_response(request_id, {"mcpServers": []})
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
+                control_error(request_id, f"Unsupported control request subtype: {subtype}")
             elif subtype == "set_permission_mode":
                 control_response(request_id, {"mode": request.get("mode")})
             else:
@@ -1434,6 +1613,8 @@ def state_main():
                 control_response(request_id, {"mcpServers": []})
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
+                control_error(request_id, f"Unsupported control request subtype: {subtype}")
             elif subtype == "set_permission_mode":
                 control_response(request_id, {"mode": request.get("mode")})
             else:
@@ -1715,6 +1896,8 @@ def bg_main():
                     control_response(request_id, {})
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
+                control_error(request_id, f"Unsupported control request subtype: {subtype}")
             else:
                 control_response(request_id, {})
         elif kind == "user":
@@ -1848,6 +2031,7 @@ def main():
         sys.stderr.write("fixture: unknown session\n")
         sys.stderr.flush()
         os._exit(1)
+    CURRENT_COMMANDS.extend(initialize_payload()["commands"])
     resumed = resume_arg()
     if resumed and resumed in read_title_store():
         # A resumed session that has a stored title says so first (Q7).
@@ -1899,7 +2083,9 @@ def main():
                     sys.stdout.write("not-json\n")
                     sys.stdout.flush()
                 wait_for_handshake_gate()
-                control_response(request_id, initialize_payload())
+                control_response(request_id, main_initialize_payload())
+                if CLI_BUSY_GATE_PATH:
+                    threading.Thread(target=cli_busy_until_gate, daemon=True).start()
                 if MODE == "commands_changed":
                     # A plugin or skill loaded mid-session. The CLI resends
                     # the whole list — terminal-bound commands included,
@@ -2005,6 +2191,20 @@ def main():
                 answer_rename(request_id, request)
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype == "mcp_toggle":
+                if TOGGLE_GATE_PATH and not os.path.exists(TOGGLE_GATE_PATH):
+                    threading.Thread(target=toggle_when_gated,
+                                     args=(request_id, request), daemon=True).start()
+                else:
+                    answer_toggle(request_id, request)
+            elif subtype == "reload_plugins":
+                if RELOAD_GATE_PATH and not os.path.exists(RELOAD_GATE_PATH):
+                    threading.Thread(target=reload_when_gated,
+                                     args=(request_id, request), daemon=True).start()
+                else:
+                    answer_reload_plugins(request_id, request)
+            elif subtype == "reload_skills":
+                answer_reload_skills(request_id)
             elif subtype == "rewind_files":
                 if MODE == "no_rewind":
                     send({
@@ -2078,7 +2278,10 @@ def main():
             if MODE in ("context_usage", "no_context_usage", "session_panel"):
                 init_line()
                 text("Hello")
-                result()
+                if MODE == "session_panel" and RESULT_GATE_PATH:
+                    threading.Thread(target=result_when_gated, daemon=True).start()
+                else:
+                    result()
                 continue
             if MODE == "file_links":
                 # One answer to any prompt, whose paths and links the chat's file

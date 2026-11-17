@@ -172,6 +172,7 @@ pub struct Catalog {
     current_mode_id: String,
     account: AccountInfo,
     fast_mode: Option<FastMode>,
+    capabilities: Vec<String>,
 }
 
 impl Catalog {
@@ -223,7 +224,18 @@ impl Catalog {
                 api_provider: string_field(account, "apiProvider"),
             })
             .unwrap_or_default();
+        let capabilities: Vec<String> = payload
+            .get("capabilities")
+            .and_then(|value| value.as_array())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
+            capabilities,
             commands,
             terminal_commands,
             models,
@@ -241,6 +253,13 @@ impl Catalog {
                     .filter(|reason| reason != FAST_MODE_OPT_IN),
             }),
         }
+    }
+
+    /// Whether the `initialize` answer listed `name` among its capabilities.
+    /// A CLI that lists none (the floor) has none.
+    #[must_use]
+    pub fn has_capability(&self, name: &str) -> bool {
+        self.capabilities.iter().any(|capability| capability == name)
     }
 
     /// Replaces the command list from a `commands_changed` line.

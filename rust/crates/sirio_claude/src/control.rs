@@ -159,6 +159,40 @@ impl ControlRequest {
         )
     }
 
+    /// Switches one server on or off. The CLI saves the choice in its own
+    /// settings for the folder and answers with no body.
+    #[must_use]
+    pub fn mcp_toggle(request_id: &str, server: &str, enabled: bool) -> Value {
+        Self::envelope(
+            request_id,
+            json!({"subtype": "mcp_toggle", "serverName": server, "enabled": enabled}),
+        )
+    }
+
+    /// Reloads plugins. `hold` asks the CLI to leave the session alone when
+    /// the reload would change its tool list and say so instead;
+    /// `refuse_if_busy` asks it to refuse while a turn runs. A flag that is
+    /// not asked for is absent, never `false`.
+    #[must_use]
+    pub fn reload_plugins(request_id: &str, hold: bool, refuse_if_busy: bool) -> Value {
+        let mut request = json!({"subtype": "reload_plugins"});
+        if let Some(fields) = request.as_object_mut() {
+            if hold {
+                fields.insert("hold_on_cache_impact".to_string(), json!(true));
+            }
+            if refuse_if_busy {
+                fields.insert("refuse_if_busy".to_string(), json!(true));
+            }
+        }
+        Self::envelope(request_id, request)
+    }
+
+    /// Reloads the skills on disk. A changed list follows as `commands_changed`.
+    #[must_use]
+    pub fn reload_skills(request_id: &str) -> Value {
+        Self::envelope(request_id, json!({"subtype": "reload_skills"}))
+    }
+
     /// Session cost plus plan rate-limit windows — the structured form of
     /// what `/usage` renders.
     #[must_use]
@@ -241,6 +275,9 @@ pub struct ControlEnvelope {
     /// the refusal a CLI gives for a subtype it does not know, which is how
     /// a feature degrades instead of the session dying.
     pub error: Option<String>,
+    /// The CLI's machine-readable reason for an error, when it gives one
+    /// (`reload_plugins_busy`, `unsupported_request`).
+    pub error_code: Option<String>,
 }
 
 impl ControlEnvelope {
@@ -258,8 +295,13 @@ impl ControlEnvelope {
                 (response.get("subtype").and_then(|s| s.as_str()) == Some("error"))
                     .then(|| "the agent refused the request".to_string())
             });
+        let error_code = response
+            .get("error_code")
+            .and_then(|code| code.as_str())
+            .map(str::to_string);
         Some(Self {
             request_id,
+            error_code,
             payload: response
                 .get("response")
                 .cloned()

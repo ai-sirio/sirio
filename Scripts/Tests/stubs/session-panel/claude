@@ -2,7 +2,16 @@
 # The `claude` of test-chat-session-panel-e2e.sh: the version probe answers at
 # once (above sirio_claude::MIN_CLAUDE_VERSION, so the chat is native), and any
 # other call is the stream-json fixture in its session_panel mode. Every call is
-# recorded in $SIRIO_STUB_LOG when the run names one.
+# recorded in $SIRIO_STUB_LOG when the run names one. Every SIRIO_FIXTURE_* variable below that the scenario
+# sets is handed to the fixture as its matching flag; an unset one passes nothing:
+#   SIRIO_FIXTURE_FLOOR           --fixture-floor           the 2.1.257 floor: no capabilities, no `held`
+#   SIRIO_FIXTURE_RELOAD          --fixture-reload          the kind of reload_plugins answer (apply, held, busy, busy-text, refused, errors)
+#   SIRIO_FIXTURE_RELOAD_GATE     --fixture-reload-gate     holds every reload_plugins answer until the file exists
+#   SIRIO_FIXTURE_SKILLS          --fixture-skills          refused: reload_skills is an unsupported subtype
+#   SIRIO_FIXTURE_TOGGLE          --fixture-toggle          refused or missing: how mcp_toggle fails
+#   SIRIO_FIXTURE_TOGGLE_GATE     --fixture-toggle-gate     holds every mcp_toggle answer until the file exists
+#   SIRIO_FIXTURE_CLI_BUSY_GATE   --fixture-cli-busy-gate   the CLI reports a running turn until the file exists
+#   SIRIO_FIXTURE_RESULT_GATE     --fixture-result-gate     holds the turn's result until the file exists
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 [ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
 case "$1" in
@@ -10,4 +19,15 @@ case "$1" in
     echo "9.9.9 (Claude Code)"
     exit 0 ;;
 esac
-exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" session_panel "$@"
+floor=
+[ "${SIRIO_FIXTURE_FLOOR:-}" != 1 ] || floor=--fixture-floor
+exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" session_panel \
+  ${floor:+"$floor"} \
+  ${SIRIO_FIXTURE_RELOAD:+"--fixture-reload=$SIRIO_FIXTURE_RELOAD"} \
+  ${SIRIO_FIXTURE_RELOAD_GATE:+"--fixture-reload-gate=$SIRIO_FIXTURE_RELOAD_GATE"} \
+  ${SIRIO_FIXTURE_SKILLS:+"--fixture-skills=$SIRIO_FIXTURE_SKILLS"} \
+  ${SIRIO_FIXTURE_TOGGLE:+"--fixture-toggle=$SIRIO_FIXTURE_TOGGLE"} \
+  ${SIRIO_FIXTURE_TOGGLE_GATE:+"--fixture-toggle-gate=$SIRIO_FIXTURE_TOGGLE_GATE"} \
+  ${SIRIO_FIXTURE_CLI_BUSY_GATE:+"--fixture-cli-busy-gate=$SIRIO_FIXTURE_CLI_BUSY_GATE"} \
+  ${SIRIO_FIXTURE_RESULT_GATE:+"--fixture-result-gate=$SIRIO_FIXTURE_RESULT_GATE"} \
+  "$@"
