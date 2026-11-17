@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 pub use endpoint::{Endpoint, EndpointError, discover};
 pub use link::{OcPane, TITLED, link};
 
-pub use stream::create_session;
+pub use stream::{create_session, delete_session};
 use stream::{Client, Table};
 
 /// What a session is doing, as the service last said.

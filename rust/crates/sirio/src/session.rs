@@ -2767,8 +2767,9 @@ impl SessionStore {
     /// debounce window. The mirrored map follows. `false`, with nothing written, when a close
     /// ended that pane's session in this run: a report can only come from the dead pane, as
     /// Claude's `SessionEnd` hook lands after the close deleted the row. Sirio's own save runs
-    /// only for a tab still in the strip, under a key the allocator handed out, so it meets the
-    /// mark only under a duplicate legacy id, and is refused the same way. Only a restore that
+    /// only for a tab that still exists (in the active strip or a parked one), under a key the
+    /// allocator handed out, so it meets the mark only under a duplicate legacy id, and is
+    /// refused the same way. Only a restore that
     /// hands the key to a pane again lifts the mark ([`Self::lift_ended`]).
     pub fn save_session_ref(&self, session: &str, reference: &str) -> bool {
         // The mirror changes while the database lock is held, so a save and a delete of one

@@ -2260,6 +2260,12 @@ pub struct TerminalView {
     /// [`Self::release_launch`] opens it then. A view nothing asked, a tab not shown, stays
     /// unopened until its first render, as any view does.
     launch_wanted: bool,
+    /// The command every open runs once a session of this view has run
+    /// ([`Self::set_relaunch_shell`]); `None` runs `spawn.shell` every time.
+    relaunch_shell: Option<TerminalShell>,
+    /// A session of this view reached `Running` at least once: the view's next open is a
+    /// relaunch, not its first launch.
+    ran: bool,
     font_size: Pixels,
     focus_handle: gpui::FocusHandle,
     exit_status: Option<TerminalExitStatus>,
@@ -2472,6 +2478,8 @@ impl TerminalView {
             empty_prompt: false,
             launch_held: false,
             launch_wanted: false,
+            relaunch_shell: None,
+            ran: false,
             font_size: FONT_SIZE,
             focus_handle,
             exit_status: None,
@@ -2517,6 +2525,8 @@ impl TerminalView {
             empty_prompt: true,
             launch_held: false,
             launch_wanted: false,
+            relaunch_shell: None,
+            ran: false,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
             exit_status: None,
@@ -2584,6 +2594,8 @@ impl TerminalView {
             empty_prompt: false,
             launch_held: false,
             launch_wanted: false,
+            relaunch_shell: None,
+            ran: false,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
             exit_status: None,
@@ -2772,12 +2784,21 @@ impl TerminalView {
         &self.spawn.shell
     }
 
-    /// Replaces the command the pane's next open runs: its first start, a
-    /// retry, or a restart. The owner calls it when the pane moves to a fresh
-    /// id, so an agent's command names that id (SP2 fix batch 7, I1). A
-    /// process that already runs keeps the command it started with.
+    /// Replaces the command the pane's first launch runs (and every later open too, until
+    /// [`Self::set_relaunch_shell`] gives the relaunch a command of its own). The owner calls
+    /// it when the pane moves to a fresh id, so an agent's command names that id (SP2 fix
+    /// batch 7, I1). A process that already runs keeps the command it started with.
     pub fn set_launch_shell(&mut self, shell: TerminalShell) {
         self.spawn.shell = shell;
+    }
+
+    /// Sets the command every open runs once a session of this view has run: a Restart (the
+    /// context menu's and the *Session lost* overlay's) or a retry after it ran. It is the
+    /// launch command without what only its first run may send, such as an agent's first
+    /// prompt. `None` (the default) runs the launch command every time. An open that never
+    /// reached a running session (a retry after the id was taken) is still a first launch.
+    pub fn set_relaunch_shell(&mut self, shell: Option<TerminalShell>) {
+        self.relaunch_shell = shell;
     }
 
     /// The last diff accepted through this pane's drop target, if any.
@@ -2946,7 +2967,10 @@ impl TerminalView {
         OpenRequest {
             session_id: self.identity.pane_id().to_owned(),
             cwd: self.spawn.working_directory.clone(),
-            shell: self.spawn.shell.clone(),
+            shell: match (&self.relaunch_shell, self.ran) {
+                (Some(relaunch), true) => relaunch.clone(),
+                _ => self.spawn.shell.clone(),
+            },
             cols: Self::LINK_COLS,
             rows: Self::LINK_ROWS,
             // Built from the kept bytes, not taken: a `Pending` factory holds
@@ -3020,6 +3044,7 @@ impl TerminalView {
                 self.pending_prelude.clear();
                 self.pending_recreate = false;
                 self.session_lost = false;
+                self.ran = true;
                 self.terminal = TerminalState::Running(handle);
             }
             OpenOutcome::Pending => {
@@ -3089,6 +3114,7 @@ impl TerminalView {
                         self.pending_prelude.clear();
                         self.pending_recreate = false;
                         self.session_lost = false;
+                        self.ran = true;
                         self.terminal = TerminalState::Running(handle);
                     }
                     Err(message) => {
@@ -3174,6 +3200,19 @@ impl TerminalView {
         self.released.set(false);
         self.ensure_started(cx);
         cx.notify();
+    }
+
+    /// What the *Session lost* overlay's **Restart** button does, and all it does: `false`, and
+    /// nothing done, when the pane draws no such button (the overlay is drawn over a running
+    /// pane whose session is lost, and offers Restart only for a session the pane created).
+    /// Public so that the debug control presses the button itself rather than a path of its own.
+    pub fn press_lost_overlay_restart(&mut self, cx: &mut gpui::Context<Self>) -> bool {
+        let drawn = self.session_lost && matches!(self.terminal, TerminalState::Running(_));
+        if !(drawn && lost_overlay_offers_restart(self.attached)) {
+            return false;
+        }
+        self.restart(cx);
+        true
     }
 
     /// The surface host's current generation -- bumps by one on every real
@@ -5048,7 +5087,9 @@ impl gpui::Render for TerminalView {
                                     .bg(theme.ely.hover)
                                     .cursor(gpui::CursorStyle::PointingHand)
                                     .on_click(move |_, _, cx| {
-                                        restart_entity.update(cx, |view, cx| view.restart(cx));
+                                        restart_entity.update(cx, |view, cx| {
+                                            view.press_lost_overlay_restart(cx);
+                                        });
                                     })
                                     .child("Restart")
                             })),

@@ -812,8 +812,9 @@ pub mod request {
 
     /// Debug-only `surface.terminal.open`: opens an application terminal tab
     /// in the selected worktree, running `command` under `sh -c` when given,
-    /// or the agent adapter `agent` launched the way a new agent tab is.
-    pub fn terminal_open(command: Option<&str>, agent: Option<&str>) -> ControlRequest {
+    /// or the agent adapter `agent` launched the way a new agent tab is, with
+    /// `prompt` as its first message (the launch a hand-off makes) when given.
+    pub fn terminal_open(command: Option<&str>, agent: Option<&str>, prompt: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();
         if let Some(command) = command {
             params.insert("cmd".to_string(), command.to_string());
@@ -821,16 +822,22 @@ pub mod request {
         if let Some(agent) = agent {
             params.insert("agent".to_string(), agent.to_string());
         }
+        if let Some(prompt) = prompt {
+            params.insert("prompt".to_string(), prompt.to_string());
+        }
         request("surface.terminal.open", params)
     }
 
     /// Debug-only `surface.terminal.restart {pane}`: Restart on an application
-    /// terminal tab, as its *Session lost* button does.
-    pub fn terminal_restart(pane: &str) -> ControlRequest {
-        request(
-            "surface.terminal.restart",
-            BTreeMap::from([("pane".to_string(), pane.to_string())]),
-        )
+    /// terminal tab, as its context menu's Restart does. With `overlay`, the
+    /// *Session lost* overlay's own Restart button is pressed instead, and the
+    /// call fails when the pane draws none.
+    pub fn terminal_restart(pane: &str, overlay: bool) -> ControlRequest {
+        let mut params = BTreeMap::from([("pane".to_string(), pane.to_string())]);
+        if overlay {
+            params.insert("overlay".to_string(), "true".to_string());
+        }
+        request("surface.terminal.restart", params)
     }
 
     /// Debug-only `surface.terminal.state {pane}`: `sessionLost` and the

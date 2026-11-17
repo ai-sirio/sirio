@@ -1445,16 +1445,20 @@ enum ControlAction {
     },
     /// Debug-only `surface.terminal.open`: an application terminal tab in the
     /// selected worktree, running `command` under `sh -c` when given, or the
-    /// agent `agent` launched the way a new agent tab is.
+    /// agent `agent` launched the way a new agent tab is, with `prompt` as its
+    /// first message (the launch a hand-off makes; empty for none).
     OpenTerminal {
         command: Option<String>,
         agent: Option<String>,
+        prompt: String,
         reply: ControlReply,
     },
-    /// Debug-only `surface.terminal.restart {pane}`: Restart on a terminal
-    /// tab, as its *Session lost* button does.
+    /// Debug-only `surface.terminal.restart {pane, overlay?}`: Restart on a
+    /// terminal tab, as its context menu's Restart does; with `overlay`, the
+    /// *Session lost* overlay's own Restart button, pressed.
     TerminalRestart {
         pane: String,
+        overlay: bool,
         reply: ControlReply,
     },
     /// Debug-only `surface.terminal.state {pane}`: whether the tab shows
@@ -1622,6 +1626,16 @@ enum ParkedRows {
     /// never-listed strip to the next reconcile, so the cache is filled at
     /// the moment the field's doc promises and nowhere earlier.
     CachedOnly,
+}
+
+/// Where a terminal's tab is held (`SirioWorkspace::terminal_home`).
+struct TerminalHome {
+    /// The worktree the tab belongs to.
+    worktree: PathBuf,
+    /// The pane id of the terminal, wherever its tab is.
+    pane_id: usize,
+    /// The tab's database identity, when its strip is known to name one.
+    persistence_id: Option<String>,
 }
 
 /// The in-memory tab metadata paired with terminal entities parked in
@@ -3449,15 +3463,22 @@ impl ControlHandler for AppControlHandler {
             "surface.terminal.open" if cfg!(debug_assertions) => {
                 let command = request.params.get("cmd").cloned();
                 let agent = request.params.get("agent").cloned();
+                let prompt = request.params.get("prompt").cloned().unwrap_or_default();
                 self.queue_action(request, move |reply| ControlAction::OpenTerminal {
                     command,
                     agent,
+                    prompt,
                     reply,
                 })
             }
             "surface.terminal.restart" if cfg!(debug_assertions) => {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
-                self.queue_action(request, move |reply| ControlAction::TerminalRestart { pane, reply })
+                let overlay = request.params.get("overlay").is_some_and(|value| value == "true");
+                self.queue_action(request, move |reply| ControlAction::TerminalRestart {
+                    pane,
+                    overlay,
+                    reply,
+                })
             }
             "surface.terminal.state" if cfg!(debug_assertions) => {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
@@ -6798,11 +6819,11 @@ impl SirioWorkspace {
                                     workspace.perform_end_all_sessions(cx);
                                     let _ = reply.send(Ok(vec![]));
                                 }
-                                ControlAction::OpenTerminal { command, agent, reply } => {
-                                    let _ = reply.send(workspace.control_open_terminal(command, agent, cx));
+                                ControlAction::OpenTerminal { command, agent, prompt, reply } => {
+                                    let _ = reply.send(workspace.control_open_terminal(command, agent, &prompt, cx));
                                 }
-                                ControlAction::TerminalRestart { pane, reply } => {
-                                    let _ = reply.send(workspace.control_terminal_restart(&pane, cx));
+                                ControlAction::TerminalRestart { pane, overlay, reply } => {
+                                    let _ = reply.send(workspace.control_terminal_restart(&pane, overlay, cx));
                                 }
                                 ControlAction::TerminalState { pane, reply } => {
                                     let _ = reply.send(workspace.control_terminal_state(&pane, cx));
@@ -10095,6 +10116,51 @@ impl SirioWorkspace {
         None
     }
 
+    /// Where a terminal's tab is held: in the active strip, or parked by a worktree switch
+    /// (its view then lives in `terminal_pane_cache` and its tab in `parked_worktree_tabs`).
+    /// `None` for a view no strip holds: a closed tab (the cache entry went with it, though the
+    /// view itself, which `TerminalBindings` keeps for the app's life, can still be upgraded
+    /// from a weak handle), an evicted worktree, or a stale cache entry. `Some` does not prove
+    /// the tab open: a close removes only the entry under the pane's current id, so a tab moved
+    /// and then closed can keep a stale entry a parked strip still names. A caller checks
+    /// `TerminalView::is_released` first.
+    fn terminal_home(&self, terminal: &Entity<TerminalView>) -> Option<TerminalHome> {
+        if let Some((index, pane_id)) = self.terminal_pane_of(terminal) {
+            let tab = &self.tabs[index];
+            return Some(TerminalHome {
+                worktree: self.tab_worktree_path(tab.id),
+                pane_id,
+                persistence_id: Some(tab.persistence_id.clone()),
+            });
+        }
+        // A pane moved to a fresh id keeps its cache entry under the old id too (see
+        // `terminals_to_poll`), so one view can have several entries: only those its parked
+        // strip holds count, and since the allocator only grows, the highest id is the pane's
+        // current one.
+        self.terminal_pane_cache
+            .iter()
+            .filter(|cached| cached.controller.entity_id() == terminal.entity_id())
+            .filter_map(|cached| {
+                // `track_terminal_panes_in_cache` addresses a pane as `terminal-{id}`.
+                let pane_id = cached
+                    .content_id
+                    .strip_prefix("terminal-")?
+                    .parse::<usize>()
+                    .ok()?;
+                let parked = self.parked_strip_of(Path::new(&cached.worktree_id))?;
+                let index = parked
+                    .terminal_panes_by_tab
+                    .iter()
+                    .position(|panes| panes.contains(&pane_id))?;
+                Some(TerminalHome {
+                    worktree: PathBuf::from(&cached.worktree_id),
+                    pane_id,
+                    persistence_id: parked.layout.tabs.get(index).map(|tab| tab.id.clone()),
+                })
+            })
+            .max_by_key(|home| home.pane_id)
+    }
+
     /// The one-time dedup of pane ids across the worktrees' persisted layouts
     /// (SP2 fix batch 5, N2 and N3). It runs when the host first answers, before
     /// any terminal opens, so no pane has opened under an id it is about to lose.
@@ -10279,30 +10345,34 @@ impl SirioWorkspace {
             // and resume command name the pane they run in: it launches again
             // under `to`, before its next open (fix batch 7, I1).
             if was_root
-                && let Some(shell) =
+                && let Some((shell, relaunch)) =
                     self.relaunch_agent_shell(terminal, agent_id.as_deref(), to)
             {
-                terminal.update(cx, |view, _| view.set_launch_shell(shell));
+                terminal.update(cx, |view, _| {
+                    view.set_launch_shell(shell);
+                    view.set_relaunch_shell(relaunch);
+                });
             }
         }
     }
 
-    /// The shell an agent pane that moved from `from` to `to` launches with
-    /// (fix batch 7, I1): the launch its tab was made with, under the new key.
-    /// A new agent starts fresh with its prompt, as `add_agent_terminal_tab`
-    /// starts it. An OpenCode 2 tab Sirio created the session of resumes that
-    /// session under the new key: the id is the tab's own launch, not a row read
-    /// under the old key. A restored one resumes nothing: `move_pane`
-    /// has deleted the rows of both keys, because the old id is held by another
-    /// session by construction and its row is ambiguous. `None` only for a pane
-    /// with no agent, or an agent id that is not in the catalog; a missing
-    /// sirioctl does not make it `None`, the launch just writes no hooks.
+    /// The shells an agent pane that moved from `from` to `to` launches with (fix batch 7,
+    /// I1), as `(first, relaunch)`: the launch its tab was made with, under the new key, and
+    /// the command every later open runs (`TerminalView::set_relaunch_shell`), which is the
+    /// same without the tab's first prompt. A new agent starts fresh with its prompt, as
+    /// `add_agent_terminal_tab` starts it. An OpenCode 2 tab Sirio created the session of
+    /// resumes that session under the new key: the id is the tab's own launch, not a row read
+    /// under the old key. A restored one resumes nothing, and has no prompt and so no relaunch
+    /// command of its own: `move_pane` has deleted the rows of both keys, because the old id
+    /// is held by another session by construction and its row is ambiguous. `None` only for a
+    /// pane with no agent, or an agent id that is not in the catalog; a missing sirioctl does
+    /// not make it `None`, the launch just writes no hooks.
     fn relaunch_agent_shell(
         &mut self,
         terminal: &Entity<TerminalView>,
         agent_id: Option<&str>,
         to: usize,
-    ) -> Option<TerminalShell> {
+    ) -> Option<(TerminalShell, Option<TerminalShell>)> {
         let worktree = self.working_directory.to_string_lossy().into_owned();
         let pane_key = format!("pane-{to}");
         if let Some(launch) = self
@@ -10327,9 +10397,10 @@ impl SirioWorkspace {
                 } else if !self.session.save_session_ref(&pane_key, &id) {
                     eprintln!("[sirio] {pane_key}: session ref not written: its pane was closed");
                 }
-                let (program, args) =
-                    command_shell_invocation(&sirio_agents::opencode_launch_command(Some(&id), &prompt));
-                return Some(TerminalShell::WithArguments { program, args });
+                return Some((
+                    opencode_shell(Some(&id), &prompt),
+                    Some(opencode_shell(Some(&id), "")),
+                ));
             }
             // An OpenCode tab with no created session and a finished step: the step's own
             // probe decides the plugin under the new key, and the plain command runs with its
@@ -10341,19 +10412,18 @@ impl SirioWorkspace {
                 if let Err(error) = run_opencode_plugin_step(Path::new(&worktree), &pane_key, state) {
                     eprintln!("[sirio] {pane_key}: hooks not written: {error}");
                 }
-                let (program, args) =
-                    command_shell_invocation(&sirio_agents::opencode_launch_command(None, &prompt));
-                return Some(TerminalShell::WithArguments { program, args });
+                let relaunch = (!prompt.is_empty()).then(|| opencode_shell(None, ""));
+                return Some((opencode_shell(None, &prompt), relaunch));
             }
             // The step is still running (or the agent is not OpenCode): the fresh launch is
             // used, and `finish_opencode_launch` re-runs the plugin step under the pane's
             // current key with the tab's own state.
-            let (shell, warning) =
+            let (shell, relaunch, warning) =
                 fresh_agent_shell(launch.adapter, &pane_key, &worktree, &launch.prompt);
             if let Some(warning) = warning {
                 eprintln!("[sirio] {pane_key}: {warning}");
             }
-            return Some(shell);
+            return Some((shell, relaunch));
         }
         let adapter = *AGENT_CATALOG
             .iter()
@@ -10366,7 +10436,7 @@ impl SirioWorkspace {
         if let Some(warning) = warning {
             eprintln!("[sirio] {pane_key}: {warning}");
         }
-        Some(shell)
+        Some((shell, None))
     }
 
     /// Moves the live pane `from` of the active strip to `to`, whatever its
@@ -10657,26 +10727,9 @@ impl SirioWorkspace {
             self.refresh_running_after_clear(&pane_key);
             self.mark_activity_dirty();
         }
-        // An OpenCode 2 tab Sirio created the session of already sent its prompt into that
-        // session: this restart (the context menu, the debug control) resumes it without
-        // sending the prompt again. The "Session lost" overlay's Restart calls
-        // `TerminalView::restart` directly and re-runs the launch command with its prompt,
-        // as it does for every agent's fresh tab.
-        if let Some(launch) = self
-            .new_agent_launches
-            .iter_mut()
-            .find(|launch| launch.terminal.entity_id() == terminal.entity_id())
-            && launch.adapter.id() == "opencode"
-            && !launch.prompt.is_empty()
-            && let Some(id) = launch.session.as_deref()
-        {
-            let (program, args) =
-                command_shell_invocation(&sirio_agents::opencode_launch_command(Some(id), ""));
-            launch.prompt.clear();
-            terminal.update(cx, |terminal, _| {
-                terminal.set_launch_shell(TerminalShell::WithArguments { program, args })
-            });
-        }
+        // The first prompt is not sent again: the view runs its relaunch command (the launch
+        // without the prompt) once a session of it has run, for this restart and for the
+        // *Session lost* overlay's, which calls `TerminalView::restart` directly, alike.
         terminal.update(cx, |terminal, cx| terminal.restart(cx));
         cx.notify();
     }
@@ -15397,17 +15450,22 @@ impl SirioWorkspace {
     /// Whether a session other than the tab `terminal` is in names `pane_key`: another live,
     /// retained or parked tab, or a layout the database keeps. Pane ids are not unique across
     /// layouts, so a ref written under such a key would be read by the other layout's pane.
+    /// The tab is found wherever it is held (`terminal_home`, the active strip or a parked one),
+    /// and a session is its own only when both its persistence id and its worktree are the
+    /// tab's: the default tabs of different worktrees share persistence ids such as
+    /// `default-terminal`.
     fn pane_key_held_by_other_session(
         &self,
         pane_key: &str,
         terminal: &Entity<TerminalView>,
     ) -> bool {
-        let own = self
-            .terminal_pane_of(terminal)
-            .map(|(index, _)| self.tabs[index].persistence_id.clone());
+        let own = self.terminal_home(terminal);
         let held_by_other = |session: &SessionRef| {
-            own.as_deref() != Some(session.persistence_id.as_str())
-                && session.pane_keys.iter().any(|key| key == pane_key)
+            let is_own = own.as_ref().is_some_and(|own| {
+                own.persistence_id.as_deref() == Some(session.persistence_id.as_str())
+                    && paths_name_the_same_document(&session.worktree, &own.worktree)
+            });
+            !is_own && session.pane_keys.iter().any(|key| key == pane_key)
         };
         self.live_sessions().iter().any(held_by_other)
             || self.unmounted_sessions().sessions.iter().any(held_by_other)
@@ -20495,7 +20553,7 @@ impl SirioWorkspace {
         }
         let pane_key = format!("pane-{}", self.next_pane_id);
         let worktree = self.working_directory.to_string_lossy().into_owned();
-        let (shell, warning) = fresh_agent_shell(adapter, &pane_key, &worktree, prompt);
+        let (shell, relaunch, warning) = fresh_agent_shell(adapter, &pane_key, &worktree, prompt);
         let terminal = self.add_terminal_tab_with_shell_and_agent(
             adapter.display_name(),
             shell,
@@ -20513,7 +20571,10 @@ impl SirioWorkspace {
         });
         // The agent works whether or not its tab is drawn (a hidden window,
         // another worktree), so it starts now rather than on first render.
-        terminal.update(cx, |terminal, cx| terminal.start(cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_relaunch_shell(relaunch);
+            terminal.start(cx);
+        });
         warning
     }
 
@@ -20532,15 +20593,17 @@ impl SirioWorkspace {
     ) {
         let pane_key = format!("pane-{}", self.next_pane_id);
         let worktree = self.working_directory.clone();
-        let (program, args) = command_shell_invocation(&sirio_agents::opencode_launch_command(None, prompt));
         let terminal = self.add_terminal_tab_with_shell_and_agent(
             adapter.display_name(),
-            TerminalShell::WithArguments { program, args },
+            opencode_shell(None, prompt),
             Icon::for_agent_id(adapter.id()),
             Some(adapter.id().to_string()),
             cx,
         );
-        terminal.update(cx, |terminal, _| terminal.hold_launch());
+        terminal.update(cx, |terminal, _| {
+            terminal.hold_launch();
+            terminal.set_relaunch_shell((!prompt.is_empty()).then(|| opencode_shell(None, "")));
+        });
         self.new_agent_launches.retain(|launch| launch.terminal.upgrade().is_some());
         self.new_agent_launches.push(NewAgentLaunch {
             terminal: terminal.downgrade(),
@@ -20596,8 +20659,16 @@ impl SirioWorkspace {
     }
 
     /// The background step of a fresh OpenCode tab is done: opens its session, with the id
-    /// when Sirio created one and the plain command otherwise. A closed tab drops the
-    /// outcome. The pane id is asked now, because it can move while the step ran: a v1 plugin
+    /// when Sirio created one and the plain command otherwise. The tab is looked up now,
+    /// wherever it is held (`terminal_home`): in the active strip, or parked by a worktree
+    /// switch while the step ran, in which case it launches and saves its ref exactly as an
+    /// active one does. A view no strip holds but not released belongs to a worktree evicted
+    /// while the step ran: eviction only detaches, so it launches too, without a ref. The tab no
+    /// longer exists when its view cannot be upgraded or was released (a closed tab ends its
+    /// view, a quit detaches it, and the app's terminal bindings keep the handle upgradable):
+    /// nothing is launched, the id written or logged is none, and a session the step created is
+    /// deleted on the service (`delete_created_opencode_session`), so that no session is left
+    /// behind that no ref names. The pane id is asked now, because it can move while the step ran: a v1 plugin
     /// the step wrote names `launched_key`, so one that moved gets the plugin step again under
     /// its key now. The step's warning goes to the hand-off line, if the tab has one.
     #[allow(clippy::too_many_arguments)]
@@ -20611,12 +20682,37 @@ impl SirioWorkspace {
         handoff: Option<HandoffLine>,
         cx: &mut Context<Self>,
     ) {
-        let Some(terminal) = weak.upgrade() else {
+        let Some(terminal) = weak
+            .upgrade()
+            .filter(|terminal| !terminal.read(cx).is_released())
+        else {
+            if let Some(id) = step.created {
+                // Under GPUI's test scheduler (see `add_opencode_terminal_tab`) the call runs here.
+                if cx.background_executor().scheduler_executor().scheduler().as_test().is_some() {
+                    delete_created_opencode_session(launched_key, id);
+                } else {
+                    let key = launched_key.to_string();
+                    let spawned = std::thread::Builder::new()
+                        .name("sirio-opencode-delete".into())
+                        .spawn(move || delete_created_opencode_session(&key, id));
+                    if let Err(error) = spawned {
+                        eprintln!("[sirio] opencode session not deleted: {error}");
+                    }
+                }
+            }
             return;
         };
+        // `None` when no strip holds a view that was not released: its worktree was evicted
+        // while the step ran (or, rarely, a parked tab whose open failed was dropped from the
+        // cache). Eviction does nothing to the view: it stays bound under its pane id, so the
+        // tab launches as any other, but no ref is written for it, since no strip says which
+        // layout's key it holds now. The worktree's restored tab attaches to this session only
+        // if the step ends before the worktree is selected again; if it is selected first, the
+        // restored view opens the pane id first and this launch is refused (`Taken`), so the
+        // first prompt is lost and the created session stays on the service, as on main.
         let current_key = self
-            .terminal_pane_of(&terminal)
-            .map(|(_, pane_id)| format!("pane-{pane_id}"));
+            .terminal_home(&terminal)
+            .map(|home| format!("pane-{}", home.pane_id));
         if let Some(current_key) = &current_key
             && current_key != launched_key
         {
@@ -20637,21 +20733,28 @@ impl SirioWorkspace {
             }
         }
         let state = step.state;
-        let session = step.created.filter(|_| current_key.is_some());
-        let shell = session.as_deref().and_then(|id| {
-            let (_, pane_id) = self.terminal_pane_of(&terminal)?;
-            let key = format!("pane-{pane_id}");
-            if self.pane_key_held_by_other_session(&key, &terminal) {
+        let session = step.created;
+        let shell = session.as_deref().map(|id| {
+            let Some(key) = &current_key else {
+                eprintln!("[sirio] {launched_key}: session ref not written: its worktree was evicted");
+                terminal.update(cx, |terminal, _| {
+                    terminal.set_relaunch_shell(Some(opencode_shell(Some(id), "")));
+                });
+                return opencode_shell(Some(id), prompt);
+            };
+            if self.pane_key_held_by_other_session(key, &terminal) {
                 // The key may have moved since the tab was made (its own row was deleted then):
                 // a row under it is not this tab's, which runs `--session <id>`.
-                self.session.delete_session_ref(&key);
+                self.session.delete_session_ref(key);
                 eprintln!("[sirio] {key}: session ref not written: pane id held by another layout");
-            } else if !self.session.save_session_ref(&key, id) {
+            } else if !self.session.save_session_ref(key, id) {
                 eprintln!("[sirio] {key}: session ref not written: its pane was closed");
             }
-            let (program, args) =
-                command_shell_invocation(&sirio_agents::opencode_launch_command(Some(id), prompt));
-            Some(TerminalShell::WithArguments { program, args })
+            // The prompt goes into the session once: every later open resumes it without.
+            terminal.update(cx, |terminal, _| {
+                terminal.set_relaunch_shell(Some(opencode_shell(Some(id), "")));
+            });
+            opencode_shell(Some(id), prompt)
         });
         if let Some(launch) = self
             .new_agent_launches
@@ -22976,6 +23079,7 @@ impl SirioWorkspace {
         &mut self,
         command: Option<String>,
         agent: Option<String>,
+        prompt: &str,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let pane = format!("pane-{}", self.next_pane_id);
@@ -22984,7 +23088,7 @@ impl SirioWorkspace {
                 .iter()
                 .find(|adapter| adapter.id() == agent)
                 .ok_or_else(|| format!("there is no agent adapter {agent}"))?;
-            self.add_agent_terminal_tab(adapter, "", cx);
+            self.add_agent_terminal_tab(adapter, prompt, cx);
             return Ok(vec![("pane".to_string(), pane)]);
         }
         let shell = match command {
@@ -23020,9 +23124,17 @@ impl SirioWorkspace {
     fn control_terminal_restart(
         &mut self,
         pane: &str,
+        overlay: bool,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let view = self.control_terminal_view(pane)?;
+        if overlay {
+            // The button itself: the overlay calls the view, not the workspace.
+            if !view.update(cx, |view, cx| view.press_lost_overlay_restart(cx)) {
+                return Err(format!("{pane} draws no Session lost overlay with Restart"));
+            }
+            return Ok(Vec::new());
+        }
         self.restart_terminal(&view, cx);
         Ok(Vec::new())
     }
@@ -30116,16 +30228,52 @@ fn create_opencode_session(pane_key: &str, worktree: &Path) -> Option<String> {
     }
 }
 
-/// The shell a new agent starts under `pane_key`: `prepare` writes the
-/// worktree's hooks for that pane, then the adapter's command with its prompt.
-/// The warning names what could not be written, and the command still runs.
+/// Deletes the OpenCode session a launch step created for a tab gone before the step ended
+/// (closed, or detached by a quit), so that it is not left on the service: no ref names it,
+/// so no tab, a restored one included, would ever resume it. At a quit this is best effort:
+/// the step may not end, nor this thread run, before the process exits. Only the kind of a
+/// failure is logged.
+fn delete_created_opencode_session(pane_key: &str, id: String) {
+    let home = user_home_dir().unwrap_or_default();
+    match sirio_opencode_watch::delete_session(
+        &home,
+        &|name| std::env::var(name).ok(),
+        &id,
+        Duration::from_secs(3),
+    ) {
+        Ok(()) => eprintln!(
+            "[sirio] {pane_key}: deleted the OpenCode session created for a tab gone before its launch (closed or quit)"
+        ),
+        Err(kind) => eprintln!(
+            "[sirio] {pane_key}: the OpenCode session created for a tab gone before its launch was not deleted: {kind}"
+        ),
+    }
+}
+
+/// The shell that runs `opencode` (`sirio_agents::opencode_launch_command`) resuming session
+/// `id` when given, with `prompt` as its first message when it is not empty.
+fn opencode_shell(id: Option<&str>, prompt: &str) -> TerminalShell {
+    let (program, args) = command_shell_invocation(&sirio_agents::opencode_launch_command(id, prompt));
+    TerminalShell::WithArguments { program, args }
+}
+
+/// The shells a new agent starts under `pane_key`, with the warning of `prepare`: `prepare`
+/// runs once and writes the worktree's hooks for that pane, then the first shell is the
+/// adapter's command with its prompt, and the second the same command without it, for every
+/// later open of the tab (`TerminalView::set_relaunch_shell`): `None` when `prompt` is empty,
+/// since the first command is then already the plain one. The warning names what could not be
+/// written, and the commands still run.
 fn fresh_agent_shell(
     adapter: &dyn sirio_agents::AgentAdapter,
     pane_key: &str,
     worktree: &str,
     prompt: &str,
-) -> (TerminalShell, Option<String>) {
-    agent_launch_shell(adapter, pane_key, worktree, Some(prompt))
+) -> (TerminalShell, Option<TerminalShell>, Option<String>) {
+    let (sirioctl, warning) = prepare_agent_launch(adapter, pane_key, worktree);
+    let first = agent_command_shell(adapter, pane_key, worktree, &sirioctl, Some(prompt));
+    let relaunch = (!prompt.is_empty())
+        .then(|| agent_command_shell(adapter, pane_key, worktree, &sirioctl, None));
+    (first, relaunch, warning)
 }
 
 /// The launch of an agent pane that resumes nothing: the hooks for `pane_key`, then the
@@ -30137,6 +30285,18 @@ fn agent_launch_shell(
     worktree: &str,
     prompt: Option<&str>,
 ) -> (TerminalShell, Option<String>) {
+    let (sirioctl, warning) = prepare_agent_launch(adapter, pane_key, worktree);
+    (agent_command_shell(adapter, pane_key, worktree, &sirioctl, prompt), warning)
+}
+
+/// What an agent's launch settles before its command line is built: the path of sirioctl (empty
+/// when it cannot be resolved), and the hooks `prepare` writes for `pane_key`. The warning names
+/// what could not be written; the command still runs.
+fn prepare_agent_launch(
+    adapter: &dyn sirio_agents::AgentAdapter,
+    pane_key: &str,
+    worktree: &str,
+) -> (String, Option<String>) {
     let mut warning = None;
     let sirioctl = match resolve_sirioctl_for_process() {
         Ok(path) => path.to_string_lossy().into_owned(),
@@ -30154,12 +30314,24 @@ fn agent_launch_shell(
         warning = Some(format!("hooks not written: {error}"));
     }
     keep_agent_skill_out_of_git(adapter.id(), Path::new(worktree));
+    (sirioctl, warning)
+}
+
+/// The shell of the adapter's command under `pane_key`, with `prompt` as its first message when
+/// given.
+fn agent_command_shell(
+    adapter: &dyn sirio_agents::AgentAdapter,
+    pane_key: &str,
+    worktree: &str,
+    sirioctl: &str,
+    prompt: Option<&str>,
+) -> TerminalShell {
     let command = match prompt {
-        Some(prompt) => adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt),
-        None => adapter.command(worktree, pane_key, &sirioctl),
+        Some(prompt) => adapter.command_with_prompt(worktree, pane_key, sirioctl, prompt),
+        None => adapter.command(worktree, pane_key, sirioctl),
     };
     let (program, args) = command_shell_invocation(&command);
-    (TerminalShell::WithArguments { program, args }, warning)
+    TerminalShell::WithArguments { program, args }
 }
 
 fn register_restored_agent(

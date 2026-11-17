@@ -41,6 +41,8 @@ pub(crate) const STREAM_CLOSED: &str = "stream_closed";
 pub(crate) const UNEXPECTED_STREAM: &str = "unexpected_stream";
 pub(crate) const STALLED: &str = "stalled";
 pub(crate) const NOT_V2: &str = "not_v2";
+pub(crate) const BAD_ID: &str = "bad_id";
+pub(crate) const NOT_FOUND: &str = "not_found";
 
 /// One endpoint's calls. Both agents ignore the proxy variables (the service is on this
 /// machine), follow no redirect (the registration's URL was checked for loopback, a
@@ -176,6 +178,33 @@ impl Client {
         serde_json::from_str(&text).map_err(|_| UNEXPECTED_REPLY)
     }
 
+    /// `DELETE path`, over by `deadline`. Any 2xx is `Ok`: the reply's body, if any, is not
+    /// read (the service answers 204 with none).
+    fn delete_within(&self, deadline: Instant, path: &str) -> Result<(), &'static str> {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(UNREACHABLE)?;
+        let mut request = self
+            .calls
+            .delete(format!("{}{path}", self.base))
+            .config()
+            .timeout_global(Some(left))
+            .build();
+        if let Some(authorization) = &self.authorization {
+            request = request.header("Authorization", authorization);
+        }
+        match request.call() {
+            // With no redirects followed, a 3xx comes back as `Ok` too: only a 2xx deleted it.
+            Ok(response) if response.status().is_success() => Ok(()),
+            Ok(_) => Err(UNEXPECTED_REPLY),
+            Err(ureq::Error::StatusCode(404)) => Err(NOT_FOUND),
+            Err(ureq::Error::StatusCode(401 | 403)) => Err(UNAUTHORIZED),
+            Err(ureq::Error::StatusCode(_)) => Err(UNEXPECTED_REPLY),
+            Err(_) => Err(UNREACHABLE),
+        }
+    }
+
     /// Like [`Client::confirm`], inside `deadline`, and the service's major version too: only
     /// a v2 service has the session API `create_session` uses.
     fn confirm_v2(&self, deadline: Instant) -> Result<(), &'static str> {
@@ -291,6 +320,28 @@ pub fn create_session(
         return Err(MISMATCH);
     }
     Ok(id.to_string())
+}
+
+/// Deletes the session `id` on the service the registration names. The id is checked the way
+/// `create_session` checks a reply's (letters, digits and `_` only, so that it is one path
+/// segment), the registration is confirmed as a v2 service, and then `DELETE /api/session/<id>`
+/// runs inside what is left of the one `deadline`, which covers the whole call. A 2xx is
+/// `Ok(())`; a session the service does not hold (a 404) is `not_found`. No reply body is read.
+/// Every failure is a kind name: no id, path or credential is ever returned or logged.
+pub fn delete_session(
+    home: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    id: &str,
+    deadline: Duration,
+) -> Result<(), &'static str> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(BAD_ID);
+    }
+    let deadline = Instant::now() + deadline;
+    let endpoint = crate::endpoint::discover(home, env).map_err(|error| error.kind())?;
+    let client = Client::new(&endpoint);
+    client.confirm_v2(deadline)?;
+    client.delete_within(deadline, &format!("/api/session/{id}"))
 }
 
 /// Whether the service's `created` directory and the `wanted` one are the same. Elsewhere, the
