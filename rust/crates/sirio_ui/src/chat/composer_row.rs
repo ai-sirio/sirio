@@ -159,6 +159,9 @@ pub(crate) struct RowFrame {
     pub chips: Cell<Option<Bounds<Pixels>>>,
     /// The ⋯ trigger's bounds, as its probe last measured them.
     pub overflow_button: Cell<Option<Bounds<Pixels>>>,
+    /// The task chip's bounds, as its probe last measured them: a press on the chip
+    /// is the press that toggles the popover, not one outside it.
+    pub background_chip: Cell<Option<Bounds<Pixels>>>,
     /// The Lucide name of the icon the last render drew in the permission pill;
     /// `None` when it drew none.
     pub mode_icon: Cell<Option<&'static str>>,
@@ -238,6 +241,8 @@ pub struct ComposerSnapshot {
     /// The composer picker that is open: `mode`, `model`, `effort`, `thinking`,
     /// `overflow`, `history` or `context`; `None` when none is.
     pub picker: Option<&'static str>,
+    /// Whether the background-task popover is drawn (A3).
+    pub background_popover: bool,
 }
 
 fn boxed(bounds: Option<Bounds<Pixels>>) -> Option<[f32; 4]> {
@@ -357,6 +362,7 @@ impl Chat {
             overflow_button: boxed(frame.overflow_button.get()),
             menu: frame.menu.borrow().clone(),
             picker: self.open_picker_name(),
+            background_popover: self.background_popover_visible(),
         }
     }
 

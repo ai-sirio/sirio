@@ -24,7 +24,7 @@ use sirio_chat_child::{
 use sirio_claude::{
     Catalog, ChatSession, CliMessage, ContextBreakdown, ContextUsageReport, ControlEnvelope,
     ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer,
-    McpServerStatus, RewindOutcome, parse_mcp_status,
+    McpServerStatus, RewindOutcome, TaskOutput, parse_mcp_status,
 };
 
 use super::ClaudeLaunch;
@@ -75,6 +75,15 @@ pub(super) enum Command {
         dry_run: bool,
         reply: mpsc::SyncSender<Result<RewindOutcome, String>>,
     },
+    /// Read the tail of a background task's output. At most one read per task
+    /// is in flight: a second is answered `Err("busy")` and not written.
+    TaskOutput {
+        task_id: String,
+        reply: mpsc::SyncSender<Result<TaskOutput, String>>,
+    },
+    /// Stop a background task. Nothing waits on it: the task's own `task_*`
+    /// lines say how it ended.
+    StopTask { task_id: String },
     /// Ask the CLI for its context breakdown outside a turn. The answer is
     /// stored and signalled, never replied: the surface reads it back.
     RefreshContext,
@@ -99,6 +108,18 @@ pub(super) enum Command {
 /// a liveness bound rather than patience: a CLI that never answers must not
 /// hold the turn's end open behind a measurement.
 const CONTEXT_USAGE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long a `get_task_output` stays pending. A CLI that never answers one
+/// costs a single stdin write per task for this long, and then the task can be
+/// read again.
+const TASK_OUTPUT_EXPIRY: Duration = Duration::from_secs(30);
+
+/// A `get_task_output` the CLI has not answered.
+struct PendingTaskRead {
+    task_id: String,
+    reply: mpsc::SyncSender<Result<TaskOutput, String>>,
+    asked_at: std::time::Instant,
+}
 
 /// A card the surface is showing, waiting on a human.
 struct PendingPermission {
@@ -661,6 +682,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut pending_effort: HashMap<String, String> = HashMap::new();
     let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
         HashMap::new();
+    // The task reads the CLI has not answered, by request id: at most one per
+    // task, and the worker's own record of which answers are its polls.
+    let mut pending_task_reads: HashMap<String, PendingTaskRead> = HashMap::new();
     let timeout_reason: Arc<Mutex<Option<ChatError>>> = Arc::new(Mutex::new(None));
     let permission_counter = AtomicU64::new(1);
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
@@ -805,12 +829,27 @@ async fn session(context: SessionContext) -> SessionOutcome {
             futures::future::Either::Left((futures::future::Either::Left((line, _)), _)) => {
                 match line {
                     Some(Ok(line)) => {
-                        touch_activity(&activity);
                         // Stamped here, as the line leaves the pipe: the
                         // trace's every edge is this instant, and the GPUI
                         // thread can be behind by the time it hears of it.
                         let at = std::time::Instant::now();
-                        let Some(message) = CliMessage::parse(&line) else {
+                        let message = CliMessage::parse(&line);
+                        // Every line is activity, a line that does not parse
+                        // included, except the answer to one of Sirio's own
+                        // task polls: a tail polled once a second would
+                        // otherwise hold off the prompt timeout of a turn
+                        // that hung on the model.
+                        let answers_a_poll = matches!(
+                            &message,
+                            Some(CliMessage::ControlResponse(value))
+                                if ControlEnvelope::parse(value).is_some_and(|envelope| {
+                                    pending_task_reads.contains_key(&envelope.request_id)
+                                })
+                        );
+                        if !answers_a_poll {
+                            touch_activity(&activity);
+                        }
+                        let Some(message) = message else {
                             continue;
                         };
                         if let CliMessage::ControlResponse(value) = &message
@@ -1021,6 +1060,17 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                         "the agent refused the sign-in request".to_string(),
                                     ),
                                 });
+                            }
+                            if let Some(read) = pending_task_reads.remove(&envelope.request_id) {
+                                let _ =
+                                    read.reply.send(match (&envelope.payload, &envelope.error) {
+                                        (Some(payload), _) => Ok(TaskOutput::parse(payload)),
+                                        (None, Some(error)) => Err(error.clone()),
+                                        (None, None) => {
+                                            Err("the agent refused the task output request"
+                                                .to_string())
+                                        }
+                                    });
                             }
                             if let Some(reply) = pending_rewinds.remove(&envelope.request_id) {
                                 // A success carries the outcome; a refusal
@@ -1494,6 +1544,56 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             );
                         }
                     }
+                    Ok(Command::TaskOutput { task_id, reply }) => {
+                        // A stale read must not answer `busy`: the sweep at
+                        // the loop's end runs after this check, so expire here
+                        // too.
+                        pending_task_reads
+                            .retain(|_, read| read.asked_at.elapsed() < TASK_OUTPUT_EXPIRY);
+                        if pending_task_reads
+                            .values()
+                            .any(|read| read.task_id == task_id)
+                        {
+                            let _ = reply.send(Err("busy".to_string()));
+                        } else {
+                            let id = next_request_id();
+                            if write_line(
+                                &mut stdin,
+                                &ControlRequest::get_task_output(&id, &task_id),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                end_held_turn(&event_tx, &mut pending_context_usage).await;
+                                return SessionOutcome::Died(
+                                    ": could not write the task output request".into(),
+                                );
+                            }
+                            pending_task_reads.insert(
+                                id,
+                                PendingTaskRead {
+                                    task_id,
+                                    reply,
+                                    asked_at: std::time::Instant::now(),
+                                },
+                            );
+                        }
+                    }
+                    Ok(Command::StopTask { task_id }) => {
+                        // Nothing is kept pending: the answer is `success {}`
+                        // whether or not anything stopped, and falls through
+                        // as an answer nobody is waiting for.
+                        let id = next_request_id();
+                        if write_line(&mut stdin, &ControlRequest::stop_task(&id, &task_id))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the stop request".into(),
+                            );
+                        }
+                    }
                     Ok(Command::RefreshContext) => {
                         let id = next_request_id();
                         pending_context_refresh = Some(id.clone());
@@ -1626,6 +1726,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 })
                 .await;
         }
+        // A read the CLI never answered frees its task for a new one.
+        pending_task_reads.retain(|_, read| read.asked_at.elapsed() < TASK_OUTPUT_EXPIRY);
         // The meter has its own grace: the turn it belongs to has already
         // finished, and a CLI that never answers must not hold its end open.
         if let Some(pending) = pending_context_usage

@@ -539,6 +539,38 @@ pub enum ChatEvent {
     /// native Claude client emits these; an ACP agent never does, so a chat
     /// on one has no trace and the transcript is its only record.
     Trace(TraceEvent),
+    /// What the CLI said about its background tasks. Only the native Claude
+    /// client emits these. The count in `OtherSessionUpdate` and the notice
+    /// for a task's end stay beside them.
+    BackgroundTask(BackgroundTaskEvent),
+}
+
+/// One row of the CLI's list of live background tasks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundTaskRow {
+    pub task_id: String,
+    /// The CLI's own word for what runs it, e.g. `local_bash`.
+    pub task_type: Option<String>,
+    pub description: String,
+}
+
+/// A background task's life as the CLI's lines tell it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackgroundTaskEvent {
+    /// The whole list of live tasks, a replacement rather than a delta.
+    Rows(Vec<BackgroundTaskRow>),
+    /// A task began in the background (`is_backgrounded` only).
+    Started {
+        task_id: String,
+        /// The tool call that started it.
+        tool_use_id: Option<String>,
+        task_type: Option<String>,
+        description: String,
+    },
+    /// A task reached a terminal status: `completed`, `killed`, `failed`
+    /// or `stopped`. Both the `task_updated` and the `task_notification`
+    /// say so, so a task can end twice.
+    Ended { task_id: String, status: String },
 }
 
 /// Something that happened to the session and belongs in the transcript at

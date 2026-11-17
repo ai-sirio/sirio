@@ -1318,6 +1318,276 @@ def state_main():
     turns.join()
 
 
+# ---------------------------------------------------------------------------
+# `background_tasks`: a background shell or agent, `get_task_output` and
+# `stop_task`. Line shapes and orders copy the A3 live probe (claude 2.1.326,
+# and the 2.1.257 floor for `--fixture-floor`).
+#
+# The first word of a prompt picks the script; any other word is a plain turn
+# (init, text, `result`, `idle`) that starts nothing:
+#   `shell`  a backgrounded Bash. The first is `bshell001`, a later one
+#            `bshell002`, and so on: a task's state is never reused. Its output
+#            is time-based: one `\u001b[32mline N\u001b[0m\n` a second for 6 s,
+#            then quiet. The turn ends (`result`, `idle`), as the CLI's does
+#            while the shell runs.
+#   `agent`  a background Agent, `aagent001`, alive until `stop_task`: the turn's
+#            `result` comes and its `idle` does not. `get_task_output` refuses it.
+#   `hold`   `shell`'s lines up to the `tool_result`, then nothing more for the
+#            turn: no `result`, no `idle`. It still answers `get_task_output`.
+#   `slow`   `shell`, but a `get_task_output` is not answered until the file
+#            named by `--fixture-gate=<path>` exists, so a read stays pending
+#            for exactly as long as a test wants.
+# A `stop_task` for a live task is answered about a second later, with the
+# task's end in the probe's order: `task_updated` (`killed`), `task_notification`
+# (`stopped`), `background_tasks_changed []`, the `success {}`, then `idle`
+# (a stopped Agent also gets the follow-up turn the CLI starts). `\n[killed]\n`
+# ends the output then. A stop for an ended or unknown task is `success {}` at
+# once, with no lines.
+# `--fixture-floor` is the floor (2.1.257): no `run_id` anywhere,
+# `get_task_output` refused, and on a stop the rows drain before the `task_*`
+# lines.
+# `--fixture-request-log=<path>` appends every control request received, one
+# JSON line each, as received.
+# ---------------------------------------------------------------------------
+
+BG_FLOOR = "--fixture-floor" in sys.argv
+# `--fixture-rowless`: every non-empty list also carries a row with no `task_id`.
+BG_ROWLESS = "--fixture-rowless" in sys.argv
+BG_REQUEST_LOG = next(
+    (arg[len("--fixture-request-log="):] for arg in sys.argv
+     if arg.startswith("--fixture-request-log=")),
+    "",
+)
+# `SIRIO_FIXTURE_STOP_DELAY` (seconds) lengthens it: a framed run's slow frames can keep a control read
+# waiting past a second, and the `stopping` state a test looks for would be over by then.
+BG_STOP_DELAY = float(os.environ.get("SIRIO_FIXTURE_STOP_DELAY") or 1.0)
+BG_OUTPUT_SECONDS = 6
+BG_PROMPTS = queue.Queue()
+# Every task the session has started, by id: its type, when it began, when its
+# process was stopped, and whether `[killed]` ends its output yet.
+BG_TASKS = {}
+BG_SLOW = threading.Event()
+BG_LOCK = threading.Lock()
+
+
+def bg_init():
+    init_line("2.1.257" if BG_FLOOR else "2.1.273")
+
+
+def bg_system(subtype, **fields):
+    if BG_FLOOR:
+        fields.pop("run_id", None)
+    send({"type": "system", "subtype": subtype, **fields,
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
+
+
+def bg_state(state):
+    bg_system("session_state_changed", state=state)
+
+
+def bg_row(task_id, task_type, description, subagent_type=None):
+    row = {"task_id": task_id, "run_id": f"run-{task_id}", "task_type": task_type}
+    if subagent_type:
+        row["subagent_type"] = subagent_type
+    row["description"] = description
+    if BG_FLOOR:
+        row.pop("run_id")
+    return row
+
+
+def bg_rows(rows):
+    if BG_ROWLESS and rows:
+        rows = [{"task_type": "local_bash", "description": "no id"}] + rows
+    bg_system("background_tasks_changed", tasks=rows)
+
+
+def bg_output(task_id):
+    """A shell's output file, as of now."""
+    with BG_LOCK:
+        task = dict(BG_TASKS[task_id])
+    elapsed = (task["ended_at"] or time.time()) - task["started"]
+    count = min(int(elapsed), BG_OUTPUT_SECONDS)
+    body = "".join(f"\u001b[32mline {n}\u001b[0m\n" for n in range(1, count + 1))
+    if task["killed"]:
+        body += "\n[killed]\n"
+    return {"output": body, "total_bytes": len(body.encode("utf-8")), "truncated": False}
+
+
+def bg_next_id(prefix):
+    with BG_LOCK:
+        taken = sum(1 for task_id in BG_TASKS if task_id.startswith(prefix))
+    return f"{prefix}{taken + 1:03d}"
+
+
+def bg_start(task_id, task_type, tool_use_id, tool_name, tool_input, description,
+             subagent_type, launched):
+    bg_state("running")
+    bg_init()
+    assistant_tool_use(tool_use_id, tool_name, tool_input)
+    bg_rows([bg_row(task_id, task_type, description, subagent_type)])
+    started = {"task_id": task_id, "run_id": f"run-{task_id}", "tool_use_id": tool_use_id,
+               "description": description, "is_backgrounded": True, "task_type": task_type}
+    if subagent_type:
+        started["subagent_type"] = subagent_type
+        started["spawn_depth"] = 1
+        started["prompt"] = tool_input.get("prompt", description)
+    bg_system("task_started", **started)
+    with BG_LOCK:
+        BG_TASKS[task_id] = {"type": task_type, "started": time.time(),
+                             "ended_at": None, "killed": False,
+                             "tool_use_id": tool_use_id, "summary": description}
+    state_tool_result(tool_use_id, launched)
+
+
+def bg_shell(hold=False, slow=False):
+    if slow:
+        BG_SLOW.set()
+    task_id = bg_next_id("bshell")
+    bg_start(task_id, "local_bash", f"toolu_s{int(task_id[-3:])}", "Bash",
+             {"command": "bash shell40.sh", "run_in_background": True}, "shell40", None,
+             f"Command running in background with ID: {task_id}. Output is being "
+             f"written to: /tmp/{task_id}.output. You will be notified when it completes.")
+    if hold:
+        return
+    result()
+    bg_state("idle")
+
+
+def bg_agent():
+    task_id = bg_next_id("aagent")
+    bg_start(task_id, "local_agent", f"toolu_a{int(task_id[-3:])}", "Agent",
+             {"description": "bg task", "prompt": "do the thing",
+              "subagent_type": "general-purpose", "run_in_background": True},
+             "bg task", "general-purpose",
+             [{"type": "text", "text": "Async agent launched successfully.\n"
+               f"agentId: {task_id} (internal ID - do not mention to user.)\n"
+               "The agent is working in the background. You will be notified "
+               "automatically when it completes."}])
+    result()
+
+
+def bg_plain():
+    bg_state("running")
+    bg_init()
+    state_text("Hello there")
+    result()
+    bg_state("idle")
+
+
+def bg_end(task_id, request_id):
+    """What a stop leaves, after the delay a real stop takes: the probe's lines
+    in the probe's order, the stop's own answer among them."""
+    time.sleep(BG_STOP_DELAY)
+    with BG_LOCK:
+        task = BG_TASKS[task_id]
+        task["killed"] = True
+        task_type, tool_use_id, summary = task["type"], task["tool_use_id"], task["summary"]
+    if BG_FLOOR:
+        bg_rows([])
+    bg_system("task_updated", task_id=task_id, run_id=f"run-{task_id}",
+              patch={"status": "killed", "end_time": int(time.time() * 1000)})
+    bg_system("task_notification", task_id=task_id, run_id=f"run-{task_id}",
+              tool_use_id=tool_use_id, status="stopped",
+              output_file=f"/tmp/{task_id}.output", summary=summary)
+    if not BG_FLOOR:
+        bg_rows([])
+    control_response(request_id, {})
+    if task_type == "local_agent":
+        # A stopped Agent makes the CLI start a turn of its own; a shell does not.
+        send({"type": "user",
+              "message": {"role": "user", "content": [
+                  {"type": "text", "text": "[Request interrupted by user]"}]},
+              "parent_tool_use_id": tool_use_id, "agent_id": task_id,
+              "session_id": SESSION_ID, "uuid": trace_uuid(),
+              "subagent_type": "general-purpose", "task_description": summary})
+        bg_init()
+        state_text("The agent was stopped.")
+        result()
+    bg_state("idle")
+
+
+BG_SCRIPTS = {"shell": lambda: bg_shell(), "hold": lambda: bg_shell(hold=True),
+              "slow": lambda: bg_shell(slow=True), "agent": bg_agent}
+
+
+def bg_turns():
+    while True:
+        prompt = BG_PROMPTS.get()
+        if prompt is None:
+            return
+        first = prompt.split(None, 1)[0].lower() if prompt.split() else ""
+        BG_SCRIPTS.get(first, bg_plain)()
+
+
+def bg_answer_output(request_id, task_id):
+    with BG_LOCK:
+        task = BG_TASKS.get(task_id)
+    if BG_FLOOR:
+        control_error(request_id, "Unsupported control request subtype: get_task_output")
+    elif task is not None and task["type"] == "local_bash":
+        control_response(request_id, bg_output(task_id))
+    elif task is None and task_id.startswith("b"):
+        # The probe: an unknown id shaped like a shell's is an empty success.
+        control_response(request_id, {"output": "", "total_bytes": 0, "truncated": False})
+    else:
+        control_error(request_id,
+                      "get_task_output: no shell or Monitor task with that task_id in this session")
+
+
+def bg_answer_when_gated(request_id, task_id):
+    while GATE_PATH and not os.path.exists(GATE_PATH):
+        time.sleep(0.02)
+    bg_answer_output(request_id, task_id)
+
+
+def bg_main():
+    bg_init()
+    turns = threading.Thread(target=bg_turns, daemon=True)
+    turns.start()
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = message.get("type")
+        if kind == "control_request":
+            request = message.get("request", {})
+            subtype = request.get("subtype")
+            request_id = message.get("request_id")
+            if BG_REQUEST_LOG:
+                with open(BG_REQUEST_LOG, "a", encoding="utf-8") as log:
+                    log.write(json.dumps(message, separators=(",", ":")) + "\n")
+            if subtype == "initialize":
+                control_response(request_id, initialize_payload())
+            elif subtype == "interrupt":
+                control_response(request_id, {"still_queued": []})
+            elif subtype == "get_task_output":
+                task_id = request.get("task_id", "")
+                if BG_SLOW.is_set() and not BG_FLOOR:
+                    threading.Thread(target=bg_answer_when_gated,
+                                     args=(request_id, task_id), daemon=True).start()
+                else:
+                    bg_answer_output(request_id, task_id)
+            elif subtype == "stop_task":
+                task_id = request.get("task_id", "")
+                with BG_LOCK:
+                    task = BG_TASKS.get(task_id)
+                    live = task is not None and task["ended_at"] is None
+                    if live:
+                        task["ended_at"] = time.time()
+                if live:
+                    threading.Thread(target=bg_end, args=(task_id, request_id),
+                                     daemon=True).start()
+                else:
+                    control_response(request_id, {})
+            else:
+                control_response(request_id, {})
+        elif kind == "user":
+            BG_PROMPTS.put(trace_prompt_text(message))
+    BG_PROMPTS.put(None)
+    turns.join()
+
+
 def main():
     if LAUNCH_LOG_PATH:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
@@ -1327,6 +1597,9 @@ def main():
         return
     if MODE == "session_state":
         state_main()
+        return
+    if MODE == "background_tasks":
+        bg_main()
         return
     if MODE == "refuse_unknown_resume" and resume_arg() not in (None, SESSION_ID):
         # Only this fixture's own session exists: the resume of any other id

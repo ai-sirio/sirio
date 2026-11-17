@@ -172,6 +172,38 @@ impl ControlRequest {
             }),
         )
     }
+
+    /// Stops one background task. The CLI answers `success` at once, for an
+    /// unknown or ended task too; the task's end arrives as `task_*` lines.
+    #[must_use]
+    pub fn stop_task(request_id: &str, task_id: &str) -> Value {
+        Self::envelope(
+            request_id,
+            json!({"subtype": "stop_task", "task_id": task_id}),
+        )
+    }
+
+    /// Reads the tail of a background shell's or Monitor's output.
+    #[must_use]
+    pub fn get_task_output(request_id: &str, task_id: &str) -> Value {
+        Self::envelope(
+            request_id,
+            json!({"subtype": "get_task_output", "task_id": task_id}),
+        )
+    }
+}
+
+/// Whether an error answers a verb the CLI does not have, as against an
+/// action it has and could not do.
+///
+/// ADR 0001: a refusal retires the one feature for the session, quietly;
+/// any other error is that one action's failure and the feature stays. The
+/// 2.1.257 floor says `Unsupported control request subtype: <verb>`, an
+/// older build `Unknown control request subtype`.
+#[must_use]
+pub fn is_refusal(error: &str) -> bool {
+    error.contains("Unknown control request subtype")
+        || error.contains("Unsupported control request subtype")
 }
 
 /// A control response, reduced to what a waiting caller needs: which
@@ -493,6 +525,33 @@ mod tests {
                 "dry_run": true
             })
         );
+    }
+
+    // `is_refusal` failure list, written before the function:
+    //  - a refusal read as an action's error: the floor's "Unsupported control
+    //    request subtype: get_task_output", and the older "Unknown control
+    //    request subtype" with and without a verb after it;
+    //  - an action's error read as a refusal, which would retire a feature that
+    //    works: "get_task_output: no shell or Monitor task ...", the CLI's
+    //    answer for a task it cannot read, and "Server not found: x";
+    //  - an empty string read as a refusal.
+    #[test]
+    fn a_refusal_is_told_from_an_actions_own_error() {
+        for refusal in [
+            "Unsupported control request subtype: get_task_output",
+            "Unknown control request subtype",
+            "Unknown control request subtype: rewind_files",
+        ] {
+            assert!(is_refusal(refusal), "{refusal}");
+        }
+        for failure in [
+            "get_task_output: no shell or Monitor task with that task_id in this session",
+            "Server not found: x",
+            "the agent refused the request",
+            "",
+        ] {
+            assert!(!is_refusal(failure), "{failure:?}");
+        }
     }
 
     #[test]

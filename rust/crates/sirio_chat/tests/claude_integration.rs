@@ -9,8 +9,9 @@ use std::time::Duration;
 use futures::future::Either;
 use sirio_chat::ThinkingDisplay;
 use sirio_chat::{
-    AvailableCommandInfo, ChatEvent, ClaudeClient, ClaudeLaunch, CliState, CloseReason,
-    ElicitationAction, ElicitationPrompt, RequestKind, SessionNotice, SpanKind, TraceEvent,
+    AvailableCommandInfo, BackgroundTaskEvent, BackgroundTaskRow, ChatEvent, ClaudeClient,
+    ClaudeLaunch, CliState, CloseReason, ElicitationAction, ElicitationPrompt, RequestKind,
+    SessionNotice, SpanKind, TraceEvent,
 };
 use sirio_claude::FastMode;
 
@@ -1720,4 +1721,374 @@ fn the_cli_session_state_reaches_the_client_across_a_background_agent() {
     }
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Background tasks: `get_task_output`, `stop_task` and the events over the
+// fixture's `background_tasks` mode. Every test launches its own fixture and
+// its own request log, so they run side by side.
+// ---------------------------------------------------------------------------
+
+const SHELL: &str = "bshell001";
+
+fn background_launch(tag: &str, floor: bool) -> (ClaudeLaunch, PathBuf) {
+    let log = std::env::temp_dir().join(format!("sirio-bg-{tag}-{}.requests", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    // A gate a failed earlier run left open would answer `slow` at once.
+    let _ = std::fs::remove_file(gate_path(&log));
+    let mut args = vec![
+        FIXTURE.to_string(),
+        "background_tasks".to_string(),
+        format!("--fixture-request-log={}", log.display()),
+        format!("--fixture-gate={}", gate_path(&log).display()),
+    ];
+    if floor {
+        args.push("--fixture-floor".to_string());
+    }
+    if tag == "events" {
+        // Rows with no `task_id` ride along; the events must not name them.
+        args.push("--fixture-rowless".to_string());
+    }
+    (ClaudeLaunch::fixture(PathBuf::from("python3"), args), log)
+}
+
+/// The file `slow` holds its `get_task_output` answers for, until it exists.
+fn gate_path(log: &std::path::Path) -> PathBuf {
+    PathBuf::from(format!("{}.gate", log.display()))
+}
+
+/// The control requests the fixture logged for one verb, as it received them.
+fn logged_requests(log: &std::path::Path, subtype: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| message["request"]["subtype"] == subtype)
+        .collect()
+}
+
+/// The next event within `budget`, or none: a test that must fail rather
+/// than hang reads through this, not through `next_event`.
+fn next_event_within(events: &sirio_chat::EventStream, budget: Duration) -> Option<ChatEvent> {
+    let receive = events.recv();
+    let timer = async_io::Timer::after(budget);
+    futures::executor::block_on(async move {
+        futures::pin_mut!(receive, timer);
+        match futures::future::select(receive, timer).await {
+            Either::Left((event, _)) => event.ok(),
+            Either::Right((_, _)) => None,
+        }
+    })
+}
+
+/// Every event up to and including the first one `stop` accepts.
+fn events_until(
+    events: &sirio_chat::EventStream,
+    stop: impl Fn(&ChatEvent) -> bool,
+) -> Vec<ChatEvent> {
+    let mut seen = Vec::new();
+    loop {
+        let event = next_event(events);
+        let done = stop(&event);
+        seen.push(event);
+        if done {
+            return seen;
+        }
+    }
+}
+
+fn ended(event: &ChatEvent, wanted: &str) -> bool {
+    matches!(
+        event,
+        ChatEvent::BackgroundTask(BackgroundTaskEvent::Ended { status, .. }) if status == wanted
+    )
+}
+
+/// Reads until `done` accepts the answer, or fails after `budget`.
+fn read_output_until(
+    control: &sirio_chat::TaskControl,
+    budget: Duration,
+    done: impl Fn(&sirio_chat::TaskOutput) -> bool,
+) -> sirio_chat::TaskOutput {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let answer = control.output(SHELL).expect("the CLI answers a read");
+        if done(&answer) {
+            return answer;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the output never reached the awaited state: {answer:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+// Failure list for the shell's output and its stop (E2E, written first):
+//  - the output is read once and never again, so it cannot grow: the second
+//    read must be longer than the first, with its ANSI intact;
+//  - a stop that does not reach the CLI, or reaches it as a turn's cancel:
+//    the task must end, and the log must hold one `stop_task` for its id and
+//    no `interrupt`;
+//  - the end not showing in the output: the `[killed]` trailer is the CLI's
+//    word that the process is gone.
+#[test]
+fn a_shell_tasks_output_grows_and_its_stop_ends_it() {
+    let (launch, log) = background_launch("grows", false);
+    let (client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("handshake succeeds");
+    let control = client.task_control();
+    client.prompt("shell go").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+
+    let first = read_output_until(&control, Duration::from_secs(10), |out| out.total_bytes > 0);
+    let grown = read_output_until(&control, Duration::from_secs(10), |out| {
+        out.total_bytes > first.total_bytes
+    });
+    assert!(
+        grown.output.starts_with(&first.output),
+        "an output only grows: {first:?} then {grown:?}"
+    );
+    assert!(
+        grown.output.contains("\u{1b}[32mline 1\u{1b}[0m\n"),
+        "the CLI's own escapes reach the caller as written: {grown:?}"
+    );
+
+    control.stop(SHELL);
+    events_until(&events, |event| ended(event, "killed"));
+    let last = read_output_until(&control, Duration::from_secs(10), |out| {
+        out.output.ends_with("\n[killed]\n")
+    });
+    assert!(!last.truncated);
+
+    let stops = logged_requests(&log, "stop_task");
+    assert_eq!(stops.len(), 1, "one press, one request: {stops:?}");
+    assert!(
+        logged_requests(&log, "interrupt").is_empty(),
+        "a stop is not the turn's cancel"
+    );
+    drop(client);
+    let _ = std::fs::remove_file(&log);
+}
+
+// Failure list for the floor (E2E, written first):
+//  - the floor's refusal comes back as something `is_refusal` does not know
+//    (a wrapped or reworded sentence), so the feature is never retired;
+//  - the refusal takes the stop down with it: `stop_task` works on the floor
+//    and must still end the task.
+#[test]
+fn the_floor_refuses_task_output_as_a_refusal_and_still_stops() {
+    let (launch, log) = background_launch("floor", true);
+    let (client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("handshake succeeds");
+    let control = client.task_control();
+    client.prompt("shell go").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+
+    let error = control
+        .output(SHELL)
+        .expect_err("the floor has no get_task_output");
+    assert!(
+        sirio_chat::is_refusal(&error),
+        "not read as a refusal: {error:?}"
+    );
+
+    control.stop(SHELL);
+    // Returns only on the end: a stop the floor did not carry out would wait
+    // out the event guard instead.
+    events_until(&events, |event| ended(event, "killed"));
+    drop(client);
+    let _ = std::fs::remove_file(&log);
+}
+
+// Failure list for the events (E2E, written first):
+//  - the rows and the start in the wrong order, or the start lost because the
+//    rows already named the task;
+//  - the start without the tool call that made it (`toolu_s1`);
+//  - a stop that ends the task once, when the CLI says `killed` and then
+//    `stopped`: both are `Ended`, the first one being the outcome;
+//  - the drain `background_tasks_changed []` not reaching the caller;
+//  - a row with no `task_id` reaching the registry as a task keyed `""`.
+#[test]
+fn background_task_events_follow_the_cli_lines() {
+    let (launch, log) = background_launch("events", false);
+    let (client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("handshake succeeds");
+    let control = client.task_control();
+    client.prompt("shell go").expect("prompt is accepted");
+    let mut tasks: Vec<BackgroundTaskEvent> = Vec::new();
+    let mut collect = |seen: Vec<ChatEvent>| {
+        tasks.extend(seen.into_iter().filter_map(|event| match event {
+            ChatEvent::BackgroundTask(task) => Some(task),
+            _ => None,
+        }));
+    };
+    collect(drain_until_turn_end(&events));
+    control.stop(SHELL);
+    collect(events_until(&events, |event| {
+        matches!(
+            event,
+            ChatEvent::BackgroundTask(BackgroundTaskEvent::Rows(rows)) if rows.is_empty()
+        )
+    }));
+    assert_eq!(
+        tasks,
+        vec![
+            BackgroundTaskEvent::Rows(vec![BackgroundTaskRow {
+                task_id: SHELL.into(),
+                task_type: Some("local_bash".into()),
+                description: "shell40".into(),
+            }]),
+            BackgroundTaskEvent::Started {
+                task_id: SHELL.into(),
+                tool_use_id: Some("toolu_s1".into()),
+                task_type: Some("local_bash".into()),
+                description: "shell40".into(),
+            },
+            BackgroundTaskEvent::Ended {
+                task_id: SHELL.into(),
+                status: "killed".into(),
+            },
+            BackgroundTaskEvent::Ended {
+                task_id: SHELL.into(),
+                status: "stopped".into(),
+            },
+            BackgroundTaskEvent::Rows(vec![]),
+        ]
+    );
+    drop(client);
+    let _ = std::fs::remove_file(&log);
+}
+
+// Failure list for the pending read (E2E, written first):
+//  - a second read of a task whose first read is unanswered is written too,
+//    so a CLI that stops answering costs a stdin write per tick: it must
+//    answer `busy` at once and write nothing;
+//  - `busy` only after the first is answered: once it is, the task must be
+//    readable again, and that read must be written.
+#[test]
+fn a_second_read_of_a_pending_task_is_busy_and_not_written() {
+    let (launch, log) = background_launch("busy", false);
+    let (client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("handshake succeeds");
+    let control = client.task_control();
+    client.prompt("slow go").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+
+    // `slow` holds every read's answer until the gate file exists, so the first
+    // read stays pending for exactly as long as this test wants, load or not.
+    let slow = control.clone();
+    let first = std::thread::spawn(move || slow.output(SHELL));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while logged_requests(&log, "get_task_output").is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first read never left"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(control.output(SHELL), Err("busy".to_string()));
+    assert_eq!(
+        logged_requests(&log, "get_task_output").len(),
+        1,
+        "a busy answer writes nothing"
+    );
+    std::fs::write(gate_path(&log), "").expect("open the gate");
+    first
+        .join()
+        .expect("the first read does not panic")
+        .expect("the first read is answered");
+    control
+        .output(SHELL)
+        .expect("an answered task can be read again");
+    assert_eq!(logged_requests(&log, "get_task_output").len(), 2);
+    drop(client);
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(gate_path(&log));
+}
+
+// Failure list for the watchdog (E2E, written first; R4):
+//  - the answers to Sirio's own polls count as the CLI's activity, so a 1 Hz
+//    poll holds off the prompt timeout of a turn that hung on the model: the
+//    timeout must still fire while the tail is being polled;
+//  - the polls stop being written or answered (a regression in the `busy`
+//    branch, or `hold` no longer answering): nothing touches the clock then,
+//    the timeout fires, and the test would pass without the exclusion. The
+//    answers are counted and must number at least three before it fires.
+// Not covered here: that the exclusion stays narrow (an unparseable line and
+// every other line still touch the clock). That needs a fixture that emits
+// such a line on a schedule inside a hold, which `hold` does not.
+// The window is the shortest the other timeout tests use (400 ms) and the poll
+// gap an eighth of it, so a machine that is slow cannot make the poll
+// sparser than the window and let this pass without the exclusion. The wait is
+// three windows, so that without the exclusion it fails rather than hangs.
+#[test]
+fn task_output_answers_do_not_hold_off_the_prompt_timeout() {
+    let window = Duration::from_millis(400);
+    let (launch, log) = background_launch("hold", false);
+    let (client, events) = ClaudeClient::launch_with_timeouts(
+        launch,
+        std::env::temp_dir(),
+        Duration::from_secs(10),
+        window,
+        Duration::from_secs(60),
+    )
+    .expect("handshake succeeds");
+    let control = client.task_control();
+    client.prompt("hold go").expect("prompt is accepted");
+    loop {
+        let event = next_event(&events);
+        if matches!(
+            event,
+            ChatEvent::BackgroundTask(BackgroundTaskEvent::Started { .. })
+        ) {
+            break;
+        }
+        assert!(
+            !matches!(event, ChatEvent::Timeout { .. }),
+            "the window ran out before the task started: a slow machine, not the watchdog"
+        );
+    }
+
+    let polling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let polls = {
+        let polling = std::sync::Arc::clone(&polling);
+        std::thread::spawn(move || {
+            let mut answered = 0;
+            while polling.load(std::sync::atomic::Ordering::Relaxed) {
+                if control.output(SHELL).is_ok() {
+                    answered += 1;
+                }
+                std::thread::sleep(window / 8);
+            }
+            answered
+        })
+    };
+    let deadline = std::time::Instant::now() + window * 3;
+    let mut timed_out = false;
+    while let Some(budget) = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|budget| !budget.is_zero())
+    {
+        if let Some(ChatEvent::Timeout {
+            operation: sirio_chat::TimeoutOperation::Prompt,
+            ..
+        }) = next_event_within(&events, budget)
+        {
+            timed_out = true;
+            break;
+        }
+    }
+    polling.store(false, std::sync::atomic::Ordering::Relaxed);
+    let answered = polls.join().expect("the poll thread does not panic");
+    assert!(
+        answered >= 3,
+        "too few polls were answered to prove anything: {answered}"
+    );
+    assert!(
+        timed_out,
+        "the prompt timeout must fire while the tail is polled ({answered} reads answered)"
+    );
+    drop(client);
+    let _ = std::fs::remove_file(&log);
 }

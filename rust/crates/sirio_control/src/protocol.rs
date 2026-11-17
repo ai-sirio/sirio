@@ -1177,6 +1177,20 @@ pub mod request {
         request("surface.chat.elicitation", params)
     }
 
+    /// Debug-only `surface.chat.stopTask {surfaceId, taskId}`, and test-only
+    /// `surface.chat.paintTail {surfaceId, taskId}`: Stop on a background task as its button
+    /// does, and a frame painting that task's tail (all the tail poll waits for), so that a
+    /// run with no display can drive it. `method` is one of the two.
+    pub fn chat_task(method: &str, surface_id: &str, task_id: &str) -> ControlRequest {
+        request(
+            method,
+            BTreeMap::from([
+                ("surfaceId".to_string(), surface_id.to_string()),
+                ("taskId".to_string(), task_id.to_string()),
+            ]),
+        )
+    }
+
     /// Debug-only `surface.project_add {kind, value, submit?, answer?}`: starts
     /// an add without the folder chooser. `kind` is `path` (the Open folder
     /// flow on the folder `value`), `clone` or `create` (the form, its field

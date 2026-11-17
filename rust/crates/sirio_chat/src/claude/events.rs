@@ -12,8 +12,8 @@ use sirio_claude::message::{CliMessage, Delta, ResultPayload, SystemPayload};
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
 use sirio_chat_vocab::{
-    ChatEvent, CliState, PlanEntryInfo, SessionNotice, ToolCallContentInfo, ToolCallDiff,
-    ToolCallLocationInfo,
+    BackgroundTaskEvent, BackgroundTaskRow, ChatEvent, CliState, PlanEntryInfo, SessionNotice,
+    ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
 };
 
 /// What a finished turn reported, kept for the caller that asks after the
@@ -388,10 +388,50 @@ impl Fold {
                 if let Some(task_id) = system.task_id.clone()
                     && system.is_backgrounded == Some(true)
                 {
-                    self.backgrounded.insert(task_id);
+                    self.backgrounded.insert(task_id.clone());
+                    events.push(ChatEvent::BackgroundTask(BackgroundTaskEvent::Started {
+                        task_id,
+                        tool_use_id: system.tool_use_id.clone(),
+                        task_type: system.task_type.clone(),
+                        description: system.description.clone().unwrap_or_default(),
+                    }));
+                }
+            }
+            "task_updated" => {
+                // Only a terminal status ends a task; any other patch is a
+                // change of some other field.
+                if let Some(task_id) = system.task_id.clone()
+                    && let Some(status) = system
+                        .patch
+                        .as_ref()
+                        .and_then(|patch| patch.status.clone())
+                        .filter(|status| {
+                            matches!(
+                                status.as_str(),
+                                "completed" | "killed" | "failed" | "stopped"
+                            )
+                        })
+                {
+                    events.push(ChatEvent::BackgroundTask(BackgroundTaskEvent::Ended {
+                        task_id,
+                        status,
+                    }));
                 }
             }
             "task_notification" => {
+                // The status of a notification is always an end, whether or
+                // not this task was a background one: the registry decides
+                // whether it knows the id.
+                if let Some(task_id) = system.task_id.clone()
+                    && let Some(status) = system.status.clone().filter(|status| {
+                        matches!(status.as_str(), "completed" | "failed" | "stopped")
+                    })
+                {
+                    events.push(ChatEvent::BackgroundTask(BackgroundTaskEvent::Ended {
+                        task_id,
+                        status,
+                    }));
+                }
                 // `is_backgrounded` is not repeated here, so the start is
                 // the only place that ever said so.
                 if let Some(task_id) = system.task_id.as_deref()
@@ -406,6 +446,20 @@ impl Fold {
                 }
             }
             "background_tasks_changed" => {
+                events.push(ChatEvent::BackgroundTask(BackgroundTaskEvent::Rows(
+                    system
+                        .tasks
+                        .iter()
+                        .flatten()
+                        // A row the CLI sent without an id cannot be told apart.
+                        .filter(|task| !task.task_id.is_empty())
+                        .map(|task| BackgroundTaskRow {
+                            task_id: task.task_id.clone(),
+                            task_type: task.task_type.clone(),
+                            description: task.description.clone().unwrap_or_default(),
+                        })
+                        .collect(),
+                )));
                 let count = system.tasks.as_ref().map_or(0, Vec::len);
                 if count != self.background_tasks {
                     self.background_tasks = count;

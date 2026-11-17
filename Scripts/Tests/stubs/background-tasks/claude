@@ -1,0 +1,17 @@
+#!/bin/sh
+# The `claude` of test-chat-session-panel-e2e.sh's background_* scenarios: the version probe
+# answers at once (above sirio_claude::MIN_CLAUDE_VERSION, so the chat is native), and any
+# other call is the stream-json fixture in its background_tasks mode. SIRIO_FIXTURE_FLOOR=1
+# makes it the 2.1.257 floor, which refuses get_task_output; SIRIO_FIXTURE_REQUEST_LOG names
+# the file it appends every control request to. Every call is recorded in $SIRIO_STUB_LOG
+# when the run names one.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
+case "$1" in
+  --version|-V|version)
+    echo "9.9.9 (Claude Code)"
+    exit 0 ;;
+esac
+floor=
+[ "${SIRIO_FIXTURE_FLOOR:-}" != 1 ] || floor=--fixture-floor
+exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" background_tasks ${floor:+"$floor"} --fixture-request-log="${SIRIO_FIXTURE_REQUEST_LOG:-}" "$@"

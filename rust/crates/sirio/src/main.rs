@@ -1550,6 +1550,17 @@ enum ChatControlAction {
         surface_id: String,
         action: EffortListAction,
     },
+    /// Debug-only: Stop on a background task, as its button does.
+    StopTask {
+        surface_id: String,
+        task_id: String,
+    },
+    /// Debug-only, for tests: says that a frame painted a background task's tail, which
+    /// is all the tail poll waits for, so that a run with no display can drive it.
+    PaintTail {
+        surface_id: String,
+        task_id: String,
+    },
     /// Debug-only: what a digit key, Enter in the free-text row or Esc does
     /// to the open question.
     Elicitation {
@@ -3782,6 +3793,29 @@ impl ControlHandler for AppControlHandler {
                     action: ChatControlAction::Effort { surface_id, action },
                     reply,
                 })
+            }
+            "surface.chat.stopTask" | "surface.chat.paintTail" if cfg!(debug_assertions) => {
+                let (Some(surface_id), Some(task_id)) = (
+                    request.params.get("surfaceId").cloned(),
+                    request.params.get("taskId").cloned(),
+                ) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        format!("{} requires surfaceId and taskId", request.method),
+                    );
+                };
+                let action = if request.method == "surface.chat.stopTask" {
+                    ChatControlAction::StopTask {
+                        surface_id,
+                        task_id,
+                    }
+                } else {
+                    ChatControlAction::PaintTail {
+                        surface_id,
+                        task_id,
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Chat { action, reply })
             }
             "surface.chat.elicitation" if cfg!(debug_assertions) => {
                 let Some(surface_id) = request.params.get("surfaceId").cloned() else {
@@ -9925,6 +9959,8 @@ impl SirioWorkspace {
                 ChatEvent::OpenTrace => workspace.add_trace_tab(&chat_entity, cx),
                 // The Trace tab listens to this itself.
                 ChatEvent::TraceChanged => {}
+                // A background task changed; the Trace tab listens to this itself.
+                ChatEvent::BackgroundChanged => {}
                 // A drag of the composer's top edge ended on a new maximum.
                 ChatEvent::ComposerMaxRowsChanged(rows) => workspace.save_composer_max_rows(*rows),
                 ChatEvent::SessionIdentified(session_id) => {
@@ -21095,6 +21131,12 @@ impl SirioWorkspace {
                 serde_json::to_string(&snapshot.spans)
                     .expect("the trace tab's spans are serializable"),
             ),
+            // The strip of background tasks under the tree (A3).
+            (
+                "background".to_string(),
+                serde_json::to_string(&snapshot.background)
+                    .expect("the trace tab's background strip is serializable"),
+            ),
         ])
     }
 
@@ -24823,6 +24865,12 @@ impl SirioWorkspace {
             ("effort".to_string(), snapshot.effort.unwrap_or_default()),
             // The CLI's own session state; empty until it reports one.
             ("sessionState".to_string(), snapshot.session_state),
+            // The session's background tasks as a JSON array (see `ChatControlSnapshot`).
+            ("backgroundTasks".to_string(), snapshot.background_tasks),
+            (
+                "taskOutputRetired".to_string(),
+                snapshot.task_output_retired.to_string(),
+            ),
         ]
     }
 
@@ -24934,6 +24982,28 @@ impl SirioWorkspace {
                     chat.effort_act(action, window, cx)?;
                     Ok::<_, String>(chat.control_snapshot())
                 })?;
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
+            ChatControlAction::StopTask {
+                surface_id,
+                task_id,
+            } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let snapshot = chat.update(cx, |chat, cx| {
+                    chat.stop_background_task(&task_id, cx);
+                    chat.control_snapshot()
+                });
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
+            ChatControlAction::PaintTail {
+                surface_id,
+                task_id,
+            } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let snapshot = chat.read_with(cx, |chat, _| {
+                    chat.paint_tail(&task_id);
+                    chat.control_snapshot()
+                });
                 Ok(Self::control_chat_result(&surface_id, snapshot))
             }
             ChatControlAction::Elicitation {
@@ -49711,6 +49781,10 @@ done
             "surface.chat.effort" => request::chat_effort("chat-1", "open", None),
             "surface.chat.elicitation" => {
                 request::chat_elicitation("chat-1", 1, Some(1), None, false)
+            }
+            "surface.chat.stopTask" => request::chat_task("surface.chat.stopTask", "chat-1", "task-1"),
+            "surface.chat.paintTail" => {
+                request::chat_task("surface.chat.paintTail", "chat-1", "task-1")
             }
             "surface.project_add" => {
                 request::surface_project_add("path", VERBATIM_PATH, false, None)

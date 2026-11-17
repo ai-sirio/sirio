@@ -1200,3 +1200,373 @@ fn claude_reports_its_session_state_under_the_variable() {
     );
     assert_eq!(steps.last(), Some(&state("idle")), "ends idle: {steps:?}");
 }
+
+// Failure list for `claude_serves_task_output_and_stops_background_tasks`, written before the
+// test. It fails when, under Sirio's own `initialize` (no `perTaskStopAffordance`):
+// - the `initialize` answer is not `success` (Sirio's worker fails the handshake on an error);
+// - the shell's `task_started` lacks `is_backgrounded:true` / `task_type:"local_bash"`, or no
+//   `background_tasks_changed` row lists it while it runs, or one still lists it after its stop
+//   (the lines Sirio's task registry is built from); the same for the agent, `local_agent`;
+// - the CLI refuses `get_task_output` on a running background shell, or its `total_bytes` does
+//   not grow between two reads 2 s apart (the output is not live);
+// - `stop_task` on the shell is not answered `success`, or the first terminal `task_updated`
+//   for it is not `patch.status:"killed"`, or its `task_notification` lacks `status:"stopped"`;
+// - a read after the stop does not end with `[killed]\n` within 5 s (v1 #19: the trailer
+//   lands late, so the read is retried, not assumed);
+// - 2 s after that, a read shows more bytes or no longer ends `[killed]\n` (the task was only
+//   marked killed while the process went on writing);
+// - the background agent reports an end before `stop_task` is sent, 2 s after its turn ended
+//   (it does not stay busy, so the stop below would prove nothing), or its stop does not give
+//   its `killed` / `stopped` lines;
+// - the CLI exits early or a wait runs past 40 s (the run ends and the assertion prints
+//   what was seen).
+//
+// Background shells outliving the CLI's group kill: #765, not asserted here.
+
+/// A `task_updated` patch status that ends a task (Sirio's registry skips the others).
+fn is_terminal(status: &serde_json::Value) -> bool {
+    matches!(
+        status.as_str(),
+        Some("completed" | "killed" | "failed" | "stopped")
+    )
+}
+
+/// One CLI process driven over stream-json; every line it prints is kept in `seen`.
+struct TaskRun {
+    session: claude_live::Session,
+    seen: Vec<serde_json::Value>,
+    next_id: u32,
+}
+
+impl TaskRun {
+    /// Reads lines until `deadline`, answering every `can_use_tool` with allow.
+    /// Returns when the CLI exits or at `deadline`, or at the first new line `stop` accepts.
+    fn pump(&mut self, deadline: Instant, stop: &dyn Fn(&serde_json::Value) -> bool) -> bool {
+        use claude_live::Polled;
+        loop {
+            match self.session.poll(deadline) {
+                Polled::Line(line) => {
+                    if let Some(call) = sirio_claude::CanUseTool::parse(&line) {
+                        self.session.write(
+                            &sirio_claude::PermissionResult::allow(call.input)
+                                .into_response(&call.request_id),
+                        );
+                    }
+                    let hit = stop(&line);
+                    self.seen.push(line);
+                    if hit {
+                        return true;
+                    }
+                }
+                Polled::Timeout => return false,
+                Polled::Closed => panic!("the CLI exited early; saw {:#?}", self.brief()),
+            }
+        }
+    }
+
+    /// The first line from `from` on (already seen, else read within 40 s) that `wanted` accepts.
+    fn wait_since(
+        &mut self,
+        from: usize,
+        wanted: impl Fn(&serde_json::Value) -> bool,
+    ) -> Option<serde_json::Value> {
+        if let Some(line) = self.seen[from..].iter().find(|l| wanted(l)) {
+            return Some(line.clone());
+        }
+        let deadline = Instant::now() + Duration::from_secs(40);
+        self.pump(deadline, &wanted)
+            .then(|| self.seen.last().unwrap().clone())
+    }
+
+    fn pump_for(&mut self, span: Duration) {
+        self.pump(Instant::now() + span, &|_| false);
+    }
+
+    /// Sends a control request and returns its `control_response` body.
+    fn ask(&mut self, build: impl Fn(&str) -> serde_json::Value) -> serde_json::Value {
+        self.next_id += 1;
+        let id = format!("task-{}", self.next_id);
+        let from = self.seen.len();
+        self.session.write(&build(&id));
+        let line = self
+            .wait_since(from, |l| {
+                l["type"] == "control_response" && l["response"]["request_id"] == id.as_str()
+            })
+            .unwrap_or_else(|| panic!("no answer to {id}; saw {:#?}", self.brief()));
+        line["response"].clone()
+    }
+
+    fn output(&mut self, task_id: &str) -> serde_json::Value {
+        let response = self.ask(|id| sirio_claude::ControlRequest::get_task_output(id, task_id));
+        assert_eq!(
+            response["subtype"],
+            "success",
+            "get_task_output on {task_id}: {response}; saw {:#?}",
+            self.brief()
+        );
+        response["response"].clone()
+    }
+
+    /// The `task_started` line for `tool_use_id`, checked to be a backgrounded `task_type`.
+    fn task_started_for(&mut self, tool_use_id: &str, task_type: &str) -> String {
+        let line = self
+            .wait_since(0, |l| {
+                l["subtype"] == "task_started" && l["tool_use_id"] == tool_use_id
+            })
+            .unwrap_or_else(|| {
+                panic!("no task_started for {tool_use_id}; saw {:#?}", self.brief())
+            });
+        assert_eq!(line["is_backgrounded"], true, "{line}");
+        assert_eq!(line["task_type"], task_type, "{line}");
+        line["task_id"].as_str().unwrap().to_string()
+    }
+
+    /// Whether the latest `background_tasks_changed` lists `task_id`.
+    fn registry_lists(&self, task_id: &str) -> bool {
+        self.seen
+            .iter()
+            .rev()
+            .find(|l| l["subtype"] == "background_tasks_changed")
+            .and_then(|l| l["tasks"].as_array())
+            .is_some_and(|rows| rows.iter().any(|row| row["task_id"] == task_id))
+    }
+
+    /// Whether `from..` holds a terminal `task_updated` or any `task_notification` for `task_id`.
+    fn ended_since(&self, from: usize, task_id: &str) -> bool {
+        self.seen[from..].iter().any(|l| {
+            l["task_id"] == task_id
+                && (l["subtype"] == "task_notification"
+                    || (l["subtype"] == "task_updated" && is_terminal(&l["patch"]["status"])))
+        })
+    }
+
+    fn turn_ended(&mut self, from: usize) {
+        self.wait_since(from, |l| l["type"] == "result")
+            .unwrap_or_else(|| panic!("the turn never ended; saw {:#?}", self.brief()));
+    }
+
+    /// `stop_task`, then both of its lines: `task_updated` killed, `task_notification` stopped.
+    fn stop(&mut self, task_id: &str) {
+        let from = self.seen.len();
+        let response = self.ask(|id| sirio_claude::ControlRequest::stop_task(id, task_id));
+        assert_eq!(
+            response["subtype"],
+            "success",
+            "stop_task: {response}; saw {:#?}",
+            self.brief()
+        );
+        let updated = self.wait_since(from, |l| {
+            l["subtype"] == "task_updated"
+                && l["task_id"] == task_id
+                && is_terminal(&l["patch"]["status"])
+        });
+        assert!(
+            updated.is_some_and(|l| l["patch"]["status"] == "killed"),
+            "the first terminal task_updated for {task_id} is killed; saw {:#?}",
+            self.brief()
+        );
+        let notified = self.wait_since(from, |l| {
+            l["subtype"] == "task_notification" && l["task_id"] == task_id
+        });
+        assert!(
+            notified.is_some_and(|l| l["status"] == "stopped"),
+            "task_notification stopped for {task_id}; saw {:#?}",
+            self.brief()
+        );
+        let delisted = self.wait_since(from, |l| {
+            l["subtype"] == "background_tasks_changed" && !Self::lists_in(l, task_id)
+        });
+        assert!(
+            delisted.is_some(),
+            "background_tasks_changed drops {task_id}; saw {:#?}",
+            self.brief()
+        );
+    }
+
+    fn lists_in(line: &serde_json::Value, task_id: &str) -> bool {
+        line["tasks"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["task_id"] == task_id))
+    }
+
+    /// Every line kept, one short string each, for assertion messages and the report.
+    fn brief(&self) -> Vec<String> {
+        self.seen
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l["type"] != "stream_event")
+            .map(|(i, l)| {
+                let kind = match l["subtype"].as_str() {
+                    Some(sub) => format!("{}/{sub}", l["type"].as_str().unwrap_or("?")),
+                    None => l["type"].as_str().unwrap_or("?").to_string(),
+                };
+                let detail = ["task_id", "status", "state", "request_id"]
+                    .iter()
+                    .filter_map(|k| l[k].as_str().map(|v| format!("{k}={v}")))
+                    .chain(
+                        l["response"]["subtype"]
+                            .as_str()
+                            .map(|v| format!("response={v}")),
+                    )
+                    .chain(
+                        l["patch"]["status"]
+                            .as_str()
+                            .map(|v| format!("patch.status={v}")),
+                    )
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{i:3} {kind} {detail}")
+            })
+            .collect()
+    }
+}
+
+/// Proves the real `claude` serves `get_task_output` and `stop_task` for background tasks
+/// under the handshake Sirio sends (`ControlRequest::initialize`, no `perTaskStopAffordance`):
+/// a running shell's output grows between reads; stopping it gives `killed` / `stopped`, and a
+/// later read ends `[killed]`; and stopping a background agent gives its own `killed` /
+/// `stopped` lines.
+///
+/// A fake model API (`fake_tasks_api.py`) scripts a background `Bash` that prints a line a
+/// second, then in a second turn a background `Agent` that stays busy. It uses no credential and
+/// no network beyond 127.0.0.1, but launches a real CLI, so it is `#[ignore]`d and stays off CI:
+///
+///     cargo nextest run -p sirio_agents --test acp_conformance --run-ignored only -E 'test(=claude_serves_task_output_and_stops_background_tasks)'
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
+/// `python3`.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_serves_task_output_and_stops_background_tasks() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("task-output", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version: {version_text:?}");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+    eprintln!("claude binary {} reports {version_text}", claude.display());
+
+    let session = claude_live::Session::start_tasks(&claude, &python, &scratch.root.join("tasks"));
+    let mut run = TaskRun {
+        session,
+        seen: Vec::new(),
+        next_id: 0,
+    };
+    // Sirio's own handshake: the builder the native client uses, nothing added.
+    let init = run.ask(sirio_claude::ControlRequest::initialize);
+    assert_eq!(init["subtype"], "success", "initialize: {init}");
+    run.session.write(&serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": "run shells"}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    }));
+    let ticker = run.task_started_for("toolu_s1", "local_bash");
+    run.turn_ended(0);
+    assert!(
+        run.registry_lists(&ticker),
+        "the registry lists the running shell"
+    );
+
+    // Two reads of the running shell, 2 s apart: the output is live.
+    let first = run.output(&ticker);
+    run.pump_for(Duration::from_secs(2));
+    let second = run.output(&ticker);
+    let (before, after) = (
+        first["total_bytes"].as_u64().unwrap(),
+        second["total_bytes"].as_u64().unwrap(),
+    );
+    assert!(
+        after > before && second["output"].as_str().unwrap().contains("tick"),
+        "total_bytes grows between reads: {first} then {second}"
+    );
+
+    // Stop the ticker; a read after it ends [killed], retried for 5 s.
+    run.stop(&ticker);
+    assert!(
+        !run.registry_lists(&ticker),
+        "the registry dropped the stopped shell"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut killed = serde_json::Value::Null;
+    while Instant::now() < deadline {
+        killed = run.output(&ticker);
+        if killed["output"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("[killed]\n")
+        {
+            break;
+        }
+        run.pump_for(Duration::from_millis(250));
+    }
+    assert!(
+        killed["output"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("[killed]\n"),
+        "a read after the stop ends with [killed]: {killed}"
+    );
+    // The process is stopped, not only marked: 2 s on, nothing more was written.
+    run.pump_for(Duration::from_secs(2));
+    let later = run.output(&ticker);
+    assert_eq!(
+        later["total_bytes"], killed["total_bytes"],
+        "the stopped shell wrote nothing more: {killed} then {later}"
+    );
+    assert!(
+        later["output"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("[killed]\n"),
+        "still ends with [killed]: {later}"
+    );
+
+    // Turn two: a background agent that stays busy; stop it.
+    let from = run.seen.len();
+    run.session.write(&serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": "run agent"}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    }));
+    let agent = run.task_started_for("toolu_a1", "local_agent");
+    run.turn_ended(from);
+    // It stays busy: 2 s after the turn ended nothing has ended it, so the stop below is
+    // what ends it, not the turn's end.
+    run.pump_for(Duration::from_secs(2));
+    assert!(
+        !run.ended_since(from, &agent),
+        "the agent ended before stop_task; saw {:#?}",
+        run.brief()
+    );
+    assert!(
+        run.registry_lists(&agent),
+        "the registry lists the running agent"
+    );
+    run.stop(&agent);
+    assert!(
+        !run.registry_lists(&agent),
+        "the registry dropped the stopped agent"
+    );
+    run.pump_for(Duration::from_secs(1));
+
+    eprintln!("line order:\n{}", run.brief().join("\n"));
+}

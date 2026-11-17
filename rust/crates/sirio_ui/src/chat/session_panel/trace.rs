@@ -33,17 +33,18 @@
 //! the loop slows to a tick a second, enough for the numbers.
 
 use super::{Row, Section};
+use crate::chat::background_view::stop_button;
 use crate::chat::trace::{
     Axis, Lane, ROOT, Segment, SegmentKind, SpanState, TraceStore, Turn, TurnState, TurnStats,
     axis, format_duration,
 };
-use crate::chat::{Chat, ChatEvent};
+use crate::chat::{BackgroundEntry, Chat, ChatEvent};
 use crate::trace_frame::{Pace, TICK, frame_driver};
 use crate::trace_style::{compact_count, dropped_note, state_color, turn_color};
 use ely_gpui_component::{motion::ease_out_cubic, typography::ShimmerText};
 use gpui::{
     AnyElement, App, Context, CursorStyle, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, div, pattern_slash,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, canvas, div, pattern_slash,
     prelude::FluentBuilder as _, px, relative,
 };
 use sirio_theme::Theme;
@@ -57,6 +58,8 @@ const INDENT: f32 = 12.0;
 /// How long a lane takes to appear, and how far it rises as it does.
 const ENTER: Duration = Duration::from_millis(200);
 const ENTER_RISE: f32 = 6.0;
+/// The room a lane's header keeps at its end for a Stop laid over it.
+const STOP_ROOM: f32 = 64.0;
 /// One sweep of the "now" text's band of light, as Ely's own shimmer runs it.
 const SHIMMER: Duration = Duration::from_millis(1800);
 
@@ -116,13 +119,53 @@ fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool)
     ]
 }
 
+/// The task whose Stop an agent lane carries: the live background task the
+/// lane's Agent call started. The lane's span id is that call's `tool_use.id`.
+fn lane_stop(background: &[BackgroundEntry], span: &str) -> Option<String> {
+    background
+        .iter()
+        .find(|entry| entry.tool_use_id.as_deref() == Some(span) && !entry.ended())
+        .map(|entry| entry.task_id.clone())
+}
+
+/// The entries the Background group lists (R9): every one except a task whose
+/// Agent call the card already draws as a lane, which carries its Stop. An
+/// agent whose lane is not in this turn, an older one's, has a row here.
+fn group_entries<'a>(background: &'a [BackgroundEntry], lanes: &[Lane]) -> Vec<&'a BackgroundEntry> {
+    background
+        .iter()
+        .filter(|entry| {
+            !entry
+                .tool_use_id
+                .as_deref()
+                .is_some_and(|call| lanes.iter().any(|lane| lane.span == call))
+        })
+        .collect()
+}
+
+/// What a group row says under itself, a line each: the last line of the task's tail, and
+/// why the tail could not be read when it could not (the tail kept from the last good read
+/// stays, so a CLI that stopped answering is not a frozen last line with no hint).
+fn group_note(entry: &BackgroundEntry) -> String {
+    entry
+        .tail
+        .last()
+        .into_iter()
+        .chain(entry.tail_note.as_ref())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The Trace card's snapshot, headed by `headline` (the CLI's state over the
 /// latest turn's, see `headline_state`): the latest turn's line, its numbers, one row
 /// per lane with a row after it for each permission that lane waits on, and
-/// the row that opens the tab. `None` for a chat that has no turn.
+/// the Background group (one row per task no lane already carries), and the
+/// row that opens the tab. `None` for a chat that has no turn.
 pub(super) fn section(
     store: &TraceStore,
     headline: Option<TurnState>,
+    background: &[BackgroundEntry],
     now: Instant,
 ) -> Option<Section> {
     let turn = store.latest()?;
@@ -141,16 +184,18 @@ pub(super) fn section(
             ..Row::new("trace/dropped", dropped_note(stats.dropped), "")
         });
     }
-    for lane in turn.lanes(now) {
+    let lanes = turn.lanes(now);
+    for lane in &lanes {
         rows.push(Row {
             depth: lane.depth,
             tag: lane.state.word().to_string(),
             action: Some("reveal".to_string()),
             note: lane.now.clone().unwrap_or_default(),
+            stop: lane_stop(background, &lane.span),
             ..Row::new(
                 &format!("trace/lane/{}", lane.span),
                 lane.name.clone(),
-                &lane_count(&lane),
+                &lane_count(lane),
             )
         });
         for wait in &lane.waits {
@@ -164,6 +209,18 @@ pub(super) fn section(
                 )
             });
         }
+    }
+    for entry in group_entries(background, &lanes) {
+        rows.push(Row {
+            tag: entry.state_word().to_string(),
+            note: group_note(entry),
+            stop: (!entry.ended()).then(|| entry.task_id.clone()),
+            ..Row::new(
+                &format!("trace/background/{}", entry.task_id),
+                entry.description.clone(),
+                entry.kind(),
+            )
+        });
     }
     rows.push(Row {
         action: Some("open".to_string()),
@@ -189,6 +246,15 @@ impl Chat {
         key: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        // A Stop button's click and the control verb: a row's Stop, which is
+        // there while its task runs.
+        if let Some(task_id) = key.strip_prefix("trace/stop/") {
+            if !self.live_background_tasks().any(|entry| entry.task_id == task_id) {
+                return Err(format!("no row has a Stop for task {task_id}"));
+            }
+            self.stop_background_task(task_id, cx);
+            return Ok(());
+        }
         let now = Instant::now();
         let Some(turn) = self.trace.latest() else {
             return Err("the chat has no trace".to_string());
@@ -547,12 +613,14 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .flex()
         .flex_col()
         .child(ticks)
-        .children(
-            lanes
-                .iter()
-                .enumerate()
-                .map(|(at, lane)| render_lane(lane, at == 0, &axis, &beat, theme, &entity)),
-        );
+        .children(lanes.iter().enumerate().map(|(at, lane)| {
+            let stop = lane_stop(chat.background_entries(), &lane.span).and_then(|task_id| {
+                let entry = chat.background_entries().iter().find(|e| e.task_id == task_id)?;
+                Some((task_id, entry.stopping))
+            });
+            render_lane(lane, at == 0, stop, &axis, &beat, theme, &entity)
+        }));
+    let group = render_background_group(chat, &lanes, theme, &entity);
 
     let open = div()
         .id("trace-open")
@@ -588,6 +656,7 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .child(numbers)
         .children(dropped)
         .child(waterfall)
+        .children(group)
         .child(open)
         .child(frame_driver(
             chat.session_panel.frame.trace_frame_pending.clone(),
@@ -607,10 +676,13 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
 /// One agent: its name line, what it is doing, its track, and a line under it
 /// for each permission it waits on. The lane's lines are one click that
 /// reveals it; each wait is a sibling, never inside that click, so reaching
-/// the permission does not also scroll to the lane.
+/// the permission does not also scroll to the lane. The Stop of a background
+/// agent is a sibling too, laid over the header's end and occluding the click
+/// beneath it, so stopping the agent does not reveal it either.
 fn render_lane(
     lane: &Lane,
     first: bool,
+    stop: Option<(String, bool)>,
     axis: &Axis,
     beat: &Beat,
     theme: &Theme,
@@ -630,6 +702,7 @@ fn render_lane(
         .items_center()
         .gap(px(6.0))
         .pl(px(indent))
+        .when(stop.is_some(), |header| header.pr(px(STOP_ROOM)))
         .child(
             div()
                 .flex_none()
@@ -748,6 +821,24 @@ fn render_lane(
     // A lane that has just begun rises into place over `ENTER`, by the turn's
     // clock; a still card, a finished turn and reduced motion draw it whole.
     let entered = entry(beat.moving && !beat.reduced, beat.elapsed, lane.start);
+    let stop = stop.map(|(task_id, stopping)| {
+        let entity = entity.clone();
+        div()
+            .absolute()
+            .top(px(5.0))
+            .right_0()
+            .occlude()
+            .child(stop_button(
+                format!("trace-lane-stop-{task_id}"),
+                stopping,
+                theme,
+                move |_, cx| {
+                    entity.update(cx, |chat, cx| {
+                        let _ = chat.activate_trace(&format!("trace/stop/{task_id}"), cx);
+                    });
+                },
+            ))
+    });
     div()
         .relative()
         .flex()
@@ -756,8 +847,141 @@ fn render_lane(
             lane.top(px(-(1.0 - entered) * ENTER_RISE)).opacity(entered)
         })
         .child(clickable)
+        .children(stop)
         .children(waits)
         .into_any_element()
+}
+
+/// The Background group (R9): one row per task no lane carries, after the
+/// lanes. A shell's row draws the last line of its tail, so the draw is where
+/// the tail poll hears of it: `paint_tail` runs here, in the paint path, never
+/// in `section()` (the control read runs that too). With the CLI having refused
+/// to read output there is no tail, and nothing is painted.
+fn render_background_group(
+    chat: &Chat,
+    lanes: &[Lane],
+    theme: &Theme,
+    entity: &gpui::Entity<Chat>,
+) -> Option<AnyElement> {
+    // What this draw measures is what a click can be aimed at: a task that ended has no button.
+    chat.session_panel.frame.stop_buttons.borrow_mut().clear();
+    let entries = group_entries(chat.background_entries(), lanes);
+    if entries.is_empty() {
+        return None;
+    }
+    let caption = theme.typography.footnote;
+    let retired = chat.task_output_retired();
+    let rows = entries.into_iter().map(|entry| {
+        if entry.is_shell() && !retired {
+            chat.paint_tail(&entry.task_id);
+        }
+        let task_id = entry.task_id.clone();
+        let note = group_note(entry);
+        let tone = match entry.state_word() {
+            "failed" => theme.ely.danger,
+            "running" | "stopping" => theme.ely.fg,
+            _ => theme.ely.fg_muted,
+        };
+        div()
+            .debug_selector({
+                let selector = format!("trace-background-{task_id}");
+                move || selector.clone()
+            })
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .py(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.ely.fg)
+                            .child(entry.description.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.ely.fg_subtle)
+                            .child(entry.kind().to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(tone)
+                            .child(entry.state_word()),
+                    )
+                    .children((!entry.ended()).then(|| {
+                        let entity = entity.clone();
+                        let id = task_id.clone();
+                        let frame = chat.session_panel.frame.clone();
+                        let measured = task_id.clone();
+                        div()
+                            .relative()
+                            .flex_none()
+                            // Measures the button for a real click to aim at; paints nothing.
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        frame.stop_buttons.borrow_mut().insert(
+                                            measured,
+                                            [
+                                                bounds.origin.x.into(),
+                                                bounds.origin.y.into(),
+                                                bounds.size.width.into(),
+                                                bounds.size.height.into(),
+                                            ],
+                                        );
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
+                            .child(stop_button(
+                                format!("trace-background-stop-{task_id}"),
+                                entry.stopping,
+                                theme,
+                                move |_, cx| {
+                                    entity.update(cx, |chat, cx| {
+                                        let _ =
+                                            chat.activate_trace(&format!("trace/stop/{id}"), cx);
+                                    });
+                                },
+                            ))
+                    })),
+            )
+            .children(note.lines().map(|line| {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.ely.fg_subtle)
+                    .child(line.to_string())
+            }))
+    });
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .text_size(caption)
+            .border_t_1()
+            .border_color(theme.ely.border)
+            .pt(px(6.0))
+            .child(
+                div()
+                    .text_size(theme.typography.scaled(9.5))
+                    .text_color(theme.ely.fg_subtle)
+                    .child("BACKGROUND"),
+            )
+            .children(rows)
+            .into_any_element(),
+    )
 }
 
 /// A lane's track: the grid, the faint band of a subagent's lifetime, its
@@ -930,7 +1154,7 @@ mod tests {
         // The title, its elapsed time at `now`, and the pill's word.
         let card = |chat: &Entity<Chat>, cx: &mut VisualTestContext, now: Instant| {
             chat.read_with(cx, |chat, _| {
-                let section = super::section(&chat.trace, chat.trace_headline(), now)
+                let section = super::section(&chat.trace, chat.trace_headline(), &[], now)
                     .expect("the chat has a turn");
                 (section.summary, section.rows[0].tag.clone())
             })

@@ -45,6 +45,9 @@ mod band_tests;
 #[cfg(test)]
 mod ely_tests;
 pub(crate) mod identity;
+mod background;
+pub use background::{BackgroundEntry, tail_lines};
+pub(crate) mod background_view;
 mod bypass;
 mod composer_height;
 mod composer_row;
@@ -1136,6 +1139,12 @@ pub struct ChatControlSnapshot {
     /// The CLI's own session state: `""` before one arrives, then `running`,
     /// `idle` or `requires_action`.
     pub session_state: String,
+    /// The background tasks of the session, as `surface.chat.read` gives them:
+    /// a JSON array of `{taskId, toolUseId, kind, description, live, outcome,
+    /// stopping, tail, tailNote}`.
+    pub background_tasks: String,
+    /// The CLI refused to read task output: no tail is shown this session.
+    pub task_output_retired: bool,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -1862,6 +1871,10 @@ pub enum ChatEvent {
     /// A drag of the composer's top edge ended on a new maximum: the
     /// workspace saves it (every chat already follows the published value).
     ComposerMaxRowsChanged(usize),
+    /// A background task changed: the registry took a line of the CLI's, a
+    /// tail or its note was read, Stop was pressed, or the registry emptied.
+    /// The Trace tab repaints on it.
+    BackgroundChanged,
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -2293,6 +2306,18 @@ pub struct Chat {
     /// clears are defensive: the flag only matters while `cli_state` is
     /// `Running`, and the one place that sets that also recomputes it.
     cli_unprompted: bool,
+    /// The session's background tasks (A3), in start order; emptied with the
+    /// connection they belonged to.
+    background: background::BackgroundRegistry,
+    /// The tail poll's loop. One field, so a new loop replaces the old.
+    background_poll: Option<Task<()>>,
+    /// Whether that loop is running: it ends itself when no task could be read.
+    background_poll_active: bool,
+    /// Counts the connections: a read's answer from an earlier one is dropped.
+    connection_generation: u64,
+    /// A test's stand-in for the connection's task calls.
+    #[cfg(test)]
+    task_source_override: Option<std::sync::Arc<dyn background::TaskSource>>,
     /// How many of `ChatClient::mcp_warnings()` have already been seen.
     /// `mcp_warnings()` returns the whole running list each call (it doesn't
     /// drain), so this is the cursor that keeps the list from growing
@@ -2331,6 +2356,13 @@ pub struct Chat {
     /// Bypass permissions, picked and not yet confirmed (`bypass.rs`).
     bypass_ask: Option<AgentMode>,
     context_popover_open: bool,
+    /// The background-task popover (A3), hung from the composer's task chip. It
+    /// lists the live tasks and never outlives them: `background_changed` closes it.
+    background_popover_open: bool,
+    background_popover_focus: FocusHandle,
+    /// The popover closed while it may have held the keyboard: the next render hands it
+    /// back to the composer (`settle_background_popover`).
+    background_focus_return: bool,
     /// The effort list, anchored to the effort chip. Its own popover rather
     /// than a section of the model picker: effort is a scale of the agent's
     /// own levels, not one more model.
@@ -2743,6 +2775,8 @@ impl Chat {
             },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
+            background_popover_focus: cx.focus_handle().tab_stop(true),
+            background_focus_return: false,
             effort_picker_focus: cx.focus_handle().tab_stop(true),
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
@@ -2755,6 +2789,12 @@ impl Chat {
             has_completed_turn: false,
             cli_state: None,
             cli_unprompted: false,
+            background: background::BackgroundRegistry::default(),
+            background_poll: None,
+            background_poll_active: false,
+            connection_generation: 0,
+            #[cfg(test)]
+            task_source_override: None,
             mcp_warnings_shown: 0,
             available_models: Vec::new(),
             model_config_id: None,
@@ -2768,6 +2808,7 @@ impl Chat {
             mode_picker_open: false,
             bypass_ask: None,
             context_popover_open: false,
+            background_popover_open: false,
             effort_picker_open: false,
             agent_session_id: resumed_session,
             continues_agent_session,
@@ -3065,6 +3106,7 @@ impl Chat {
             // open, so Escape has to resolve from its context too.
             KeyBinding::new("escape", Cancel, Some("ChatModelSearch")),
             KeyBinding::new("escape", Cancel, Some("ChatContextPopover")),
+            KeyBinding::new("escape", Cancel, Some("ChatBackgroundPopover")),
             KeyBinding::new("escape", Cancel, Some("ChatEffortPicker")),
             KeyBinding::new("escape", Cancel, Some("ChatThinkingPicker")),
             KeyBinding::new("escape", Cancel, Some("ChatOverflowMenu")),
@@ -3650,6 +3692,7 @@ impl Chat {
                 // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.cli_unprompted = false;
+                self.reset_background_tasks(cx);
                 self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
                 self.fail_trace_turn(&message, cx);
@@ -3671,6 +3714,7 @@ impl Chat {
                 // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.cli_unprompted = false;
+                self.reset_background_tasks(cx);
                 self.expire_unanswered();
                 let message = format!(
                     "{operation:?} timed out after {:.1}s",
@@ -3791,6 +3835,9 @@ impl Chat {
                     cx.notify();
                 }
                 return;
+            }
+            sirio_chat::ChatEvent::BackgroundTask(event) => {
+                self.apply_background_event(event, cx);
             }
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
@@ -4289,6 +4336,8 @@ impl Chat {
                 .cli_state
                 .map(|state| state.as_str().to_string())
                 .unwrap_or_default(),
+            background_tasks: self.background_tasks_json(),
+            task_output_retired: self.background.output_retired(),
         }
     }
 
@@ -5560,6 +5609,7 @@ impl Chat {
         });
         self.streaming = true;
         self.cli_unprompted = false;
+        self.drop_ended_background_tasks(cx);
         // A new prompt ends an idle CLI's rest, and the CLI has not said
         // so yet. A running or waiting CLI stays so: it does not say it twice.
         if self.cli_state == Some(sirio_chat::CliState::Idle) {
@@ -5573,6 +5623,7 @@ impl Chat {
             // The CLI that said it was running is gone.
             self.cli_state = None;
             self.cli_unprompted = false;
+            self.reset_background_tasks(cx);
             let message = format!("send failed: {error:#}");
             self.fail_trace_turn(&message, cx);
             self.push_entry(Entry::Error {
@@ -5979,6 +6030,7 @@ impl Chat {
             || self.mode_picker_open
             || self.thinking_picker_open
             || self.context_popover_open
+            || self.background_popover_visible()
             || self.effort_picker_open
             || self.overflow_open
             || self.history_open
@@ -5989,6 +6041,7 @@ impl Chat {
             self.mode_picker_open = false;
             self.thinking_picker_open = false;
             self.context_popover_open = false;
+            self.background_popover_open = false;
             self.effort_picker_open = false;
             self.overflow_open = false;
             self.history_open = false;
@@ -6064,6 +6117,9 @@ impl Chat {
         // launch and a failed launch all pass here.
         self.cli_state = None;
         self.cli_unprompted = false;
+        // A new process has no tasks, and an answer of the old one's is stale.
+        self.connection_generation += 1;
+        self.reset_background_tasks(cx);
         // A new process is a new agent to ask: the guard only stops one
         // process answering one report in a loop, and what the last process
         // answered says nothing of this one.
@@ -6158,6 +6214,7 @@ impl Chat {
         // The CLI is gone, whatever it last said.
         self.cli_state = None;
         self.cli_unprompted = false;
+        self.reset_background_tasks(cx);
         if self.streaming {
             self.expire_unanswered();
         }
@@ -7309,6 +7366,7 @@ impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
+        self.settle_background_popover(window, cx);
         // Read before any loader renews this view's lease.
         if sirio_perf::enabled() && crate::motion::Painter::of(cx).woken(cx) {
             sirio_perf::event("motion.Chat.woken", cx.entity_id().as_u64());
