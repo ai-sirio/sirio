@@ -49,7 +49,9 @@ Agreed with Enzo on 2026-11-16, in this order. Each later step gets its own desi
 **Goals**
 
 - G1. The workspace's `gpui` and `gpui_platform` are `gpui-pre =0.3.12` and
-  `gpui-pre-platform =0.3.12`; no `bezel-gpui*` package remains in `rust/Cargo.lock`.
+  `gpui-pre-platform =0.3.12`; no `bezel-gpui*` or gpui-bound `bezel-zed-*` package remains in
+  `rust/Cargo.lock` (checked for every target: `cargo tree --target all`), and `gpui-pre`
+  appears in it exactly once.
 - G2. Sirio looks and behaves as before on Linux, macOS and Windows: same surfaces, same
   pixels within the tolerance of §6, same keys, same tests passing.
 - G3. The three engine patches Sirio carries keep working on the new engine: the Wayland
@@ -88,7 +90,7 @@ Agreed with Enzo on 2026-11-16, in this order. Each later step gets its own desi
 ## 4. Approaches considered
 
 1. **Two steps — engine first with today's Ely, then the Ely sync (chosen).** Today's
-   vendored Ely needs only four compile fixes on gpui-pre (below), so little work is thrown
+   vendored Ely needs only a handful of fixes on gpui-pre (§5.2), so little work is thrown
    away when 1b replaces it, and a regression in 1a can only come from the engine.
 2. **Engine and Ely sync in one branch.** No intermediate state, but two independent sources
    of regressions in one very large diff; a terminal or editor bug becomes hard to attribute.
@@ -131,8 +133,12 @@ Measured by grep against gpui-pre 0.3.12 (not yet compiled; the compiler is the 
 | `Keystroke::parse` takes `&'static str` | `sirio/src/main.rs:23472`; Ely `typography/keys.rs:16` and its test helper `:76` | Builder's call (§8) — the strings there are built at run time |
 | `Keystroke::unparse(&self, os)` | `sirio_ui/src/text_selection.rs:694` | Pass the running OS |
 | `Modifiers::secondary(&self, cx)` | Ely `typography/select.rs:111` | Pass `cx` |
+| `KeyBinding::new` takes `&'static str`, parses without an OS and `unwrap`s: a `secondary-` binding **compiles and panics when registered** (bezel resolved `secondary` with `cfg!`) | 21 `secondary-…` bindings (`sirio_ui/src/file_view.rs:505,507,508`; Ely `editor/keys.rs:89-98`, `forms/text/actions.rs`, 8 sites); `format!`-built strings at Ely `editor/keys.rs:72-75,85`, `forms/text/actions.rs:68,69,78,79` | `KeyBinding::load(.., cx)`, which resolves `secondary` for the host OS. Every `KeyBinding::new` in the workspace is audited, not only these |
+| The `perf-native` feature of `sirio` pins `bezel-zed-scheduler =0.3.8` (`sirio/Cargo.toml:13,16`) and hands its `SpawnTime` to `gpui::profiler::update_running_task` (`native_perf.rs:6,268`) | 1 crate | Repoint to `gpui-pre-scheduler =0.3.12`; the feature is built in the verification |
 
-Deprecated names are migrated rather than allowed, so `ci-linux.sh`'s clippy stays clean.
+The table was measured by grep and the compiler cannot see the `secondary-` panic, so the
+start-up of the app and of every probe is part of the verification. Deprecated names are
+migrated rather than allowed, so `ci-linux.sh`'s clippy stays clean.
 Each change inside `rust/vendor/ely-gpui-component` gets a bullet in its `LOCAL-CHANGES.md`
 under a new "gpui-pre 0.3.12 compatibility" heading (step 1b sorts them as "compat").
 
@@ -160,12 +166,29 @@ lock and the `ci-linux.sh` stage that tests `vendor/gpui_linux` keep their shape
    (`sirio/src/main.rs:32116`) has no equivalent in gpui-pre-linux: `xdg-open`
    (`linux/platform.rs:956`) and `open::commands` (`:1187`) inherit the AppImage's
    environment (`LD_LIBRARY_PATH` and friends). The same API is re-added to the vendored
-   crate, applied at both spawn points.
+   crate, applied at both spawn points with this contract, which is today's: when a child
+   environment is set, the child runs with exactly those pairs plus `XDG_ACTIVATION_TOKEN`
+   when gpui has one; gpui-pre's `GraphicalEnvironment::apply_to` is not applied on top,
+   because it would remove the user's `WAYLAND_DISPLAY` whenever Sirio forced X11 for itself
+   (`sirio/src/display_backend.rs:100`). Unset, gpui-pre's own behaviour stands.
+   gpui-pre also changed the order of link opening: it now tries the opener commands first,
+   waiting for each one's exit status, and falls back to the desktop portal only if all fail
+   (bezel spawned the first that started and waited for none). That is accepted as upstream
+   behaviour: the link still opens in the user's browser.
 3. **Windows bitblt swap chain (ADR 0003).** `create_swap_chain` is unchanged in gpui-pre
    (`directx_renderer.rs:1324-1346`, reached through `GPUI_DISABLE_DIRECT_COMPOSITION`), so
    the change applies verbatim. Today's vendored crate also carries `sirio_perf` spans in
    four files that the README does not mention; they are carried over and the README is
    corrected to list them.
+
+4. **macOS translucency.** gpui-pre-macos changed the material of the `Blurred` window
+   background from `Selection` to `UnderWindowBackground` with `BehindWindow`
+   (`gpui-pre-macos-0.3.12/src/window.rs:3940-3950`), because `Selection` has no backdrop
+   layer on macOS 27 and blurred nothing. Sirio uses `Blurred` on macOS
+   (`sirio/src/shell_chrome.rs:29-36`). **Recommended: accept the upstream material** (it
+   repairs the blur on the current macOS) as the one intended visible change of this step,
+   checked by hand on a Mac; the alternative is vendoring gpui-pre-macos to restore
+   `Selection`. Pending Enzo's (or t2s's) confirmation.
 
 ### 5.4 The HTTP client gpui used to get for free
 
@@ -175,8 +198,10 @@ gpui-pre falls back to `NullHttpClient` (`gpui-pre-0.3.12/src/app.rs:246`). Siri
 `gpui_platform::application()` (`sirio/src/main.rs:32126`), and the vendored `bezel_markdown`
 hands any `://` URL to `gpui::img` (`render.rs:1423-1427`), so without a client every remote
 image in Markdown would silently stop loading — a change the compiler does not catch.
-Sirio therefore installs an `HttpClient` itself with `.with_http_client(..)` at start-up, in
-the `sirio` crate. Whether it is a port of `bezel-zed-reqwest-client` onto
+Sirio therefore installs an `HttpClient` itself with `.with_http_client(..)`, through one
+helper that the app (`sirio/src/main.rs`), every probe and every binary that draws Markdown
+(`sirio_ui/examples/*_probe.rs`, `sirio_ui/src/bin/changes_preview.rs`) start from, as
+bezel's `application()`/`headless()` did for all of them. Whether it is a port of `bezel-zed-reqwest-client` onto
 `gpui-pre-http-client` or a small reqwest-backed implementation is the builder's call; its
 behaviour must match today's (same redirects, no new headers that identify the user). The
 remote-image case of the Markdown Preview is added to the verification (§6.4).
@@ -209,11 +234,14 @@ settings as the run after the swap.
    included.
 4. **Engine patches and the HTTP client.** XDND: `Scripts/wayland-drive.sh xdnd …
    --delay-ms 400` against a Terminal pane — the drop lands. Child environment: no repeatable
-   check exists today, so one is added to `Scripts/Tests/test-sirioctl-e2e.sh`'s fake AppRun
-   mount — an `xdg-open` stub that writes its own environment, which must hold the user's
-   values, not the mount's; a real AppImage run is a hand check listed as owed. Remote images:
-   a Markdown Preview of a file whose image is served over loopback HTTP draws the picture
-   (captured in the sweep or a dedicated case). Windows translucency is a hand check on
+   check exists today, so one is added and proven on the baseline first: the app is started
+   through a fake AppRun mount (the one `Scripts/Tests/test-sirioctl-e2e.sh` builds), a link
+   is opened by a real click, and an `xdg-open` stub on the user's login PATH writes its own
+   environment, which must hold the user's values (including `WAYLAND_DISPLAY`) and no mount
+   entry; it must go red when `set_child_environment` is removed. A real AppImage run is a
+   hand check listed as owed. Remote images:
+   a Markdown Preview of a file whose image is served over loopback HTTP draws the picture,
+   in the app (not a probe); the case is added and proven green on the baseline first. Windows translucency is a hand check on
    Windows.
 5. **Cost.** `sirio_terminal/tests/still_frame_cost.rs` and the editor/chat frame probes
    that exist today, compared with the baseline.
@@ -256,8 +284,13 @@ XDND transcript, under `artifacts/engine-swap/`, re-runnable from the commands a
 - Pin `=0.3.12`, not 0.3.13, to match upstream Ely (§3).
 - `bezel-syntax` is not vendored: patching `bezel-theme` is enough (§5.1).
 - Deprecated gpui names are migrated, not allowed (§5.2).
-- An HTTP client is installed by Sirio so remote images keep loading (§5.4) — from G2 and
-  "every Preview feature stays".
+- An HTTP client is installed by Sirio, in the app and every probe, so remote images keep
+  loading (§5.4) — from G2 and "every Preview feature stays".
+- `KeyBinding::new` with `secondary-` or a built string moves to `KeyBinding::load(.., cx)`
+  (§5.2); `perf-native` moves to gpui-pre-scheduler (§5.2).
+- The child-environment contract keeps the user's `WAYLAND_DISPLAY`, and gpui-pre's new
+  link-opening order is accepted (§5.3.2).
+- **Open:** macOS `Blurred` material — recommended to accept upstream's (§5.3.4).
 - Pixel gate at `capture-diff.py --tolerance 1`; engine-caused drift goes to Enzo at the end,
   never `--allow`ed (§6.2).
 - A new repeatable child-environment check in the sirioctl E2E's fake mount; the real
