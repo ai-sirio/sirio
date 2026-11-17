@@ -260,7 +260,9 @@ Each item is laid out the same way:
   A registry gives the same Stop and tail without touching any of these.
 
   **Cost.** A shell has no timeline bar of its own. The proof checks that the registry entry ends,
-  not that a lane ends.
+  not that a lane ends. The painted-only rule has one bounded exception: a read still pending at a
+  tick keeps its task's mark, so after that read is answered or expires the poll sends one more read
+  even if nothing paints any more (one request, not repeated).
 - **Not declared: `perTaskStopAffordance`.** Without it, an interrupt still kills running
   background agents, as it does today. With it, an interrupt would spare them, and the Trace and the
   chat's status would then need to keep a surviving agent right after Stop. That is a follow-up,
@@ -268,7 +270,7 @@ Each item is laid out the same way:
 - **Degrade.** `get_task_output` refused → no tail. Stop still works.
 - **Proof.**
   - A fixture mode with a background shell task that writes, then stops on `stop_task`. The E2E
-    checks the tail text, Stop, and the lane's end.
+    checks the tail text, Stop, and the registry entry's end.
   - Live: `get_task_output` on a real background `Bash` scripted by the fake model.
 
 ### A4 · Rename reaches Claude Code

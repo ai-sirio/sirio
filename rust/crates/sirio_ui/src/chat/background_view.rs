@@ -62,7 +62,11 @@ impl Chat {
 
     /// Run at the top of every render: a popover the row no longer draws (it went Narrow) is
     /// closed, and one that closed hands the keyboard back, when it held it.
-    pub(super) fn settle_background_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn settle_background_popover(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.background_popover_open && !self.background_popover_visible() {
             self.close_background_popover();
         }
@@ -75,7 +79,11 @@ impl Chat {
 
     /// The chip was pressed. A chip with no live task has nothing to list, so
     /// it opens nothing.
-    pub(super) fn toggle_background_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_background_popover(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.background_popover_open {
             self.close_background_popover();
         } else if self.live_background_tasks().next().is_some() {
@@ -199,8 +207,10 @@ mod tests {
 
     use super::super::background::tests::Fake;
     use super::super::band_tests::configure_fitting_full_row;
-    use super::super::tests::{CHAT_FIXTURE, pump_chat_until, push_answers, refresh_frame, top_entry};
     use super::super::composer_row::RowLayout;
+    use super::super::tests::{
+        CHAT_FIXTURE, pump_chat_until, push_answers, refresh_frame, top_entry,
+    };
     use super::*;
     use crate::trace_tab::TraceTab;
     use gpui::{AppContext as _, Modifiers, Styled as _, TestAppContext, VisualTestContext, size};
@@ -462,7 +472,10 @@ mod tests {
                 "{task}'s row, with its Stop, is inside the popover"
             );
         }
-        assert!(popover_reported(&chat, cx), "the read says the popover is open");
+        assert!(
+            popover_reported(&chat, cx),
+            "the read says the popover is open"
+        );
 
         // The same chip closes it: the mouse-down that is outside the popover closes it, and the
         // click that follows must not open it again.
@@ -474,7 +487,10 @@ mod tests {
         click(cx, "background-tasks-chip");
         assert!(is_drawn(cx, "background-tasks-popover"));
         let root = drawn(cx, "chat-root");
-        cx.simulate_click(root.origin + gpui::point(px(40.0), px(40.0)), Modifiers::none());
+        cx.simulate_click(
+            root.origin + gpui::point(px(40.0), px(40.0)),
+            Modifiers::none(),
+        );
         cx.run_until_parked();
         settle(cx);
         assert!(!is_drawn(cx, "background-tasks-popover"));
@@ -498,7 +514,10 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         settle(cx);
-        assert!(!is_drawn(cx, "background-tasks-popover"), "Escape closes the popover");
+        assert!(
+            !is_drawn(cx, "background-tasks-popover"),
+            "Escape closes the popover"
+        );
         assert!(
             chat.read_with(cx, |chat, _| chat.streaming),
             "and the turn it was pressed over runs on"
@@ -543,7 +562,10 @@ mod tests {
             !chat.read_with(cx, |chat, _| chat.background_popover_open),
             "the flag does not outlive the drawing, with no later render to close it"
         );
-        assert!(composer_is_focused(&chat, cx), "the keyboard is the composer's again");
+        assert!(
+            composer_is_focused(&chat, cx),
+            "the keyboard is the composer's again"
+        );
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
@@ -556,7 +578,10 @@ mod tests {
         cx.simulate_resize(size(px(1920.0), px(1000.0)));
         settle(cx);
         // The cached host drops a reused view's debug bounds, so `is_drawn` would prove nothing.
-        assert!(!popover_reported(&chat, cx), "widening brings nothing back unbidden");
+        assert!(
+            !popover_reported(&chat, cx),
+            "widening brings nothing back unbidden"
+        );
     }
 
     #[gpui::test]
@@ -577,10 +602,18 @@ mod tests {
             composer_is_focused(&chat, cx),
             "the keyboard went back to the composer, not to a view that is not drawn"
         );
-        assert!(!is_drawn(cx, "background-tasks-popover"), "nothing is left to list");
-        assert!(!popover_reported(&chat, cx), "and the read does not say it is open");
+        assert!(
+            !is_drawn(cx, "background-tasks-popover"),
+            "nothing is left to list"
+        );
+        assert!(
+            !popover_reported(&chat, cx),
+            "and the read does not say it is open"
+        );
 
-        // The chip, still drawn from the CLI's count, has nothing to open.
+        // The chip is drawn from the CLI's count, so it can show with no task
+        // running, and then it opens nothing. When the connection that gave
+        // the count ends, the chip goes with it.
         chat.update(cx, |chat, cx| {
             chat.background_tasks = 2;
             cx.notify();
@@ -588,7 +621,16 @@ mod tests {
         settle(cx);
         assert!(is_drawn(cx, "background-tasks-chip"));
         click(cx, "background-tasks-chip");
-        assert!(!is_drawn(cx, "background-tasks-popover"));
+        assert!(
+            !is_drawn(cx, "background-tasks-popover"),
+            "a chip with no running task opens nothing"
+        );
+        chat.update(cx, |chat, cx| chat.reset_background_tasks(cx));
+        settle(cx);
+        assert!(
+            !is_drawn(cx, "background-tasks-chip"),
+            "a reset leaves no chip count"
+        );
         assert!(!popover_reported(&chat, cx));
     }
 
@@ -661,15 +703,26 @@ mod tests {
         });
         open_card(&chat, cx);
         let before = top_entry(&chat, cx);
-        assert!(before > agent, "the transcript's tail is far below the agent's row");
+        assert!(
+            before > agent,
+            "the transcript's tail is far below the agent's row"
+        );
 
         click(cx, "trace-lane-stop-aagent001");
         assert_eq!(fake.stops(), ["aagent001"]);
-        assert_eq!(top_entry(&chat, cx), before, "Stop did not scroll to the agent's row");
+        assert_eq!(
+            top_entry(&chat, cx),
+            before,
+            "Stop did not scroll to the agent's row"
+        );
 
         // The control: the lane's own click is the one that reveals.
         click(cx, "trace-lane-toolu_a1");
-        assert_eq!(top_entry(&chat, cx), agent, "the lane's click reveals its row");
+        assert_eq!(
+            top_entry(&chat, cx),
+            agent,
+            "the lane's click reveals its row"
+        );
     }
 
     /// One tick of the tail poll, and the reads it started.
@@ -688,7 +741,11 @@ mod tests {
         let (host, chat, fake, cx) = setup(cx);
         start_tasks(&chat, cx);
         // The card is folded and the column closed: nothing paints a tail.
-        assert_eq!(tick(&chat, cx, &fake), 0, "a chat showing no tail is not read");
+        assert_eq!(
+            tick(&chat, cx, &fake),
+            0,
+            "a chat showing no tail is not read"
+        );
 
         open_card(&chat, cx);
         assert_eq!(
@@ -726,7 +783,11 @@ mod tests {
             cx.notify();
         });
         settle(cx);
-        assert_eq!(tick(&chat, cx, &fake), 2, "the control: the drawn strip reads both shells");
+        assert_eq!(
+            tick(&chat, cx, &fake),
+            2,
+            "the control: the drawn strip reads both shells"
+        );
 
         host.update(cx, |host, cx| {
             host.show_tab = false;
@@ -737,7 +798,11 @@ mod tests {
         // next tick, and after it nothing paints.
         tick(&chat, cx, &fake);
         settle(cx);
-        assert_eq!(tick(&chat, cx, &fake), 0, "a tab that is not drawn is not read");
+        assert_eq!(
+            tick(&chat, cx, &fake),
+            0,
+            "a tab that is not drawn is not read"
+        );
         assert_eq!(tick(&chat, cx, &fake), 0);
     }
 
@@ -755,7 +820,11 @@ mod tests {
         // The tab is not drawn, and `surface.trace.read` reads it.
         let strip = tab.read_with(cx, |tab, app| tab.snapshot(app).background);
         assert_eq!(strip.len(), 3, "the read does list the tasks");
-        assert_eq!(tick(&chat, cx, &fake), 0, "a read of the tab's state is not a frame");
+        assert_eq!(
+            tick(&chat, cx, &fake),
+            0,
+            "a read of the tab's state is not a frame"
+        );
         tab.read_with(cx, |tab, app| tab.snapshot(app));
         assert_eq!(tick(&chat, cx, &fake), 0);
     }

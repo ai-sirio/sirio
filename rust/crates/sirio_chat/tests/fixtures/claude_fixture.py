@@ -1351,6 +1351,8 @@ def state_main():
 # ---------------------------------------------------------------------------
 
 BG_FLOOR = "--fixture-floor" in sys.argv
+# `--fixture-rowless`: every non-empty list also carries a row with no `task_id`.
+BG_ROWLESS = "--fixture-rowless" in sys.argv
 BG_REQUEST_LOG = next(
     (arg[len("--fixture-request-log="):] for arg in sys.argv
      if arg.startswith("--fixture-request-log=")),
@@ -1394,6 +1396,8 @@ def bg_row(task_id, task_type, description, subagent_type=None):
 
 
 def bg_rows(rows):
+    if BG_ROWLESS and rows:
+        rows = [{"task_type": "local_bash", "description": "no id"}] + rows
     bg_system("background_tasks_changed", tasks=rows)
 
 

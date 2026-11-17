@@ -165,19 +165,23 @@ entry is created by a `background_tasks_changed` row or by a `task_started` with
 true`. Its `live` flag means the CLI's last rows list it (a new entry starts live), and it has an
 outcome once a terminal line arrives. A task has ended when it is not live or has an outcome, and is
 running otherwise (its state word is `running`, or `stopping` after a Stop); `live` can stay true
-after an outcome, since the rows may come after the terminal line. The outcome is the first terminal
-`task_updated` or `task_notification` status and a later one never changes it (a stop says `killed`,
-then `stopped`); rows and terminal lines may come in either order, and a task the rows drop with no
-terminal line reads `ended`. An ended entry stays until the next prompt is submitted, then it is
-dropped. The registry is cleared, with its stopping marks, painted, in-flight, ended-window and
-trailer sets and refusal flag, and its poll loop dropped, on a transport error, a timeout, a failed
-prompt send, the event source closing and a new connection (`start_connection`); a late task event
-or read answer is dropped unless the chat still has a client and the answer's connection generation
-is the current one. The composer chip's number is the CLI's own count (`BackgroundTasksUpdate`), not
-the registry's, and the clear does not touch it. `surface.chat.read` reports the registry as the
-`backgroundTasks` JSON string (`taskId`, `toolUseId`, `kind`, `description`, `live`, `outcome`,
-`stopping`, `tail`, `tailNote`), whether the CLI refused to read output as `taskOutputRetired`, and
-whether the popover is drawn as `composerRow.backgroundPopover`.
+after an outcome, since the rows may come after the terminal line. A task reads one of six state
+words, none of them the CLI session state `running` above: `running` and `stopping` while it is live
+with no outcome, `done` for `completed`, `interrupted` for `killed` or `stopped`, `failed` for
+`failed`, and `ended` for any other outcome or a task the rows dropped with no terminal line. The
+outcome is the first terminal `task_updated` or `task_notification` status and a later one never
+changes it (a stop says `killed`, then `stopped`); rows and terminal lines may come in either order.
+An ended entry stays until the next prompt is submitted, then it is dropped. The registry is
+cleared, with its stopping marks, painted, in-flight, ended-window and trailer sets and refusal
+flag, and its poll loop dropped, on a transport error, a timeout, a failed prompt send, the event
+source closing and a new connection (`start_connection`); a late task event or read answer is
+dropped unless the chat still has a client and the answer's connection generation is the current
+one. The composer chip's number is the CLI's own count (`BackgroundTasksUpdate`), not the
+registry's, and the clear sets it to 0 until the next connection reports its own.
+`surface.chat.read` reports the registry as the `backgroundTasks` JSON string (`taskId`,
+`toolUseId`, `kind`, `description`, `live`, `outcome`, `stopping`, `tail`, `tailNote`), whether the
+CLI refused to read output as `taskOutputRetired`, and whether the popover is drawn as
+`composerRow.backgroundPopover`.
 
 **A shell's tail** is read only for a task whose tail a frame painted since the last tick. A draw
 calls `Chat::paint_tail`: the Trace card's Background row (its last line) and the Trace tab's strip

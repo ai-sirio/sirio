@@ -451,6 +451,8 @@ impl Fold {
                         .tasks
                         .iter()
                         .flatten()
+                        // A row the CLI sent without an id cannot be told apart.
+                        .filter(|task| !task.task_id.is_empty())
                         .map(|task| BackgroundTaskRow {
                             task_id: task.task_id.clone(),
                             task_type: task.task_type.clone(),

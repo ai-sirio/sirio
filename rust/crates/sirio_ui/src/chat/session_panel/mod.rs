@@ -566,7 +566,11 @@ impl Chat {
             drawn: self.session_panel_drawn(),
             overlay: matches!(self.session_panel_placement(), Some(Placement::Overlay(_))),
             sections,
-            stop_buttons: if panel.open && !panel.collapsed.contains("trace") {
+            // With no turn the card is not built, and the last bounds are stale.
+            stop_buttons: if panel.open
+                && !panel.collapsed.contains("trace")
+                && self.trace.latest().is_some()
+            {
                 panel.frame.stop_buttons.borrow().clone()
             } else {
                 Default::default()

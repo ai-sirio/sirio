@@ -1745,6 +1745,10 @@ fn background_launch(tag: &str, floor: bool) -> (ClaudeLaunch, PathBuf) {
     if floor {
         args.push("--fixture-floor".to_string());
     }
+    if tag == "events" {
+        // Rows with no `task_id` ride along; the events must not name them.
+        args.push("--fixture-rowless".to_string());
+    }
     (ClaudeLaunch::fixture(PathBuf::from("python3"), args), log)
 }
 
@@ -1903,7 +1907,8 @@ fn the_floor_refuses_task_output_as_a_refusal_and_still_stops() {
 //  - the start without the tool call that made it (`toolu_s1`);
 //  - a stop that ends the task once, when the CLI says `killed` and then
 //    `stopped`: both are `Ended`, the first one being the outcome;
-//  - the drain `background_tasks_changed []` not reaching the caller.
+//  - the drain `background_tasks_changed []` not reaching the caller;
+//  - a row with no `task_id` reaching the registry as a task keyed `""`.
 #[test]
 fn background_task_events_follow_the_cli_lines() {
     let (launch, log) = background_launch("events", false);

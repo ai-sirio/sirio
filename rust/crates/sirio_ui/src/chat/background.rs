@@ -149,7 +149,11 @@ impl BackgroundRegistry {
     }
 
     fn entry_mut_or_new(&mut self, task_id: &str) -> &mut BackgroundEntry {
-        let at = match self.entries.iter().position(|entry| entry.task_id == task_id) {
+        let at = match self
+            .entries
+            .iter()
+            .position(|entry| entry.task_id == task_id)
+        {
             Some(at) => at,
             None => {
                 self.entries.push(BackgroundEntry::new(task_id));
@@ -560,7 +564,10 @@ impl Chat {
 
     /// The tasks still running, in start order: what the composer's popover lists.
     pub fn live_background_tasks(&self) -> impl Iterator<Item = &BackgroundEntry> {
-        self.background.entries().iter().filter(|entry| !entry.ended())
+        self.background
+            .entries()
+            .iter()
+            .filter(|entry| !entry.ended())
     }
 
     /// The registry changed under a surface: it repaints, and the Trace tab
@@ -603,9 +610,12 @@ impl Chat {
     pub(super) fn reset_background_tasks(&mut self, cx: &mut Context<Self>) {
         self.background_poll = None;
         self.background_poll_active = false;
+        // The chip's count came from the connection that ended.
+        self.background_tasks = 0;
         if self.background.clear() {
             self.background_changed(cx);
         }
+        cx.notify();
     }
 
     /// Starts the poll when a task could be read and no loop is running.
@@ -618,7 +628,8 @@ impl Chat {
         self.background_poll = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
-                let Ok(keep_going) = this.update(cx, |chat, cx| chat.background_tick(generation, cx))
+                let Ok(keep_going) =
+                    this.update(cx, |chat, cx| chat.background_tick(generation, cx))
                 else {
                     return;
                 };
@@ -758,7 +769,11 @@ pub(super) mod tests {
         assert_eq!(tail.len(), 254 + 2);
         assert_eq!(
             tail_lines(&output, true, 3),
-            lines(&["L0599-éééééééé-xxxxxxxx", "no-trailing-newline-tail", "[killed]"])
+            lines(&[
+                "L0599-éééééééé-xxxxxxxx",
+                "no-trailing-newline-tail",
+                "[killed]"
+            ])
         );
     }
 
@@ -804,7 +819,8 @@ pub(super) mod tests {
 
     #[test]
     fn a_title_sequence_does_not_leak_into_a_line() {
-        let output = "\u{1b}]0;title\u{7}one\n\u{1b}]8;;http://x\u{1b}\\two\u{1b}[2K\u{1b}[1;32mgo\u{1b}[0m";
+        let output =
+            "\u{1b}]0;title\u{7}one\n\u{1b}]8;;http://x\u{1b}\\two\u{1b}[2K\u{1b}[1;32mgo\u{1b}[0m";
         assert_eq!(tail_lines(output, false, 10), lines(&["one", "twogo"]));
     }
 
@@ -919,7 +935,10 @@ pub(super) mod tests {
             chat.handle_event(rows("bshell001"), cx);
             chat.paint_tail("bshell001");
             let generation = chat.connection_generation;
-            assert!(chat.background_tick(generation, cx), "a painted live shell is read");
+            assert!(
+                chat.background_tick(generation, cx),
+                "a painted live shell is read"
+            );
             generation
         });
 
@@ -967,7 +986,10 @@ pub(super) mod tests {
             chat.handle_event(sirio_chat::ChatEvent::TransportError("gone".into()), cx);
             assert!(chat.background_entries().is_empty());
             assert!(chat.background_poll.is_none() && !chat.background_poll_active);
-            assert!(!chat.background_tick(generation, cx), "a loop of the dead CLI ends");
+            assert!(
+                !chat.background_tick(generation, cx),
+                "a loop of the dead CLI ends"
+            );
         });
         cx.run_until_parked();
         chat.read_with(cx, |chat, _| {
@@ -1008,7 +1030,11 @@ pub(super) mod tests {
         // tick after the answer serves it, with no new frame in between.
         chat.update(cx, |chat, cx| assert!(chat.background_tick(generation, cx)));
         cx.run_until_parked();
-        assert_eq!(fake.reads(), 2, "the mark kept through the pending tick is served next");
+        assert_eq!(
+            fake.reads(),
+            2,
+            "the mark kept through the pending tick is served next"
+        );
 
         // That mark is spent: a tick with no frame since reads nothing, and the
         // loop goes on while the shell lives.
@@ -1054,7 +1080,11 @@ pub(super) mod tests {
         *fake.answer.lock().unwrap() = ok("one\ntwo\n");
         chat.update(cx, |chat, cx| assert!(chat.background_tick(generation, cx)));
         cx.run_until_parked();
-        assert_eq!(fake.reads(), 3, "busy is a skipped tick, not the end of the polling");
+        assert_eq!(
+            fake.reads(),
+            3,
+            "busy is a skipped tick, not the end of the polling"
+        );
         chat.read_with(cx, |chat, _| {
             let entry = &chat.background_entries()[0];
             assert_eq!(entry.tail, vec!["one".to_string(), "two".to_string()]);
@@ -1080,8 +1110,14 @@ pub(super) mod tests {
             said.get() > before
         };
         assert!(answer(cx, ok("one\ntwo\n")));
-        assert!(!answer(cx, Err("busy".to_string())), "busy repaints nothing");
-        assert!(answer(cx, Err("get_task_output: broken\nsecond line".to_string())));
+        assert!(
+            !answer(cx, Err("busy".to_string())),
+            "busy repaints nothing"
+        );
+        assert!(answer(
+            cx,
+            Err("get_task_output: broken\nsecond line".to_string())
+        ));
         chat.read_with(cx, |chat, _| {
             let entry = &chat.background_entries()[0];
             assert_eq!(entry.tail, vec!["one".to_string(), "two".to_string()]);

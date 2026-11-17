@@ -1555,7 +1555,7 @@ enum ChatControlAction {
         surface_id: String,
         task_id: String,
     },
-    /// Test-only: says that a frame painted a background task's tail, which
+    /// Debug-only, for tests: says that a frame painted a background task's tail, which
     /// is all the tail poll waits for, so that a run with no display can drive it.
     PaintTail {
         surface_id: String,
