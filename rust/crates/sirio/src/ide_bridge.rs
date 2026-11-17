@@ -401,6 +401,8 @@ pub(crate) struct IdeBridge {
     selection: Coalescer<ConnId, WeakEntity<FileView>>,
     /// What the commands said to the user, newest last; content-free copy only.
     toasts: Vec<String>,
+    /// How many times each toast was shown since launch: unlike `toasts`, never capped.
+    toast_totals: std::collections::BTreeMap<String, u64>,
     /// How the comments of the last proposal that ended with some were delivered.
     last_delivery: Option<&'static str>,
     /// How many times comments went to the clipboard since launch (one per ending, however many
@@ -442,6 +444,7 @@ pub(crate) fn start_at_launch(
         folders,
         selection: Coalescer::default(),
         toasts: Vec::new(),
+        toast_totals: std::collections::BTreeMap::new(),
         last_delivery: None,
         deliveries: 0,
         hook_resolutions: 0,
@@ -683,6 +686,7 @@ impl IdeBridge {
 
     /// Records the copy of a toast the app showed.
     pub(crate) fn push_toast(&mut self, message: &str) {
+        *self.toast_totals.entry(message.to_string()).or_default() += 1;
         self.toasts.push(message.to_string());
         if self.toasts.len() > TOASTS_KEPT {
             self.toasts.remove(0);
@@ -722,6 +726,7 @@ impl IdeBridge {
             "proposals": proposals,
             "confirmation": confirmation,
             "toasts": self.toasts,
+            "toast_totals": self.toast_totals,
             "hook_resolutions": self.hook_resolutions,
             "last_delivery": self.last_delivery,
             "deliveries": self.deliveries,

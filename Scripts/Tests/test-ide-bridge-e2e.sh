@@ -33,7 +33,7 @@ set -eEuo pipefail
 #   inherited_port    Sirio launched with CLAUDE_CODE_SSE_PORT=1 hands its own port to panes;
 #                     with the switch off a new pane has none
 #   owner_resolved    the state shows the client's connection owned by the pane it runs in
-#                     (the pane id panel create returned) and by that pane's worktree
+#                     (the pane id `surface.terminal.open` returned) and by that pane's worktree
 #   selection_utf16  opening a file sends its selection once (a focused file says it; once
 #                    within the run's send window); in a file whose line 3 is
 #                    `let s = "<emoji>x";` the `x`, selected with surface.editor.select,
@@ -61,6 +61,12 @@ set -eEuo pipefail
 #   at_mention_to_new_terminal
 #                    a terminal created after the others, focused when its client connects, gets
 #                    the next at-mention
+#   selection_not_lost_to_another_worktree
+#                    a file of another worktree sits in this worktree's strip: select in this
+#                    worktree's file, then select the other tab once the select is answered;
+#                    the case fails unless the tab change was answered less than SEND_AFTER_MS
+#                    after the select was sent (inside the select's send window), and the
+#                    client still gets the selection of the first file
 #   no_eligible_agent_toast
 #                    with every terminal and the chat closed, the same command leaves the toast
 #                    "No Claude terminal or chat in this worktree" in the state's toasts
@@ -77,12 +83,6 @@ set -eEuo pipefail
 #                    the same relaunch with a file as the active tab: one at-mention from that
 #                    file reaches the reconnected client (nothing was focused since the
 #                    relaunch), focuses its tab and leaves the toast count as it was
-#   selection_not_lost_to_another_worktree
-#                    a file of another worktree sits in this worktree's strip: select in this
-#                    worktree's file, then select the other tab once the select is answered;
-#                    the case fails unless the tab change was answered less than SEND_AFTER_MS
-#                    after the select was sent (inside the select's send window), and the
-#                    client still gets the selection of the first file
 #   diagnostics_file the fake language server (Scripts/Tests/fake_lsp.py; the run maps every
 #                    extension it opens, .py and .rs, to it through the first-match
 #                    languages.toml, so no other server is looked for, and an end check
@@ -119,12 +119,65 @@ set -eEuo pipefail
 #                    selection_while_terminal_active is: the click must not change the active tab);
 #                    Accept answers text holding the typed characters
 #   reject           `act reject` answers DIFF_REJECTED and the tab name
+#   reject_with_comments_clipboard
+#                    one Old-side comment on a line and one New-side comment on a range, written
+#                    through `surface.ide.comment` (the composer's own path): the state counts 2
+#                    comments and 2 cards and no open composer; Reject answers DIFF_REJECTED,
+#                    closes the tab, the state says last_delivery "clipboard", the toast says
+#                    "Comments copied: paste them into Claude", and the CLIPBOARD (read from outside
+#                    the app, on this run's display) is exactly the two `@<path>#L<n> ...` lines,
+#                    the path relative to the worktree, `#L<a>-<b>` for the range, `(proposed) `
+#                    before the New side's text
+#   comment_composer_anchor
+#                    a 300-line file with every tenth line changed (thirty hunks, so line 150
+#                    starts well below the viewport): a comment with commit=false opens the
+#                    composer at Old line 150 holding a seven-character draft (the state shows
+#                    side, line, draft length, no comment, no card, and in_view true: the diff's
+#                    list, whose layout gpui computed, has scrolled that line's row into its
+#                    viewport); Reject answers DIFF_REJECTED and the CLIPBOARD, which the case
+#                    owned before, is unchanged and `deliveries` has not moved: a draft is never
+#                    delivered
+#   comment_refusals the verb's errors leave the tab as it was and name their reason: an unknown
+#                    tab, a line that is not in the diff, a side that is neither old nor new, an
+#                    end_line that is no number, a commit that is neither true nor false, a
+#                    comment while Edit shows no diff, and (Ruling 27) a New-side comment on the
+#                    diff of the edited text
+#   composer_typing_keeps_line
+#                    the same composer, then a real click into its text box and real keys
+#                    (xdotool): the draft grows to the typed length and in_view is still true (a
+#                    keystroke re-splices the diff's list; the view must not jump to the top)
+#   comments_on_withdraw
+#                    two comments and an open draft, then Claude's close_tab: TAB_CLOSED, the
+#                    openDiff gets -32000, one delivery, and the clipboard holds the two comments
+#                    and not the draft
+#   comments_on_close_all
+#                    two proposals with a comment each, then closeAllDiffTabs: both openDiffs get
+#                    -32000, ONE delivery (the copy and its toast are one step), and the clipboard holds both comments
+#   comments_on_replace
+#                    a comment, then an openDiff with the same tab_name: the old openDiff gets
+#                    -32000, one delivery, the clipboard holds the old proposal's comment
+#   comments_on_accept
+#                    a comment, then Accept: FILE_SAVED, one delivery, the clipboard holds it
+#   comments_on_confirmation_reject
+#                    a comment, `act close`, the question, confirm_reject: DIFF_REJECTED, one
+#                    delivery, then the clipboard
+#   comments_on_disconnect
+#                    a comment, then the client closes its socket: no decision, one delivery and
+#                    the clipboard
 #   close_confirm    `act close` asks "Closing rejects Claude's change" (Reject, Cancel); Cancel keeps
 #                    the tab and answers nothing; close again + confirm_reject answers DIFF_REJECTED
 #   close_others_guarded
 #                    Close Others on a file tab of Secondary with the proposal among the others, and
 #                    `surface.tabs.close ... confirm=yes` on the proposal itself, ask before anything
 #                    closes; Cancel keeps every tab; Reject answers, then the others close
+#   reject_leaves_no_inert_tab
+#                    a dirty file tab among Close Others: Reject in the confirmation answers
+#                    DIFF_REJECTED and the proposal's tab is gone at once; the dirty-tab prompt is up
+#                    (the state says so), a click on Cancel closes it (the state says so), the dirty tab stays
+#   confirm_stable_tabs
+#                    a Close Others question is open, another worktree is selected, Reject: no tab
+#                    of that worktree (clean file tabs, which close without asking) closes and nothing
+#                    is answered (the question held identities, not positions)
 #   close_tab_withdraws
 #                    the client's close_tab answers TAB_CLOSED, the pending openDiff gets -32000 (no
 #                    decision), the tab is gone
@@ -145,7 +198,9 @@ set -eEuo pipefail
 #   no_decision_without_user
 #                    with an openDiff pending, switching the bridge off, the client dropping its
 #                    socket, and the app quitting each send no FILE_SAVED, DIFF_REJECTED or
-#                    TAB_CLOSED for that request id (read from the client's transcript)
+#                    TAB_CLOSED for that request id (read from the client's transcript: while the
+#                    client still reads, which a switch-off and a quit leave it doing, and just
+#                    before it drops its own socket, after which it can read nothing)
 #   worktree_close_guarded
 #                    two Claudes wait on a worktree (one in its pane, one outside every Sirio
 #                    shell): `workspace.close` over the socket fails; the sidebar's confirmed
@@ -154,14 +209,11 @@ set -eEuo pipefail
 #                    `git worktree list`, its branch and both connections; Reject answers
 #                    DIFF_REJECTED (read by the outside client), then the checkout is gone from disk
 #                    and from git, and the pane's session ends
-#   reject_leaves_no_inert_tab
-#                    a dirty file tab among Close Others: Reject in the confirmation answers
-#                    DIFF_REJECTED and the proposal's tab is gone at once; the dirty-tab prompt is up
-#                    (the state says so), a click on Cancel closes it (the state says so), the dirty tab stays
-#   confirm_stable_tabs
-#                    a Close Others question is open, another worktree is selected, Reject: no tab
-#                    of that worktree (clean file tabs, which close without asking) closes and nothing
-#                    is answered (the question held identities, not positions)
+#   project_close_guarded
+#                    the same for the sidebar's "Remove project from Sirio?" (RemoveProject, driven by
+#                    `act remove_project`) on a second project: it asks first and ends no session;
+#                    Cancel keeps the project listed and both Claudes connected; Reject answers
+#                    DIFF_REJECTED (read by the outside client), then the project is gone
 #   confirm_stable_worktree
 #                    three worktrees a-gone, b-asked, c-next made with git under one directory (git
 #                    lists them sorted by path): the removal question of b-asked is open while a-gone
@@ -177,11 +229,6 @@ set -eEuo pipefail
 #                    a file shown in Secondary, a click into the Primary terminal, an openDiff: the
 #                    proposal is what Secondary shows
 #   symlink_title    a symlink CLAUDE.md -> AGENTS.md as the file: the tab is titled "✻ CLAUDE.md"
-#   project_close_guarded
-#                    the same for the sidebar's "Remove project from Sirio?" (RemoveProject, driven by
-#                    `act remove_project`) on a second project: it asks first and ends no session;
-#                    Cancel keeps the project listed and both Claudes connected; Reject answers
-#                    DIFF_REJECTED (read by the outside client), then the project is gone
 #   parked_worktree  relaunched with the mounted-worktree cap seeded at 2 in the isolated database
 #                    (appearance_seed --limit-mounted 2) and a stale file left in the scratch
 #                    directory (which the launch sweeps; the directory is 0700): a proposal for a
@@ -190,53 +237,9 @@ set -eEuo pipefail
 #                    the worktree brings the tab; it survives that worktree's eviction; Accept
 #                    answers; and a Claude outside every Sirio shell (no owner) proposing a file of a
 #                    worktree not on screen is held under the file's worktree too
-#   reject_with_comments_clipboard
-#                    one Old-side comment on a line and one New-side comment on a range, written
-#                    through `surface.ide.comment` (the composer's own path): the state counts 2
-#                    comments and 2 cards and no open composer; Reject answers DIFF_REJECTED,
-#                    closes the tab, the state says last_delivery "clipboard", the toast says
-#                    "Comments copied: paste them into Claude", and the CLIPBOARD (read from outside
-#                    the app, on this run's display) is exactly the two `@<path>#L<n> ...` lines,
-#                    the path relative to the worktree, `#L<a>-<b>` for the range, `(proposed) `
-#                    before the New side's text
-#   comment_composer_anchor
-#                    a 300-line file with every tenth line changed (thirty hunks, so line 150
-#                    starts well below the viewport): a comment with commit=false opens the
-#                    composer at Old line 150 holding a seven-character draft (the state shows
-#                    side, line, draft length, no comment, no card, and in_view true: the diff's
-#                    list, whose layout gpui computed, has scrolled that line's row into its
-#                    viewport); Reject answers DIFF_REJECTED and the CLIPBOARD, which the case
-#                    owned before, is unchanged and `deliveries` has not moved: a draft is never
-#                    delivered
-#   composer_typing_keeps_line
-#                    the same composer, then a real click into its text box and real keys
-#                    (xdotool): the draft grows to the typed length and in_view is still true (a
-#                    keystroke re-splices the diff's list; the view must not jump to the top)
-#   comment_refusals the verb's errors leave the tab as it was and name their reason: an unknown
-#                    tab, a line that is not in the diff, a side that is neither old nor new, an
-#                    end_line that is no number, a commit that is neither true nor false, a
-#                    comment while Edit shows no diff, and (Ruling 27) a New-side comment on the
-#                    diff of the edited text
-#   comments_on_withdraw
-#                    two comments and an open draft, then Claude's close_tab: TAB_CLOSED, the
-#                    openDiff gets -32000, one delivery, and the clipboard holds the two comments
-#                    and not the draft
-#   comments_on_close_all
-#                    two proposals with a comment each, then closeAllDiffTabs: both openDiffs get
-#                    -32000, ONE delivery (the copy and its toast are one step), and the clipboard holds both comments
-#   comments_on_replace
-#                    a comment, then an openDiff with the same tab_name: the old openDiff gets
-#                    -32000, one delivery, the clipboard holds the old proposal's comment
-#   comments_on_accept
-#                    a comment, then Accept: FILE_SAVED, one delivery, the clipboard holds it
-#   comments_on_confirmation_reject
-#                    a comment, `act close`, the question, confirm_reject: DIFF_REJECTED, one
-#                    delivery, then the clipboard
-#   comments_on_disconnect
-#                    a comment, then the client closes its socket: no decision, one delivery and
-#                    the clipboard
-#   (`deliveries` in the state counts the clipboard deliveries since launch, so each case tells its
-#   own from an earlier one's; the newest toast is the copy's.)
+#   (`deliveries` in the state counts the clipboard deliveries since launch, and `toast_totals` how
+#   many times each toast was shown, neither capped, so each case tells its own from an earlier
+#   one's: one delivery and one copy toast.)
 #
 # `surface.ide.act` (debug builds only) presses what a user presses: accept, reject, edit (with
 # `text`, which errors when Edit is unavailable), show_diff, close, confirm_reject, cancel,
@@ -253,7 +256,7 @@ set -eEuo pipefail
 # SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS=3000 delays the first resolution a connection's announcing
 # itself starts (never one a request runs; when it fires it resolves every ownerless connection),
 # for the whole run: the cases that wait for an owner or a worktree in the state wait up to 3 s
-# longer for it, which with the ownerless cases' own waits adds 15 to 19 s to a run.
+# longer for it, which with the ownerless cases' own waits adds about 40 s to a run (measured).
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
@@ -1277,6 +1280,7 @@ case_token_refused() {
 case_handshake() {
   start_client "$WT_ID"
   wait_client "connected, the server echoes mcp" 'r.get("event") == "connected" and r.get("subprotocol") == "mcp"' 1
+  wait_client "initialize is answered with a result" 'r.get("event") == "initialized" and r.get("status") == "ok"' 1
   client_do "call tools/list {}"
   wait_client "tools/list answered" 'r.get("dir") == "in" and r.get("frame", {}).get("id") == "call-1"' 1
   local tools
@@ -1556,7 +1560,10 @@ PY
   done
   [ "$(tabs_field active)" = "$A_TAB" ] || fail "$CASE: the terminal's tab ($A_TAB) is not focused (active: $(tabs_field active))"
   echo "OK: the terminal's tab is focused"
-  case "$("$CTL" panel read "$A_PANE" 2>&1 | base64 -d 2>/dev/null)" in *sel.rs*) fail "$CASE: something was written into the pane" ;; esac
+  local pane_read pane_text
+  pane_read="$("$CTL" panel read "$A_PANE" 2>&1)" || fail "$CASE: panel read of $A_PANE failed: $pane_read"
+  pane_text="$(printf '%s' "$pane_read" | base64 -d)" || fail "$CASE: panel read of $A_PANE did not decode: $pane_read"
+  case "$pane_text" in *sel.rs*) fail "$CASE: something was written into the pane" ;; esac
   echo "OK: nothing was written into the pane"
   capture ide-at-mention
 }
@@ -1721,7 +1728,6 @@ print(paths[0] if paths else "")')"
   client_do "token $TOKEN"
   wait_client "reconnected" 'r.get("event") == "connected"' 2
   expect_state "the reconnected client is a connection" 'len(d["connections"])' 1
-  expect_state "ownerless while its worktree is not mounted" 'd["connections"][0]["owner_pane"]' None
   expect_state "its worktree is found from its cwd" 'd["connections"][0]["worktree"]' "$second"
   # The state can show no owner until a pane of that worktree is live, so "ownerless" here holds
   # by construction and is not asserted: the proof of this case is the select step below. The
@@ -1896,6 +1902,7 @@ start_outside_client() { # cwd
 end_outside_client() {
   client_do quit
   wait "$OUTSIDE_PID" 2>/dev/null || true
+  OUTSIDE_PID=""
 }
 second_worktree() {
   "$CTL" list-workspaces --json | python3 -I -c '
@@ -2242,11 +2249,18 @@ comment() { # tab_name side line text [end_line] [commit]
 COMMENTS_TOAST='Comments copied: paste them into Claude'
 # How many times comments went to the clipboard since launch (one per ending).
 deliveries() { state_expr 'd["deliveries"]'; }
-# One delivery since BEFORE (a count taken with `deliveries`), and the newest toast is the copy's.
-expect_one_delivery() { # before
-  expect_state "exactly one clipboard delivery" 'd["deliveries"]' "$(($1 + 1))"
+# The mark a case takes before it ends a proposal: the delivery count and how many times the
+# copy's toast was shown, both since launch (`toast_totals` is not capped like the `toasts` ring).
+delivery_mark() { state_expr '"%d %d" % (d["deliveries"], d["toast_totals"].get("'"$COMMENTS_TOAST"'", 0))'; }
+# Exactly one delivery and one copy toast since MARK (from `delivery_mark`); once the first
+# delivery shows, the state is read again after a moment, so a second one a UI pass later is seen.
+expect_one_delivery() { # mark
+  local before_deliveries="${1%% *}" before_toasts="${1##* }"
+  expect_state "exactly one clipboard delivery" 'd["deliveries"]' "$((before_deliveries + 1))"
+  sleep 1
+  expect_state "still exactly one clipboard delivery a moment later" 'd["deliveries"]' "$((before_deliveries + 1))"
   expect_state "the delivery is the clipboard" 'd["last_delivery"]' clipboard
-  expect_state "the newest toast says so" 'd["toasts"][-1]' "$COMMENTS_TOAST"
+  expect_state "the delivery showed the copy's toast once" 'd["toast_totals"].get("'"$COMMENTS_TOAST"'", 0)' "$((before_toasts + 1))"
 }
 # A proposal of FILE (old four lines, a proposal that changes two of them and adds one) opened
 # as TAB, with an Old-side comment on line 2 and, when $3 is two, a New-side comment on the range 4-5.
@@ -2273,7 +2287,7 @@ case_reject_with_comments_clipboard() {
   proposal_client
   expect_state "nothing was delivered yet" 'd["last_delivery"]' None
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cm1.txt"
   open_diff cm1 "$WT/cm1.txt" 'alpha\nBETA\ngamma\nDELTA\nepsilon\n'
   expect_proposal cm1 ready True
@@ -2298,7 +2312,7 @@ case_comment_composer_anchor() {
   proposal_client
   open_long cm2 cm2.txt
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   clipboard_own "sentinel before the reject"
   expect_clipboard "the case owns the clipboard" "sentinel before the reject"
   comment cm2 old 150 "a draft" "" false
@@ -2311,7 +2325,7 @@ case_comment_composer_anchor() {
   assert_response "$(req_id cm2)" 'd["texts"] == ["DIFF_REJECTED", "cm2"]' "Reject answers DIFF_REJECTED"
   expect_no_proposals
   expect_clipboard "a draft is never delivered: the clipboard is as it was" "sentinel before the reject"
-  expect_state "nothing was delivered" 'd["deliveries"]' "$before"
+  expect_state "nothing was delivered" 'd["deliveries"]' "${before%% *}"
   clipboard_stop
   end_app_client
 }
@@ -2387,7 +2401,7 @@ case_comment_refusals() {
 case_comments_on_withdraw() {
   proposal_client
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   open_commented cm4 cm4.txt 2
   comment cm4 old 4 "a draft" "" false
   expect_proposal cm4 comments 2
@@ -2404,7 +2418,7 @@ case_comments_on_withdraw() {
 case_comments_on_close_all() {
   proposal_client
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   open_commented ca1 ca1.txt 1
   open_commented ca2 ca2.txt 1
   client_do 'call tools/call {"name":"closeAllDiffTabs","arguments":{}}'
@@ -2422,7 +2436,7 @@ $(want_old ca2.txt)"
 case_comments_on_replace() {
   proposal_client
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   open_commented cm8 cm8.txt 1
   printf 'one\n' >"$WT/cm8b.txt"
   open_diff cm8 "$WT/cm8b.txt" 'two\n'
@@ -2439,7 +2453,7 @@ case_comments_on_replace() {
 case_comments_on_accept() {
   proposal_client
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   open_commented cm9 cm9.txt 1
   act cm9 accept
   assert_response "$(req_id cm9)" 'd["texts"][0] == "FILE_SAVED"' "Accept answers FILE_SAVED"
@@ -2452,7 +2466,7 @@ case_comments_on_accept() {
 case_comments_on_confirmation_reject() {
   proposal_client
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   open_commented cm5 cm5.txt 1
   act cm5 close
   expect_state "closing asks first" 'd["confirmation"]["title"]' "Closing rejects Claude's change"
@@ -2467,12 +2481,13 @@ case_comments_on_confirmation_reject() {
 case_comments_on_disconnect() {
   proposal_client
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   open_commented cm6 cm6.txt 1
+  # The client's reader is alive until it closes, so this is read before it does.
+  assert_no_decision "$(req_id cm6)" "nothing was decided before the socket dropped"
   client_do close
   wait_client "the connection closed" 'r.get("event") == "closed"' 1
   expect_no_proposals
-  assert_no_decision "$(req_id cm6)" "a closed connection is answered nothing"
   expect_one_delivery "$before"
   expect_clipboard "the clipboard holds the comment" "$(want_old cm6.txt)"
   end_app_client
@@ -2546,7 +2561,7 @@ case_proposal_edit_keys() {
   read -r width height <<<"$geometry"
   capture ide-proposal-edit-keys
   # In the middle of the Secondary half, on the editor's first lines (measured on
-  # ide-proposal-edit-keys.png), then the End key so the characters land after `one`.
+  # ide-proposal-edit-keys.png), then Ctrl+Home, so the characters land at the top of the text.
   DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 70 / 100))" "$((height * 20 / 100))" click 1
   sleep 0.3
   DISPLAY="$DISPLAY_TARGET" xdotool key ctrl+Home
@@ -2684,7 +2699,7 @@ print([r["mounted"] for r in json.load(sys.stdin) if r["id"] == sys.argv[1]][0])
   echo "OK: Cancel keeps the checkout on disk, listed by git, its branch, the worktree mounted and the clients connected"
   act wt-1 close_worktree
   act_alone confirm_reject
-  assert_response "$(req_id wt-2)" 'd["texts"] == ["DIFF_REJECTED", "wt-2"]' "Reject answers DIFF_REJECTED before the checkout is removed"
+  assert_response "$(req_id wt-2)" 'd["texts"] == ["DIFF_REJECTED", "wt-2"]' "Reject answers DIFF_REJECTED"
   local tries=0
   while [ -d "$third" ] && [ "$tries" -lt 100 ]; do tries=$((tries + 1)); sleep 0.2; done
   [ ! -d "$third" ] || fail "$CASE: the checkout is still on disk after Reject"
@@ -3040,12 +3055,12 @@ case_disconnect_closes() {
   before="$(toast_count 'Claude closed its proposed change')"
   open_diff gone-1 "$WT/d.txt" 'two\n'
   expect_proposal gone-1 ready True
+  assert_no_decision "$(req_id gone-1)" "nothing was decided before the socket dropped"
   client_do close
   wait_client "the connection closed" 'r.get("event") == "closed"' 1
   expect_no_proposals
   expect_no_tab '✻ d.txt'
   expect_state "the toast says Claude closed it" 'len([t for t in d["toasts"] if t == "Claude closed its proposed change"])' "$((before + 1))"
-  assert_no_decision "$(req_id gone-1)" "a closed connection is answered nothing"
   end_app_client
 }
 
@@ -3159,10 +3174,10 @@ case_no_decision_without_user() {
   open_diff nd-2 "$WT/nd.txt" 'two\n'
   expect_proposal nd-2 ready True
   req="$(req_id nd-2)"
+  assert_no_decision "$req" "nothing was decided before the socket dropped"
   client_do close
   wait_client "the connection closed" 'r.get("event") == "closed"' 1
   expect_no_proposals
-  assert_no_decision "$req" "a dropped socket is answered no decision"
   end_app_client
   # Sirio quits.
   proposal_client
@@ -3223,9 +3238,9 @@ print([r["mounted"] for r in json.load(sys.stdin) if r["id"] == sys.argv[1]][0])
   echo "OK: selecting the worktree brings its tab"
   ctl select-workspace --workspace "$a_id" >/dev/null
   ctl select-workspace --workspace "$c_id" >/dev/null
-  expect_state "B was evicted" 'len(d["proposals"])' 1
+  expect_state "the proposal is still held after the eviction" 'len(d["proposals"])' 1
   [ "$(mounted "$WT_ID")" = false ] || fail "$CASE: B is still mounted, so no eviction happened and the case proves nothing"
-  echo "OK: B was evicted (mounted $(mounted "$WT_ID"))"
+  echo "OK: B was evicted (mounted $(mounted "$WT_ID")) and its proposal is held"
   expect_proposal parked-1 on_screen False
   ctl select-workspace --workspace "$WT_ID" >/dev/null
   expect_proposal parked-1 on_screen True
@@ -3425,7 +3440,7 @@ case_live_reject_with_comment() {
   clipboard_own "live sentinel"
   expect_clipboard "the clipboard holds the sentinel" "live sentinel"
   local before
-  before="$(deliveries)"
+  before="$(delivery_mark)"
   live_prompt "run edit"
   local tries=0
   while [ "$(state_expr 'len(d["proposals"])')" != 1 ] && [ "$tries" -lt 300 ]; do

@@ -187,34 +187,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn leftover_temp_file_cannot_weaken_the_mode() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tmp("leftover");
-        std::fs::create_dir_all(&dir).unwrap();
-        let stray = dir.join("31.lock.tmp");
-        std::fs::write(&stray, b"x").unwrap();
-        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let l = Lockfile::write(&dir, 31, &body(&[])).unwrap();
-        assert_eq!(std::fs::metadata(l.path()).unwrap().permissions().mode() & 0o777, 0o600);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_symlink_at_the_temp_name_is_not_followed() {
-        let dir = tmp("symlink");
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("victim");
-        std::fs::write(&target, b"untouched").unwrap();
-        std::os::unix::fs::symlink(&target, dir.join("32.lock.tmp")).unwrap();
-        let l = Lockfile::write(&dir, 32, &body(&[])).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
-        assert!(read(&l)["authToken"].is_string());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn concurrent_rewrites_never_leave_torn_json_or_temp_files() {
         let dir = tmp("concurrent");

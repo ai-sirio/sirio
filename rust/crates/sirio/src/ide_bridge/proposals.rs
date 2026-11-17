@@ -143,6 +143,10 @@ pub(crate) struct Proposals {
     /// tab yet, and a withdrawal, a disconnect or a replacement drops it from here.
     waiting: HashMap<DiffId, ConnId>,
     pub(crate) confirmation: Option<Confirmation>,
+    /// The labels of the buttons the confirmation drew on its last frame, in order: what
+    /// `surface.ide.state` reports, so the state says what the modal showed, not what a
+    /// constant says it should.
+    drawn_buttons: std::cell::RefCell<Vec<String>>,
 }
 
 impl Proposals {
@@ -749,33 +753,32 @@ impl SirioWorkspace {
         let confirmation = self.ide_proposals.confirmation.as_ref()?;
         let focus = confirmation.focus.clone();
         let (reject_entity, cancel_entity, key_entity) = (entity.clone(), entity.clone(), entity);
-        Some(render_modal(
-            ModalSpec {
-                id: "proposal-close-confirm",
-                title: CONFIRM_TITLE.into(),
-                body: String::new(),
-                text_field: None,
-                buttons: vec![
-                    ModalButton::new("cancel", CONFIRM_BUTTONS[0], ModalButtonTone::Plain, move |_, window, cx| {
-                        cancel_entity.update(cx, |workspace, cx| {
-                            workspace.ide_cancel_confirmation(Some(window), cx);
-                        });
-                    }),
-                    ModalButton::new("reject", CONFIRM_BUTTONS[1], ModalButtonTone::Destructive, move |_, window, cx| {
-                        reject_entity.update(cx, |workspace, cx| {
-                            workspace.ide_confirm_reject(window, cx);
-                        });
-                    }),
-                ],
-                focus: Some(ModalFocus::new(focus, move |event, window, cx| {
-                    cx.stop_propagation();
-                    key_entity.update(cx, |workspace, cx| {
-                        workspace.handle_proposal_confirm_key(event, window, cx);
+        let spec = ModalSpec {
+            id: "proposal-close-confirm",
+            title: CONFIRM_TITLE.into(),
+            body: String::new(),
+            text_field: None,
+            buttons: vec![
+                ModalButton::new("cancel", CONFIRM_BUTTONS[0], ModalButtonTone::Plain, move |_, window, cx| {
+                    cancel_entity.update(cx, |workspace, cx| {
+                        workspace.ide_cancel_confirmation(Some(window), cx);
                     });
-                })),
-            },
-            theme,
-        ))
+                }),
+                ModalButton::new("reject", CONFIRM_BUTTONS[1], ModalButtonTone::Destructive, move |_, window, cx| {
+                    reject_entity.update(cx, |workspace, cx| {
+                        workspace.ide_confirm_reject(window, cx);
+                    });
+                }),
+            ],
+            focus: Some(ModalFocus::new(focus, move |event, window, cx| {
+                cx.stop_propagation();
+                key_entity.update(cx, |workspace, cx| {
+                    workspace.handle_proposal_confirm_key(event, window, cx);
+                });
+            })),
+        };
+        *self.ide_proposals.drawn_buttons.borrow_mut() = spec.buttons.iter().map(|button| button.label.clone()).collect();
+        Some(render_modal(spec, theme))
     }
 
     // ---- the debug verb and state
@@ -811,7 +814,7 @@ impl SirioWorkspace {
         let confirmation = self.ide_proposals.confirmation.as_ref().map(|confirmation| {
             json!({
                 "title": CONFIRM_TITLE,
-                "buttons": CONFIRM_BUTTONS,
+                "buttons": *self.ide_proposals.drawn_buttons.borrow(),
                 "then": confirmation.then.name(),
                 "proposals": confirmation
                     .views

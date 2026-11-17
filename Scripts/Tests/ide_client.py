@@ -23,6 +23,7 @@ Every frame in and out, and every connection event, is one JSON line in the tran
 request was answered with, or that it never was:
   {"dir": "out"|"in", "frame": <the JSON-RPC message>}
   {"event": "connected", "subprotocol": "mcp"}
+  {"event": "initialized", "status": "ok"|"error"|"none"}   how the server answered `initialize`
   {"event": "refused", "status": 401}
   {"event": "closed"}
 """
@@ -228,11 +229,13 @@ def connect(port, token, transcript):
         return None
     transcript.write({"event": "connected", "subprotocol": subprotocol})
     connection = Connection(sock, transcript)
-    connection.call(
+    answer = connection.call(
         "init-1",
         "initialize",
         {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "ide_client.py", "version": "0"}},
     )
+    status = "none" if answer is None else ("error" if "error" in answer else "ok")
+    transcript.write({"event": "initialized", "status": status})
     connection.send_json({"jsonrpc": "2.0", "method": "notifications/initialized"})
     connection.send_json({"jsonrpc": "2.0", "method": "ide_connected", "params": {"pid": os.getpid()}})
     return connection
