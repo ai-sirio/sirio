@@ -13,6 +13,8 @@ set -eEuo pipefail
 #   lockfile_and_env  the lockfile has exactly six keys, mode 0600 in a 0700 directory, ideName
 #                     "Sirio (debug)", the app's pid and the repository as a workspace folder; a
 #                     new pane's environment holds the port the state reports
+#                     the state directory (made 0755 before the launch) is 0700 and the database
+#                     (made 0644) and its -wal and -shm are 0600: the token is stored there
 #   token_refused     a client that offers a wrong token is refused (401) and is no connection
 #   handshake         a client with the right token is accepted, the server echoes the mcp
 #                     subprotocol, tools/list names exactly the four tools, the state lists the
@@ -579,7 +581,9 @@ export TMPDIR="$RUN_DIR/tmp"
 # A pane's shell: no rc file of the user's matters, whatever their login shell is.
 export SHELL=/bin/sh
 export SIRIO_SOCKET="$RUN_DIR/c.sock"
-export SIRIO_DB="$RUN_DIR/session.sqlite"
+STATE_DIR="$RUN_DIR/state"
+mkdir -p "$STATE_DIR"
+export SIRIO_DB="$STATE_DIR/session.sqlite"
 export SIRIO_CREDENTIALS="$RUN_DIR/credentials.json"
 export SIRIO_HOST_HOME="$RUN_DIR/host"
 unset CLAUDE_CODE_SSE_PORT SIRIO_CONFIG_DIR
@@ -587,6 +591,10 @@ unset CLAUDE_CODE_SSE_PORT SIRIO_CONFIG_DIR
 LOCK_DIR="$HOME/.claude/ide"
 
 "$SEED" --database "$SIRIO_DB" --appearance dark
+# The state directory and the database as an older Sirio left them (world-readable): the first
+# launch must make them private, which lockfile_and_env checks (the seed above already did once).
+chmod 755 "$STATE_DIR"
+chmod 644 "$SIRIO_DB"
 
 # The only language server the run can start: the fake one (Scripts/Tests/fake_lsp.py), named
 # by a stub first on PATH and by languages.toml entries that replace the built-in ones for every
@@ -1260,6 +1268,15 @@ body["authToken"] = "<redacted>"
 json.dump(body, open(sys.argv[2], "w"), indent=2, sort_keys=True)
 PY
   echo "OK: lockfile $file: six keys, 0600 in a 0700 directory, Sirio (debug), pid $APP_PID, $WT"
+  # The token is stored in the database (settings table): no easier to read than the lockfile.
+  [ "$(stat -c %a "$STATE_DIR")" = 700 ] || fail "$CASE: the state directory's mode is $(stat -c %a "$STATE_DIR"), not 700 (it was made 755 before the launch)"
+  local state_file
+  for state_file in "$SIRIO_DB" "$SIRIO_DB-wal" "$SIRIO_DB-shm"; do
+    [ -e "$state_file" ] || { [ "$state_file" != "$SIRIO_DB" ] || fail "$CASE: the database is missing"; continue; }
+    [ "$(stat -c %a "$state_file")" = 600 ] || fail "$CASE: $(basename "$state_file") has mode $(stat -c %a "$state_file"), not 600 (the database was made 644 before the launch)"
+  done
+  [ -e "$SIRIO_DB-wal" ] || fail "$CASE: no -wal beside the database while the app runs, so its mode was not checked"
+  echo "OK: the state directory is 0700 and the database and its sidecars 0600 (re-moded from 0755 and 0644 at launch)"
   expect_state "the state's port is the lockfile's" 'd["port"]' "$port"
   expect_state "the state is enabled" 'd["enabled"]' True
   expect_state "the state names the lockfile" 'd["lockfile"]' "$port.lock"
