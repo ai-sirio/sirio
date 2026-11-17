@@ -1660,6 +1660,26 @@ impl ChangesTab {
         self.resolve_reveal_line(cx);
     }
 
+    /// Whether the list laid out the item that draws `line` of `path` on `side` inside its
+    /// viewport (partly in view counts): `Some(false)` when that item lies wholly above or below
+    /// it, `None` when no row draws the line or the list has not laid the item out yet. Read
+    /// from `ListState`'s own layout, through the row stream the list renders.
+    pub fn line_in_view(&self, path: &Path, side: AnnotationSide, line: u32) -> Option<bool> {
+        let mut rows = Vec::new();
+        for section in self.section_rows(self.unified_mode) {
+            rows.push(ListRow::Header {
+                section: section.section,
+                count: section.count,
+                collapsed: section.collapsed,
+            });
+            rows.extend(section.rows.into_iter().map(ListRow::Change));
+        }
+        let index = line_row_index(&rows, path, side, Some(line as usize))?;
+        let above = self.list_state.item_is_above_viewport(index)?;
+        let below = self.list_state.item_is_below_viewport(index)?;
+        Some(!above && !below)
+    }
+
     /// Opens the file and reveals its annotation, or a line on either side.
     pub fn focus_anchor(
         &mut self,
@@ -3051,6 +3071,17 @@ fn reveal_target(rows: &[ListRow], path: &Path, line: usize) -> Option<usize> {
 fn reveal_anchor_target(
     rows: &[ListRow], path: &Path, side: AnnotationSide, line: Option<usize>,
 ) -> Option<usize> {
+    line_row_index(rows, path, side, line).or_else(|| {
+        rows.iter().position(|row| {
+            matches!(row, ListRow::Change(ChangeRow::File { entry, .. }) if entry.path == path)
+        })
+    })
+}
+
+/// The index of the list item that draws `line` of `path` on `side`, if the stream has one.
+fn line_row_index(
+    rows: &[ListRow], path: &Path, side: AnnotationSide, line: Option<usize>,
+) -> Option<usize> {
     rows.iter()
         .position(|row| match row {
             ListRow::Change(ChangeRow::Line { path: row_path, line: row_line, .. }) => {
@@ -3068,11 +3099,6 @@ fn reveal_anchor_target(
                 row_path == path && line.is_some() && number == line
             }
             _ => false,
-        })
-        .or_else(|| {
-            rows.iter().position(|row| {
-                matches!(row, ListRow::Change(ChangeRow::File { entry, .. }) if entry.path == path)
-            })
         })
 }
 

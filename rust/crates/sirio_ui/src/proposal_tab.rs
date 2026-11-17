@@ -561,14 +561,19 @@ impl ProposalTab {
             .collect();
     }
 
-    /// The side and last line of the open composer, if one is open.
-    pub fn composer_position(&self) -> Option<(CommentSide, u32)> {
+    /// The side and last line of the open composer, and whether the diff's list laid that line
+    /// out in view (`None` while it has not laid it out), if a composer is open.
+    pub fn composer_position(&self, cx: &App) -> Option<(CommentSide, u32, Option<bool>)> {
         self.composer.as_ref().map(|open| {
             let side = match open.anchor.side {
                 AnnotationSide::Old => CommentSide::Old,
                 AnnotationSide::New => CommentSide::New,
             };
-            (side, open.anchor.last())
+            let in_view = self
+                .changes
+                .as_ref()
+                .and_then(|changes| changes.read(cx).line_in_view(&open.anchor.path, open.anchor.side, open.anchor.last()));
+            (side, open.anchor.last(), in_view)
         })
     }
 

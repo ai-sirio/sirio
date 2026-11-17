@@ -200,9 +200,10 @@ set -eEuo pipefail
 #                    the path relative to the worktree, `#L<a>-<b>` for the range, `(proposed) `
 #                    before the New side's text
 #   comment_composer_anchor
-#                    a 300-line file changed at lines 2 and 150: a comment with commit=false opens
+#                    a 300-line file with every tenth line changed (thirty hunks, so line 150 starts well below the viewport): a comment with commit=false opens
 #                    the composer at Old line 150 (the state shows its side and line, no comment,
-#                    no card); a line not in the diff and an unknown tab are errors that leave it
+#                    no card, and in_view true: the diff's list, whose layout gpui computed, has
+#                    scrolled that line's row into its viewport); a line not in the diff and an unknown tab are errors that leave it
 #                    as it was; Reject answers DIFF_REJECTED and the CLIPBOARD, which the case
 #                    owned before, is unchanged: a draft is never delivered
 #   comment_refusals the verb's errors leave the tab as it was: an unknown tab, a line that is not
@@ -2115,7 +2116,7 @@ case_comment_composer_anchor() {
   proposal_client
   seq -f 'line %g' 1 300 >"$WT/cm2.txt"
   local changed
-  changed="$(seq 1 300 | awk '{ if ($1 == 2 || $1 == 150) print "CHANGED " $1; else print "line " $1 }' | awk '{ printf "%s\\n", $0 }')"
+  changed="$(seq 1 300 | awk '{ if ($1 % 10 == 0) print "CHANGED " $1; else print "line " $1 }' | awk '{ printf "%s\\n", $0 }')"
   open_diff cm2 "$WT/cm2.txt" "$changed"
   expect_proposal cm2 ready True
   local toasts
@@ -2123,7 +2124,9 @@ case_comment_composer_anchor() {
   clipboard_own "sentinel before the reject"
   expect_clipboard "the case owns the clipboard" "sentinel before the reject"
   comment cm2 old 150 "a draft" "" false
-  expect_proposal cm2 composer "{'side': 'old', 'line': 150}"
+  # in_view is read from the diff list's own layout (gpui's ListState) for line 150's row; the
+  # scroll to the composer lands on a later layout, so it is polled for.
+  expect_proposal cm2 composer "{'side': 'old', 'line': 150, 'in_view': True}"
   expect_proposal cm2 comments 0
   expect_proposal cm2 cards 0
   act cm2 reject

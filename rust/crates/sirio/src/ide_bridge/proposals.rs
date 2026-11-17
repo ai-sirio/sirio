@@ -786,8 +786,8 @@ impl SirioWorkspace {
                     "editing": tab.is_editing(),
                     "comments": tab.comment_count(),
                     "cards": tab.card_count(),
-                    "composer": tab.composer_position().map(|(side, line)| {
-                        json!({"side": if side == CommentSide::Old { "old" } else { "new" }, "line": line})
+                    "composer": tab.composer_position(cx).map(|(side, line, in_view)| {
+                        json!({"side": if side == CommentSide::Old { "old" } else { "new" }, "line": line, "in_view": in_view})
                     }),
                     "reject_label": tab.reject_label(),
                     "owner_named": tab.has_owner_title(),
