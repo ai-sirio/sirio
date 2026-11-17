@@ -1974,3 +1974,258 @@ fn claude_lists_permission_rules() {
         "no process of the run outlives the CLI: false ({left} left)"
     );
 }
+
+// Failure list for `claude_toggles_a_connector_and_reloads`, written before the test. On a version
+// that meets the floor it fails when:
+// 0. before the first toggle, `probe` does not read `Pending` or `Connected` (`Failed` fails);
+// 1. `mcp_toggle` off for the user-scope server `probe` answers an error;
+// 2. `mcp_status` afterwards does not read `Disabled` for it;
+// 3. after the first session exits (item 7), the config dir's `.claude.json` is missing or does
+//    not parse, or has no `projects[<work>].disabledMcpServers` list, or the list lacks `probe`;
+// 4. a `reload_plugins` with the hold, sent before any turn, does not parse with
+//    `parse_plugins_reload`, or comes back `held: true`, or (2.1.325 or later) does not carry an
+//    explicit `held: false` (a missing key reads as false, so it would hide a hold never received);
+// 5. its `commands`, given to `Catalog::replace_commands`, do not yield a non-empty list holding
+//    every command the `initialize` answer listed, or that list was empty to begin with;
+// 6. on 2.1.325 or later, the `initialize` capabilities lack `reload_plugins_refuse_if_busy_v1`;
+// 7. the first session does not exit on stdin EOF, or a process of it outlives it;
+// 8. a fresh session on the same folder does not read `probe` as `Disabled` before any toggle;
+// 9. `mcp_toggle` on does not answer success;
+// 10. `mcp_status` does not reach `Pending` or `Connected` within 15 s (`Failed` or
+//     `Disabled` for the whole time fails);
+// 11. after the second session exits (item 13), the same list is missing or still has `probe`
+//     (the CLI writes `[]` on toggle on);
+// 12. a toggle of an unknown server is not an error, or its error is a refusal;
+// 13. the second session does not exit on EOF, or leaves a process behind.
+
+/// Proves the real Claude Code honours Sirio's `mcp_toggle` (`ControlRequest::mcp_toggle`) and
+/// `reload_plugins` with the hold (`ControlRequest::reload_plugins`): the switch is saved per
+/// folder in the config dir and a fresh session still sees it, and the reload answers in a shape
+/// `parse_plugins_reload` reads.
+///
+/// It uses the fake API of the session-state test, no credential and nothing beyond 127.0.0.1,
+/// but launches a real CLI, so it is `#[ignore]`d and stays off CI. TMPDIR must be on disk
+/// outside the home directory:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance claude_toggles_a_connector_and_reloads -- --ignored --nocapture
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor and without
+/// `python3`.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_toggles_a_connector_and_reloads() {
+    use sirio_claude::McpState;
+
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("toggle-reload", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+    let advertises = version >= sirio_claude::ClaudeVersion::new(2, 1, 325);
+    eprintln!("claude reports {version_text}");
+
+    let root = scratch.root.join("mcp");
+    let work_key = root.join("work").display().to_string();
+    // `projects[<work>].disabledMcpServers` of the config dir's `.claude.json`, read once the
+    // CLI has exited and so written its config; `None` when the file, the project or the list
+    // is missing or unreadable.
+    let disabled_in_file = |session: &claude_live::Session| -> Option<Vec<String>> {
+        let text = std::fs::read_to_string(session.config_dir().join(".claude.json")).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let list = json["projects"][work_key.as_str()]["disabledMcpServers"].as_array()?;
+        Some(
+            list.iter()
+                .filter_map(|name| name.as_str().map(str::to_string))
+                .collect(),
+        )
+    };
+    // The state `mcp_status` gives `probe`, or `None` when it is not listed.
+    let probe_state = |session: &mut claude_live::Session,
+                       seen: &mut Vec<serde_json::Value>,
+                       id: &str|
+     -> Option<McpState> {
+        let answer = ask_session(session, seen, sirio_claude::ControlRequest::mcp_status(id));
+        let servers = if answer["subtype"] == "success" {
+            sirio_claude::parse_mcp_status(&answer["response"])
+        } else {
+            None
+        };
+        servers
+            .unwrap_or_else(|| panic!("mcp_status answered a list: false"))
+            .into_iter()
+            .find(|server| server.name == "probe")
+            .map(|server| server.status)
+    };
+    // Closes `session` and waits for nothing of its run to be left.
+    let finish = |session: &mut claude_live::Session| {
+        let exit = session.close_cli();
+        assert!(
+            exit.is_some_and(|status| status.success()),
+            "the CLI exited successfully on stdin EOF: false (exit code {:?}, None when killed after 20 s)",
+            exit.map(|status| status.code())
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut left = claude_live::holders_of(&session.home());
+        while left > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            left = claude_live::holders_of(&session.home());
+        }
+        assert!(
+            left == 0,
+            "no process of the run outlives the CLI: false ({left} left)"
+        );
+    };
+
+    let mut session = claude_live::Session::start_with_user_mcp(&claude, &python, &root, true);
+    let mut seen = Vec::new();
+    let init = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::initialize("tr-init"),
+    );
+    assert_eq!(
+        init["subtype"], "success",
+        "initialize answered success: false"
+    );
+    let mut catalog = sirio_claude::Catalog::from_initialize(&init["response"]);
+    let capable = catalog.has_capability("reload_plugins_refuse_if_busy_v1");
+    // 6.
+    if advertises {
+        assert!(
+            capable,
+            "the initialize answer lists reload_plugins_refuse_if_busy_v1: {capable}"
+        );
+    }
+
+    // The server is listed and not disabled before any toggle.
+    let first = probe_state(&mut session, &mut seen, "tr-s0");
+    let listed = first.is_some();
+    assert!(listed, "the user-scope server is listed: {listed}");
+    let starts_up = matches!(first, Some(McpState::Pending | McpState::Connected));
+    assert!(starts_up, "the server starts pending or connected: {starts_up}");
+
+    // 1-3.
+    let off = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::mcp_toggle("tr-off", "probe", false),
+    );
+    std::fs::write(scratch.root.join("off-answer.json"), off.to_string()).unwrap();
+    assert_eq!(off["subtype"], "success", "the toggle off succeeded: false");
+    let now = probe_state(&mut session, &mut seen, "tr-s1");
+    let disabled = now == Some(McpState::Disabled);
+    assert!(disabled, "mcp_status reads the server Disabled: {disabled}");
+
+    // 4, 5.
+    let before: Vec<String> = catalog.commands().into_iter().map(|c| c.name).collect();
+    let reload = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::reload_plugins("tr-reload", true, false),
+    );
+    std::fs::write(scratch.root.join("reload-answer.json"), reload.to_string()).unwrap();
+    assert_eq!(
+        reload["subtype"], "success",
+        "the held reload succeeded: false"
+    );
+    let parsed = sirio_claude::parse_plugins_reload(&reload["response"]);
+    let parses = parsed.is_some();
+    assert!(parses, "the reload answer parses: {parses}");
+    let held = parsed.is_some_and(|reloaded| reloaded.held);
+    assert!(!held, "the reload before any turn was held: {held}");
+    if advertises {
+        let explicit = reload["response"]["held"] == serde_json::Value::Bool(false);
+        assert!(explicit, "the reload answer carries held: false: {explicit}");
+    }
+    catalog.replace_commands(&reload["response"]["commands"]);
+    let after: Vec<String> = catalog.commands().into_iter().map(|c| c.name).collect();
+    let had_commands = !before.is_empty();
+    assert!(had_commands, "the initialize answer listed commands: {had_commands}");
+    let non_empty = !after.is_empty();
+    let keeps_all = before.iter().all(|name| after.contains(name));
+    assert!(non_empty, "the reload gave commands: {non_empty}");
+    assert!(keeps_all, "the reload kept every command: {keeps_all}");
+
+    // 12: before the switch goes back on, so a refusal-shaped answer cannot hide behind it.
+    let unknown = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::mcp_toggle("tr-nosuch", "no-such-server", true),
+    );
+    let is_error = unknown["subtype"] == "error";
+    assert!(is_error, "a toggle of an unknown server is an error: {is_error}");
+    let refusal = unknown["error"]
+        .as_str()
+        .is_some_and(sirio_claude::is_refusal);
+    assert!(!refusal, "that error is a refusal: {refusal}");
+
+    // 7, then 3: the exit comes first, so the CLI has written its config.
+    finish(&mut session);
+    let saved = disabled_in_file(&session).is_some_and(|list| list.iter().any(|n| n == "probe"));
+    assert!(saved, "the folder's disabledMcpServers lists it: {saved}");
+    drop(session);
+
+    // 8.
+    let mut session = claude_live::Session::start_with_user_mcp(&claude, &python, &root, false);
+    let mut seen = Vec::new();
+    let init = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::initialize("tr2-init"),
+    );
+    assert_eq!(
+        init["subtype"], "success",
+        "initialize answered success: false"
+    );
+    let state = probe_state(&mut session, &mut seen, "tr2-s0");
+    let still_off = state == Some(McpState::Disabled);
+    assert!(still_off, "a fresh session reads it Disabled: {still_off}");
+
+    // 9-11.
+    let on = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::mcp_toggle("tr2-on", "probe", true),
+    );
+    assert_eq!(on["subtype"], "success", "the toggle on succeeded: false");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut n = 0;
+    let left_disabled = loop {
+        n += 1;
+        let state = probe_state(&mut session, &mut seen, &format!("tr2-s{n}"));
+        if matches!(state, Some(McpState::Pending | McpState::Connected)) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert!(
+        left_disabled,
+        "mcp_status reached pending or connected within 15 s: {left_disabled}"
+    );
+    // 13.
+    finish(&mut session);
+    // 11: after the exit, `[]` is on disk (a missing list fails, it is not "not listed").
+    let cleared = disabled_in_file(&session).is_some_and(|list| !list.iter().any(|n| n == "probe"));
+    assert!(cleared, "the folder's disabledMcpServers no longer lists it: {cleared}");
+}
