@@ -21,6 +21,7 @@ const FAKE_KEY: &str = "sk-ant-api03-fake-key-for-local-live-test-0000000000";
 const FAKE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_elicit_api.py");
 const ELICIT_MCP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/elicit_mcp.py");
 const STATE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_state_api.py");
+const TASKS_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_tasks_api.py");
 
 /// The real binary of the newest installed mise `claude`, never the `latest` link or the
 /// wrapper in `~/.local/bin` (running that under a private HOME reinstalls claude there).
@@ -255,6 +256,12 @@ impl Session {
     /// session-state test (`fake_state_api.py`), with no MCP server.
     pub fn start_state(claude: &Path, python: &Path, root: &Path) -> Self {
         Self::launch(claude, python, root, STATE_API, false)
+    }
+
+    /// Launches `claude` for a new chat session under `root` against the fake API of the
+    /// background-task test (`fake_tasks_api.py`), with no MCP server.
+    pub fn start_tasks(claude: &Path, python: &Path, root: &Path) -> Self {
+        Self::launch(claude, python, root, TASKS_API, false)
     }
 
     fn launch(claude: &Path, python: &Path, root: &Path, api_script: &str, with_mcp: bool) -> Self {
