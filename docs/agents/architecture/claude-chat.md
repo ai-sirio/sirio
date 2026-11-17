@@ -250,7 +250,8 @@ clear does not end it: after a reconnect Sirio neither shows it nor stops it.
 
 **A session's name (A4).** A manual rename of a tab (the tab bar's inline editor, the Set Title
 modal, or the debug-only `surface.tabs.rename`) reaches every native Claude chat of the tab through
-`apply_manual_tab_title`, and the chat asks the CLI to carry it: `rename_session {title, source:"host", session_id}`
+`apply_manual_tab_title`, and the chat asks the CLI to carry it:
+`rename_session {title, source:"host", session_id}`
 (`ControlRequest::rename_session`). Both fields go to every CLI, because the 2.1.257 floor ignores
 them, so there is no version gate. The worker fills `session_id` at write time from its own id (the
 launch's, replaced by `init` and by a refused-resume retry), never from the chat's

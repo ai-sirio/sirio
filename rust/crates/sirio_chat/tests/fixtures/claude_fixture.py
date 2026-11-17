@@ -1682,9 +1682,10 @@ def answer_rename(request_id, request):
 
 def release_held_renames():
     global RENAMES_DRAINING
-    while not os.path.exists(RENAME_GATE_PATH):
-        time.sleep(0.05)
     while True:
+        # Checked before each answer: a gate removed mid-drain holds the rest.
+        while not os.path.exists(RENAME_GATE_PATH):
+            time.sleep(0.05)
         with HELD_RENAMES_LOCK:
             if not HELD_RENAMES:
                 # Every held rename is answered; the next one goes straight out.
