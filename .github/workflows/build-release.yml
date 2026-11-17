@@ -568,8 +568,17 @@ jobs:
 
       # The whole workspace (no -p): sirio, sirioctl and sirio-host, the
       # three binaries the package below ships.
+      # Without the sccache wrapper on Windows. Since Cargo 1.100 every
+      # dependency's output sits in a directory of its own, so rustc gets one
+      # `-L dependency=` per crate: ely-gpui-component's command reached ~40K
+      # characters, past Windows' 32K limit, and v0.41.0's build stopped on
+      # "os error 206". Cargo answers that error by passing rustc an @argfile,
+      # but through sccache the spawn that fails is sccache's own. An empty
+      # wrapper overrides rust/.cargo/config.toml for this step only.
       - name: Build
         working-directory: rust
+        env:
+          CARGO_BUILD_RUSTC_WRAPPER: ""
         run: cargo build --release
 
       - name: Assert the shipped binary carries the channel and version
