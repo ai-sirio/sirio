@@ -271,7 +271,7 @@ set -eEuo pipefail
 # `system.ping` route probe sirioctl sends by itself, and only before `panel.*` calls (the proxy
 # forwards it and leaves it out of the log). Rerunning the script reproduces it.
 #
-# Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--proposals-only] [--live] [--out-dir DIR]
+# Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--proposals-only] [--only CASES] [--live] [--out-dir DIR]
 #
 #   --xvfb        start a private Xvfb on a free display between :90 and :99
 #   --display :N  use an Xvfb this user started (never your own $DISPLAY)
@@ -279,6 +279,8 @@ set -eEuo pipefail
 #   --proposals-only
 #                 run only the openDiff cases (development; it prints a different last line and
 #                 is not the evidence of a run)
+#   --only a,b    development, implies --proposals-only: run only the named openDiff cases (the
+#                 others are skipped); prints the same different last line
 #   --live        the opt-in live mode, by hand only (spec 8.3), INSTEAD of the 60 cases: the real
 #                 `claude` (SIRIO_LIVE_CLAUDE, else the newest real install under
 #                 ~/.local/share/mise/installs/claude/<version>/claude; never the ~/.local/bin
@@ -327,6 +329,7 @@ CLIENT="$ROOT/Scripts/Tests/ide_client.py"
 
 STATE_ONLY=0
 PROPOSALS_ONLY=0
+ONLY_CASES=""
 LIVE=0
 START_XVFB=0
 DISPLAY_TARGET=""
@@ -337,6 +340,7 @@ while [ $# -gt 0 ]; do
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --state-only) STATE_ONLY=1; shift ;;
     --proposals-only) PROPOSALS_ONLY=1; shift ;;
+    --only) ONLY_CASES="${2:?--only needs case names, comma separated}"; PROPOSALS_ONLY=1; shift 2 ;;
     --live) LIVE=1; shift ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -1229,6 +1233,10 @@ capture() { # name
 # ---------------------------------------------------------------- the cases
 
 case_run() { # name function
+  # --only: development, with --proposals-only; the cases not named are skipped.
+  if [ -n "$ONLY_CASES" ] && [[ ",$ONLY_CASES," != *",$1,"* ]]; then
+    return 0
+  fi
   CASE="$1"
   say "case $1"
   "$2"
@@ -3217,15 +3225,15 @@ case_no_decision_without_user() {
 # (where Claude runs), C = ide-third; the eviction takes the first idle non-selected worktree in
 # catalog order, which is B once A, B and C are mounted.
 case_parked_worktree() {
-  mkdir -p -m 700 "$RUN_DIR/ide-proposals"
-  printf 'left behind by a crash' >"$RUN_DIR/ide-proposals/stale-proposal-file"
+  mkdir -p -m 700 "$STATE_DIR/ide-proposals"
+  printf 'left behind by a crash' >"$STATE_DIR/ide-proposals/stale-proposal-file"
   app_quit
   "$SEED" --database "$SIRIO_DB" --appearance dark --limit-mounted 2
   app_start
   select_repo
   WT_ID="$(worktree_id "$WT")"
-  [ ! -e "$RUN_DIR/ide-proposals/stale-proposal-file" ] || fail "$CASE: the scratch directory was not swept at launch"
-  [ "$(stat -c %a "$RUN_DIR/ide-proposals")" = 700 ] || fail "$CASE: the scratch directory is not private"
+  [ ! -e "$STATE_DIR/ide-proposals/stale-proposal-file" ] || fail "$CASE: the scratch directory was not swept at launch"
+  [ "$(stat -c %a "$STATE_DIR/ide-proposals")" = 700 ] || fail "$CASE: the scratch directory is not private"
   echo "OK: the scratch directory was swept at launch and is private"
   wait_lockfile >/dev/null
   local a c a_id c_id
