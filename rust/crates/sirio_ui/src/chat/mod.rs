@@ -3792,6 +3792,8 @@ impl Chat {
                 }
                 return;
             }
+            // Read by the background-task registry, which comes with its UI.
+            sirio_chat::ChatEvent::BackgroundTask(_) => {}
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
         // this chat's own `set_mode` resolving) only reaches the wire as an

@@ -23,7 +23,7 @@ use sirio_chat_child::{
     ChildHandle, PERMISSION_TIMEOUT, PROMPT_TIMEOUT, SHUTDOWN_TIMEOUT, detach_worker,
     terminate_and_reap_blocking,
 };
-use sirio_claude::{ContextBreakdown, McpAuthStart, McpServer, RewindOutcome};
+use sirio_claude::{ContextBreakdown, McpAuthStart, McpServer, RewindOutcome, TaskOutput};
 
 use sirio_chat_vocab::{ChatError, EventStream, ModeCatalog, ModelCatalog, TimeoutOperation};
 
@@ -494,6 +494,15 @@ impl ClaudeClient {
         self.mcp_control().authenticate(server)
     }
 
+    /// A handle that reads a background task's output and stops it, from
+    /// another thread.
+    #[must_use]
+    pub fn task_control(&self) -> TaskControl {
+        TaskControl {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+
     /// A handle that makes the three connector calls from another thread.
     /// The client itself is not `Clone`, and the calls block.
     #[must_use]
@@ -558,6 +567,55 @@ impl McpControl {
             start.auth_url = None;
         }
         Ok(start)
+    }
+}
+
+/// The background-task calls of one session, detached from the client like
+/// [`McpControl`]: `output` blocks, so none of it belongs on a UI thread. A
+/// handle outliving its session answers that the worker is not running.
+#[derive(Clone)]
+pub struct TaskControl {
+    command_tx: async_channel::Sender<worker::Command>,
+}
+
+impl std::fmt::Debug for TaskControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskControl").finish_non_exhaustive()
+    }
+}
+
+impl TaskControl {
+    /// The tail of a background shell's or Monitor's output. Blocking,
+    /// bounded at 5 s. The `Err` is the CLI's own sentence, so that
+    /// [`sirio_claude::is_refusal`] can tell a refused verb from a task it
+    /// could not read; `"busy"` says a read of this task is already in flight
+    /// and nothing was written.
+    pub fn output(&self, task_id: &str) -> Result<TaskOutput, String> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::TaskOutput {
+                task_id: task_id.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| format!("the Claude worker is not running: {error}"))?;
+        match reply_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("get_task_output timed out after 5s".to_string())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("the Claude worker is not running: get_task_output went unanswered".to_string())
+            }
+        }
+    }
+
+    /// Stops a task. Fire and forget: the CLI answers `success` either way
+    /// and the task's own `task_*` lines carry the end. Never a turn's
+    /// cancel, which would end the turn in flight as well.
+    pub fn stop(&self, task_id: &str) {
+        let _ = self.command_tx.send_blocking(worker::Command::StopTask {
+            task_id: task_id.to_string(),
+        });
     }
 }
 

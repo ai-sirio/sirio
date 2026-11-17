@@ -259,6 +259,49 @@ pub struct BackgroundTask {
     /// The CLI's own word for what runs it, e.g. `local_bash`.
     pub task_type: Option<String>,
     pub description: Option<String>,
+    /// The run the task belongs to. 2.1.257 never sends it.
+    #[serde(deserialize_with = "lenient")]
+    pub run_id: Option<String>,
+    /// The task that started this one, when a task started it.
+    #[serde(deserialize_with = "lenient")]
+    pub parent_task_id: Option<String>,
+}
+
+/// What `get_task_output` answers: the tail of a task's output file.
+///
+/// Read leniently: an answer that lacks a field, or has one of another
+/// type, is still an answer, and the field falls back to its default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaskOutput {
+    /// The last 8 KiB of the output, ANSI and `\r` included. When
+    /// `truncated` it can start mid-line, even mid-character (one leading
+    /// U+FFFD).
+    pub output: String,
+    /// The size of the whole output, in bytes.
+    pub total_bytes: u64,
+    pub truncated: bool,
+}
+
+impl TaskOutput {
+    /// Reads the response body.
+    #[must_use]
+    pub fn parse(payload: &serde_json::Value) -> Self {
+        Self {
+            output: payload
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            total_bytes: payload
+                .get("total_bytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default(),
+            truncated: payload
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// A `rate_limit_event`: the plan's windows, pushed mid-session.

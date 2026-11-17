@@ -694,6 +694,7 @@ fn apply_event(state: &mut ChatState, event: ChatEvent) -> EventFold {
         | ChatEvent::TokenUsageBreakdown { .. }
         | ChatEvent::OtherSessionUpdate { .. }
         | ChatEvent::CliState { .. }
+        | ChatEvent::BackgroundTask(_)
         | ChatEvent::Trace(_) => EventFold::default(),
     }
 }

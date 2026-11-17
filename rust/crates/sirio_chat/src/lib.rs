@@ -14,7 +14,7 @@ mod chat;
 mod claude;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
-pub use claude::{ClaudeClient, ClaudeLaunch, McpControl};
+pub use claude::{ClaudeClient, ClaudeLaunch, McpControl, TaskControl};
 pub use sirio_acp::AgentCommand;
 pub use sirio_chat_vocab::*;
 
@@ -360,6 +360,16 @@ impl ChatClient {
         }
     }
 
+    /// The background-task calls as a handle that can leave the GPUI thread.
+    /// ACP agents have none.
+    #[must_use]
+    pub fn task_control(&self) -> Option<TaskControl> {
+        match self {
+            Self::Claude(client) => Some(client.task_control()),
+            Self::Acp(_) => None,
+        }
+    }
+
     /// Asks the agent for each connector's state, blocking for up to 10 s.
     pub fn refresh_mcp_status(&self) -> Result<Vec<sirio_claude::McpServer>> {
         match self {
@@ -390,5 +400,5 @@ impl ChatClient {
 /// `sirio_claude`.
 pub use sirio_claude::{
     ContextBreakdown, ContextOrigins, FastMode, McpAuthStart, McpOrigin, McpServer, McpState,
-    OriginNode, Standing, THINKING_DISPLAYS,
+    OriginNode, Standing, THINKING_DISPLAYS, TaskOutput, is_refusal,
 };
