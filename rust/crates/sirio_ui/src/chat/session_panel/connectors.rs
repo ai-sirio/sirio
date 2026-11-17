@@ -121,6 +121,11 @@ impl Connectors {
         self.stamp
     }
 
+    /// Whether a list of servers has been read, so the card has more than its placeholder.
+    pub(super) fn is_read(&self) -> bool {
+        self.servers.is_some()
+    }
+
     fn has_starting(&self) -> bool {
         self.servers
             .iter()
@@ -816,6 +821,7 @@ mod tests {
                 NOTION,
                 "connectors/user",
                 CODEGRAPH,
+                "connectors.reload",
             ]
         );
         assert_eq!(

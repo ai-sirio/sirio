@@ -119,6 +119,27 @@ switch sits in a wrapper that stops a mouse-down, so a click on it never reaches
 Sign in or Reconnect; its element id is a hash of the row key, never the key or the row's index, since
 Ely logs a checkbox's id on every click. `switchButtons` in the `sessionPanel` JSON holds each
 switch's drawn bounds, as `stopButtons` does for Stop.
+The reload row (A6): the Connectors card ends with a row `Plugins and skills` whose action is
+`Reload` (`session_panel/reload.rs`, key `connectors.reload`), drawn only once the card has read the
+servers (`Connectors::is_read`); the debug `activate` follows the same condition. While no turn runs it sends
+`reload_plugins` and then, only if that applied, `reload_skills`; the slash list takes the `commands` of
+the `reload_plugins` answer (`replace_commands`, then `AvailableCommands`), and a changed skill list
+arrives as `commands_changed`; the card reads `mcp_status` again afterwards. The first `reload_plugins` carries `hold_on_cache_impact: true`,
+so a reload that would reset the prompt cache is held: nothing is reloaded, no `reload_skills` is sent,
+the row's note gives the cost warning with the servers the reload would add or remove and the LSP tool
+change (names go through `visible_text`), and the action becomes `Reload anyway`, which sends the
+request without the hold. `refuse_if_busy: true` is added only when the CLI's `initialize` answer lists
+`reload_plugins_refuse_if_busy_v1`; a flag that is not sent is absent, never `false`. The chat is busy
+while `is_streaming()` or while `cli_state()` (never `deciding_cli_state()`, so a turn the CLI started
+counts) is `running` or `requires_action`: the row then sends nothing and says
+`Claude is busy with a turn. Try again when it ends.`, which a turn's end or the CLI going idle clears.
+The gate is read again after `reload_plugins` and before `reload_skills`, and the CLI's own busy
+refusal is recognised by its `error_code` (`reload_plugins_busy`), never its text. A reload that
+applied with load errors says `<n> plugins failed to load.`; any other failure says `Reload failed:`
+and the CLI's sentence. A second Reload while one runs fails and sends nothing, the row reading
+`reloading…`. A refusal of either verb (`sirio_chat::is_refusal`) hides the row until the next
+connection, so the 2.1.257 floor degrades to no row where the verbs are missing, and the busy refusal is
+not asked for where the capability is missing. `reload_output_styles` is never sent.
 `surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full`,
 `compact`, `narrow` or `minimal`, the `band`, `root`, `send`, `chips`, `overflowButton`, `field` (the text field's box, its vertical padding
 included) and `edge` (the strip along the composer's top that a drag resizes by) boxes as `[x, y, w, h]`,

@@ -405,6 +405,19 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # toggles that server and starts no sign-in, with two captures). New fixture variables, passed by launch()
 # and reset per scenario: SIRIO_FIXTURE_TOGGLE (refused or missing) and SIRIO_FIXTURE_TOGGLE_GATE (a file
 # whose absence holds every mcp_toggle answer). Every count reads only the lines after a control_log_lines mark.
+# A6, the reload row, on the same stub (the twelve reload_* scenarios, each ending with no mcp_toggle after its
+# mark): reload_plugins_and_skills (reload_plugins with the hold and refuse_if_busy, then reload_skills; the row is
+# back to Reload and the plugin server joins the card), reload_floor (SIRIO_FIXTURE_FLOOR=1: the hold without
+# refuse_if_busy, an answer with no `held` is applied), reload_held (SIRIO_FIXTURE_RELOAD=held: the cost warning,
+# a bidi override shown as text, Reload anyway sends no hold and is followed by reload_skills; a framed run
+# captures the held card), reload_held_then_busy (a turn during the hold adds the busy note and sends nothing; its
+# end leaves the warning), reload_busy_refusal (SIRIO_FIXTURE_RELOAD=busy), reload_busy_cli
+# (SIRIO_FIXTURE_CLI_BUSY_GATE: a turn the CLI started), reload_busy_turn, reload_busy_before_skills
+# (SIRIO_FIXTURE_RELOAD_GATE holds reload_plugins while a turn begins: no reload_skills), reload_in_flight
+# (reloading…, a second activate fails), reload_refused (SIRIO_FIXTURE_RELOAD=refused hides the row),
+# reload_skills_refused (SIRIO_FIXTURE_SKILLS=refused hides it after an applied reload) and reload_errors
+# (`2 plugins failed to load.`). New fixture variables, passed by launch() and reset per scenario:
+# SIRIO_FIXTURE_RELOAD, SIRIO_FIXTURE_RELOAD_GATE, SIRIO_FIXTURE_SKILLS and SIRIO_FIXTURE_CLI_BUSY_GATE.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 

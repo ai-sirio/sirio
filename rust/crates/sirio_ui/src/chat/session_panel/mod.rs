@@ -15,6 +15,7 @@ mod connectors;
 mod context;
 mod environment;
 mod permissions;
+mod reload;
 mod trace;
 
 use super::composer_height::cap_rows;
@@ -280,6 +281,7 @@ pub(super) struct SessionPanel {
     flipped: HashSet<String>,
     context: context::Context,
     connectors: connectors::Connectors,
+    reload: reload::Reload,
     permissions: permissions::Permissions,
     change_request: change_request::ChangeRequest,
     /// What the frames the chat is painted in have told it.
@@ -299,6 +301,7 @@ impl SessionPanel {
     pub(super) fn clear_session(&mut self) {
         self.context.clear();
         self.connectors.clear();
+        self.reload = reload::Reload::default();
         self.permissions.clear();
     }
 
@@ -312,6 +315,7 @@ impl SessionPanel {
             flipped: HashSet::new(),
             context: context::Context::default(),
             connectors: connectors::Connectors::default(),
+            reload: reload::Reload::default(),
             permissions: permissions::Permissions::default(),
             change_request: change_request::ChangeRequest::default(),
             frame: Rc::new(Frame::default()),
@@ -430,11 +434,19 @@ impl Chat {
             self.streaming,
             &panel.flipped,
         ));
-        sections.extend(connectors::section(
+        let mut connectors = connectors::section(
             &panel.connectors,
             self.client.as_ref().is_some_and(ChatClient::supports_connectors),
             &panel.flipped,
-        ));
+        );
+        // The reload row ends the card, once the servers have been read.
+        if let Some(section) = connectors.as_mut()
+            && panel.connectors.is_read()
+            && self.client.as_ref().and_then(ChatClient::reload_control).is_some()
+        {
+            section.rows.extend(reload::row(&panel.reload));
+        }
+        sections.extend(connectors);
         sections.extend(permissions::section(
             &panel.permissions,
             self.client.as_ref().and_then(ChatClient::rules_control).is_some(),
@@ -484,6 +496,9 @@ impl Chat {
     /// Runs the action of the row with this key: a row with a file opens it
     /// in a tab, a connector's row signs in or reconnects.
     fn activate_session_row(&mut self, key: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        if key == reload::RELOAD_KEY {
+            return self.activate_reload(cx);
+        }
         if key.starts_with("connectors/") {
             return self.activate_connector(key, cx);
         }
