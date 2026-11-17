@@ -219,6 +219,16 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 /// fills paint across a card's whole box, so cards that touch merge into
 /// one highlight block; this keeps them reading as separate cards.
 pub(crate) const ROW_V_GAP: f32 = 2.0;
+
+/// Space after the last card of an expanded project, before the next project.
+const PROJECT_END_SPACE: f32 = 8.0;
+
+/// Whether `rows[index]` is the last card of an expanded project: a worktree
+/// followed by a project row or by nothing.
+fn closes_project(rows: &[SidebarRow], index: usize) -> bool {
+    rows[index].kind == RowKind::Worktree
+        && rows.get(index + 1).is_none_or(|next| next.kind == RowKind::Project)
+}
 /// Two-line card height: 8 + 18 + 4 + 15 + 8 — Zed's two-line thread row.
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 53.0;
 /// A visible row in the flattened sidebar tree.
@@ -1253,7 +1263,7 @@ impl Sidebar {
 
         let mut offset = 0.0;
         let mut current = None;
-        for row in rows {
+        for (index, row) in rows.iter().enumerate() {
             if offset > scrolled {
                 break;
             }
@@ -1265,6 +1275,9 @@ impl Sidebar {
                 _ => CARD_TWO_LINE_HEIGHT,
             };
             offset += height + ROW_V_GAP;
+            if closes_project(rows, index) {
+                offset += PROJECT_END_SPACE;
+            }
         }
         current
     }
@@ -4577,12 +4590,19 @@ impl Render for Sidebar {
                         render_count: 0,
                     }),
                 };
-                rendered_rows.push(if cache_rows && !changed {
+                let card = if cache_rows && !changed {
                     view.clone()
                         .cached(StyleRefinement::default().w_full().h(px(row_height)))
                         .into_any_element()
                 } else {
                     view.clone().into_any_element()
+                };
+                // The margin sits on a wrapper, not on the cached view, and
+                // `sticky_section` adds the same space to its arithmetic.
+                rendered_rows.push(if closes_project(&rows, index) {
+                    div().mb(px(PROJECT_END_SPACE)).child(card).into_any_element()
+                } else {
+                    card
                 });
                 next_views.insert(row_id, view);
             }
@@ -5380,7 +5400,7 @@ mod tests {
     use super::*;
 
     /// Opens the New Worktree prompt the way a user does. The section
-    /// header's `+` is hover-revealed (`group_hover`), and gpui lays an
+    /// project row's `+` is hover-revealed (`group_hover`), and gpui lays an
     /// invisible element out — so `debug_bounds` finds it — but does not
     /// hit-test it, so the header has to be hovered before the click.
     fn click_section_add(cx: &mut VisualTestContext) {
