@@ -700,7 +700,10 @@ pub struct Sidebar {
     /// The header bell's list of sessions that want the user.
     bell_menu: Popup<()>,
     /// The New Chat row's list of agents for the selected worktree.
-    new_chat_menu: Popup<()>,
+    new_chat_menu: Popup<SidebarContextTarget>,
+    /// The worktree New Chat aims at, by path: the last one the host or a
+    /// click selected. Selecting a project row leaves it alone.
+    current_worktree: Option<PathBuf>,
     /// When the bell opened (Unix ms): its entries' ages are read at this
     /// instant, so the list does not tick while it is open.
     bell_opened_at_ms: i64,
@@ -1085,6 +1088,7 @@ impl Sidebar {
             view_menu: Popup::default(),
             bell_menu: Popup::default(),
             new_chat_menu: Popup::default(),
+            current_worktree: None,
             bell_opened_at_ms: 0,
             bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
@@ -1194,6 +1198,7 @@ impl Sidebar {
             view_menu: Popup::default(),
             bell_menu: Popup::default(),
             new_chat_menu: Popup::default(),
+            current_worktree: None,
             bell_opened_at_ms: 0,
             bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
@@ -1975,8 +1980,10 @@ impl Sidebar {
     }
 
     fn toggle_new_chat_menu(&mut self, cx: &mut Context<Self>) {
-        if !self.new_chat_menu.take_press_was_open() && self.selected_worktree_row().is_some() {
-            self.new_chat_menu.open(());
+        if !self.new_chat_menu.take_press_was_open()
+            && let Some(target) = self.new_chat_target()
+        {
+            self.new_chat_menu.open(target);
             self.view_menu.close();
             self.bell_menu.close();
         }
@@ -1991,12 +1998,25 @@ impl Sidebar {
         }
     }
 
-    /// The row id of the selected worktree, the one New Chat opens in.
-    fn selected_worktree_row(&self) -> Option<usize> {
+    /// The row id of the current worktree, the one New Chat opens in: the
+    /// remembered one when it is still listed, else the selected worktree.
+    fn current_worktree_row(&self) -> Option<usize> {
+        let remembered = self.current_worktree.as_deref();
         self.rows
             .iter()
-            .find(|row| row.selected && row.kind == RowKind::Worktree)
+            .find(|row| {
+                row.kind == RowKind::Worktree
+                    && match remembered {
+                        Some(path) => row.path.as_deref() == Some(path),
+                        None => row.selected,
+                    }
+            })
             .map(|row| row.id)
+    }
+
+    fn new_chat_target(&self) -> Option<SidebarContextTarget> {
+        self.current_worktree_row()
+            .and_then(|row_id| self.context_target(row_id))
     }
 
     fn close_bell_menu(&mut self, cx: &mut Context<Self>) {
@@ -2500,6 +2520,16 @@ impl Sidebar {
     }
 
     fn select_row(&mut self, id: usize, cx: &mut Context<Self>) {
+        if self.current_worktree.is_none() {
+            self.current_worktree = self.current_worktree_row().and_then(|row| {
+                self.rows.iter().find(|r| r.id == row).and_then(|r| r.path.clone())
+            });
+        }
+        if let Some(row) = self.rows.iter().find(|row| row.id == id && row.kind == RowKind::Worktree)
+            && row.path.is_some()
+        {
+            self.current_worktree = row.path.clone();
+        }
         for row in &mut self.rows {
             row.selected = row.id == id;
         }
@@ -2510,6 +2540,7 @@ impl Sidebar {
     /// by calling this, so the highlight always agrees with what the shell
     /// actually treats as the current worktree.
     pub fn set_selected_worktree(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.current_worktree = Some(path.to_path_buf());
         let mut changed = false;
         for row in &mut self.rows {
             let selected = row.kind == RowKind::Worktree && row.path.as_deref() == Some(path);
@@ -3811,12 +3842,9 @@ impl Sidebar {
     /// launch a chat in the selected worktree. Without a selected worktree it
     /// is muted, opens nothing and says why in its tooltip.
     fn render_new_chat(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let target = self
-            .selected_worktree_row()
-            .and_then(|row_id| self.context_target(row_id));
-        let enabled = target.is_some();
-        let menu = match (&target, self.new_chat_menu.get()) {
-            (Some(target), Some(_)) => {
+        let enabled = self.new_chat_target().is_some();
+        let menu = match self.new_chat_menu.get() {
+            Some(target) => {
                 let outside = cx.entity();
                 let card = menu_card("sidebar-new-chat-menu", cx)
                     .debug_selector(|| "sidebar-new-chat-menu".to_owned())
@@ -3840,7 +3868,7 @@ impl Sidebar {
                     cx,
                 ))
             }
-            _ => None,
+            None => None,
         };
         let color = if enabled { theme.ely.fg } else { theme.ely.fg_muted };
         div()
@@ -8785,7 +8813,7 @@ mod tests {
         let events = tests_support::collect_events(&sidebar, &mut cx);
         let expected = window
             .update(&mut cx, |s, _, _| {
-                let row = s.selected_worktree_row().expect("a selected worktree");
+                let row = s.current_worktree_row().expect("a current worktree");
                 s.context_target(row).expect("its target")
             })
             .unwrap();
@@ -8803,6 +8831,44 @@ mod tests {
         cx.executor().advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "the menu closes");
+    }
+
+    fn emitted_new_chat_path(events: &std::rc::Rc<std::cell::RefCell<Vec<SidebarEvent>>>) -> Option<PathBuf> {
+        events.borrow().iter().find_map(|event| match event {
+            SidebarEvent::ContextAction {
+                target: SidebarContextTarget::Worktree { path, .. },
+                action: SidebarContextAction::NewChatAgent("codex"),
+            } => Some(path.clone()),
+            _ => None,
+        })
+    }
+
+    #[gpui::test]
+    async fn new_chat_survives_selecting_a_project_row(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-row-0");
+        assert!(cx.debug_bounds("sidebar-new-chat-disabled").is_none(), "still enabled");
+        click_control(&mut cx, "sidebar-new-chat");
+        click_control(&mut cx, "sidebar-context-chat-agent-codex");
+        assert_eq!(emitted_new_chat_path(&events), Some(PathBuf::from("/tmp/sirio")));
+    }
+
+    #[gpui::test]
+    async fn new_chat_keeps_the_worktree_the_menu_was_opened_for(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-new-chat");
+        window
+            .update(&mut cx, |s, _, cx| {
+                s.set_selected_worktree(std::path::Path::new("/tmp/sirio-feat-x"), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-context-chat-agent-codex");
+        assert_eq!(emitted_new_chat_path(&events), Some(PathBuf::from("/tmp/sirio")));
     }
 
     #[gpui::test]
