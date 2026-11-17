@@ -1,21 +1,21 @@
 # Ely integration (chat and editor)
 
-Upstream: https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components
-(the host the 2026-11 sync compared against). Upstream has since moved to
-https://github.com/ELY-Open-Source/Ely-GPUI-Components; its history was
-rewritten in the move. The GitHub repository
-https://github.com/ZacharyZhang-NY/Ely-GPUI-Components is a stale mirror: its
-`main` stops at 2026-10-09.
+Upstream: https://github.com/ELY-Open-Source/Ely-GPUI-Components
+The history was rewritten before the move to that repository: `e17e31a6` became
+`e3957f78` on upstream's `main` (same author date and tree). In the moved
+repository `e3957f78` and `7f7a715d` are ancestors of its HEAD, `2d827752`, and
+`e17e31a6` survives under the tag `pre-coauthor-strip`. The 2026-11 sync
+compared against the git.zacharyzhang.com copy of the same history
+(`e3957f78..7f7a715d`), https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.
+The GitHub repository https://github.com/ZacharyZhang-NY/Ely-GPUI-Components is
+a stale mirror: its `main` stops at 2026-10-09.
 Revision: `e17e31a6890c09ebcfa8b61133d7bc7c625edf69`
 `e17e31a6` equals `e3957f78` on upstream's rewritten `main`: same author date
-(2026-09-30T00:29:08-04:00) and identical tree (checked 2026-11-16). The 2026-11
-sync compared `e3957f78..7f7a715d` on
-https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components. `7f7a715d` is an
-ancestor of the moved repository's HEAD, `2d827752` (2026-11-15), which is split
-into crates under `crates/` and uses `gpui-pre =0.3.12` where Sirio is on
-`bezel-gpui =0.3.8`. Of the 259 commits after `7f7a715d`, those touching the
-ported files are refactors, accessibility and API changes; none is a newer
-caret, IME or tabs behaviour fix.
+(2026-09-30T00:29:08-04:00) and identical tree (checked 2026-11-16).
+`2d827752` (2026-11-15) is split into crates under `crates/` and uses
+`gpui-pre =0.3.12` where Sirio is on `bezel-gpui =0.3.8`. Of the 259 commits
+after `7f7a715d`, those touching the ported files are refactors, accessibility
+and API changes; none is a newer caret, IME or tabs behaviour fix.
 Upstream `main` no longer has this revision's hash: `e17e31a6` is not an
 ancestor of `origin/main` in the upstream clone's existing refs (checked
 2026-10-17 without fetching). The vendored sources are this revision's content,
@@ -376,8 +376,10 @@ Every deviation from upstream is listed above, with the file it changes.
 Vendored from the same revision for Sirio's change-request surfaces and its
 Changes view (`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` §4):
 
-- `src/navigation/tabs.rs` — verbatim. `navigation/mod.rs` is local and
-  declares only this module; the rest of upstream's `navigation/` is excluded.
+- `src/navigation/tabs.rs` — upstream main plus one local line (the `compact`
+  condition at `tabs.rs:140`); see "Ports from upstream main (2026-11 sync)"
+  below. `navigation/mod.rs` is local and declares only this module; the rest of
+  upstream's `navigation/` is excluded.
 - `src/git/badges.rs` — verbatim except one import: `GitStatus` comes from
   `super::status` instead of `crate::lists`.
 - `src/git/status.rs` — upstream's `GitStatus` and its `impl`, verbatim from
@@ -387,7 +389,8 @@ Changes view (`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.m
 
 Caveats a host must respect:
 
-- `Tabs` panics when `selected` names no tab's `value`. Build `selected`
+- `Tabs` marks no tab when `selected` names no tab's `value`, and `slide` logs
+  an error on every render (`src/motion/slide.rs`, `73a8bf2`). Build `selected`
   from the same list passed as tabs.
 - `Tabs`' arrow keys act only while its strip holds focus, and a click on a
   tab does not give it focus (`prevent_default` on mouse-down). This build
@@ -618,16 +621,19 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   chosen tab in view when it is too narrow for every label, and a long label is
   cut to fit. `src/layout/mod.rs` takes two lines, `mod narrow;` and
   `pub(crate) use narrow::{measure_width, text_width};`. `src/theme/tokens.rs`
-  is merged: it gains `Theme::hairline` (`px(1.0)`) with no conflict. The port
-  adds no public API Sirio calls and no inline test.
+  is merged: it gains `Theme::hairline` (`px(1.0)`) with no conflict. That
+  hunk comes from `cb5e35f`, which also touched `narrow.rs` after `6d95b24`.
+  The port adds no public API Sirio calls and no inline test.
   Skipped from `6d95b24`: its other files, namely the narrow `ScrollArea`
   (`layout/scroll.rs` keeps Sirio's hover change), the property rows, the
   segments, and the status items in the vendored `src/shell/bars.rs` (items
   that shrink and end in an ellipsis).
   Also not taken, vendored files the listed commits touch: `919f26f`'s
   `navigation/breadcrumb.rs`; `4580e3b`'s `buttons/button.rs`,
-  `buttons/icon_button.rs`, `overlays/dialog.rs`, `forms/text/actions.rs` (IME
-  Enter handling) and `shell/bars.rs`; `cb5e35f`'s `shell/bars.rs`; and the
+  `buttons/icon_button.rs`, `overlays/dialog.rs` (its IME Enter change, which
+  Sirio's local Enter handling above covers), `forms/text/actions.rs`
+  (accessibility only: `Role::TextInput`, `aria_label` and `aria_value`) and
+  `shell/bars.rs`; `cb5e35f`'s `shell/bars.rs`; and the
   tests of `9977785`, `919f26f`, `e56a343`, `3a68d1b` and `7d704d9` under
   `navigation/tests*`, which is not vendored.
 - `73a8bf2`: `src/motion/slide.rs` verbatim (a slide whose `selected` is not
@@ -651,10 +657,19 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   out; the port documents them and does not apply them):
   - `e2d880f`'s `select()` hunk in `src/forms/text/mod.rs`: `select` keeps its
     `assert!` on an out-of-range selection, where upstream logs and ignores it.
-  - `e2d880f`'s part in `src/forms/files.rs`.
-  - `6d95b24`'s part in `src/layout/scroll.rs`.
+    The assert stays because every Sirio caller of the text input passes an
+    in-range selection: `0..0`, `0..len` or `0..end` with the length read just
+    before the call, or a fixed range that the tests of `ely_ui.rs` pick inside
+    their text.
+  - `e2d880f`'s part in `src/forms/files.rs`: its `file_name` is reached only
+    through `FileInput`'s render, and no Sirio code names `FileInput` or
+    `DropZone`.
+  - `6d95b24`'s part in `src/layout/scroll.rs`: that file keeps Sirio's local
+    hover change (see its entry under "Local source changes").
   - The tests of `2a18e9d` and `152d881`: they live in `forms/tests/`, which is
     not vendored.
+  - `tasks/github.md` and `tasks/reviews.md` (`2a18e9d`, `152d881`): not
+    vendored; the upstream `tasks/` notes sit outside `src/`.
 
 Not ported (2026-11 sync):
 
