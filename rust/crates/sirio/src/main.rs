@@ -3759,23 +3759,35 @@ impl ControlHandler for AppControlHandler {
                 let action = match request.params.get("action").map(String::as_str) {
                     Some("open") => SessionPanelAction::Open,
                     Some("close") => SessionPanelAction::Close,
-                    Some(verb @ ("toggle" | "activate")) => {
+                    Some(verb @ ("toggle" | "activate" | "switch")) => {
                         let Some(key) = key else {
                             return ControlResponse::failure(
                                 &request.id,
                                 format!("surface.chat.panel {verb} requires key"),
                             );
                         };
-                        if verb == "toggle" {
-                            SessionPanelAction::Toggle(key)
-                        } else {
-                            SessionPanelAction::Activate(key)
+                        match verb {
+                            "toggle" => SessionPanelAction::Toggle(key),
+                            "activate" => SessionPanelAction::Activate(key),
+                            _ => {
+                                let on = match request.params.get("on").map(String::as_str) {
+                                    Some("true") => true,
+                                    Some("false") => false,
+                                    _ => {
+                                        return ControlResponse::failure(
+                                            &request.id,
+                                            "surface.chat.panel switch requires on true or false",
+                                        );
+                                    }
+                                };
+                                SessionPanelAction::Switch { key, on }
+                            }
                         }
                     }
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.chat.panel requires action open, close, toggle or activate",
+                            "surface.chat.panel requires action open, close, toggle, activate or switch",
                         );
                     }
                 };
@@ -49840,7 +49852,7 @@ done
             "surface.chat.permission" => request_with_params(method, &[]),
             "surface.chat.stop" => request_with_params(method, &[]),
             "surface.chat.read" => request_with_params(method, &[]),
-            "surface.chat.panel" => request::chat_panel("chat-1", "open", None),
+            "surface.chat.panel" => request::chat_panel("chat-1", "open", None, None),
             "surface.chat.effort" => request::chat_effort("chat-1", "open", None),
             "surface.chat.elicitation" => {
                 request::chat_elicitation("chat-1", 1, Some(1), None, false)

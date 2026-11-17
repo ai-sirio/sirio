@@ -21,6 +21,7 @@ use super::composer_height::cap_rows;
 use super::composer_row::probe_notifies;
 use super::*;
 use ely_gpui_component::{
+    forms::Checkbox,
     primitives::{Icon, IconName},
     theme::{ActiveTheme as _, IconSize as ElyIconSize},
 };
@@ -49,6 +50,8 @@ pub enum SessionPanelAction {
     Toggle(String),
     /// Runs the action of the row with this key.
     Activate(String),
+    /// Flips the switch of the connector row with this key, to on or off.
+    Switch { key: String, on: bool },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
@@ -64,6 +67,10 @@ pub struct SessionPanelSnapshot {
     /// unfolded: task id to `[x, y, width, height]` in window pixels.
     #[serde(rename = "stopButtons")]
     pub stop_buttons: std::collections::BTreeMap<String, [f32; 4]>,
+    /// The Connectors card's switches as last drawn, while the card is unfolded: row key to
+    /// `[x, y, width, height]` in window pixels.
+    #[serde(rename = "switchButtons")]
+    pub switch_buttons: std::collections::BTreeMap<String, [f32; 4]>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -92,6 +99,8 @@ pub struct RowSnapshot {
     /// The background task this row stops, while it runs (A3): its Stop is
     /// the row's own button.
     pub stop: Option<String>,
+    /// The connector switch's state, `None` for a row with no switch.
+    pub switch: Option<bool>,
 }
 
 /// One line of a card, as it is drawn and as the snapshot reports it.
@@ -135,6 +144,14 @@ pub(super) struct Row {
     pub(super) note: String,
     /// The background task a Stop on this row ends, while it runs.
     pub(super) stop: Option<String>,
+    /// The switch at the line's end (a connector's).
+    pub(super) switch: Option<RowSwitch>,
+}
+
+/// A server row's switch: whether it reads on, and whether a click is taken now.
+pub(super) struct RowSwitch {
+    pub(super) on: bool,
+    pub(super) enabled: bool,
 }
 
 /// How a status dot reads, resolved to a theme colour when it is drawn.
@@ -168,6 +185,7 @@ impl Row {
             tag_below: false,
             note: String::new(),
             stop: None,
+            switch: None,
         }
     }
 
@@ -238,6 +256,9 @@ pub(super) struct Frame {
     /// Where the Trace card's Background rows drew their Stop buttons, by task id, in window
     /// pixels `[x, y, width, height]`: what a real click is aimed at.
     stop_buttons: std::cell::RefCell<std::collections::BTreeMap<String, [f32; 4]>>,
+    /// Where the Connectors card's rows drew their switches, by row key, in window pixels
+    /// `[x, y, width, height]`: what a real click is aimed at.
+    switch_buttons: std::cell::RefCell<std::collections::BTreeMap<String, [f32; 4]>>,
 }
 
 /// Where the column is drawn, which the chat's width decides.
@@ -383,6 +404,12 @@ impl Chat {
                     return Err("the session panel is closed".to_string());
                 }
                 return self.activate_session_row(&key, cx);
+            }
+            SessionPanelAction::Switch { key, on } => {
+                if !self.session_panel.open {
+                    return Err("the session panel is closed".to_string());
+                }
+                return self.switch_connector(&key, on, cx);
             }
         }
         Ok(())
@@ -575,6 +602,7 @@ impl Chat {
                             action: row.action,
                             note: row.note,
                             stop: row.stop,
+                            switch: row.switch.map(|switch| switch.on),
                         })
                         .collect(),
                 })
@@ -593,6 +621,12 @@ impl Chat {
                 && self.trace.latest().is_some()
             {
                 panel.frame.stop_buttons.borrow().clone()
+            } else {
+                Default::default()
+            },
+            // Only an unfolded card draws its switches, and the last bounds of a folded one are stale.
+            switch_buttons: if panel.open && !panel.collapsed.contains("connectors") {
+                panel.frame.switch_buttons.borrow().clone()
             } else {
                 Default::default()
             },
@@ -791,12 +825,19 @@ impl Chat {
                             .child(section.note.clone()),
                     )
                 })
-                .children(
+                .children({
+                    // What this draw measures is what a click can be aimed at: a row of a
+                    // group the reader closed has no switch.
+                    if key == "connectors" {
+                        self.session_panel.frame.switch_buttons.borrow_mut().clear();
+                    }
+                    let frame = self.session_panel.frame.clone();
                     section
                         .rows
                         .iter()
-                        .map(|row| Self::render_session_row(row, theme, cx)),
-                )
+                        .map(|row| Self::render_session_row(row, &frame, theme, cx))
+                        .collect::<Vec<_>>()
+                })
             })
             .into_any_element()
     }
@@ -820,10 +861,83 @@ impl Chat {
             .into_any_element()
     }
 
+    /// The switch at a server row's end. Its element ids are a hash of the row key: Ely logs a
+    /// checkbox's id on every click, so the key and the server's name must not be in it, and a row's
+    /// index would hand a checkbox's focus and motion to another server when the rows re-sort.
+    fn render_row_switch(
+        key: &str,
+        switch: &RowSwitch,
+        frame: &Rc<Frame>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // A key per process: the id is stable for the run, which keeps a checkbox's focus and
+        // motion on its server, and the click log cannot be reversed with a dictionary of names.
+        static IDS: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+            std::sync::OnceLock::new();
+        let hash = std::hash::BuildHasher::hash_one(
+            IDS.get_or_init(std::collections::hash_map::RandomState::new),
+            key,
+        );
+        let entity = cx.entity();
+        let flipped = key.to_string();
+        let measured = key.to_string();
+        let frame = frame.clone();
+        div()
+            .id(("session-switch-box", hash))
+            .debug_selector({
+                let selector = format!("session-row-switch-{key}");
+                move || selector.clone()
+            })
+            .relative()
+            .flex_none()
+            .tooltip(crate::controls::tooltip(
+                "Saved in Claude Code's settings for this folder",
+            ))
+            // The row's own click would sign in or reconnect: a press on the switch ends here, so
+            // the line never sees the mouse-down its click needs.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // Measures the switch for a real click to aim at; paints nothing.
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        frame.switch_buttons.borrow_mut().insert(
+                            measured,
+                            [
+                                bounds.origin.x.into(),
+                                bounds.origin.y.into(),
+                                bounds.size.width.into(),
+                                bounds.size.height.into(),
+                            ],
+                        );
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(
+                Checkbox::new(("session-switch", hash), switch.on)
+                    .disabled(!switch.enabled)
+                    .on_change(move |on, _, cx| {
+                        entity.update(cx, |chat, cx| {
+                            // A flip the card no longer takes says nothing here; the
+                            // row already shows why.
+                            let _ = chat.switch_connector(&flipped, on, cx);
+                        });
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// One row. Its text is read, not clicked, so it can be selected; a row
     /// that folds or acts is a clickable one, drawn without selectable text
     /// because a press on it would fire the click after a drag.
-    fn render_session_row(row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_row(
+        row: &Row,
+        frame: &Rc<Frame>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let caption = theme.typography.footnote;
         let key = SharedString::from(format!("session-row-{}", row.key));
         if row.heading {
@@ -935,6 +1049,10 @@ impl Chat {
             })
             .children(end.map(|(word, is_action)| {
                 div()
+                    .debug_selector({
+                        let selector = format!("session-row-end-{}", row.key);
+                        move || selector.clone()
+                    })
                     .flex_none()
                     .text_color(if is_action {
                         theme.ely.link
@@ -942,6 +1060,9 @@ impl Chat {
                         theme.ely.fg_muted
                     })
                     .child(word)
+            }))
+            .children(row.switch.as_ref().map(|switch| {
+                Self::render_row_switch(&row.key, switch, frame, cx)
             }));
         let line = div()
             .id(key.clone())

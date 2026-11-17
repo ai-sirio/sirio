@@ -84,8 +84,9 @@ starts folded, and which cards are folded does not survive a relaunch. Its cards
 (project, the chat's own directory, the branch read live), Context (what fills the window,
 folded by origin, from `get_context_usage` through `sirio_claude::context`; asked once on open
 when no report exists yet), Connectors (the session's MCP servers by origin, with Sign in and
-Reconnect, from `sirio_claude::mcp` and `sirio_chat::McpControl`, whose calls wait for the CLI
-and so run off the GPUI thread), Permissions (below), Trace (below) and Change request (the
+Reconnect and a switch on every server row, from `sirio_claude::mcp` and `sirio_chat::McpControl`,
+whose calls wait for the CLI and so run off the GPUI thread; the switch is below), Permissions
+(below), Trace (below) and Change request (the
 branch's pull or merge request through the forge source, sharing the right panel's per-host
 rate-limit pause, and read
 only once the card is unfolded and a frame paints the column, so a chat in a background tab asks
@@ -94,9 +95,30 @@ whether the Change request card is drawn at all; it reads local git config and t
 file and never runs `gh` or `glab`, and a forge you are not signed in to shows a muted "Not
 signed in to <host>" row rather than hiding the card. Connectors is Claude-native only and other
 agents get a total-only Context. The debug-only `surface.chat.panel`
-(`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
-it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
+(`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>|switch <key> on|off`)
+drives it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
 JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
+The connector switch (A6): every server row ends with an Ely `Checkbox`, whatever the server's
+origin, and its tooltip reads `Saved in Claude Code's settings for this folder`. A click sends
+`mcp_toggle` through `McpControl::toggle`, then reads `mcp_status` again; the debug action `switch`
+(`surface.chat.panel` with `action: "switch"`, `key`, and `on` of `"true"` or `"false"`) does the same.
+Sirio sends `mcp_toggle` only for that click or that action, never on connect, restore, reconnect,
+reload, retry or a new session. The switch's state is read only from `mcp_status`: a server reading
+`disabled` is off, so a row's `switch` in the `sessionPanel` JSON is `true`, `false` or, once the
+switches are hidden, `null`; while a toggle is open the row reads `switching…` and shows the state
+asked for, and a second flip of that server fails and sends nothing. A switch to the state the row
+already shows sends nothing. The saved state is Claude Code's: it writes it per folder, in its own
+settings, and a sibling worktree, being another folder, does not share it. For a user or project
+server this was seen on a live run; for claude.ai and plugin servers it rests on a read of the
+2.1.326 binary, not a live run. Sirio never reads or writes `.claude.json` or any other
+Claude Code settings file; it learns the state only from the CLI's `mcp_status`. Flipping a
+server off drops its sign-in poll, and a toggle that fails leaves the CLI's sentence under the row
+while the switch keeps what `mcp_status` last said. A CLI that refuses `mcp_toggle`
+(`sirio_chat::is_refusal`) hides every switch until the next connection (`switches_retired`). The
+switch sits in a wrapper that stops a mouse-down, so a click on it never reaches the row's own
+Sign in or Reconnect; its element id is a hash of the row key, never the key or the row's index, since
+Ely logs a checkbox's id on every click. `switchButtons` in the `sessionPanel` JSON holds each
+switch's drawn bounds, as `stopButtons` does for Stop.
 `surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full`,
 `compact`, `narrow` or `minimal`, the `band`, `root`, `send`, `chips`, `overflowButton`, `field` (the text field's box, its vertical padding
 included) and `edge` (the strip along the composer's top that a drag resizes by) boxes as `[x, y, w, h]`,

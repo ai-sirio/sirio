@@ -31,6 +31,20 @@ set -euo pipefail
 #                      CLAUDE.md row opening a file tab
 #   connectors         a failed server reconnecting to connected, a server that needs
 #                      sign-in waiting for it (the opened URL is looked for in a browser stub)
+#   connector_switch   (A6) every server row has a switch read only from mcp_status: switching codegraph off
+#                      reads disabled with no action, on reads starting then failed again, a repeat sends
+#                      nothing, Notion off loses its Sign in, and no mcp_authenticate is sent; exactly one
+#                      mcp_toggle per switch whose requested state differed from the shown one
+#   connector_switch_in_flight  (SIRIO_FIXTURE_TOGGLE_GATE) a row reads switching… while its toggle is open,
+#                      a second flip fails and sends nothing, and the row reads disabled once it answers
+#   connector_switch_waiting    a server waiting for its sign-in is switched off: the sign-in poll is dropped
+#                      (one mcp_status after the switch, the switch's own)
+#   connector_switch_refused    (SIRIO_FIXTURE_TOGGLE=refused) a refused mcp_toggle hides every switch and
+#                      leaves the rows and their notes as they were
+#   connector_switch_missing    (SIRIO_FIXTURE_TOGGLE=missing) a failed toggle puts the CLI's sentence under
+#                      the row, and the switch keeps the state mcp_status reported
+#   connector_switch_click      (framed, 2200x1000) a real X click at the switch's drawn bounds toggles that
+#                      server and starts no sign-in; a capture of the card and one with the pointer on the switch
 #   change_request     the branch's pull request as a card, its row opening the tab
 #   rate_limit_shared  a forge host paused by the right panel's list is paused for the card
 #                      too: the row says so and the forge sees no read of it during the pause
@@ -294,7 +308,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
-ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
+ALL_SCENARIOS=(environment default_folds context connectors connector_switch connector_switch_in_flight
+  connector_switch_waiting connector_switch_refused connector_switch_missing connector_switch_click
+  change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
@@ -338,10 +354,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize background_tail_card background_tail_tab background_stop_click background_lane_stop "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize background_tail_card background_tail_tab background_stop_click background_lane_stop connector_switch_click "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize background_stop_click "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize background_stop_click connector_switch_click "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -867,6 +883,23 @@ elif command == "stop-button-xy":
             print(f"FAIL: stop-button-xy: the Stop button of {task_id} was never drawn", file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
+elif command == "switch-button-xy":
+    # switch-button-xy SURFACE SECONDS KEY: wait for the Connectors card to have drawn the switch of
+    # the row KEY and print the window pixel at its centre as "x y".
+    surface, seconds, key = sys.argv[2], float(sys.argv[3]), sys.argv[4]
+    deadline = time.time() + seconds
+    while True:
+        try:
+            box = state(surface)[0].get("switchButtons", {}).get(key)
+            if box:
+                print(f"{round(box[0] + box[2] / 2)} {round(box[1] + box[3] / 2)}")
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print("FAIL: switch-button-xy: the switch was never drawn", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
 elif command == "composer-menu":
     # composer-menu SURFACE SECONDS REASON: wait for the overflow menu the compact row opens
     # (`picker` is `overflow` and `menu` the rows its render built), and assert them: Fast is
@@ -1161,6 +1194,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_PERMISSION_FIELDS=${SIRIO_FIXTURE_PERMISSION_FIELDS:-}" "SIRIO_FIXTURE_PERMISSION_RULES=${SIRIO_FIXTURE_PERMISSION_RULES:-}"
     "SIRIO_FIXTURE_RULES_LOG=${SIRIO_FIXTURE_RULES_LOG:-}" "SIRIO_FIXTURE_RULES_GATE=${SIRIO_FIXTURE_RULES_GATE:-}"
     "SIRIO_FIXTURE_RESULT_GATE=${SIRIO_FIXTURE_RESULT_GATE:-}"
+    "SIRIO_FIXTURE_TOGGLE=${SIRIO_FIXTURE_TOGGLE:-}" "SIRIO_FIXTURE_TOGGLE_GATE=${SIRIO_FIXTURE_TOGGLE_GATE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -1573,6 +1607,185 @@ scenario_connectors() {
   else
     echo "NOTE: the sign-in URL was not observed through the BROWSER/xdg-open stubs (gpui opens URLs through the desktop portal when it can); the row's waiting state is what is asserted"
   fi
+  stop_app
+}
+
+# ---- the connector_switch* scenarios (A6) ---------------------------------------------
+# How many control requests of one subtype the CLI heard after a mark taken with control_log_lines.
+control_since() { # mark subtype
+  python3 -c '
+import json, sys
+mark, count = int(sys.argv[2]), 0
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+for line in lines[mark:]:
+    if json.loads(line).get("subtype") == sys.argv[3]:
+        count += 1
+print(count)' "$RUN_DIR/fixture-control.log" "$1" "$2"
+}
+# How many requests of SUBTYPE came after the first request of FIRST after the mark: with FIRST the
+# toggle, whatever follows it was asked for by the switch itself or by something that outlived it.
+control_after_first() { # mark first-subtype subtype
+  python3 -c '
+import json, sys
+mark, count, seen = int(sys.argv[2]), 0, False
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+for line in lines[mark:]:
+    subtype = json.loads(line).get("subtype")
+    if seen and subtype == sys.argv[4]:
+        count += 1
+    if subtype == sys.argv[3]:
+        seen = True
+print(count)' "$RUN_DIR/fixture-control.log" "$1" "$2" "$3"
+}
+# expect_since MARK SUBTYPE COUNT LABEL: exactly COUNT such requests came after the mark.
+expect_since() {
+  local got
+  got=$(control_since "$1" "$2")
+  [ "$got" = "$3" ] || fail "$4: the CLI heard $got $2 requests after the mark, not $3"
+}
+# The Connectors card of a fresh Sirio, unfolded, with both servers read.
+switch_chat() { # name
+  chat_app "$1"
+  open_column
+  unfold_cards connectors
+  wait_panel "the user server failed and the claude.ai server needs sign-in" \
+    "R('connectors', '$CODEGRAPH') and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION') and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
+}
+CODEGRAPH="connectors/user/codegraph"
+NOTION="connectors/claude.ai/claude.ai Notion"
+
+scenario_connector_switch() {
+  switch_chat connector_switch
+  wait_panel "both server rows read switch on" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$NOTION')['switch'] is True"
+  local mark
+  mark=$(control_log_lines)
+  echo "step: the user server off"
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the user server reads switch off, disabled, with no action" \
+    "R('connectors', '$CODEGRAPH')['switch'] is False and R('connectors', '$CODEGRAPH')['detail'] == 'disabled' and R('connectors', '$CODEGRAPH')['action'] is None"
+  echo "step: the user server on: it starts, and the backoff finds it failed again"
+  panel_ctl switch "$CODEGRAPH" on >/dev/null
+  wait_panel "the user server reads switch on and starting" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$CODEGRAPH')['detail'] == 'starting'" 10
+  wait_panel "the user server reads failed again within the backoff" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$CODEGRAPH')['detail'] == 'failed'" 5
+  echo "step: the user server on again: the state is shown already, so nothing is sent"
+  panel_ctl switch "$CODEGRAPH" on >/dev/null || fail "a switch to the state shown was refused"
+  echo "step: the claude.ai server off"
+  panel_ctl switch "$NOTION" off >/dev/null
+  wait_panel "the claude.ai server reads switch off, disabled, and has lost its Sign in" \
+    "R('connectors', '$NOTION')['switch'] is False and R('connectors', '$NOTION')['detail'] == 'disabled' and R('connectors', '$NOTION')['action'] is None"
+  sleep 1
+  expect_since "$mark" mcp_toggle 3 "two toggles for the user server and one for the claude.ai server"
+  expect_since "$mark" mcp_authenticate 0 "no sign-in"
+  echo "OK: connector_switch: a switch is read from mcp_status, a repeat sends nothing, three toggles and no sign-in"
+  stop_app
+}
+
+scenario_connector_switch_in_flight() {
+  SIRIO_FIXTURE_TOGGLE_GATE="$RUN_DIR/toggle-gate"
+  rm -f "$SIRIO_FIXTURE_TOGGLE_GATE"
+  switch_chat connector_switch_in_flight
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the user server reads switching… with its switch off" \
+    "R('connectors', '$CODEGRAPH')['detail'] == 'switching…' and R('connectors', '$CODEGRAPH')['switch'] is False"
+  if panel_ctl switch "$CODEGRAPH" on >/dev/null 2>&1; then
+    fail "a second flip of a server whose toggle is open was accepted"
+  fi
+  sleep 1
+  expect_since "$mark" mcp_toggle 1 "the second flip sent nothing"
+  : >"$SIRIO_FIXTURE_TOGGLE_GATE"
+  wait_panel "the user server reads disabled once the CLI answers" \
+    "R('connectors', '$CODEGRAPH')['detail'] == 'disabled' and R('connectors', '$CODEGRAPH')['switch'] is False" 15
+  expect_since "$mark" mcp_toggle 1 "one toggle in all"
+  echo "OK: connector_switch_in_flight: switching… while the toggle is open, a second flip failed and sent nothing"
+  stop_app
+}
+
+scenario_connector_switch_waiting() {
+  switch_chat connector_switch_waiting
+  panel_ctl activate "$NOTION" >/dev/null
+  wait_panel "the sign-in server waits for the sign-in" "R('connectors', '$NOTION')['detail'] == 'waiting for sign-in…'"
+  local mark after
+  mark=$(control_log_lines)
+  panel_ctl switch "$NOTION" off >/dev/null
+  wait_panel "the sign-in server reads disabled" "R('connectors', '$NOTION')['detail'] == 'disabled' and R('connectors', '$NOTION')['switch'] is False"
+  echo "step: past the sign-in poll's 3 s step"
+  sleep 4
+  expect_since "$mark" mcp_toggle 1 "one toggle"
+  # The switch replaces the server's task before its toggle is written, so after the toggle line
+  # the only mcp_status is the switch's own refresh; a second is a poll that survived.
+  after=$(control_after_first "$mark" mcp_toggle mcp_status)
+  [ "$after" = 1 ] || fail "the CLI heard $after mcp_status requests after the toggle, not 1 (a poll survived, or the refresh is missing)"
+  echo "OK: connector_switch_waiting: switching a waiting server off dropped its sign-in poll"
+  stop_app
+}
+
+scenario_connector_switch_refused() {
+  SIRIO_FIXTURE_TOGGLE=refused
+  switch_chat connector_switch_refused
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "every server row has lost its switch" \
+    "[r for r in rows('connectors') if r['depth'] == 1] and all(r['switch'] is None for r in rows('connectors') if r['depth'] == 1)"
+  check_panel "the details are unchanged and no row has a note" \
+    "R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in' and all(r['note'] == '' for r in rows('connectors'))"
+  expect_since "$mark" mcp_toggle 1 "one refused toggle"
+  echo "OK: connector_switch_refused: a refused mcp_toggle hides every switch and changes nothing else"
+  stop_app
+}
+
+scenario_connector_switch_missing() {
+  SIRIO_FIXTURE_TOGGLE=missing
+  switch_chat connector_switch_missing
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the row carries the CLI's sentence" "'Server not found' in R('connectors', '$CODEGRAPH')['note']"
+  check_panel "the switch still reads on and the row still reads failed" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$CODEGRAPH')['detail'] == 'failed'"
+  expect_since "$mark" mcp_toggle 1 "one failed toggle"
+  echo "OK: connector_switch_missing: a failed toggle is a note and the switch keeps the state mcp_status gave"
+  stop_app
+}
+
+scenario_connector_switch_click() {
+  stub_openers_lead_login_path connector_switch_click
+  switch_chat connector_switch_click
+  fold_cards environment
+  local xy lines mark
+  xy=$(E2E switch-button-xy "$SURFACE" 15 "$NOTION") || fail "the claude.ai server switch was never drawn"
+  capture connector-switches
+  echo "step: the pointer on the switch, for its tooltip"
+  local origin x y
+  origin=$(window_origin)
+  x=$(( ${xy% *} + ${origin% *} ))
+  y=$(( ${xy#* } + ${origin#* } ))
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mousemove "$x" "$y" || fail "xdotool could not move to the switch"
+  sleep 2
+  capture connector-switch-hover
+  lines=$(wc -l <"$RUN_DIR/browser.log" 2>/dev/null) || lines=0
+  mark=$(control_log_lines)
+  xy=$(E2E switch-button-xy "$SURFACE" 15 "$NOTION") || fail "the switch was never drawn after the captures"
+  echo "step: a real click on the switch, drawn at window pixel $xy"
+  click_at_window "$xy"
+  wait_panel "the claude.ai server reads switch off and disabled" \
+    "R('connectors', '$NOTION')['switch'] is False and R('connectors', '$NOTION')['detail'] == 'disabled'" 15
+  sleep 1
+  expect_since "$mark" mcp_toggle 1 "one toggle for the click"
+  expect_since "$mark" mcp_authenticate 0 "the click started no sign-in"
+  [ "$(( $(wc -l <"$RUN_DIR/browser.log" 2>/dev/null || echo 0) ))" = "$((lines))" ] || fail "the click opened a page in the browser stub"
+  echo "OK: connector_switch_click: a real click on the switch toggled that server and started no sign-in"
   stop_app
 }
 
@@ -4248,6 +4461,8 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_RULES_LOG=""
   SIRIO_FIXTURE_RULES_GATE=""
   SIRIO_FIXTURE_RESULT_GATE=""
+  SIRIO_FIXTURE_TOGGLE=""
+  SIRIO_FIXTURE_TOGGLE_GATE=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))

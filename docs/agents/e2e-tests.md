@@ -396,6 +396,15 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # permission_rules_unreadable (a note, no rows). The connection-ready and restore triggers have no
 # E2E. test-ely-chat-ui-e2e.py's `permission` scenario reads questionDock for ACP: the plain card.
 # The live check is `claude_lists_permission_rules` (#[ignore], acp_conformance).
+# A6, the connector switch: connector_switch (a switch per server read from mcp_status, a repeat sends
+# nothing, Notion off loses its Sign in; three mcp_toggle and no mcp_authenticate after its mark),
+# connector_switch_in_flight (switching…, a second flip fails and sends nothing), connector_switch_waiting
+# (switching a waiting server off drops its poll: one mcp_status after the mark), connector_switch_refused
+# (every switch hidden, rows and notes unchanged), connector_switch_missing (the CLI's sentence as a note,
+# the switch unchanged) and connector_switch_click (framed, 2200x1000: a real X click at `switchButtons`
+# toggles that server and starts no sign-in, with two captures). New fixture variables, passed by launch()
+# and reset per scenario: SIRIO_FIXTURE_TOGGLE (refused or missing) and SIRIO_FIXTURE_TOGGLE_GATE (a file
+# whose absence holds every mcp_toggle answer). Every count reads only the lines after a control_log_lines mark.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 
