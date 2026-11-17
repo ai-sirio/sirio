@@ -266,7 +266,7 @@ set -eEuo pipefail
 # `system.ping` route probe sirioctl sends by itself, and only before `panel.*` calls (the proxy
 # forwards it and leaves it out of the log). Rerunning the script reproduces it.
 #
-# Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--proposals-only] [--out-dir DIR]
+# Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--proposals-only] [--live] [--out-dir DIR]
 #
 #   --xvfb        start a private Xvfb on a free display between :90 and :99
 #   --display :N  use an Xvfb this user started (never your own $DISPLAY)
@@ -274,6 +274,37 @@ set -eEuo pipefail
 #   --proposals-only
 #                 run only the openDiff cases (development; it prints a different last line and
 #                 is not the evidence of a run)
+#   --live        the opt-in live mode, by hand only (spec 8.3), INSTEAD of the 60 cases: the real
+#                 `claude` (SIRIO_LIVE_CLAUDE, else the newest real install under
+#                 ~/.local/share/mise/installs/claude/<version>/claude; never the ~/.local/bin
+#                 wrapper, which runs `mise use -g`, and a `#!` file that mentions mise aborts the run,
+#                 the rule of sirio_term_session/tests/program_status_live.rs) in an application
+#                 terminal tab of the debug Sirio, against
+#                 rust/crates/sirio_term_session/tests/live/fake_messages.py ("run edit"), with the
+#                 default permission mode so each Edit asks and calls openDiff. Cases:
+#                   live_accept  the pane shows "Opened changes in Sirio" (a debug build says
+#                                "Sirio (debug)"), the connection is owned by that pane, the proposal
+#                                tab "✻ probe.txt" opens, `surface.ide.act accept` makes Claude write
+#                                the file (checked on disk) and the turn ends
+#                   live_reject_with_comment
+#                                "run edit" again: one comment committed through surface.ide.comment,
+#                                then Reject: the CLIPBOARD (read from outside the app, owned with a
+#                                sentinel first) is exactly `@probe.txt#L1 <comment>`, `deliveries`
+#                                went up by one, the pane shows Claude's rejection
+#                                ("ejected update to probe.txt": 2.1.325 printed "User rejected
+#                                update", 2.1.326 prints "Rejected update"), the file is unchanged
+#                 Prints "IDE BRIDGE LIVE OK (claude <version>, <n> cases)". A missing CLI prints
+#                 "SKIP: ..." and exits 0. Isolation, on top of the run's private HOME, database,
+#                 socket, host root and Xvfb: Claude's own configuration (.claude.json twice,
+#                 settings.json) is seeded under the private HOME, its environment is built from
+#                 nothing (env -i) with a fake ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL on the fake
+#                 API, DISABLE_AUTOUPDATER, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
+#                 CLAUDE_CODE_DISABLE_CLAUDE_MDS, CLAUDE_CONFIG_DIR and a dead HTTP(S) proxy; the run
+#                 aborts before anything starts when the private HOME is, or is inside, the real
+#                 home's .claude; the real ~/.claude, ~/.claude.json and ~/.claude/ide are never read
+#                 or written. Cleanup also kills every process still holding the private HOME in its
+#                 environment (a CLI's helpers). The artifact adds claude-version.txt, fake.log and
+#                 live-pane-*.txt (what the pane showed at each step) to the usual files.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -285,6 +316,7 @@ CLIENT="$ROOT/Scripts/Tests/ide_client.py"
 
 STATE_ONLY=0
 PROPOSALS_ONLY=0
+LIVE=0
 START_XVFB=0
 DISPLAY_TARGET=""
 OUT_DIR=""
@@ -294,6 +326,7 @@ while [ $# -gt 0 ]; do
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --state-only) STATE_ONLY=1; shift ;;
     --proposals-only) PROPOSALS_ONLY=1; shift ;;
+    --live) LIVE=1; shift ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -320,6 +353,56 @@ fi
 python3 -I -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null || fail "python3-gi with GTK 3 is required (it reads and owns the CLIPBOARD)"
 [ -n "$DISPLAY_TARGET" ] || [ "$START_XVFB" -eq 1 ] || fail "no display; pass --xvfb or --display :N"
 [ -z "$DISPLAY_TARGET" ] || [ "$DISPLAY_TARGET" != "${DISPLAY:-}" ] || fail "--display $DISPLAY_TARGET is your own \$DISPLAY; pass --xvfb, or an Xvfb you started on another number"
+
+# ---------------------------------------------------------------- live: the real claude
+
+LIVE_CLAUDE=""
+if [ "$LIVE" -eq 1 ]; then
+  [ "$PROPOSALS_ONLY" -eq 0 ] || fail "--live and --proposals-only are two different runs"
+  REAL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+  [ -n "$REAL_HOME" ] || fail "no home directory for this user"
+  LIVE_CLAUDE="${SIRIO_LIVE_CLAUDE:-}"
+  if [ -z "$LIVE_CLAUDE" ]; then
+    # The newest real install: a directory (not a link) named by dotted numbers, holding the binary.
+    LIVE_CLAUDE="$(python3 -I - "$REAL_HOME/.local/share/mise/installs/claude" <<'PY'
+import os, sys
+root, best = sys.argv[1], None
+try:
+    names = os.listdir(root)
+except OSError:
+    names = []
+for name in names:
+    path = os.path.join(root, name)
+    if os.path.islink(path) or not os.path.isdir(path):
+        continue
+    try:
+        key = tuple(int(part) for part in name.split("."))
+    except ValueError:
+        continue
+    binary = os.path.join(path, "claude")
+    if os.path.isfile(binary) and (best is None or key > best[0]):
+        best = (key, binary)
+print(best[1] if best else "")
+PY
+)"
+  fi
+  if [ -z "$LIVE_CLAUDE" ] || [ ! -f "$LIVE_CLAUDE" ]; then
+    echo "SKIP: claude not found (set SIRIO_LIVE_CLAUDE to its path)"
+    exit 0
+  fi
+  # program_status_live.rs's rule: never the ~/.local/bin wrapper (it runs `mise use -g`, which
+  # edits the user's global mise config), and never a script that mentions mise.
+  python3 -I - "$LIVE_CLAUDE" "$REAL_HOME" <<'PY' || fail "refusing a mise wrapper: $LIVE_CLAUDE"
+import os, sys
+path, home = sys.argv[1], os.path.realpath(sys.argv[2])
+head = open(path, "rb").read(4096)
+local_bin = os.path.join(home, ".local", "bin") + os.sep
+wrapper = (head.startswith(b"#!") and b"mise" in head) \
+    or os.path.realpath(path).startswith(local_bin) or os.path.abspath(path).startswith(local_bin)
+sys.exit(1 if wrapper else 0)
+PY
+  echo "claude: $LIVE_CLAUDE"
+fi
 
 # ---------------------------------------------------------------- build
 
@@ -390,6 +473,23 @@ stop_hosts() {
     kill -KILL "$pid" 2>/dev/null || true
   done
 }
+# Live mode: kills every process that still holds the private HOME in its environment (a CLI's
+# background helpers outlive it), read from /proc (Linux), the shell, tee, the sleeps of the watchdogs and this script's own
+# subshells excepted.
+kill_home_holders() {
+  local dir pid comm
+  for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
+    [ "$pid" != "$$" ] && [ "$pid" != "$BASHPID" ] || continue
+    comm="$(cat "$dir/comm" 2>/dev/null || true)"
+    case "$comm" in bash|tee|sleep|"") continue ;; esac
+    [ -r "$dir/environ" ] || continue
+    if { tr '\0' '\n' <"$dir/environ" || true; } 2>/dev/null | grep -qxF "HOME=$RUN_DIR/home"; then
+      echo "cleanup: killing $comm ($pid), which still holds the private HOME"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
 cleanup() {
   local rc=$?
   [ -z "$APP_PID" ] || terminate "$APP_PID"
@@ -398,6 +498,9 @@ cleanup() {
   [ -z "${PROXY_PID:-}" ] || kill "$PROXY_PID" 2>/dev/null || true
   [ -z "${OUTSIDE_PID:-}" ] || kill "$OUTSIDE_PID" 2>/dev/null || true
   [ -z "$CLIP_PID" ] || kill "$CLIP_PID" 2>/dev/null || true
+  [ -z "${FAKE_PID:-}" ] || kill "$FAKE_PID" 2>/dev/null || true
+  [ "$LIVE" -eq 0 ] || kill_home_holders
+  cp "$RUN_DIR"/fake.log "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/app.log "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/socket.jsonl "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/client-*.jsonl "$OUT_DIR/" 2>/dev/null || true
@@ -405,6 +508,16 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+
+# Live mode: the real claude runs here, so the private HOME must be nowhere near the real one.
+if [ "$LIVE" -eq 1 ]; then
+  mkdir -p "$RUN_DIR/home"
+  case "$(realpath "$RUN_DIR/home")/" in
+    "$(realpath "$REAL_HOME")/") fail "ABORT: the private HOME is the real home" ;;
+    "$(realpath "$REAL_HOME")/.claude/"*) fail "ABORT: the private HOME is inside the real ~/.claude" ;;
+  esac
+  [ "$(realpath "$RUN_DIR/home")" != "$(realpath "$REAL_HOME")" ] || fail "ABORT: the private HOME is the real home"
+fi
 
 VULKAN_ENV=()
 if [ "$START_XVFB" -eq 1 ]; then
@@ -3160,6 +3273,173 @@ run_proposal_cases() {
   case_run symlink_title case_symlink_title
   case_run parked_worktree case_parked_worktree
 }
+
+# ---------------------------------------------------------------- the live mode (--live)
+
+FAKE_KEY=sk-ant-api03-fake-key-for-local-live-test-0000000000
+FAKE_PID=""
+LIVE_PANE=""
+# What the pane shows right now, kept as live-pane-NAME.txt in the artifact.
+# `panel read` answers the screen as base64.
+live_pane() { # name
+  "$CTL" panel read "$LIVE_PANE" 2>/dev/null | base64 -d >"$OUT_DIR/live-pane-$1.txt" 2>/dev/null || true
+}
+# Polls the pane until it shows TEXT (a substring); prints nothing, keeps the screen as live-pane-NAME.txt.
+wait_pane() { # name text [tries]
+  local tries=0
+  while [ "$tries" -lt "${3:-300}" ]; do
+    live_pane "$1"
+    grep -qF -- "$2" "$OUT_DIR/live-pane-$1.txt" && { echo "OK: the pane shows: $2"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$CASE: the pane never showed '$2' ($(tail -n 30 "$OUT_DIR/live-pane-$1.txt" | cut -c1-200))"
+}
+# Types one prompt into Claude's pane and sends it, with real keys (`panel write` refuses the
+# application's own panes): a click into the Primary half, where the terminal is, so the pane
+# holds the keyboard focus, then the text and Return.
+live_prompt() { # text
+  local window geometry width height
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window with _NET_WM_PID=$APP_PID"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  width="${geometry% *}"
+  height="${geometry#* }"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 30 / 100))" "$((height * 50 / 100))" click 1
+  sleep 0.5
+  DISPLAY="$DISPLAY_TARGET" xdotool type --delay 60 "$1"
+  sleep 0.5
+  DISPLAY="$DISPLAY_TARGET" xdotool key Return
+}
+wait_file_is() { # path printf-text
+  local tries=0
+  while [ "$tries" -lt 100 ]; do
+    python3 -I -c '
+import sys
+want = sys.argv[2].encode().decode("unicode_escape").encode()
+sys.exit(0 if open(sys.argv[1], "rb").read() == want else 1)' "$1" "$2" 2>/dev/null && { echo "OK: $1 holds $2 on disk"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$CASE: $1 never held $2 (it holds: $(cat "$1" | head -c 200))"
+}
+
+live_setup() {
+  [ "$(realpath "$HOME")" != "$(realpath "$REAL_HOME")" ] || fail "ABORT: HOME is the real home"
+  local version
+  version="$(env -i HOME="$HOME" PATH=/usr/bin:/bin "$LIVE_CLAUDE" --version 2>&1 | head -n 1)"
+  case "$version" in [0-9]*"(Claude Code)"*) ;; *) fail "claude --version answered '$version'" ;; esac
+  printf '%s\n%s\n' "$version" "$LIVE_CLAUDE" >"$OUT_DIR/claude-version.txt"
+  echo "claude --version: $version"
+  LIVE_VERSION="${version%% *}"
+  # The fake model API (the committed scenario file), on a free loopback port, HOLD 1 s.
+  local port
+  port="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+  python3 -I "$ROOT/rust/crates/sirio_term_session/tests/live/fake_messages.py" "$port" 1 >"$RUN_DIR/fake.log" 2>&1 &
+  FAKE_PID=$!
+  local tries=0
+  while ! python3 -I -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 2).close()' "$port" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || fail "the fake model API did not come up on $port"
+    sleep 0.1
+  done
+  FAKE_PORT="$port"
+  # Claude's configuration, under the private HOME only (program_status_live.rs's seeding): the
+  # onboarding done, the fake key approved by its last 20 characters, the repository trusted.
+  mkdir -p "$HOME/.claude"
+  local tail="${FAKE_KEY: -20}"
+  local global
+  global="{\"hasCompletedOnboarding\":true,\"theme\":\"dark\",\"hasSeenAutoDefaultNotice\":true,\"hasResetAutoModeOptInForDefaultOffer\":true,\"customApiKeyResponses\":{\"approved\":[\"$tail\"],\"rejected\":[]},\"projects\":{\"$WT\":{\"hasTrustDialogAccepted\":true,\"hasCompletedProjectOnboarding\":true}}}"
+  printf '%s\n' "$global" >"$HOME/.claude.json"
+  printf '%s\n' "$global" >"$HOME/.claude/.claude.json"
+  printf '{}\n' >"$HOME/.claude/settings.json"
+  # The file the fake's Edit changes (alpha -> beta, then beta -> alpha).
+  printf 'alpha\ngamma\n' >"$WT/probe.txt"
+}
+
+# Claude's pane: an application terminal tab of the selected worktree running the real binary
+# with an environment built from nothing, except the two things the pane itself must supply (its
+# TERM and the CLAUDE_CODE_SSE_PORT Sirio gave it), so the port is proved to reach a real Claude.
+live_start_claude() {
+  local cmd
+  cmd="env -i HOME=$HOME PATH=/usr/bin:/bin LANG=C.UTF-8 SHELL=/bin/sh TMPDIR=$TMPDIR TERM=\$TERM"
+  cmd="$cmd CLAUDE_CODE_SSE_PORT=\${CLAUDE_CODE_SSE_PORT-} ANTHROPIC_API_KEY=$FAKE_KEY"
+  cmd="$cmd ANTHROPIC_BASE_URL=http://127.0.0.1:$FAKE_PORT DISABLE_AUTOUPDATER=1"
+  cmd="$cmd CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"
+  cmd="$cmd CLAUDE_CONFIG_DIR=$HOME/.claude HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9"
+  cmd="$cmd NO_PROXY=127.0.0.1,localhost $LIVE_CLAUDE --permission-mode default"
+  LIVE_PANE="$(sockcall surface.terminal.open "cmd=$cmd; :" | jq_py 'd["pane"]')"
+  [ -n "$LIVE_PANE" ] || fail "$CASE: surface.terminal.open named no pane"
+  wait_pane started "Claude Code v" 300
+  wait_pane prompt "❯" 150
+}
+
+# The first Edit: Claude asks, Sirio opens the proposal, Accept makes Claude write the file.
+case_live_accept() {
+  live_start_claude
+  expect_state "Claude's connection is owned by its pane" '[c["owner_pane"] for c in d["connections"]]' "['$LIVE_PANE']"
+  live_prompt "run edit"
+  wait_pane opened "Opened changes in Sirio" 300
+  expect_state "one proposal is open" 'len(d["proposals"])' 1
+  LIVE_TAB="$(state_expr 'd["proposals"][0]["tab_name"]')"
+  case "$LIVE_TAB" in *"probe.txt"*) ;; *) fail "$CASE: the proposal's tab_name is '$LIVE_TAB'" ;; esac
+  expect_tab '✻ probe.txt' >/dev/null
+  expect_proposal "$LIVE_TAB" ready True
+  assert_file_is "$WT/probe.txt" 'alpha\ngamma\n'
+  capture live-proposal
+  act "$LIVE_TAB" accept
+  wait_file_is "$WT/probe.txt" 'beta\ngamma\n'
+  expect_no_proposals
+  expect_no_tab '✻ probe.txt'
+  wait_pane accepted "● ok" 300
+}
+
+# The second Edit, rejected with one comment: the clipboard holds the line Claude is to be told.
+case_live_reject_with_comment() {
+  clipboard_own "live sentinel"
+  expect_clipboard "the clipboard holds the sentinel" "live sentinel"
+  local before
+  before="$(deliveries)"
+  live_prompt "run edit"
+  local tries=0
+  while [ "$(state_expr 'len(d["proposals"])')" != 1 ] && [ "$tries" -lt 300 ]; do
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  expect_state "the second proposal is open" 'len(d["proposals"])' 1
+  LIVE_TAB="$(state_expr 'd["proposals"][0]["tab_name"]')"
+  wait_pane opened2 "Opened changes in Sirio" 100
+  expect_proposal "$LIVE_TAB" ready True
+  comment "$LIVE_TAB" old 1 "keep beta here"
+  expect_proposal "$LIVE_TAB" comments 1
+  expect_proposal "$LIVE_TAB" reject_label "Reject with 1 comment"
+  act "$LIVE_TAB" reject
+  expect_no_proposals
+  expect_one_delivery "$before"
+  expect_clipboard "the clipboard holds Claude's line" "@probe.txt#L1 keep beta here"
+  # 2.1.325 printed "User rejected update to probe.txt", 2.1.326 prints "Rejected update to probe.txt".
+  wait_pane rejected "ejected update to probe.txt" 300
+  wait_file_is "$WT/probe.txt" 'beta\ngamma\n'
+}
+
+run_live() {
+  live_setup
+  app_start
+  select_repo
+  WT_ID="$(worktree_id "$WT")"
+  [ -n "$WT_ID" ] || fail "sirioctl does not list the worktree $WT"
+  wait_lockfile >/dev/null
+  case_run live_accept case_live_accept
+  case_run live_reject_with_comment case_live_reject_with_comment
+  sockcall surface.tabs.close "index=$(tabs_field count)" confirm=yes >/dev/null 2>&1 || true
+  stop_hosts
+  echo "IDE BRIDGE LIVE OK (claude $LIVE_VERSION, $CASES_PASSED cases)"
+}
+
+if [ "$LIVE" -eq 1 ]; then
+  run_live
+  exit 0
+fi
 
 app_start
 select_repo
