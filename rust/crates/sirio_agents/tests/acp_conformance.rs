@@ -1570,3 +1570,228 @@ fn claude_serves_task_output_and_stops_background_tasks() {
 
     eprintln!("line order:\n{}", run.brief().join("\n"));
 }
+
+// Failure list for `claude_takes_a_host_rename`, written before the test. It fails when, under
+// Sirio's own `initialize` and `rename_session("Café ☕ 名前", Some(<own uuid>))`:
+// - the rename is refused in stream-json (the answer is not `success`);
+// - `claude agents --json`, run while the session is live, does not list that `sessionId` under
+//   `name == "Café ☕ 名前"` (the picker would not show the title);
+// - the non-ASCII title comes back mangled anywhere: every line is parsed as JSON and compared
+//   as a string, never matched on raw text, because a writer may escape non-ASCII;
+// - the transcript `projects/<slug>/<uuid>.jsonl` has no `custom-title` line with that title;
+// - `claude -p --resume "Café ☕ 名前"` does not resolve to the same session (its
+//   `system/init.session_id` is not the uuid), run after the stream-json CLI has exited;
+// - a rename that names a foreign `session_id` is accepted (current CLIs answer the error
+//   `session_id is not the current session`);
+// - the CLI exits early or any wait runs past its limit (the run ends and prints what was seen).
+//
+// The listing and the foreign-id error run at 2.1.326 and above only. The 2.1.257 floor
+// (FINDINGS Q2, Q3) answers success to a foreign `session_id` and writes to its own current
+// session, ignores `source` and `session_id`, never updates `sessions/<pid>.json` (which
+// `agents` reads), and writes the title to the transcript only once a turn creates it.
+
+/// Every JSON line of `text` that parses, in order.
+fn json_lines(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// The `<uuid>.jsonl` under `<config_dir>/projects/<slug>/`, found without the slug rule.
+fn find_transcript(config_dir: &std::path::Path, uuid: &str) -> Option<std::path::PathBuf> {
+    let file = format!("{uuid}.jsonl");
+    std::fs::read_dir(config_dir.join("projects"))
+        .ok()?
+        .flatten()
+        .map(|slug| slug.path().join(&file))
+        .find(|path| path.is_file())
+}
+
+/// Sends `request` and returns the `control_response` body for its `request_id` within 30 s,
+/// ignoring every other line (the echo `session_title_changed` comes first).
+fn ask_session(
+    session: &mut claude_live::Session,
+    seen: &mut Vec<serde_json::Value>,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    let id = request["request_id"]
+        .as_str()
+        .expect("a control request has a request_id")
+        .to_string();
+    session.write(&request);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while let Some(line) = session.next(deadline) {
+        seen.push(line.clone());
+        if line["type"] == "control_response" && line["response"]["request_id"] == id.as_str() {
+            return line["response"].clone();
+        }
+    }
+    panic!("no answer to {id}; saw {seen:#?}");
+}
+
+/// Proves the real Claude Code accepts Sirio's `rename_session` (`ControlRequest::rename_session`,
+/// `source:"host"` and the session's own id): the session is listed by `agents --json` under the
+/// title, the transcript records it, a foreign session id is refused, and after the CLI exits
+/// `claude -p --resume "<title>"` resumes the same session. Non-ASCII on purpose.
+///
+/// `initialize` and `rename_session` come from Sirio's builders. The user line of the turn is
+/// hand-written JSON: the real builder (`sirio_chat::claude::prompt::user_message`) is
+/// `pub(super)` and `sirio_agents` does not depend on `sirio_chat`.
+///
+/// It uses the fake API of the session-state test, no credential and nothing beyond 127.0.0.1,
+/// but launches a real CLI, so it is `#[ignore]`d and stays off CI. TMPDIR must be on disk
+/// outside the home directory:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance claude_takes_a_host_rename -- --ignored --nocapture
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
+/// `python3`.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_takes_a_host_rename() {
+    const TITLE: &str = "Café ☕ 名前";
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("host-rename", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version: {version_text:?}");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+    // Only a current CLI lists the title and guards the session id (see the failure list).
+    let current = version >= sirio_claude::ClaudeVersion::new(2, 1, 326);
+    eprintln!("claude binary {} reports {version_text}", claude.display());
+
+    let mut session =
+        claude_live::Session::start_state(&claude, &python, &scratch.root.join("rename"));
+    let uuid = session.session_id().to_string();
+    let mut seen = Vec::new();
+
+    let init = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::initialize("rn-init"),
+    );
+    assert_eq!(init["subtype"], "success", "initialize: {init}");
+
+    // 2. The rename, with the session's own id.
+    let renamed = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::rename_session("rn-1", TITLE, Some(&uuid)),
+    );
+    assert_eq!(renamed["subtype"], "success", "rename_session: {renamed}");
+
+    // 3. While the process is alive, the listing shows the title under the session id.
+    if current {
+        let listing = session.run_claude("agents", &["agents", "--json"], Duration::from_secs(20));
+        assert!(listing.success, "agents --json failed: {}", listing.stderr);
+        let entries: serde_json::Value = serde_json::from_str(listing.stdout.trim())
+            .unwrap_or_else(|e| panic!("agents --json is not JSON ({e}): {}", listing.stdout));
+        let entry = entries
+            .as_array()
+            .and_then(|all| all.iter().find(|entry| entry["sessionId"] == uuid.as_str()))
+            .unwrap_or_else(|| panic!("agents --json lists no {uuid}: {entries}"));
+        assert_eq!(entry["name"], TITLE, "agents entry: {entry}");
+    }
+
+    // 4. One turn creates the transcript.
+    session.write(&serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    }));
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut result = None;
+    while let Some(line) = session.next(deadline) {
+        seen.push(line.clone());
+        if line["type"] == "result" {
+            result = Some(line);
+            break;
+        }
+    }
+    let result = result.unwrap_or_else(|| panic!("the turn never ended; saw {seen:#?}"));
+    assert_eq!(result["subtype"], "success", "the turn failed: {result}");
+
+    // 5. The transcript holds the title in a custom-title line.
+    let transcript = find_transcript(&session.config_dir(), &uuid)
+        .unwrap_or_else(|| panic!("no {uuid}.jsonl under {}", session.config_dir().display()));
+    let text = std::fs::read_to_string(&transcript).unwrap();
+    assert!(
+        json_lines(&text)
+            .iter()
+            .any(|line| line["type"] == "custom-title"
+                && line["customTitle"] == TITLE
+                && line["sessionId"] == uuid.as_str()),
+        "no custom-title line {TITLE:?} in {}:\n{text}",
+        transcript.display()
+    );
+
+    // 6. A foreign session id is refused.
+    if current {
+        // A fixed uuid that is not the session's own (FINDINGS Q2).
+        let foreign = "d5f4c32d-3654-48cf-91e6-5665e2d3ce60";
+        let refused = ask_session(
+            &mut session,
+            &mut seen,
+            sirio_claude::ControlRequest::rename_session("rn-2", "x", Some(foreign)),
+        );
+        assert_eq!(refused["subtype"], "error", "foreign session_id: {refused}");
+        assert_eq!(
+            refused["error"], "session_id is not the current session",
+            "foreign session_id: {refused}"
+        );
+    }
+
+    // 7. After the CLI exited (stdin closed, process reaped; the fake API still up), the title
+    // resolves the same session.
+    let exit = session.close_cli();
+    assert!(
+        exit.is_some_and(|status| status.success()),
+        "the CLI did not exit successfully on stdin EOF: {exit:?}"
+    );
+    let resumed = session.run_claude(
+        "resume",
+        &[
+            "-p",
+            "--resume",
+            TITLE,
+            "hi",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ],
+        Duration::from_secs(30),
+    );
+    assert!(
+        resumed.success,
+        "-p --resume failed: {}\n{}",
+        resumed.stderr, resumed.stdout
+    );
+    let lines = json_lines(&resumed.stdout);
+    let init = lines
+        .iter()
+        .find(|line| line["type"] == "system" && line["subtype"] == "init")
+        .unwrap_or_else(|| panic!("no system/init in the resumed run: {}", resumed.stdout));
+    assert_eq!(
+        init["session_id"],
+        uuid.as_str(),
+        "--resume {TITLE:?} resumed another session: {init}"
+    );
+}

@@ -156,6 +156,11 @@ pub fn version_text(claude: &Path, root: &Path) -> String {
         .to_string()
 }
 
+/// The `CLAUDE_CONFIG_DIR` of a CLI whose private HOME is `home`.
+fn config_dir_of(home: &Path) -> PathBuf {
+    home.join(".claude")
+}
+
 /// The environment of a CLI: private HOME, nothing of the user's, and a dead proxy so nothing
 /// reaches past 127.0.0.1 (copied from `Rig::offline` in `program_status_live.rs`).
 fn isolate(command: &mut Command, home: &Path, root: &Path) {
@@ -165,7 +170,7 @@ fn isolate(command: &mut Command, home: &Path, root: &Path) {
         .env_clear()
         .env("PATH", ISOLATED_PATH)
         .env("HOME", home)
-        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("CLAUDE_CONFIG_DIR", config_dir_of(home))
         // The CLI's `/tmp/cc-socks/*.sock` land here, not in the user's temp dir.
         .env("TMPDIR", &tmp)
         .env("LANG", "C.UTF-8")
@@ -241,8 +246,51 @@ pub struct Session {
     _child: Reaper,
     _api: Reaper,
     _sweep: HomeSweep,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     lines: Receiver<String>,
+    /// What a second `claude` command needs to run beside this one.
+    cli: CliEnv,
+}
+
+/// The environment a `claude` command of this session runs in, kept for `Session::run_claude`.
+struct CliEnv {
+    claude: PathBuf,
+    root: PathBuf,
+    home: PathBuf,
+    work: PathBuf,
+    port: u16,
+    session_id: String,
+    launch_env: Vec<(String, String)>,
+}
+
+impl CliEnv {
+    /// The isolated environment plus the fake API's base URL: the one `launch` gives its CLI.
+    fn apply(&self, command: &mut Command) {
+        isolate(command, &self.home, &self.root);
+        command
+            .env("ANTHROPIC_API_KEY", FAKE_KEY)
+            .env(
+                "ANTHROPIC_BASE_URL",
+                format!("http://127.0.0.1:{}", self.port),
+            )
+            .env("DISABLE_AUTOUPDATER", "1")
+            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+            // Claude reads CLAUDE.md files from every ancestor of its directory.
+            .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
+            .env("ENABLE_TOOL_SEARCH", "false")
+            .envs(
+                self.launch_env
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str())),
+            );
+    }
+}
+
+/// What a finished `Session::run_claude` printed.
+pub struct CommandOutput {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl Session {
@@ -268,7 +316,7 @@ impl Session {
         let _ = std::fs::remove_dir_all(root);
         let home = root.join("home");
         let work = root.join("work");
-        let config_dir = home.join(".claude");
+        let config_dir = config_dir_of(&home);
         for dir in [&home, &work, &config_dir] {
             std::fs::create_dir_all(dir).unwrap();
         }
@@ -315,16 +363,17 @@ impl Session {
         if with_mcp {
             command.args(["--mcp-config", &mcp.to_string(), "--strict-mcp-config"]);
         }
-        isolate(&mut command, &home, root);
+        let cli = CliEnv {
+            claude: claude.to_path_buf(),
+            root: root.to_path_buf(),
+            home: home.clone(),
+            work: work.clone(),
+            port,
+            session_id: session_id.clone(),
+            launch_env: line.env.clone(),
+        };
+        cli.apply(&mut command);
         command
-            .env("ANTHROPIC_API_KEY", FAKE_KEY)
-            .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{port}"))
-            .env("DISABLE_AUTOUPDATER", "1")
-            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-            // Claude reads CLAUDE.md files from every ancestor of its directory.
-            .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
-            .env("ENABLE_TOOL_SEARCH", "false")
-            .envs(line.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(std::fs::File::create(root.join("stderr.log")).unwrap());
@@ -344,14 +393,77 @@ impl Session {
             _child: child,
             _api: api,
             _sweep: sweep,
-            stdin,
+            stdin: Some(stdin),
             lines,
+            cli,
+        }
+    }
+
+    /// The session uuid this CLI was started with (`--session-id`).
+    pub fn session_id(&self) -> &str {
+        &self.cli.session_id
+    }
+
+    /// The CLI's `CLAUDE_CONFIG_DIR`.
+    pub fn config_dir(&self) -> PathBuf {
+        config_dir_of(&self.cli.home)
+    }
+
+    /// Closes the CLI's stdin and waits up to 20 s for it to exit, leaving the fake API up.
+    /// Returns its exit status, or `None` when it had to be killed after the 20 s.
+    pub fn close_cli(&mut self) -> Option<std::process::ExitStatus> {
+        drop(self.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = self._child.0.try_wait().ok().flatten() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = self._child.0.kill();
+                let _ = self._child.0.wait();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Runs the same `claude` binary as a separate command with `args`, in this session's
+    /// environment (HOME, config dir, fake API) and work directory, stdin from /dev/null.
+    /// A command still running after `timeout` is killed and the test panics. Its output goes to
+    /// `side-<label>.out` / `.err` under the session root, so each call keeps its own.
+    pub fn run_claude(&self, label: &str, args: &[&str], timeout: Duration) -> CommandOutput {
+        let out_path = self.cli.root.join(format!("side-{label}.out"));
+        let err_path = self.cli.root.join(format!("side-{label}.err"));
+        let mut command = Command::new(&self.cli.claude);
+        command.args(args).current_dir(&self.cli.work);
+        self.cli.apply(&mut command);
+        command
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&out_path).unwrap())
+            .stderr(std::fs::File::create(&err_path).unwrap());
+        let mut child = Reaper(command.spawn().expect("claude launches"));
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.0.try_wait().expect("the command is waited on") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "`claude {args:?}` did not finish in {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        CommandOutput {
+            success: status.success(),
+            stdout: std::fs::read_to_string(out_path).unwrap_or_default(),
+            stderr: std::fs::read_to_string(err_path).unwrap_or_default(),
         }
     }
 
     pub fn write(&mut self, line: &Value) {
-        writeln!(self.stdin, "{line}").expect("a line is written to claude");
-        self.stdin.flush().expect("stdin is flushed");
+        let stdin = self.stdin.as_mut().expect("the CLI's stdin is still open");
+        writeln!(stdin, "{line}").expect("a line is written to claude");
+        stdin.flush().expect("stdin is flushed");
     }
 
     /// The next stdout line that parses as JSON, or `None` at `deadline` or when the CLI exits.
