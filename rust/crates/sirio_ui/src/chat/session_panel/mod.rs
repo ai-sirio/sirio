@@ -128,6 +128,9 @@ pub(super) struct Row {
     /// Draws `detail` as a muted second line under the label, indented past
     /// the icon, instead of at the row's end.
     pub(super) detail_below: bool,
+    /// Draws `tag` as its own muted line under the label, above any detail,
+    /// for a tag too long to share the label's line in the narrow column.
+    pub(super) tag_below: bool,
     /// A muted line under the row, wrapping rather than truncated.
     pub(super) note: String,
     /// The background task a Stop on this row ends, while it runs.
@@ -162,6 +165,7 @@ impl Row {
             show_action: false,
             short: None,
             detail_below: false,
+            tag_below: false,
             note: String::new(),
             stop: None,
         }
@@ -921,7 +925,7 @@ impl Chat {
                     .truncate()
                     .child(label),
             )
-            .when(!row.tag.is_empty(), |line| {
+            .when(!row.tag.is_empty() && !row.tag_below, |line| {
                 line.child(
                     div()
                         .flex_none()
@@ -964,6 +968,15 @@ impl Chat {
                     })
             })
             .child(main)
+            .when(row.tag_below && !row.tag.is_empty(), |line| {
+                line.child(
+                    div()
+                        .ml(px(indent + 20.0))
+                        .truncate()
+                        .text_color(theme.ely.fg_subtle)
+                        .child(row.tag.clone()),
+                )
+            })
             // The detail of a card that wants its own line: under the
             // title, past the icon, as muted as a note.
             .when(row.detail_below && !row.detail.is_empty(), |line| {

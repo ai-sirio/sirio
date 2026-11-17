@@ -119,15 +119,16 @@ drawn, so the two are equal.
 and is drawn only for native Claude, where the client has rules control (`RulesControl`, a
 detached handle like `McpControl`); an ACP chat has none. It starts folded. The section is absent
 before the first answer, after a refusal and with no rules control.
-- **Rows.** Groups Allow, Ask and Deny, then Directories, each with a count and folded on its own
-  (row keys `permissions/allow`, `permissions/allow/0`, `permissions/directories`, ...; no row has
-  an action). A rule row shows the rule and the CLI's description, tagged with its source in words
-  (`user settings`, `managed settings`, ...), plus ` · read-only` or ` · this session` from its
-  editability; a source of `session` reads just "this session". A `notInEffect` rule says managed
-  settings allow only their own rules. An empty list has no rows, and the summary counts only the
-  rules drawn. Rule and path text go through `visible_text`. Directories show the path only,
-  because the CLI's `source` for a directory is unreliable. `withheld` is not shown: only a cloud
-  or self-hosted connection sets it, never stdio.
+- **Rows.** Groups Allow, Ask and Deny, then Directories, each with a count; each group folds on
+  its own and starts open (row keys `permissions/allow`, `permissions/allow/0`,
+  `permissions/directories`, ...; no row has an action). A rule row shows the rule and the CLI's
+  description, tagged with its source in words (`user settings`, `managed settings`, ...), plus ` ·
+  read-only` or ` · this session` from its editability; a source of `session` reads just "this
+  session". A `notInEffect` rule says managed settings allow only their own rules. An empty list has
+  no rows, and the summary counts every allow, ask and deny rule, folded groups included, and skips
+  unknown behaviors. Rule and path text go through `visible_text`. Directories show the path only,
+  because the CLI's `source` for a directory is unreliable. `withheld` is not shown: only a cloud or
+  self-hosted connection sets it, never stdio.
 - **Notes.** `managedOnly` adds "Managed settings allow only their own rules." Each skipped
   settings file is `Skipped <file>: <message>`.
 - **Triggers.** The ask runs only while the panel is open, and the section's state is that of the
@@ -147,7 +148,8 @@ before the first answer, after a refusal and with no rules control.
 - **The fixture's default.** With no `--fixture-permission-rules` file the fixture refuses the
   request as the floor does, so a scenario that wants rules must name a file. Live,
   `claude_lists_permission_rules` (`sirio_agents/tests/acp_conformance.rs`, `#[ignore]`) checks
-  a real answer on a configured `CLAUDE_CONFIG_DIR` and the floor's refusal.
+  a real answer on a configured `CLAUDE_CONFIG_DIR`; below 2.1.325 it accepts a refusal or a
+  parse, and it has run only on 2.1.326.
 
 **The Trace card** shows what the native Claude transport reports of the chat's latest turn, and
 only once the chat has received a `TraceEvent`, which no ACP client ever sends. Folded it is one

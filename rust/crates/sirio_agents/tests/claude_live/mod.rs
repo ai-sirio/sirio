@@ -207,7 +207,8 @@ pub fn kill_holders_of(home: &Path) {
     }
 }
 
-/// How many processes name `home` as their HOME, without killing them.
+/// How many processes name `home` as their HOME, without killing them. It
+/// reads /proc, so it is Linux only, like `kill_holders_of`.
 pub fn holders_of(home: &Path) -> usize {
     holder_pids(home).len()
 }

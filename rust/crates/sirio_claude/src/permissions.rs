@@ -98,12 +98,14 @@ pub fn parse_permission_rules(payload: &Value) -> Option<PermissionRules> {
 
 fn parse_rule(row: &Value) -> Option<PermissionRule> {
     let field = |key: &str| row.get(key)?.as_str().map(str::to_string);
+    // Only the behavior and the rule are needed; a renamed `source` or
+    // `editability` leaves the row listed with a plainer tag.
     Some(PermissionRule {
         behavior: field("behavior")?,
-        source: field("source")?,
+        source: field("source").unwrap_or_default(),
         rule: field("rule")?,
         description: row.get("description").and_then(description),
-        editability: field("editability")?,
+        editability: field("editability").unwrap_or_default(),
         not_in_effect: flag(row, "notInEffect"),
     })
 }

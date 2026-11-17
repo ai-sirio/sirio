@@ -213,8 +213,9 @@ set -euo pipefail
 # the fixture heard). What each must catch, written before the code: a card that asks with the panel closed; a
 # refusal that is asked again or shown; a burst of triggers that sends more than one follow-up; Always allow that
 # leaves the card stale until the turn ends; a success with no state shown as an empty list.
-#   permission_rules   (and the last good list kept after an unreadable answer) every group, row key, label, detail, tag and note, the section note, a bidi rule shown as
-#                      <U+202E>, an unknown behavior skipped and not counted
+#   permission_rules  every group, row key, label, detail, tag and note, the section note, a bidi rule and a
+#                      bidi source shown as <U+202E>, an unknown behavior skipped and not counted, and the
+#                      last good list kept after an unreadable answer
 #   permission_rules_refused   the floor refuses: no card, one request, and still one after a turn
 #   permission_rules_closed_panel   no request with the panel closed through a turn; one when it opens, before unfolding
 #   permission_rules_coalesced   Always allow and a turn's end during a held answer make one follow-up: two requests in all
@@ -4017,6 +4018,7 @@ scenario_permission_detail() {
   permissions_chat permission_detail '{"title":"Run the build","description":"make a file","decision_reason_type":"rule","decision_reason_rule_source":"userSettings","blocked_path":"/w/out.txt","mcp_server":{"name":"probe","source":"project"}}'
   send_prompt build
   wait_panel "the card shows the CLI's detail, in order" 'c["questionDock"] != "" and c["questionDock"]["caption"] == "Run the build" and c["questionDock"]["body"] == "'"$PERMISSION_COMMAND"'" and c["questionDock"]["details"] == [{"label": None, "text": "make a file"}, {"label": "Reason", "text": "Matches an ask rule in user settings"}, {"label": "Path", "text": "/w/out.txt"}, {"label": "MCP server", "text": "probe (project)"}]' 30
+  capture permission-detail
   check_panel "Always allow is still offered, row 1 is selected and digits are on" '"allow_always" in [o["id"] for o in c["questionDock"]["options"]] and c["questionDock"]["selected"] == 0 and c["questionDock"]["digits"] is True'
   answer_permission allow_once
   wait_panel "the turn completed and the tool ran" 'c["status"] == "completed" and [r["status"] for r in c["transcript"] if r.get("kind") == "tool"] == ["Completed"]' 30
@@ -4114,6 +4116,8 @@ scenario_permission_rules() {
     {"behavior":"deny","source":"policySettings","rule":"Read(./secret.txt)","editability":"readonly"},
     {"behavior":"allow","source":"localSettings","rule":"Edit(./notes)","editability":"readonly","notInEffect":true},
     {"behavior":"allow","source":"userSettings","rule":"Bash(echo \u202eevil:*)","editability":"persistent"},
+    {"behavior":"allow","source":"mcpMount","rule":"mcp__probe","editability":"persistent"},
+    {"behavior":"allow","source":"odd\u202esrc","rule":"Bash(odd)","editability":"persistent"},
     {"behavior":"other","source":"userSettings","rule":"Bash(unknown)","editability":"persistent"}],
     "workspaceDirectories":[{"path":"/w/extra","source":"localSettings"}],
     "managedOnly":true,
@@ -4122,13 +4126,16 @@ scenario_permission_rules() {
   panel_ctl open >/dev/null
   wait_panel "the Permissions card is drawn" "S('permissions') is not None" 30
   ensure_unfolded permissions
+  capture permission-rules
   wait_panel "the card is in the order of the cards, after Connectors" '[s["key"] for s in p["sections"]].index("permissions") == [s["key"] for s in p["sections"]].index("connectors") + 1' 5
-  check_panel "five rules are counted, the unknown behavior is not" 'S("permissions")["summary"] == "5 rules"'
+  check_panel "seven rules are counted, the unknown behavior is not" 'S("permissions")["summary"] == "7 rules"'
   check_panel "the section note is the managed line, then the skipped file" 'S("permissions")["note"] == "Managed settings allow only their own rules.\nSkipped /p/.claude/settings.json: Expected array, but received string"'
-  local want='[("permissions/allow", 0, "Allow", "3", "", "", None),
+  local want='[("permissions/allow", 0, "Allow", "5", "", "", None),
     ("permissions/allow/0", 1, "Bash(echo hi:*)", "Any Bash command starting with echo hi", "user settings", "", None),
     ("permissions/allow/1", 1, "Edit(./notes)", "", "local project settings · read-only", "Not in effect: managed settings allow only their own rules", None),
     ("permissions/allow/2", 1, "Bash(echo ⟨U+202E⟩evil:*)", "", "user settings", "", None),
+    ("permissions/allow/3", 1, "mcp__probe", "", "an MCP server", "", None),
+    ("permissions/allow/4", 1, "Bash(odd)", "", "odd⟨U+202E⟩src", "", None),
     ("permissions/ask", 0, "Ask", "1", "", "", None),
     ("permissions/ask/0", 1, "Bash(git push:*)", "", "project settings", "", None),
     ("permissions/deny", 0, "Deny", "1", "", "", None),
@@ -4141,8 +4148,8 @@ scenario_permission_rules() {
   panel_ctl toggle permissions >/dev/null
   wait_panel "the card is folded" 'S("permissions")["expanded"] is False' 10
   panel_ctl toggle permissions >/dev/null
-  wait_panel "the unreadable answer is a note and the rows stay" 'S("permissions")["expanded"] is True and S("permissions")["note"].endswith("Claude Code\x27s rules could not be read: the answer had no rules") and len(rows("permissions")) == 10' 30
-  check_panel "the summary still counts the last good list" 'S("permissions")["summary"] == "5 rules"'
+  wait_panel "the unreadable answer is a note and the rows stay" 'S("permissions")["expanded"] is True and S("permissions")["note"].endswith("Claude Code\x27s rules could not be read: the answer had no rules") and len(rows("permissions")) == 12' 30
+  check_panel "the summary still counts the last good list" 'S("permissions")["summary"] == "7 rules"'
   echo "OK: permission_rules: the card lists the CLI's rules by behavior, with sources, notes and hidden characters shown, and keeps them after an unreadable answer"
   stop_app
 }

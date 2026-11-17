@@ -42,7 +42,7 @@ impl Permissions {
 }
 
 fn tag(rule: &PermissionRule) -> String {
-    let mut tag = source_words(&rule.source);
+    let mut tag = visible_text(&source_words(&rule.source), false);
     match rule.editability.as_str() {
         "readonly" => tag.push_str(" · read-only"),
         // The source `session` already says so.
@@ -98,6 +98,7 @@ pub(super) fn section(
                 rows.push(Row {
                     depth: 1,
                     tag: tag(rule),
+                    tag_below: true,
                     detail_below: !detail.is_empty(),
                     note: if rule.not_in_effect {
                         "Not in effect: managed settings allow only their own rules".to_string()

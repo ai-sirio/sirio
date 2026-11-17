@@ -99,6 +99,10 @@ pub fn source_words(source: &str) -> String {
         "cliArg" => "a command-line flag",
         "session" => "this session",
         "command" => "a command",
+        "mcpMount" => "an MCP server",
+        "toolsNarrowing" => "the tool list",
+        "mcpServerPolicy" => "MCP server policy",
+        "hostCredential" => "the host",
         other => other,
     }
     .to_string()

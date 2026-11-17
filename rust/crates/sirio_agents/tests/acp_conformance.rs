@@ -1635,6 +1635,7 @@ fn ask_session(
                 line["subtype"]
                     .as_str()
                     .or(line["response"]["subtype"].as_str())
+                    .or(line["request"]["subtype"].as_str())
                     .unwrap_or("-"),
                 line["response"]["request_id"]
                     .as_str()
