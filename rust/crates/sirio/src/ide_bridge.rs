@@ -567,8 +567,8 @@ impl IdeBridge {
         }
     }
 
-    /// The owner pane and worktree of `conn`, `None` when it is unknown (gone). The pane is
-    /// `None` for a connection with no owner; the worktree is then the cwd's, when known.
+    /// The owner pane and its worktree of `conn`, `None` when the connection is unknown (gone);
+    /// an ownerless connection answers `Some((None, None))`.
     pub(crate) fn owner_of(&self, conn: ConnId) -> Option<(Option<usize>, Option<PathBuf>)> {
         let connection = self.connections.get(&conn)?;
         let owner = connection.owner.as_ref().map(|owner| owner.pane_id);

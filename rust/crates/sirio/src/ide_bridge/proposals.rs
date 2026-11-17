@@ -44,7 +44,9 @@ const UNREADABLE_COPY: &str =
     "This change cannot be drawn: the file cannot be read. You can still Reject or Accept it.";
 
 const CONFIRM_TITLE: &str = "Closing rejects Claude's change";
-const CONFIRM_BODY: &str = "Claude is waiting for a decision on this change. Closing sends it a rejection.";
+/// The confirmation's buttons, in the order they are drawn: the one source of the modal and of
+/// the debug state.
+const CONFIRM_BUTTONS: [&str; 2] = ["Cancel", "Reject"];
 
 /// What `read_regular_file` refused, in the words the tab's body shows.
 fn refusal_copy(refusal: Refusal) -> String {
@@ -96,17 +98,21 @@ struct Record {
     worktree: String,
     /// The file as Claude named it, canonical when it exists; only compared, never shown.
     path: PathBuf,
+    /// The pane of the terminal whose Claude proposes it, when the connection has an owner.
+    owner_pane: Option<usize>,
     view: Entity<ProposalTab>,
     _decided: Subscription,
 }
 
 /// What a confirmed Reject goes on to do.
 pub(crate) enum Then {
-    /// Close these tabs (the original `close_tab` or Close Others / Close Tabs to the Right).
-    CloseTabs(Vec<usize>),
+    /// Close these tabs of `worktree` (the original `close_tab` or Close Others / Close Tabs to
+    /// the Right). A pending question holds stable identities, never positions: the tabs by their
+    /// persistence ids, and it is dropped when another worktree is selected meanwhile.
+    CloseTabs { worktree: PathBuf, tabs: Vec<String> },
     /// The sidebar's confirmed "Remove worktree?" goes on: git removes the checkout, then
     /// `WorktreeRemoved` ends its sessions.
-    RemoveWorktree { row_id: usize, remote: Option<sirio_git::UpstreamBranch> },
+    RemoveWorktree { path: PathBuf, remote: Option<sirio_git::UpstreamBranch> },
     /// Remove this project from Sirio.
     RemoveProject(String),
 }
@@ -114,7 +120,7 @@ pub(crate) enum Then {
 impl Then {
     fn name(&self) -> &'static str {
         match self {
-            Then::CloseTabs(_) => "close_tabs",
+            Then::CloseTabs { .. } => "close_tabs",
             Then::RemoveWorktree { .. } => "remove_worktree",
             Then::RemoveProject(_) => "remove_project",
         }
@@ -168,6 +174,7 @@ struct Opening {
     contents: String,
     tab_name: String,
     replaces: Option<DiffId>,
+    new_path: PathBuf,
 }
 
 fn answer_diff(cx: &App, id: &DiffId, answer: DiffAnswer) -> Result<(), Gone> {
@@ -198,10 +205,10 @@ impl SirioWorkspace {
                 old_path,
                 canonical,
                 original,
+                new_path,
                 contents,
                 tab_name,
                 replaces,
-                ..
             } => {
                 let opening = Opening {
                     id,
@@ -212,6 +219,7 @@ impl SirioWorkspace {
                     contents,
                     tab_name,
                     replaces,
+                    new_path,
                 };
                 self.ide_open_diff(opening, cx);
             }
@@ -256,12 +264,7 @@ impl SirioWorkspace {
             ReadOutcome::Missing => (None, None),
             ReadOutcome::Refused(why) => (None, Some(refusal_copy(*why))),
         };
-        let owner_title = owner.and_then(|pane| {
-            self.tabs
-                .iter()
-                .find(|tab| tab.panes.contains(pane))
-                .map(|tab| tab.title.clone())
-        });
+        let owner_title = owner.and_then(|pane| self.ide_pane_title(pane));
         let init = ProposalInit {
             tab_name: opening.tab_name.clone(),
             path: path.clone(),
@@ -273,7 +276,8 @@ impl SirioWorkspace {
             dirty_in_editor: self.ide_path_dirty(&path, cx),
             scratch: scratch_dir(),
         };
-        let title = proposal_title(&path, &opening.tab_name);
+        // The name Claude sent, not what it resolves to: a symlink CLAUDE.md shows as CLAUDE.md.
+        let title = proposal_title(&opening.new_path, &opening.tab_name);
         // The same `tab_name` again, in place: the old request was answered with an error by the
         // server, and Claude uses a fresh name per proposal, so this is the defensive path.
         if let Some(old) = &opening.replaces
@@ -305,6 +309,7 @@ impl SirioWorkspace {
             title: title.clone(),
             worktree: worktree_id.clone(),
             path,
+            owner_pane: owner,
             view: view.clone(),
             _decided: decided,
         });
@@ -316,6 +321,37 @@ impl SirioWorkspace {
             self.ide_toast(&format!("Claude proposes a change in {name}"), cx);
         }
         cx.notify();
+    }
+
+    /// The title of the tab that holds terminal pane `pane`, on screen or in a worktree's parked
+    /// strip.
+    fn ide_pane_title(&self, pane: usize) -> Option<String> {
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.panes.contains(pane)) {
+            return Some(tab.title.clone());
+        }
+        self.parked_worktree_tabs.values().find_map(|parked| {
+            parked
+                .terminal_panes_by_tab
+                .iter()
+                .position(|panes| panes.contains(&pane))
+                .and_then(|index| parked.layout.tabs.get(index))
+                .map(|tab| tab.title.clone())
+        })
+    }
+
+    /// A parked proposal's worktree came back: its bar names the owner terminal again, from the
+    /// strip just restored.
+    pub(crate) fn ide_refresh_owner_titles(&mut self, view: &Entity<ProposalTab>, tabs: &[crate::OpenTab], cx: &mut Context<Self>) {
+        let Some(index) = self.ide_proposals.position_of_view(view.entity_id()) else {
+            return;
+        };
+        let Some(pane) = self.ide_proposals.records[index].owner_pane else {
+            return;
+        };
+        let title = tabs.iter().find(|tab| tab.panes.contains(pane)).map(|tab| tab.title.clone());
+        if title.is_some() {
+            view.update(cx, |tab, cx| tab.set_owner_title(title, cx));
+        }
     }
 
     /// The name the sidebar gives `worktree`: its branch, else its directory's name.
@@ -453,10 +489,16 @@ impl SirioWorkspace {
         if doomed.is_empty() {
             return;
         }
+        let mut comments = Vec::new();
         for record in &doomed {
+            comments.extend(record.view.read(cx).comments_text());
             self.ide_remove_view(record.view.entity_id(), cx);
         }
         self.ide_toast(CLOSED_TOAST, cx);
+        if !comments.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(comments.join("\n")));
+            self.ide_toast(COMMENTS_COPIED_TOAST, cx);
+        }
         cx.defer(move |_| drop(doomed));
         cx.notify();
     }
@@ -481,7 +523,7 @@ impl SirioWorkspace {
     /// The tabs in `ids` hold a proposal: asks "Closing rejects Claude's change" and returns
     /// `true`, and the caller must not close anything. Reject answers each proposal and then
     /// does `then`.
-    pub(crate) fn ide_guard_tab_close(&mut self, ids: &[usize], then: Then, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn ide_guard_tab_close(&mut self, ids: &[usize], cx: &mut Context<Self>) -> bool {
         if self.ide_proposals.is_empty() {
             return false;
         }
@@ -489,6 +531,13 @@ impl SirioWorkspace {
         if views.is_empty() {
             return false;
         }
+        let tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| ids.contains(&tab.id))
+            .map(|tab| tab.persistence_id.clone())
+            .collect();
+        let then = Then::CloseTabs { worktree: self.working_directory.clone(), tabs };
         self.ide_ask(views, then, cx);
         true
     }
@@ -519,7 +568,7 @@ impl SirioWorkspace {
             self.ide_continue_worktree_removal(row_id, remote, cx);
             return;
         }
-        self.ide_ask(views, Then::RemoveWorktree { row_id, remote }, cx);
+        self.ide_ask(views, Then::RemoveWorktree { path: worktree.to_path_buf(), remote }, cx);
     }
 
     fn ide_continue_worktree_removal(
@@ -571,13 +620,26 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    /// Reject: every proposal of the question is answered `DIFF_REJECTED`, then the close that
-    /// was asked for goes on.
+    /// Reject: every proposal of the question is answered `DIFF_REJECTED` and its tab closes,
+    /// then the close that was asked for goes on. The question held identities, which are looked
+    /// up again here: when what it was about is gone (another worktree selected, the row
+    /// removed), nothing is answered and nothing closes.
     pub(crate) fn ide_confirm_reject(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(confirmation) = self.ide_proposals.confirmation.take() else {
             return false;
         };
+        let still_valid = match &confirmation.then {
+            Then::CloseTabs { worktree, .. } => paths_name_the_same_document(worktree, &self.working_directory),
+            Then::RemoveWorktree { path, .. } => self.sidebar.read(cx).worktree_row_for(path).is_some(),
+            Then::RemoveProject(id) => self.project_catalog.projects().iter().any(|project| &project.id == id),
+        };
+        if !still_valid {
+            self.focus_active_pane(window, cx);
+            cx.notify();
+            return true;
+        }
         let mut undelivered = false;
+        let mut comments = Vec::new();
         let mut dropped = Vec::new();
         for view in &confirmation.views {
             let Some(index) = self.ide_proposals.position_of_view(*view) else {
@@ -585,19 +647,35 @@ impl SirioWorkspace {
             };
             let record = self.ide_proposals.records.remove(index);
             undelivered |= answer_diff(cx, &record.id, DiffAnswer::Rejected).is_err();
-            for parked in self.parked_proposals.values_mut() {
-                parked.retain(|shown| shown.entity_id() != *view);
-            }
+            comments.extend(record.view.read(cx).comments_text());
+            // Its tab goes now, not with the original close: a close that is then cancelled
+            // (a dirty tab among the others) must not leave a tab nobody answers for.
+            self.ide_remove_view(*view, cx);
             dropped.push(record);
         }
-        self.parked_proposals.retain(|_, parked| !parked.is_empty());
         if undelivered {
             self.ide_toast(CLOSED_TOAST, cx);
         }
+        if !comments.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(comments.join("\n")));
+            self.ide_toast(COMMENTS_COPIED_TOAST, cx);
+        }
         cx.defer(move |_| drop(dropped));
         match confirmation.then {
-            Then::CloseTabs(ids) => self.request_close_ids(ids, window, cx),
-            Then::RemoveWorktree { row_id, remote } => self.ide_continue_worktree_removal(row_id, remote, cx),
+            Then::CloseTabs { tabs, .. } => {
+                let ids: Vec<usize> = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tabs.contains(&tab.persistence_id))
+                    .map(|tab| tab.id)
+                    .collect();
+                self.request_close_ids(ids, window, cx);
+            }
+            Then::RemoveWorktree { path, remote } => {
+                if let Some(row_id) = self.sidebar.read(cx).worktree_row_for(&path) {
+                    self.ide_continue_worktree_removal(row_id, remote, cx);
+                }
+            }
             Then::RemoveProject(id) => {
                 self.remove_project(&id, cx);
                 self.refresh_closed_sessions(cx);
@@ -657,15 +735,15 @@ impl SirioWorkspace {
             ModalSpec {
                 id: "proposal-close-confirm",
                 title: CONFIRM_TITLE.into(),
-                body: CONFIRM_BODY.into(),
+                body: String::new(),
                 text_field: None,
                 buttons: vec![
-                    ModalButton::new("cancel", "Cancel", ModalButtonTone::Plain, move |_, window, cx| {
+                    ModalButton::new("cancel", CONFIRM_BUTTONS[0], ModalButtonTone::Plain, move |_, window, cx| {
                         cancel_entity.update(cx, |workspace, cx| {
                             workspace.ide_cancel_confirmation(Some(window), cx);
                         });
                     }),
-                    ModalButton::new("reject", "Reject", ModalButtonTone::Destructive, move |_, window, cx| {
+                    ModalButton::new("reject", CONFIRM_BUTTONS[1], ModalButtonTone::Destructive, move |_, window, cx| {
                         reject_entity.update(cx, |workspace, cx| {
                             workspace.ide_confirm_reject(window, cx);
                         });
@@ -711,7 +789,7 @@ impl SirioWorkspace {
         let confirmation = self.ide_proposals.confirmation.as_ref().map(|confirmation| {
             json!({
                 "title": CONFIRM_TITLE,
-                "buttons": ["Reject", "Cancel"],
+                "buttons": CONFIRM_BUTTONS,
                 "then": confirmation.then.name(),
                 "proposals": confirmation
                     .views
@@ -729,7 +807,8 @@ impl SirioWorkspace {
     /// available (a refused or over-cap proposal). `confirm_reject` and `cancel` answer the
     /// close confirmation, and `close_others` is the tab menu's Close Others on the tab at the
     /// position `text` names; neither takes a `tab_name`. `close_worktree` closes the
-    /// proposal's worktree the way a sidebar removal does (without git removing the checkout).
+    /// proposal's worktree through the event a confirmed sidebar "Remove worktree?" emits (it
+    /// removes the checkout with git, like the sidebar), and `remove_project` removes its project.
     pub(crate) fn control_ide_act(
         &mut self,
         tab_name: Option<&str>,

@@ -14439,7 +14439,7 @@ impl SirioWorkspace {
             // The Trace tabs this worktree parked come back with their chats.
             self.readopt_trace_tabs(&selected_worktree_id, &selected_path, &mut new_tabs);
             // So do the proposals Claude is waiting on there (never dropped by an eviction).
-            self.readopt_proposal_tabs(&selected_worktree_id, &mut new_tabs);
+            self.readopt_proposal_tabs(&selected_worktree_id, &mut new_tabs, cx);
             // Whatever this worktree had retained was just re-adopted into
             // `new_tabs`; a running chat whose tab the database no longer
             // names is dropped rather than resurrected, so the DB stays the
@@ -17340,7 +17340,7 @@ impl SirioWorkspace {
         let tab_id = self.tabs[index].id;
         // Closing what holds Claude's proposed change asks first (spec 2026-11-15 10.8); the
         // answer, Reject, then continues this close.
-        if self.ide_guard_tab_close(&[tab_id], ide_bridge::proposals::Then::CloseTabs(vec![tab_id]), cx) {
+        if self.ide_guard_tab_close(&[tab_id], cx) {
             return;
         }
         // #319 invariant: closing a tab hands its half to the *nearest*
@@ -17547,7 +17547,7 @@ impl SirioWorkspace {
             return;
         }
         // One question for the whole group, before any of it closes.
-        if self.ide_guard_tab_close(&ids, ide_bridge::proposals::Then::CloseTabs(ids.clone()), cx) {
+        if self.ide_guard_tab_close(&ids, cx) {
             return;
         }
         for id in &ids {
@@ -21489,16 +21489,18 @@ impl SirioWorkspace {
         ));
         self.tab_worktree_paths
             .insert(tab_id, self.working_directory.clone());
-        if active_in_secondary {
-            self.active_tab = self.tabs.len() - 1;
-        }
         self.next_tab_id += 1;
         self.next_pane_id += 1;
         self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &title) {
             self.rebuild_center_split();
         }
-        self.center_split.set_active(PaneRole::Secondary, Some(tab_id));
+        // Keyboard focus in Secondary stays on the tab it is in (an editor being typed in is
+        // never unmounted): the proposal is in the strip beside it. Anywhere else it becomes
+        // Secondary's shown tab.
+        if !active_in_secondary {
+            self.center_split.set_active(PaneRole::Secondary, Some(tab_id));
+        }
         self.mark_activity_dirty();
         cx.notify();
     }
@@ -21527,7 +21529,7 @@ impl SirioWorkspace {
 
     /// Puts back the proposal tabs `worktree_id` parked, among the restored `tabs`. A proposal
     /// whose request ended meanwhile is no longer parked (its record closed it).
-    fn readopt_proposal_tabs(&mut self, worktree_id: &str, tabs: &mut Vec<OpenTab>) {
+    fn readopt_proposal_tabs(&mut self, worktree_id: &str, tabs: &mut Vec<OpenTab>, cx: &mut Context<Self>) {
         let Some(parked) = self.parked_proposals.remove(worktree_id) else {
             return;
         };
@@ -21535,6 +21537,7 @@ impl SirioWorkspace {
             let Some(title) = self.ide_proposals.title_of(view.entity_id()) else {
                 continue;
             };
+            self.ide_refresh_owner_titles(&view, tabs, cx);
             let pane_id = next_pane_id(tabs).max(self.next_pane_id);
             self.next_pane_id = pane_id + 1;
             let id = tabs.len();

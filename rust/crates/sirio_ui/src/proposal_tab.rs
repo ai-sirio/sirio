@@ -656,6 +656,14 @@ impl ProposalTab {
         self.diff_stats
     }
 
+    /// The owner terminal's title, once known (a parked proposal's worktree came back).
+    pub fn set_owner_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        if self.owner_title != title {
+            self.owner_title = title;
+            cx.notify();
+        }
+    }
+
     /// Whether the bar names the owner terminal that proposes the change.
     pub fn has_owner_title(&self) -> bool {
         self.owner_title.is_some()

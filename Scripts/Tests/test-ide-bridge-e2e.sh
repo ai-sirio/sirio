@@ -154,6 +154,22 @@ set -eEuo pipefail
 #                    `git worktree list`, its branch and both connections; Reject answers
 #                    DIFF_REJECTED (read by the outside client), then the checkout is gone from disk
 #                    and from git, and the pane's session ends
+#   reject_leaves_no_inert_tab
+#                    a dirty file tab among Close Others: Reject in the confirmation answers
+#                    DIFF_REJECTED and the proposal's tab is gone at once, though the dirty-tab prompt
+#                    is then cancelled (Escape) and the dirty tab stays
+#   confirm_stable_tabs
+#                    a Close Others question is open, another worktree is selected, Reject: no tab
+#                    of that worktree closes and nothing is answered (the question held identities,
+#                    not positions)
+#   confirm_stable_worktree
+#                    the worktree removal question is open while another worktree is removed behind
+#                    the app's back and the sidebar rescans: Reject removes the asked worktree
+#                    (looked up again by path) and no other
+#   secondary_focus_keeps_editor
+#                    the focus in an editor tab of Secondary: an openDiff opens its tab in the strip
+#                    without taking the active tab, and the editor still takes keys
+#   symlink_title    a symlink CLAUDE.md -> AGENTS.md as the file: the tab is titled "✻ CLAUDE.md"
 #   project_close_guarded
 #                    the same for the sidebar's "Remove project from Sirio?" (RemoveProject, driven by
 #                    `act remove_project`) on a second project: it asks first and ends no session;
@@ -163,8 +179,10 @@ set -eEuo pipefail
 #                    (appearance_seed --limit-mounted 2) and a stale file left in the scratch
 #                    directory (which the launch sweeps; the directory is 0700): a proposal for a
 #                    worktree that is not on screen has no tab, state on_screen false, and the toast
-#                    "Claude proposes a change in <name>"; selecting the worktree brings the tab; it
-#                    survives that worktree's eviction; Accept answers
+#                    "Claude proposes a change in <name>", the bar naming its owner terminal; selecting
+#                    the worktree brings the tab; it survives that worktree's eviction; Accept
+#                    answers; and a Claude outside every Sirio shell (no owner) proposing a file of a
+#                    worktree not on screen is held under the file's worktree too
 #
 # `surface.ide.act` (debug builds only) presses what a user presses: accept, reject, edit (with
 # `text`, which errors when Edit is unavailable), show_diff, close, confirm_reject, cancel,
@@ -1799,7 +1817,9 @@ import json, sys
 paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == sys.argv[1]]
 print(paths[0] if paths else "")' "$1"
 }
-# The path of the worktree on branch $1, made when it does not exist yet.
+# The path of the worktree on branch $1, made when it does not exist yet. A worktree made late in
+# a run can be dropped from the sidebar by a catalog refresh that began before it existed, so the
+# cases that remove one remove ide-second, which every run makes at its start.
 ensure_worktree() { # branch
   local path
   path="$(branch_worktree "$1")"
@@ -1809,6 +1829,16 @@ ensure_worktree() { # branch
   fi
   [ -n "$path" ] || fail "$CASE: no worktree on branch $1"
   printf '%s' "$path"
+}
+
+# Selects a worktree just created: its row reaches the control state a moment after the listing.
+select_new_worktree() { # path
+  local tries=0
+  until "$CTL" select-workspace --workspace "$1" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "$CASE: $1 never became selectable ($("$CTL" select-workspace --workspace "$1" 2>&1 | head -n 2); rows: $("$CTL" list-workspaces --json | python3 -I -c 'import json, sys; print([(r["branch"], r["path"][-30:]) for r in json.load(sys.stdin)])'))"
+    sleep 0.2
+  done
 }
 
 # A Claude in a new application terminal of the selected worktree, connected.
@@ -2035,7 +2065,7 @@ case_proposal_close_confirm() {
   expect_proposal close-1 ready True
   act close-1 close
   expect_state "closing asks first" 'd["confirmation"]["title"]' "Closing rejects Claude's change"
-  expect_state "with Reject and Cancel" 'd["confirmation"]["buttons"]' "['Reject', 'Cancel']"
+  expect_state "with Cancel and Reject, as drawn" 'd["confirmation"]["buttons"]' "['Cancel', 'Reject']"
   capture ide-proposal-confirm
   act_alone cancel
   expect_state "Cancel closes the question" 'd["confirmation"]' None
@@ -2205,6 +2235,169 @@ case_project_close_guarded() {
   end_outside_client
   CLIENT_LOG="$in_log" CLIENT_FIFO="$in_fifo"
   ctl select-workspace --workspace "$WT_ID" >/dev/null
+}
+
+# A worktree made now that is still listed after the catalog refreshes in flight have landed:
+# one that began before it existed can drop it from the sidebar, so a dropped one is made again
+# under another branch name.
+settled_worktree() { # branch
+  local n path
+  for n in "" 2 3 4; do
+    path="$(ensure_worktree "$1$n" 2>/dev/null || true)"
+    sleep 2
+    if [ -n "$path" ] && [ -n "$(branch_worktree "$1$n")" ]; then
+      printf '%s' "$path"
+      return 0
+    fi
+  done
+  fail "$CASE: no worktree named $1 stayed in the sidebar"
+}
+
+# A pending question holds identities, not positions (a sidebar row id is the project's id plus
+# the worktree's index). The removal question of aaa-shift is open while ide-second, which comes
+# before it, is removed behind the app's back and a new worktree is made: the rows move up, and
+# the old index now names the new worktree. Reject removes aaa-shift and nothing else.
+case_confirm_stable_worktree() {
+  local doomed other trigger tries=0
+  doomed="$(settled_worktree aaa-shift)"
+  trigger="$(settled_worktree aaa-trigger)"
+  select_new_worktree "$doomed"
+  other="$(branch_worktree ide-second)"
+  [ -n "$other" ] || fail "$CASE: no ide-second worktree to remove before it"
+  printf 'a\n' >"$doomed/r.txt"
+  start_outside_client "$doomed"
+  wait_client "the outside client connected" 'r.get("event") == "connected"' 1
+  open_diff st-1 "$doomed/r.txt" 'b\n'
+  expect_proposal st-1 ready True
+  act st-1 close_worktree
+  expect_state "the removal asks first" 'd["confirmation"]["then"]' remove_worktree
+  # A mounted worktree survives a refresh whatever git says: unmount it first.
+  ctl close-workspace --workspace "$other" >/dev/null
+  git -C "$WT" worktree remove --force "$other"
+  git -C "$WT" branch -D ide-second >/dev/null
+  # Selecting a worktree rescans the project on the background executor.
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  while [ -n "$(branch_worktree ide-second)" ] && [ "$tries" -lt 100 ]; do tries=$((tries + 1)); sleep 0.2; done
+  [ -z "$(branch_worktree ide-second)" ] || fail "$CASE: the sidebar still lists the removed worktree, so no row moved"
+  echo "rows after the move: $("$CTL" list-workspaces --json | python3 -I -c 'import json, sys; print([r["branch"] for r in json.load(sys.stdin)])')"
+  expect_state "the question is still open" 'd["confirmation"]["then"]' remove_worktree
+  act_alone confirm_reject
+  assert_response "$(req_id st-1)" 'd["texts"] == ["DIFF_REJECTED", "st-1"]' "Reject answers DIFF_REJECTED"
+  tries=0
+  while [ -d "$doomed" ] && [ "$tries" -lt 150 ]; do tries=$((tries + 1)); sleep 0.2; done
+  [ ! -d "$doomed" ] || fail "$CASE: the worktree the question was about is still on disk"
+  [ -d "$trigger" ] || fail "$CASE: another worktree was removed in its place"
+  "$CTL" list-workspaces --json | python3 -I -c '
+import json, os, subprocess, sys
+listed = subprocess.run(["git", "-C", sys.argv[1], "worktree", "list", "--porcelain"], capture_output=True, text=True).stdout
+for row in json.load(sys.stdin):
+    if row["path"] == sys.argv[2]:
+        continue
+    assert os.path.isdir(row["path"]), "removed " + row["path"]
+    assert "worktree " + row["path"] in listed, "git lost " + row["path"]' "$WT" "$doomed" \
+    || fail "$CASE: a worktree other than the asked one is gone (rows moved under the question)"
+  git -C "$WT" worktree list --porcelain | grep -Fxq "worktree $trigger" || fail "$CASE: git lost $trigger"
+  [ -d "$WT" ] || fail "$CASE: the repository is gone"
+  echo "OK: only the asked worktree was removed; the one made meanwhile is intact on disk and in git"
+  end_outside_client
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+}
+
+# A Close Others question, then another worktree is selected: Reject touches no tab of it.
+case_confirm_stable_tabs() {
+  local keep before second i
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  proposal_client
+  printf 'one\n' >"$WT/s1.txt"; printf 'f1\n' >"$WT/sf1.txt"; printf 'f2\n' >"$WT/sf2.txt"
+  ctl surface editor open --path "$WT/sf1.txt" >/dev/null
+  keep="$(expect_tab 'sf1.txt')"
+  ctl surface editor open --path "$WT/sf2.txt" >/dev/null
+  expect_tab 'sf2.txt' >/dev/null
+  open_diff tabs-1 "$WT/s1.txt" 'two\n'
+  expect_proposal tabs-1 ready True
+  act_alone close_others "$keep"
+  expect_state "Close Others asks first" 'd["confirmation"]["then"]' close_tabs
+  second="$(ensure_worktree ide-second)"
+  select_new_worktree "$second"
+  for i in 1 2 3 4 5 6; do sockcall surface.terminal.open "cmd=sleep 300" >/dev/null; done
+  before="$(tab_count)"
+  act_alone confirm_reject
+  sleep 1
+  [ "$(tab_count)" = "$before" ] || fail "$CASE: Reject closed tabs of the other worktree ($before then $(tab_count))"
+  echo "OK: no tab of the other worktree closed ($before tabs)"
+  expect_state "the question is gone and the proposal kept" 'len(d["proposals"])' 1
+  assert_unanswered "$(req_id tabs-1)" "nothing was answered for a question about another worktree"
+  close_tabs_of_kind terminal
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  act tabs-1 reject
+  assert_response "$(req_id tabs-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  close_tabs_of_kind file
+  client_do quit
+  close_tabs_of_kind terminal
+}
+
+# Reject in the confirmation closes the proposal's own tab at once: when the original close is
+# then cancelled (a dirty tab among the others asks), no tab nobody answers for is left.
+case_reject_leaves_no_inert_tab() {
+  proposal_client
+  printf 'one\n' >"$WT/id1.txt"; printf 'f\n' >"$WT/idf.txt"; printf 'd\n' >"$WT/idd.txt"
+  local keep window
+  ctl surface editor open --path "$WT/idf.txt" >/dev/null
+  keep="$(expect_tab 'idf.txt')"
+  ctl surface editor open --path "$WT/idd.txt" >/dev/null
+  expect_tab 'idd.txt' >/dev/null
+  sockcall surface.editor.type text=dirty >/dev/null
+  open_diff inert-1 "$WT/id1.txt" 'two\n'
+  expect_proposal inert-1 ready True
+  act_alone close_others "$keep"
+  expect_state "Close Others asks first" 'd["confirmation"]["then"]' close_tabs
+  act_alone confirm_reject
+  assert_response "$(req_id inert-1)" 'd["texts"] == ["DIFF_REJECTED", "inert-1"]' "Reject answers"
+  expect_no_tab '✻ id1.txt'
+  echo "OK: the proposal's tab is gone while the dirty-tab prompt is still up"
+  window="$(find_window)"
+  [ -z "$window" ] || DISPLAY="$DISPLAY_TARGET" xdotool key --window "$window" Escape
+  sleep 1
+  [ "$(tab_pos 'idd.txt')" != 0 ] || fail "$CASE: the dirty tab was closed"
+  expect_no_proposals
+  close_tabs_of_kind file
+  end_app_client
+}
+
+# Keyboard focus in an editor of Secondary: the proposal opens beside it, the editor stays.
+case_secondary_focus_keeps_editor() {
+  proposal_client
+  printf 'one\n' >"$WT/sec.txt"; printf 'two\n' >"$WT/sec2.txt"
+  ctl surface editor open --path "$WT/sec.txt" >/dev/null
+  local pos active
+  pos="$(expect_tab 'sec.txt')"
+  active="$(tabs_field active)"
+  [ "$active" = "$pos" ] || fail "$CASE: the editor is not the active tab ($active, $pos)"
+  open_diff sec-1 "$WT/sec2.txt" 'x\n'
+  expect_proposal sec-1 on_screen True
+  expect_tab '✻ sec2.txt' >/dev/null
+  [ "$(tabs_field active)" = "$pos" ] || fail "$CASE: the proposal took the active tab from the editor"
+  sockcall surface.editor.type text=z >/dev/null || fail "$CASE: the editor was unmounted (no file to type in)"
+  echo "OK: the editor stays active and takes keys; the proposal is in the strip"
+  act sec-1 reject
+  assert_response "$(req_id sec-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  close_tabs_of_kind file
+  end_app_client
+}
+
+# A symlink CLAUDE.md -> AGENTS.md shows as the name Claude sent.
+case_symlink_title() {
+  proposal_client
+  printf 'x\n' >"$WT/AGENTS.md"
+  rm -f "$WT/CLAUDE.md"
+  ln -s AGENTS.md "$WT/CLAUDE.md"
+  open_diff link-1 "$WT/CLAUDE.md" 'y\n'
+  expect_tab '✻ CLAUDE.md' >/dev/null
+  echo "OK: the tab is titled ✻ CLAUDE.md"
+  act link-1 reject
+  assert_response "$(req_id link-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  rm -f "$WT/CLAUDE.md"
+  end_app_client
 }
 
 case_close_tab_withdraws() {
@@ -2448,11 +2641,13 @@ print([r["mounted"] for r in json.load(sys.stdin) if r["id"] == sys.argv[1]][0])
   ctl select-workspace --workspace "$a_id" >/dev/null
   open_diff parked-1 "$WT/parked.txt" 'B\n'
   expect_proposal parked-1 on_screen False
+  expect_proposal parked-1 owner_named True
   expect_state "the toast names the worktree" '"Claude proposes a change in main" in d["toasts"]' True
   [ "$(tab_pos '✻ parked.txt')" = 0 ] || fail "$CASE: a proposal for a worktree that is not on screen has a tab"
   echo "OK: held without a tab, announced by a toast"
   ctl select-workspace --workspace "$WT_ID" >/dev/null
   expect_proposal parked-1 on_screen True
+  expect_proposal parked-1 owner_named True
   expect_tab '✻ parked.txt' >/dev/null
   echo "OK: selecting the worktree brings its tab"
   ctl select-workspace --workspace "$a_id" >/dev/null
@@ -2470,6 +2665,22 @@ print([r["mounted"] for r in json.load(sys.stdin) if r["id"] == sys.argv[1]][0])
   expect_no_proposals
   client_do quit
   close_tabs_of_kind terminal
+  # A Claude outside every Sirio shell (no owner): its proposal for a file of a worktree that is
+  # not on screen is held under the file's worktree, and shows when that worktree is selected.
+  ctl select-workspace --workspace "$a_id" >/dev/null
+  start_outside_client "$WT"
+  wait_client "the outside client connected" 'r.get("event") == "connected"' 1
+  printf 'o\n' >"$WT/own.txt"
+  open_diff own-1 "$WT/own.txt" 'O\n'
+  expect_proposal own-1 on_screen False
+  [ "$(tab_pos '✻ own.txt')" = 0 ] || fail "$CASE: an ownerless proposal for a worktree not on screen has a tab"
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  expect_proposal own-1 on_screen True
+  expect_tab '✻ own.txt' >/dev/null
+  echo "OK: the ownerless proposal was held under the file's worktree and came back with it"
+  act own-1 accept
+  assert_response "$(req_id own-1)" 'd["texts"] == ["FILE_SAVED", "O\n"]' "Accept answers the ownerless proposal"
+  end_outside_client
   # The closing check wants the fake language server of this launch running: open its file.
   [ -f "$WT/a.py" ] || write_diag_file "$WT/a.py"
   ctl surface editor open --path "$WT/a.py" >/dev/null
@@ -2483,6 +2694,8 @@ run_proposal_cases() {
   case_run reject case_proposal_reject
   case_run close_confirm case_proposal_close_confirm
   case_run close_others_guarded case_close_others_guarded
+  case_run reject_leaves_no_inert_tab case_reject_leaves_no_inert_tab
+  case_run confirm_stable_tabs case_confirm_stable_tabs
   case_run close_tab_withdraws case_close_tab_withdraws
   case_run close_all case_close_all
   case_run replace_in_place case_replace_in_place
@@ -2495,6 +2708,9 @@ run_proposal_cases() {
   case_run no_decision_without_user case_no_decision_without_user
   case_run worktree_close_guarded case_worktree_close_guarded
   case_run project_close_guarded case_project_close_guarded
+  case_run confirm_stable_worktree case_confirm_stable_worktree
+  case_run secondary_focus_keeps_editor case_secondary_focus_keeps_editor
+  case_run symlink_title case_symlink_title
   case_run parked_worktree case_parked_worktree
 }
 
