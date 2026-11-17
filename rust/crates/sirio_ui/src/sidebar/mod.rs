@@ -202,6 +202,9 @@ const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
 pub(crate) const ROW_HEIGHT: f32 = 34.0;
 /// Horizontal padding of a sidebar row and of a section header (Zed's 6px).
 pub(crate) const ROW_PAD_X: f32 = 6.0;
+/// How far a worktree card's content sits in from its box, so it lines up
+/// with the project name above it.
+const CARD_CONTENT_INDENT: f32 = 24.0;
 /// Vertical padding of a sidebar row: 8 + 18 + 8 = 34, and 8 + 18 + 4 + 15 + 8 = 53.
 pub(crate) const ROW_PAD_Y: f32 = 8.0;
 /// Row title line height: the 13px title's line (the row adds `ROW_PAD_Y` above and below).
@@ -825,6 +828,12 @@ impl Sidebar {
     /// forgotten when the sidebar next renders.
     pub fn probe_bounds(&self) -> (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>) {
         (self.probe.section.get(), self.probe.card.get())
+    }
+
+    /// Whether the list's focus ring shows: only while the list holds keyboard
+    /// focus, so the ring reads as focus rather than decoration.
+    pub(crate) fn list_ring_active(&self, window: &Window) -> bool {
+        self.tree_focus.is_focused(window)
     }
 
     /// Restores a view without reporting it (the host already knows).
@@ -4472,6 +4481,7 @@ impl Render for Sidebar {
             ));
         }
         let tree_focus = self.tree_focus.clone();
+        let ring_active = self.list_ring_active(window);
         let filter_is_focused = filter_focus.is_focused(window);
         // Sidebar text fields (filter, worktree prompt) share one blink:
         // window focus is unique, so at most one caret is ever visible.
@@ -4989,7 +4999,12 @@ impl Render for Sidebar {
                     })
             })
             .when(view == SidebarView::Projects, |this| this.child(
-                div()
+                list_frame(
+                    ring_active,
+                    "sidebar-list-bar",
+                    &self.list_scroll,
+                    &theme,
+                    div()
                     .id("sidebar-tree")
                     .debug_selector(|| "sidebar-tree".to_owned())
                     .key_context(tree_keys::KEY_CONTEXT)
@@ -5023,10 +5038,7 @@ impl Render for Sidebar {
                     .on_action(cx.listener(|sidebar, _: &tree_keys::Expand, _, cx| {
                         sidebar.pill_step(tree_keys::Direction::Right, cx);
                     }))
-                    .mt(px(11.0))
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .h_full()
+                    .size_full()
                     .relative()
                     .overflow_y_scroll()
                     .track_scroll(&self.list_scroll)
@@ -5065,11 +5077,17 @@ impl Render for Sidebar {
                                 )),
                         )
                     }),
+                ),
             ))
             .when(view == SidebarView::Sessions, |this| {
                 let empty = session_list.open.is_empty() && session_list.closed.is_empty();
                 this.child(
-                    div()
+                    list_frame(
+                        ring_active,
+                        "sidebar-sessions-bar",
+                        &self.sessions_scroll,
+                        &theme,
+                        div()
                         .id("sidebar-sessions")
                         .debug_selector(|| "sidebar-sessions".to_owned())
                         .key_context(tree_keys::KEY_CONTEXT)
@@ -5091,9 +5109,7 @@ impl Render for Sidebar {
                                 cx.notify();
                             }
                         }))
-                        .mt(px(11.0))
-                        .flex_1()
-                        .min_h(px(0.0))
+                        .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.sessions_scroll)
                         .when(show_list, |this| this.child(
@@ -5115,6 +5131,7 @@ impl Render for Sidebar {
                                     .child("No sessions"),
                             )
                         }),
+                    ),
                 )
             })
             .when(notice.is_some(), |this| {
@@ -5316,6 +5333,37 @@ impl Render for Sidebar {
                 this.child(Self::render_project_form(form, entity.clone(), theme))
             })
     }
+}
+
+/// The frame a list scrolls in: a plain box under the list that carries what
+/// must not scroll with it, the overlay scrollbar and the focus ring. The ring
+/// is always drawn, transparent while the list is unfocused, so focus moves no
+/// pixel of layout.
+fn list_frame(
+    ring_active: bool,
+    bar_id: &'static str,
+    scroll: &ScrollHandle,
+    theme: &Theme,
+    list: impl IntoElement,
+) -> gpui::Div {
+    div()
+        .mt(px(11.0))
+        .flex_1()
+        .min_h(px(0.0))
+        .relative()
+        .child(list)
+        .child(crate::scroll::bar(bar_id, scroll))
+        .child(
+            div()
+                .debug_selector(|| "sidebar-list-ring".to_owned())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(if ring_active { theme.ely.focus } else { gpui::transparent_black() }),
+        )
 }
 
 #[cfg(test)]
@@ -8569,6 +8617,95 @@ mod tests {
             .unwrap_or_else(|| panic!("{selector} is drawn"));
         cx.simulate_click(control.center(), Modifiers::none());
         cx.run_until_parked();
+    }
+
+    fn card_star_actions(
+        cx: &mut TestAppContext,
+        primary: bool,
+    ) -> Vec<(bool, SidebarContextAction)> {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let row_id = sidebar.read_with(&cx, |s, _| {
+            s.rows
+                .iter()
+                .find(|row| row.kind == RowKind::Worktree && row.is_primary == primary)
+                .map(|row| row.id)
+                .expect("the worktree row exists")
+        });
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let star_selector: &'static str =
+            Box::leak(format!("sidebar-card-star-{row_id}").into_boxed_str());
+        let row = cx.debug_bounds(row_selector).expect("the card is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let star = cx
+            .debug_bounds(star_selector)
+            .expect("the star is drawn once the card is hovered");
+        cx.simulate_click(star.center(), Modifiers::none());
+        cx.run_until_parked();
+        let emitted: Vec<_> = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                SidebarEvent::ContextAction {
+                    target: SidebarContextTarget::Worktree { is_primary, .. },
+                    action,
+                } => Some((*is_primary, *action)),
+                _ => None,
+            })
+            .collect();
+        let selected_by_click = events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, SidebarEvent::SelectTab(_)));
+        assert!(!selected_by_click, "the star click does not also select the card");
+        emitted
+    }
+
+    #[gpui::test]
+    async fn the_card_star_sets_primary_on_a_worktree(cx: &mut TestAppContext) {
+        assert_eq!(
+            card_star_actions(cx, false),
+            vec![(false, SidebarContextAction::SetPrimary)]
+        );
+    }
+
+    #[gpui::test]
+    async fn the_card_star_unsets_primary_on_the_primary(cx: &mut TestAppContext) {
+        assert_eq!(
+            card_star_actions(cx, true),
+            vec![(true, SidebarContextAction::UnsetPrimary)]
+        );
+    }
+
+    #[gpui::test]
+    async fn the_list_ring_follows_list_focus(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let ring = cx.debug_bounds("sidebar-list-ring").expect("the ring is always drawn");
+        let tree = cx.debug_bounds("sidebar-tree").expect("the list is drawn");
+        assert_eq!(ring, tree, "the ring lays over the list and shifts nothing");
+        let active = |cx: &mut VisualTestContext| {
+            window.update(cx, |s, window, _| s.list_ring_active(window)).unwrap()
+        };
+        assert!(!active(&mut cx), "no ring while the list is not focused");
+        window
+            .update(&mut cx, |s, window, cx| s.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(active(&mut cx), "the ring shows while the list has focus");
+        assert_eq!(cx.debug_bounds("sidebar-list-ring"), Some(tree));
+    }
+
+    #[gpui::test]
+    async fn the_zed_card_still_spans_the_panel(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let tree = cx.debug_bounds("sidebar-tree").expect("the list is drawn");
+        let (_, card) = window.update(&mut cx, |s, _, _| s.probe_bounds()).unwrap();
+        let card = card.expect("the first card is probed");
+        assert_eq!(card.left(), tree.left(), "the card starts at the list's edge");
+        assert_eq!(card.right(), tree.right(), "the card ends at the list's edge");
     }
 
     /// Folds or opens one project the way the host restoring a session

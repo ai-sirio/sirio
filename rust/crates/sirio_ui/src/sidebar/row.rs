@@ -580,6 +580,9 @@ impl Sidebar {
             .w_full()
             .px(px(ROW_PAD_X))
             .py(px(ROW_PAD_Y))
+            // The card's content lines up with the project's name; its box
+            // (and so the hover wash and the probe) stays full width.
+            .when(is_worktree, |this| this.pl(px(ROW_PAD_X + CARD_CONTENT_INDENT)))
             .flex()
             .gap(px(8.0))
             .when(selected, |this| this.bg(theme.ely.active))
@@ -664,6 +667,7 @@ impl Sidebar {
                     .id(("sidebar-status-running", row_id))
                     .debug_selector(move || format!("sidebar-status-running-{row_id}"))
                     .flex_none()
+                    .group_hover(hover_group.clone(), |style| style.invisible())
                     .child(loading::bloom(
                         "sidebar-running-bloom",
                         loading::BLOOM_GLYPH,
@@ -679,6 +683,7 @@ impl Sidebar {
                     .id(("sidebar-status-settled", row_id))
                     .debug_selector(move || format!("sidebar-status-settled-{row_id}"))
                     .flex_none()
+                    .group_hover(hover_group.clone(), |style| style.invisible())
                     .child(loading::settled_bloom(
                         "sidebar-settled-bloom",
                         loading::BLOOM_GLYPH,
@@ -741,6 +746,7 @@ impl Sidebar {
                     div()
                         .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
                         .flex_none()
+                        .group_hover(hover_group.clone(), |style| style.invisible())
                         .text_size(theme.typography.scaled(10.0))
                         .text_color(theme.ely.fg_subtle)
                         .child("★"),
@@ -804,6 +810,44 @@ impl Sidebar {
                                 });
                             }
                         }),
+                )
+            })
+            .when(is_worktree, |this| {
+                let star_entity = entity.clone();
+                let is_primary = row.is_primary;
+                this.child(
+                    div()
+                        .id(("sidebar-card-star", row_id))
+                        .debug_selector(move || format!("sidebar-card-star-{row_id}"))
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .w(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radii.chip)
+                        .hover(|style| style.bg(theme.ely.hover))
+                        .invisible()
+                        .group_hover(hover_group.clone(), |style| style.visible())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            star_entity.update(cx, |sidebar, cx| {
+                                let Some(target) = sidebar.context_target(row_id) else {
+                                    return;
+                                };
+                                let action = if is_primary {
+                                    SidebarContextAction::UnsetPrimary
+                                } else {
+                                    SidebarContextAction::SetPrimary
+                                };
+                                sidebar.dispatch_context_action(target, action, window, cx);
+                            });
+                        })
+                        .child(
+                            EIcon::new(IconName::Star).size(EIconSize::Xs).color(
+                                if is_primary { theme.ely.fg } else { theme.ely.fg_subtle },
+                            ),
+                        ),
                 )
             })
             .when(is_removable_worktree, |this| {
