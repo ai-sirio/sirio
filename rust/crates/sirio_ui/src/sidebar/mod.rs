@@ -194,7 +194,6 @@ const FILTER_LEFT_INSET: f32 = 20.0;
 /// all and the `+`.
 const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
 /// Horizontal padding of one Projects/Sessions segment.
-const VIEW_TAB_PAD_X: f32 = 10.0;
 
 pub(crate) const ROW_HEIGHT: f32 = 34.0;
 /// Horizontal padding of a sidebar row and of a section header (Zed's 6px).
@@ -690,6 +689,8 @@ pub struct Sidebar {
     /// The hover-x's closure menu; shares `context_menu_focus` for Escape.
     worktree_close_menu: Popup<OpenWorktreeCloseMenu>,
     add_project_menu: Popup<()>,
+    /// The title's Projects / Sessions menu.
+    view_menu: Popup<()>,
     /// The resolved launch source per adapter id, pushed by the host beside
     /// the tab bar's copy, so the worktree menu's New Chat offers exactly
     /// the agents the + menu does.
@@ -805,6 +806,7 @@ impl Sidebar {
         self.view = view;
         self.armed_delete = None;
         self.filter.clear();
+        self.view_menu.close();
         if view == SidebarView::Sessions {
             self.set_clock(sessions::unix_now_ms(), cx);
         }
@@ -1050,6 +1052,7 @@ impl Sidebar {
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
+            view_menu: Popup::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -1153,6 +1156,7 @@ impl Sidebar {
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
+            view_menu: Popup::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -1907,6 +1911,21 @@ impl Sidebar {
         }
         self.close_context_menu(cx);
         cx.notify();
+    }
+
+    fn toggle_view_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.view_menu.take_press_was_open() {
+            self.view_menu.open(());
+        }
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn close_view_menu(&mut self, cx: &mut Context<Self>) {
+        if self.view_menu.begin_close() {
+            reap_popup(cx, |sidebar| &mut sidebar.view_menu);
+            cx.notify();
+        }
     }
 
     fn close_add_project_menu(&mut self, cx: &mut Context<Self>) {
@@ -3602,6 +3621,117 @@ impl Sidebar {
         )
     }
 
+    /// The 40 px header: the title that opens the view menu. Later tasks add
+    /// the Bell and Search to its right side through `header_trailing`.
+    fn render_header(&self, theme: &Theme, view: SidebarView, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let entity = cx.entity();
+        let menu = self.view_menu.get().map(|_| {
+            Self::render_view_menu(&self.view_menu, entity, view, *theme, cx).into_any_element()
+        });
+        div()
+            .debug_selector(|| "sidebar-header".to_owned())
+            .relative()
+            .flex_none()
+            .h(px(40.0))
+            .w_full()
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .id("sidebar-title")
+                    .debug_selector(|| "sidebar-title".to_owned())
+                    .h(px(28.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .rounded(theme.radii.control)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.ely.hover))
+                    .text_size(theme.typography.scaled(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.ely.fg)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.view_menu.note_trigger_press()),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_view_menu(cx)))
+                    .child("Sirio")
+                    .child(
+                        div()
+                            .debug_selector(|| "sidebar-title-chevron".to_owned())
+                            .flex()
+                            .flex_none()
+                            .child(
+                                IconElement::new(Icon::ChevronDown, IconSize::Small)
+                                    .text_color(theme.ely.fg_subtle),
+                            ),
+                    ),
+            )
+            .when_some(menu, |this, menu| this.child(menu))
+            .into_any_element()
+    }
+
+    fn render_view_menu(
+        popup: &Popup<()>,
+        entity: gpui::Entity<Self>,
+        current: SidebarView,
+        theme: Theme,
+        cx: &App,
+    ) -> impl IntoElement {
+        let outside = entity.clone();
+        let item = |view: SidebarView, label: &'static str, selector: &'static str, check: &'static str| {
+            let entity = entity.clone();
+            menu_row(selector, false, false, cx)
+                .debug_selector(|| selector.to_owned())
+                .w_full()
+                .gap(px(8.0))
+                .text_size(theme.typography.ui_size)
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |sidebar, cx| sidebar.choose_view(view, cx))
+                })
+                .child(menu_label(label))
+                .when(view == current, |row| {
+                    row.child(
+                        div()
+                            .debug_selector(|| check.to_owned())
+                            .flex()
+                            .flex_none()
+                            .child(
+                                IconElement::new(Icon::Check, IconSize::Small)
+                                    .text_color(theme.ely.fg),
+                            ),
+                    )
+                })
+        };
+        let card = menu_card("sidebar-view-menu", cx)
+            .debug_selector(|| "sidebar-view-menu".to_owned())
+            .w(px(190.0))
+            .child(item(
+                SidebarView::Projects,
+                "Projects",
+                "sidebar-view-menu-projects",
+                "sidebar-view-menu-check-projects",
+            ))
+            .child(item(
+                SidebarView::Sessions,
+                "Sessions",
+                "sidebar-view-menu-sessions",
+                "sidebar-view-menu-check-sessions",
+            ))
+            .on_mouse_down_out(move |_, _, cx| {
+                outside.update(cx, |sidebar, cx| sidebar.close_view_menu(cx));
+            });
+        hang_below(
+            "sidebar-view-menu-layer",
+            HANG_GAP,
+            card,
+            popup.closing_since(),
+            cx,
+        )
+    }
+
     fn render_add_project_menu(
         popup: &Popup<()>,
         entity: gpui::Entity<Self>,
@@ -3820,76 +3950,7 @@ impl Focusable for Sidebar {
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
-/// One segment of the header's view switch, drawn like the Chat/Code
-/// switch it copies: the two segments share the track's width, the current
-/// one is a filled pill on the track and the other is bare text.
-fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    let (id, icon_id, label_id, icon, label) = match tab {
-        SidebarView::Projects => (
-            "sidebar-view-projects",
-            "sidebar-view-icon-projects",
-            "sidebar-view-label-projects",
-            Icon::FolderFill,
-            "Projects",
-        ),
-        SidebarView::Sessions => (
-            "sidebar-view-sessions",
-            "sidebar-view-icon-sessions",
-            "sidebar-view-label-sessions",
-            Icon::MessageSquare,
-            "Sessions",
-        ),
-    };
-    let active = tab == current;
-    let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .flex_1()
-        .h_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(6.0))
-        .px(px(VIEW_TAB_PAD_X))
-        .rounded(theme.radii.chip_active)
-        .text_size(theme.typography.scaled(13.0))
-        .font_weight(if active {
-            FontWeight::MEDIUM
-        } else {
-            FontWeight::NORMAL
-        })
-        .text_color(tone)
-        .cursor_pointer()
-        .map(|this| {
-            if active {
-                this.bg(theme.ely.active)
-            } else {
-                // The track is already `hover`, so the bare segment answers
-                // the pointer with its text.
-                this.hover(|style| style.text_color(theme.ely.fg))
-            }
-        })
-        .child(
-            div()
-                .debug_selector(move || icon_id.to_owned())
-                .flex()
-                .flex_none()
-                .child(IconElement::new(icon, IconSize::Small).text_color(tone)),
-        )
-        .child(
-            // At the narrowest sidebar the labels give way, never the icons.
-            div()
-                .debug_selector(move || label_id.to_owned())
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(label),
-        )
-}
-
-/// A 20px icon control in the row under the view switch, the size and hover
+/// A 20px icon control in the row under the title, the size and hover
 /// of the `+` beside it. The icon says what it does only by shape, so the words live in
 /// the tooltip. The caller attaches the click.
 fn header_icon_button(
@@ -3944,7 +4005,8 @@ impl Render for Sidebar {
         let first_card_probe = self.probe.first_card.get();
         let section_probe = self.probe.section.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
-        let badge = (view == SidebarView::Projects)
+        // Drawn nowhere until Task 2 gives it to the Bell.
+        let _badge = (view == SidebarView::Projects)
             .then(|| sessions::attention(&sessions::session_list(&self.rows, &[], "").open))
             .flatten();
         let sticky_section = self.sticky_section(&rows);
@@ -4249,6 +4311,9 @@ impl Render for Sidebar {
                     if sidebar.armed_delete.take().is_some() {
                         cx.notify();
                         closed = true;
+                    } else if sidebar.view_menu.is_open() {
+                        sidebar.close_view_menu(cx);
+                        closed = true;
                     } else if sidebar.has_open_project_surface() {
                         sidebar.close_project_surface(cx);
                         closed = true;
@@ -4272,60 +4337,7 @@ impl Render for Sidebar {
             .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
-            .pt(px(8.0))
-            .child(
-                div()
-                    .debug_selector(|| "sidebar-view-tabs".to_owned())
-                    .h(px(30.0))
-                    .mx(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    // The track's own 2px inset around its 26px segments —
-                    // component geometry, like `controls::segmented`.
-                    .p(px(2.0))
-                    .rounded(theme.radii.control)
-                    // `hover`, not `surface`: on every ladder it stands off
-                    // the sidebar's `bg` in both appearances, where
-                    // `surface` all but vanished on the light ones.
-                    .bg(theme.ely.hover)
-                    .border_1()
-                    .border_color(theme.ely.border)
-                    .child({
-                        let projects_entity = entity.clone();
-                        view_tab(SidebarView::Projects, view, &theme).on_click(move |_, _, cx| {
-                            projects_entity.update(cx, |sidebar, cx| {
-                                sidebar.choose_view(SidebarView::Projects, cx)
-                            });
-                        })
-                    })
-                    .child({
-                        let sessions_entity = entity.clone();
-                        view_tab(SidebarView::Sessions, view, &theme)
-                            .when_some(badge, |this, status| {
-                                let (color, name) = match status {
-                                    ActivityStatus::Error => (theme.ely.danger, "error"),
-                                    _ => (theme.ely.warning, "needs-input"),
-                                };
-                                this.child(
-                                    div()
-                                        .debug_selector(move || {
-                                            format!("sidebar-sessions-badge-{name}")
-                                        })
-                                        .flex_none()
-                                        .w(px(6.0))
-                                        .h(px(6.0))
-                                        .rounded_full()
-                                        .bg(color),
-                                )
-                            })
-                            .on_click(move |_, _, cx| {
-                                sessions_entity.update(cx, |sidebar, cx| {
-                                    sidebar.choose_view(SidebarView::Sessions, cx)
-                                });
-                            })
-                    }),
-            )
+            .child(self.render_header(&theme, view, cx))
             .when(view == SidebarView::Projects, |this| {
                 // Open and fold the whole list, then the `+`: one row under
                 // the switch, the three drawn at one size. They are icons, so
@@ -8155,9 +8167,62 @@ mod tests {
         }
     }
 
-    /// At the narrowest sidebar the segment labels give way, never a
-    /// control: the `+` and both bulk buttons stay whole in their own row
-    /// under the view switch, at the same size, inside the sidebar.
+    /// Opens the title menu and picks `item` (`projects` or `sessions`).
+    fn choose_from_title_menu(cx: &mut VisualTestContext, item: &'static str) {
+        click_control(cx, "sidebar-title");
+        let selector = match item {
+            "projects" => "sidebar-view-menu-projects",
+            _ => "sidebar-view-menu-sessions",
+        };
+        click_control(cx, selector);
+    }
+
+    #[gpui::test]
+    async fn the_title_menu_switches_to_sessions_and_back(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "closed until asked");
+
+        click_control(&mut cx, "sidebar-title");
+        assert!(cx.debug_bounds("sidebar-view-menu").is_some(), "the title opens the menu");
+        click_control(&mut cx, "sidebar-view-menu-sessions");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(sidebar.read_with(&cx, |sidebar, _| sidebar.view), SidebarView::Sessions);
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "choosing closes the menu");
+        let changes = events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, SidebarEvent::ViewChanged(SidebarView::Sessions)))
+            .count();
+        assert_eq!(changes, 1, "one ViewChanged(Sessions)");
+
+        choose_from_title_menu(&mut cx, "projects");
+        assert_eq!(sidebar.read_with(&cx, |sidebar, _| sidebar.view), SidebarView::Projects);
+    }
+
+    #[gpui::test]
+    async fn the_title_menu_marks_the_current_view(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
+            .unwrap();
+        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-title");
+        assert!(cx.debug_bounds("sidebar-view-menu-check-sessions").is_some());
+        assert!(cx.debug_bounds("sidebar-view-menu-check-projects").is_none());
+    }
+
+    /// At the narrowest sidebar the `+` and both bulk buttons stay whole in
+    /// their own row under the title, at the same size, inside the sidebar.
     #[gpui::test]
     async fn at_the_narrowest_sidebar_the_header_controls_stay_whole(cx: &mut TestAppContext) {
         cx.update(Theme::init);
@@ -8168,14 +8233,9 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let strip = cx.debug_bounds("sidebar-view-tabs").expect("the view switch");
-        let projects = cx.debug_bounds("sidebar-view-projects").expect("the Projects segment");
-        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("the Sessions segment");
-        assert!(
-            sessions.right() <= strip.right() && projects.left() >= strip.left(),
-            "both segments sit inside the track"
-        );
-        assert_eq!(projects.size.width, sessions.size.width, "the segments share the track");
+        let strip = cx.debug_bounds("sidebar-title").expect("the title");
+        let filter_probe = cx.debug_bounds("filter-field").expect("the filter field");
+        assert!(strip.right() <= filter_probe.right(), "the title stays inside the sidebar");
         let filter = cx.debug_bounds("filter-field").expect("the filter field");
         for selector in ["sidebar-collapse-all", "sidebar-expand-all", "add-project"] {
             let control = cx
@@ -8346,6 +8406,7 @@ mod tests {
     #[gpui::test]
     async fn the_switch_shows_sessions_newest_first_and_reports_the_view(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| sessions_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -8353,9 +8414,7 @@ mod tests {
         let events = tests_support::collect_events(&sidebar, &mut cx);
         assert!(cx.debug_bounds("sidebar-tree").is_some(), "Projects is the default view");
 
-        let segment = cx.debug_bounds("sidebar-view-sessions").expect("the Sessions segment");
-        cx.simulate_click(segment.center(), Modifiers::none());
-        cx.run_until_parked();
+        choose_from_title_menu(&mut cx, "sessions");
 
         assert!(cx.debug_bounds("sidebar-sessions").is_some());
         assert!(cx.debug_bounds("sidebar-tree").is_none());
@@ -8393,6 +8452,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[ignore = "moved to the Bell, Task 2"]
     async fn the_sessions_segment_carries_the_attention_badge_in_the_projects_view(
         cx: &mut TestAppContext,
     ) {
@@ -8641,12 +8701,8 @@ mod tests {
             "delete is re-armed"
         );
 
-        let projects = cx.debug_bounds("sidebar-view-projects").expect("Projects tab");
-        cx.simulate_click(projects.center(), Modifiers::none());
-        cx.run_until_parked();
-        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("Sessions tab");
-        cx.simulate_click(sessions.center(), Modifiers::none());
-        cx.run_until_parked();
+        choose_from_title_menu(&mut cx, "projects");
+        choose_from_title_menu(&mut cx, "sessions");
         assert!(
             cx.debug_bounds("closed-session-confirm-0").is_none(),
             "view switch disarms"
