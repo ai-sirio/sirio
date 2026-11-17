@@ -4459,6 +4459,9 @@ impl Render for Sidebar {
         let filter_text = self.filter.clone();
         let filter_is_empty = filter_text.is_empty();
         let show_filter = self.filter_shown || !filter_is_empty;
+        // Folding hides the rows, never the element that owns list focus; a
+        // query reaches into a folded list the way it opens folded projects.
+        let show_list = !self.list_folded || !filter_is_empty;
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
         let context_menu = self.context_menu.get().map(|_| {
@@ -4945,7 +4948,7 @@ impl Render for Sidebar {
                         )
                     })
             })
-            .when(view == SidebarView::Projects && !self.list_folded, |this| this.child(
+            .when(view == SidebarView::Projects, |this| this.child(
                 div()
                     .id("sidebar-tree")
                     .debug_selector(|| "sidebar-tree".to_owned())
@@ -4995,7 +4998,7 @@ impl Render for Sidebar {
                     .on_drop::<RowDrag>(move |_, _, cx| {
                         reorder_drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
                     })
-                    .child(
+                    .when(show_list, |this| this.child(
                         div()
                             .flex()
                             .flex_col()
@@ -5003,8 +5006,8 @@ impl Render for Sidebar {
                             .flex_none()
                             .gap(px(ROW_V_GAP))
                             .children(rendered_rows),
-                    )
-                    .when_some(sticky_section, |this, row| {
+                    ))
+                    .when_some(sticky_section.filter(|_| show_list), |this, row| {
                         this.child(
                             div()
                                 .debug_selector(|| "sidebar-sticky-section".to_owned())
@@ -5023,7 +5026,7 @@ impl Render for Sidebar {
                         )
                     }),
             ))
-            .when(view == SidebarView::Sessions && !self.list_folded, |this| {
+            .when(view == SidebarView::Sessions, |this| {
                 let empty = session_list.open.is_empty() && session_list.closed.is_empty();
                 this.child(
                     div()
@@ -5053,14 +5056,14 @@ impl Render for Sidebar {
                         .min_h(px(0.0))
                         .overflow_y_scroll()
                         .track_scroll(&self.sessions_scroll)
-                        .child(
+                        .when(show_list, |this| this.child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap(px(ROW_V_GAP))
                                 .children(session_elements),
-                        )
-                        .when(empty, |this| {
+                        ))
+                        .when(empty && show_list, |this| {
                             this.child(
                                 div()
                                     .debug_selector(|| "sessions-empty".to_owned())
@@ -8974,10 +8977,59 @@ mod tests {
         assert_eq!(header.size.height, px(28.0), "the section header is 28px");
         assert!(cx.debug_bounds("sidebar-tree").is_some(), "the list starts drawn");
         click_control(&mut cx, "sidebar-section-toggle");
-        assert!(cx.debug_bounds("sidebar-tree").is_none(), "the list is folded away");
+        assert!(!row_drawn(&mut cx, 1), "the rows are folded away");
         assert!(cx.debug_bounds("sidebar-section-header").is_some(), "the header stays");
         click_control(&mut cx, "sidebar-section-toggle");
         assert!(cx.debug_bounds("sidebar-tree").is_some(), "the list is back");
+    }
+
+    /// Folding hides the rows, not the element that owns keyboard focus: the
+    /// host and the filter hand focus to the list while it is folded.
+    #[gpui::test]
+    async fn a_folded_list_still_owns_keyboard_focus(cx: &mut TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(cx.debug_bounds("sidebar-tree").is_some(), "the folded list keeps its focus owner");
+        window
+            .update(&mut cx, |s, window, cx| s.focus_handle(cx).focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(focused, "focus lands on the list");
+        // A key the tree handles still reaches it: the drawn element carries
+        // the focus handle, so focus survives a frame.
+        cx.run_until_parked();
+        let still = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(still, "focus is still on the list after a draw");
+    }
+
+    /// A filter query reaches into a folded list, as it opens folded projects.
+    #[gpui::test]
+    async fn a_filter_query_shows_a_folded_list(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(!row_drawn(&mut cx, 1), "folded: no project row");
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.filter = "alpha".to_string();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(row_drawn(&mut cx, 1), "a matching query shows the list");
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.filter.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!row_drawn(&mut cx, 1), "clearing the query restores the fold");
     }
 
     /// At the narrowest sidebar the `+` and both bulk buttons stay whole in
