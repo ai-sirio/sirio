@@ -379,6 +379,32 @@ Each item is laid out the same way:
   - A fixture mode that answers each verb and changes its command list. The E2E toggles a server
     and reloads.
   - Live: `mcp_toggle` on a local stdio server.
+- **Deviations, from the live probe** (`.superpowers/probe-a6/FINDINGS.md`: 2.1.326 over stdio, with
+  2.1.325 and the 2.1.257 floor for comparison):
+  - **Capabilities come from the `initialize` answer.** `system/init` arrives only with the first
+    turn, too late for a reload sent before it. The `initialize` answer carries the same list,
+    including `reload_plugins_refuse_if_busy_v1`, on 2.1.325 and 2.1.326. The floor has none, so
+    Sirio never sends `refuse_if_busy` there.
+  - **The switch is a saved setting, per folder.** `mcp_toggle` writes `disabledMcpServers` under
+    `projects[<cwd>]` in the CLI's `.claude.json`, for every server source. Off stops the server
+    and hides its tools, and a fresh session in the same folder starts with it off. A terminal in
+    that folder sees the same state, and a sibling worktree, being another folder, does not. The
+    tooltip says so: "Saved in Claude Code's settings for this folder". Two conditions, from t2s
+    on 2026-11-17: the write is Claude Code's own, made only after the user's explicit click on
+    the switch, and Sirio never reads or writes `.claude.json` itself, in `prepare` or anywhere
+    else (`docs/agents/architecture/agent-adapters.md`: `prepare` never touches user-global
+    config); and the PR's Merge Danger section says that the switch changes a saved setting.
+  - **Busy and held.** A busy refusal carries `error_code: "reload_plugins_busy"`, so Sirio reads
+    `error_code` and does not match the text. `held: true` needs a turn already taken; before the
+    first turn a held request is applied. The floor ignores both flags and sends no `held` key,
+    which means the reload was applied. Because a plain reload is accepted mid-turn, Sirio's own
+    idle check gates the action, and it counts a turn the CLI started as busy.
+  - **`reload_output_styles` is not sent.** Sirio shows no output styles, and the floor refuses
+    the verb, which would otherwise hide the whole reload action under the degrade rule.
+  - **Order.** The action sends `reload_plugins` with the hold first. `reload_skills` follows only
+    once plugins have applied, so a held answer leaves nothing half reloaded. "Reload anyway"
+    sends `reload_plugins` without the hold, then `reload_skills`. Server names in `cache_impact`
+    are written by plugin authors and go through `visible_text`.
 
 ### A7 · Errors and notices
 
