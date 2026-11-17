@@ -620,11 +620,16 @@ it names; the live probe (§8.1) adds its findings here before any product code.
 34. **Where a proposal opens is read from the tabs' own focus** (refines item 23; Ruling 72's
     second half). No element wraps Secondary to track the focus: a wrapper focuses itself on every
     press nothing below it handles (the bar's text, a disabled button, a loading body), which kept
-    the keyboard in Secondary after Accept or Reject and left a hidden Secondary reading as
-    focused. The file, changes and proposal views expose the focus handles their keys go through,
+    the keyboard in Secondary after Accept or Reject. The file, changes and proposal views expose
+    the focus handles their keys go through,
     and a proposal's arrival asks the window whether one of them holds the focus. A tab whose views
     track none (a browser, a loading file) reads as not focused, so a proposal opened then is
-    shown. Opening a proposal's comment composer focuses its input.
+    shown. Opening a proposal's comment composer focuses its input. Two limits are left as
+    candidate issues (final re-review, Ruling 92): the handles of every Secondary tab are read
+    whether Secondary is drawn or not, so after Ctrl+Shift+B hides Secondary with the keyboard
+    still in one of its tabs it reads as focused and the next proposal joins the strip; and a
+    Chat in Secondary exposes only its composer's handle, so the keyboard in its question dock,
+    transcript or pickers reads as not focused and the proposal is shown.
 35. **The sidebar's "Remove worktree?" acts on the path it named** (refines §4.7's confirmation;
     seat B's review). The prompt reads the worktree's path before it asks, finds its row again by
     that path after the answer and removes nothing when it is gone; the host's continuation takes

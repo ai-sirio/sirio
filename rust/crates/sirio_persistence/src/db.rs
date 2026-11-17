@@ -62,7 +62,8 @@ fn write_transaction(conn: &Connection) -> Result<rusqlite::Transaction<'_>, Per
 
 impl AppDatabase {
     /// Opens (creating if missing) the database at `path`, migrating it
-    /// forward to the current schema. The parent directory must exist.
+    /// forward to the current schema. On unix a missing parent directory is created (0700);
+    /// elsewhere it must exist.
     ///
     /// A corrupt or unreadable file returns [`PersistenceError::Corrupt`] /
     /// [`PersistenceError::Sqlite`] — it is never panicked on and never
@@ -1836,9 +1837,6 @@ fn initial_open_lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.sirio-open.lock"))
 }
 
-/// Validates an existing file before opening it read-write. A missing path is
-/// a new database; an existing empty file is almost certainly a truncated
-/// write and must not be mistaken for one.
 /// Creates `path`'s directory as 0700 if it is missing and makes it 0700 if it is not already.
 /// A sticky directory (a shared one such as /tmp) is left alone, and so is one this user cannot
 /// change. Best effort: a failure is logged without the path and never stops the open.
@@ -1890,6 +1888,9 @@ fn make_files_private(path: &Path) {
 #[cfg(not(unix))]
 fn make_files_private(_path: &Path) {}
 
+/// Validates an existing file before opening it read-write. A missing path is
+/// a new database; an existing empty file is almost certainly a truncated
+/// write and must not be mistaken for one.
 fn validate_existing_file(path: &Path) -> Result<(), PersistenceError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,

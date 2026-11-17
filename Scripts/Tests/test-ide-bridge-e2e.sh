@@ -3042,7 +3042,6 @@ case_focus_in_primary_shows_proposal() {
   end_app_client
 }
 
-# A symlink CLAUDE.md -> AGENTS.md shows as the name Claude sent.
 # A press on the proposal bar's text, which tracks no focus, must not take the keyboard into Secondary
 # (ruling 72): with the user typing in the Primary terminal, the next proposal is what Secondary shows.
 case_bar_click_keeps_focus_out() {
@@ -3074,6 +3073,7 @@ case_bar_click_keeps_focus_out() {
   end_app_client
 }
 
+# A symlink CLAUDE.md -> AGENTS.md shows as the name Claude sent.
 case_symlink_title() {
   proposal_client
   printf 'x\n' >"$WT/AGENTS.md"
