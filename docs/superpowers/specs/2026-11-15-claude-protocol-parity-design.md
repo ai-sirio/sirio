@@ -204,7 +204,9 @@ Each item is laid out the same way:
   - `idle` does not override: it hands the decision back to the turns. It can arrive before the
     turn's held `TurnEnded`, or from a finished turn while a queued one streams, and a false
     Running, Done, Running would fire a stop and a desktop notification. An open card also
-    outranks `running`.
+    outranks `running`. A turn the CLI starts on its own after `idle` (a Monitor event, a
+    background shell's end) does not flip the status: the stop policy has no debounce, and each
+    would be a stop and a notification.
   - #699's watchdog is not touched.
 - **Degrade.** No `session_state_changed` arrives → today's derivation, unchanged.
 - **Proof.**

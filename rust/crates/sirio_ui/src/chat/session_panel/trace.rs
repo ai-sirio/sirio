@@ -1049,6 +1049,23 @@ mod tests {
         }
     }
 
+    /// The CLI keeps running past the turn, as it does for a background agent:
+    /// its `running` came while the prompt streamed. (A `running` that comes
+    /// only after the turn, with nothing streaming, is a turn the CLI started
+    /// on its own and reads as `idle`: see `Chat::cli_unprompted`.) No prompt
+    /// is submitted, so the worker opens no trace turn of its own.
+    fn cli_runs_past_the_turn(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            let state = sirio_chat::CliState::Running;
+            chat.handle_event(sirio_chat::ChatEvent::CliState { state }, cx);
+            chat.streaming = false;
+        });
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+    }
+
     fn drawn(cx: &mut VisualTestContext, selector: &'static str) -> bool {
         cx.debug_bounds(selector).is_some()
     }
@@ -1060,7 +1077,7 @@ mod tests {
         assert!(drawn(cx, "trace-pill-done") && drawn(cx, "trace-title-done"));
         assert!(!drawn(cx, "trace-title-dot"), "a finished title has no dot");
 
-        cli_event(&chat, cx, Running);
+        cli_runs_past_the_turn(&chat, cx);
         assert!(drawn(cx, "trace-pill-live"), "the pill follows the CLI");
         assert!(drawn(cx, "trace-title-live"));
         assert!(drawn(cx, "trace-title-dot"), "a live title carries its dot");
@@ -1086,7 +1103,7 @@ mod tests {
         }
         assert_eq!(frames(&chat, cx), finished, "a finished turn requests nothing");
 
-        cli_event(&chat, cx, Running);
+        cli_runs_past_the_turn(&chat, cx);
         assert!(
             frames_over(&chat, cx, 250) >= 2,
             "an ended turn the CLI still runs keeps its title moving"
@@ -1117,7 +1134,7 @@ mod tests {
         };
         assert_eq!(tick(cx), 0, "an ended turn alone does not tick");
 
-        cli_event(&chat, cx, Running);
+        cli_runs_past_the_turn(&chat, cx);
         assert_eq!(tick(cx), 1, "the CLI's work moves the folded title");
         refresh_frame(cx);
         assert_eq!(tick(cx), 1);

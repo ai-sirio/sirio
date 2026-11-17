@@ -1121,8 +1121,8 @@ def resume_arg():
 # is written BEFORE the `can_use_tool` request it announces, and the last
 # `idle` after the last `result`.
 #
-# The first word of a prompt picks the script: `plain`, `ask`, `background` or
-# `silent` (writes nothing).
+# The first word of a prompt picks the script: `plain`, `ask`, `background`,
+# `monitor` (three turns of its own after the first) or `silent` (writes nothing).
 # `--fixture-gate=<path>` holds `background` after its main `result` until
 # `<path>` exists, and again before its second `result` until `<path>.2`
 # does; an empty or missing value means do not wait. A script runs on its own
@@ -1131,6 +1131,10 @@ def resume_arg():
 
 GATE_PATH = next(
     (arg[len("--fixture-gate="):] for arg in sys.argv if arg.startswith("--fixture-gate=")),
+    "",
+)
+DONE_PATH = next(
+    (arg[len("--fixture-done="):] for arg in sys.argv if arg.startswith("--fixture-done=")),
     "",
 )
 STATE_EMITS = bool(os.environ.get("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS"))
@@ -1229,6 +1233,30 @@ def state_background():
     state_line("idle")
 
 
+def state_monitor():
+    # A Monitor task: the prompt gets its own turn, then the CLI starts three
+    # turns by itself, one per watched line (live probe: `running`, `system`
+    # init, `assistant`, `result`, `idle`, with no `task_*` lines).
+    state_line("running")
+    init_line()
+    state_text("Watching")
+    result()
+    state_line("idle")
+    for number in (1, 2, 3):
+        time.sleep(2.0 if number == 1 else 1.0)
+        if STATE_EOF.is_set():
+            return
+        state_line("running")
+        init_line()
+        # The real CLI takes a while to answer an event: a sampler can see it.
+        time.sleep(0.6)
+        state_text(f"monitor event {number}")
+        result()
+        state_line("idle")
+    if DONE_PATH:
+        open(DONE_PATH, "w").close()
+
+
 def state_silent():
     # Writes nothing: a host test that applies the CLI's lines itself, with a
     # live client, uses it so the fixture adds none of its own.
@@ -1236,7 +1264,7 @@ def state_silent():
 
 
 STATE_SCRIPTS = {"plain": state_plain, "ask": state_ask, "background": state_background,
-                 "silent": state_silent}
+                 "monitor": state_monitor, "silent": state_silent}
 
 
 def state_turns():

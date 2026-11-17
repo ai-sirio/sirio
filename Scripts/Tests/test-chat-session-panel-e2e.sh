@@ -135,6 +135,9 @@ set -euo pipefail
 #   session_state_ask  the CLI's `requires_action` before a permission request: `sessionState` says so,
 #                      the status is needs-input and the card reads Waiting for you; allowing it ends in
 #                      `idle`, done and a Done card
+#   session_state_unprompted  turns the CLI starts on its own (a Monitor's events) after `idle` do not
+#                      flip the status: three `running` cycles of its own never read running, and
+#                      the chat, parked off screen, is not marked unread by them
 # The elicitation scenarios use Scripts/Tests/stubs/elicitation/claude, the fixture's elicitation mode.
 # The composer_keys scenario (this script's own; test-ely-chat-ui-e2e.py has one of the same name)
 # uses the default stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every
@@ -214,7 +217,7 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
   unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet
   elicitation_form elicitation_url elicitation_withdrawn unhandled_request
-  session_state_background session_state_ask)
+  session_state_background session_state_ask session_state_unprompted)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -962,6 +965,7 @@ capture() { # name
 #   SIRIO_FORGE_TEST_ENDPOINTS  ghe.test -> the loopback fake forge (debug builds only)
 #   SIRIO_FIXTURE_REPO  where the stub claude says the project memory lives
 #   SIRIO_STUB_LOG  the shim's call log; SIRIO_CSP_E2E_RUN marks this run's processes
+#   SIRIO_FIXTURE_DONE  the file the monitor script writes after its last turn (session_state_unprompted)
 #   SIRIO_FIXTURE_GATE  the file session_state_background touches to release the fixture's held steps
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
@@ -992,7 +996,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_REPO=$LINKED" "SIRIO_STUB_LOG=$RUN_DIR/stub-calls.log"
     "SIRIO_CSP_E2E_RUN=$RUN_DIR" "TRACE_STEP_MS=${TRACE_STEP_MS:-400}"
     "SIRIO_FIXTURE_USER_LOG=$RUN_DIR/fixture-user.log" "SIRIO_FIXTURE_CONTROL_LOG=$RUN_DIR/fixture-control.log"
-    "SIRIO_FIXTURE_RESPONSE_LOG=$RUN_DIR/$name-responses.jsonl" "SIRIO_FIXTURE_GATE=${SIRIO_FIXTURE_GATE:-}"
+    "SIRIO_FIXTURE_RESPONSE_LOG=$RUN_DIR/$name-responses.jsonl" "SIRIO_FIXTURE_GATE=${SIRIO_FIXTURE_GATE:-}" "SIRIO_FIXTURE_DONE=${SIRIO_FIXTURE_DONE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -3335,6 +3339,43 @@ scenario_session_state_ask() {
   stop_app
 }
 
+scenario_session_state_unprompted() {
+  use_stub session-state
+  SIRIO_FIXTURE_DONE="$RUN_DIR/session-state.done"
+  rm -f "$SIRIO_FIXTURE_DONE"
+  launch session_state_unprompted
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  open_column
+  send_prompt monitor
+  wait_attention "the first turn is done" status done 30
+  # The CLI's own turns start two seconds after its idle: park the chat before they do.
+  ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  [ "$(attention_chat onScreen)" = false ] || fail "the chat reads onScreen after the select"
+  [ "$(attention_chat unread)" = false ] || fail "the chat reads unread before the CLI's own turns"
+  local samples=0 status _
+  # Until the fixture writes its marker after the third turn's idle (about 6 s on, 60 s at most).
+  for _ in $(seq 1 200); do
+    [ -e "$SIRIO_FIXTURE_DONE" ] && break
+    status=$(attention_chat status)
+    samples=$((samples + 1))
+    [ "$status" = running ] && fail "the chat read running during a turn the CLI started on its own (sample $samples)"
+    [ "$(attention_chat unread)" = false ] || fail "a turn the CLI started on its own marked the parked chat unread (sample $samples)"
+    sleep 0.15
+  done
+  [ -e "$SIRIO_FIXTURE_DONE" ] || fail "the fixture never finished the CLI's own turns"
+  [ "$samples" -gt 0 ] || fail "the CLI's own turns ended before the chat was parked: nothing was sampled"
+  echo "OK: $samples samples through the CLI's three own turns never read running or unread"
+  [ "$(attention_chat status)" = done ] || fail "the chat does not read done after the CLI's own turns: $(attention_chat status)"
+  [ "$(attention_chat unread)" = false ] || fail "the parked chat reads unread after the CLI's own turns"
+  # The parked chat has no surface to read: bring it back to see that the turns happened.
+  ctl select-workspace --workspace "$LINKED" >/dev/null
+  wait_panel "the third turn of the CLI's own spoke" 'any("monitor event 3" in r.get("text", "") for r in c["transcript"])' 10
+  wait_panel "the CLI is idle again" 'c["sessionState"] == "idle"' 10
+  echo "OK: session_state_unprompted: turns the CLI starts on its own leave the status done and the parked chat unmarked"
+  stop_app
+}
+
 ran=0
 for name in "${SCENARIOS[@]}"; do
   echo "== scenario $name"
@@ -3342,6 +3383,7 @@ for name in "${SCENARIOS[@]}"; do
   TRACE_STEP_MS=400
   PERF_TRACE=""
   SIRIO_FIXTURE_GATE=""
+  SIRIO_FIXTURE_DONE=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))
