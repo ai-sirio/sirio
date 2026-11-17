@@ -170,6 +170,31 @@ set -euo pipefail
 #                      sends nothing and the log holds one stop_task
 #   background_lane_stop  a background agent has no row in the group (its lane carries Stop): the lane row
 #                      has `stop`, pressing it ends the agent, and it is never read
+# The rename_* scenarios (A4, spec 2026-11-15-claude-protocol-parity-design.md) use
+# Scripts/Tests/stubs/rename/claude, the fixture's normal mode answering `rename_session`
+# (SIRIO_FIXTURE_TITLE_STORE is the CLI's own title file, SIRIO_FIXTURE_RENAME_ERROR answers every
+# rename with that error, SIRIO_FIXTURE_HANDSHAKE_GATE holds a session's `initialize` answer until the file
+# exists, SIRIO_FIXTURE_RENAME_GATE holds each rename's echo and answer until the file exists; a `-p` call is the summarizer and prints `Summarized title`). A manual rename is the debug-only
+# `surface tabs rename N --title T`; `agentTitle` of `surface.chat.read` is the chat's title state. The
+# requests the CLI heard are read from the fixture's control log (parsed as JSON, it escapes non-ASCII),
+# counted from a line-count marker taken at each scenario's start. What each must catch, written before the code:
+# the verb misses the chat; an auto title is sent; a held title is lost at connect; a refusal still sends; an
+# error is silent; restore sends, or adopts the CLI's title; non-ASCII is mangled; a stale answer moves the state.
+#   rename_session            before any turn a rename of "Café ☕ notes" gives the tab that title and sends one
+#                      rename_session (source host, session_id the chat's own --session-id) that is accepted; after
+#                      a turn "Release notes" sends a second, whose session_id is fixture-session-1
+#   rename_session_failed     an error that is not a refusal: the tab keeps the title, the state is failed with the
+#                      error and the transcript ends with the warning; then two renames sent while the CLI holds its
+#                      answers are both heard, and only the last one's answer counts: one more warning, not two
+#   rename_session_retired    a refusal ("Unknown control request subtype") retires the verb quietly: a second
+#                      rename sends nothing, shows nothing, and the tab holds the second title (that a new connection
+#                      sends the title again and clears the retirement is a GPUI test of chat/mod.rs: no state-only
+#                      verb starts a new connection)
+#   rename_session_connecting a rename while the handshake is held waits (pending, no request) and is sent, once
+#                      and accepted, when the connection becomes ready
+#   rename_session_restored   a restored chat sends nothing and adopts nothing: the CLI's title for the session
+#                      differs, the tab keeps Sirio's, agentTitle is empty and no request is heard
+#   rename_auto_title_quiet   the summarizer's title reaches the tab and never the CLI
 # The elicitation scenarios use Scripts/Tests/stubs/elicitation/claude, the fixture's elicitation mode.
 # The composer_keys scenario (this script's own; test-ely-chat-ui-e2e.py has one of the same name)
 # uses the default stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every
@@ -252,7 +277,9 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   session_state_background session_state_ask session_state_unprompted
   background_shell background_shell_unpainted background_shell_floor background_agent_stop
   background_ended_dropped background_tail_card background_tail_tab background_stop_click
-  background_lane_stop)
+  background_lane_stop
+  rename_session rename_session_failed rename_session_retired rename_session_connecting
+  rename_session_restored rename_auto_title_quiet)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -523,17 +550,17 @@ done
 # Which claude shim the next launch puts first on the app's PATH: session-panel (the
 # column's own scenarios), session-panel-bypass (the same, the CLI in bypassPermissions), trace (the trace
 # scenarios), file-links (file_links), elicitation (the elicitation scenarios), session-state
-# (session_state_background) or background-tasks (the background_* scenarios). A scenario picks its stub by
+# (session_state_background), background-tasks (the background_* scenarios) or rename (the rename_* scenarios). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
-use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation|session-state|background-tasks
+use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation|session-state|background-tasks|rename
   SIRIO_E2E_CLAUDE_STUB=$1
   local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
   APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
   resolved=$(PATH="$APP_PATH" command -v claude || true)
   [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
 }
-for stub in session-panel session-panel-bypass trace file-links elicitation session-state background-tasks; do
+for stub in session-panel session-panel-bypass trace file-links elicitation session-state background-tasks rename; do
   use_stub "$stub"
   echo "OK: claude resolves to the $stub shim"
 done
@@ -588,6 +615,8 @@ def state(surface):
     chat["composerRow"] = json.loads(chat.get("composerRow") or "{}")
     # The registry of background tasks, in start order (A3).
     chat["backgroundTasks"] = json.loads(chat.get("backgroundTasks") or "[]")
+    # The title Sirio asked Claude Code for (A4): "" until a manual rename, then {title, state[, error]}.
+    chat["agentTitle"] = json.loads(chat["agentTitle"]) if chat.get("agentTitle") else ""
     chat["first"] = int(chat.get("firstVisibleEntry") or 0)
     chat["last"] = int(chat.get("lastVisibleEntry") or 0)
     return panel, chat
@@ -663,6 +692,7 @@ def evaluate(expr, surface, p, c):
         "lane": lambda key: h.R("trace", "trace/lane/" + key), "lanes_of": lanes_of,
         "wait_rows": wait_rows, "row_index": row_index, "drawn_index": drawn_index, "pending": pending, "elicit": elicit,
         "tab": tab, "T": T,
+        "title_state": lambda: c["agentTitle"]["state"] if c["agentTitle"] else "",
     }
     return eval(expr, namespace)
 
@@ -1055,6 +1085,9 @@ capture() { # name
 #                        background_stop_click sets 5 so that a framed run's slow frames cannot skip `stopping`)
 #   SIRIO_FIXTURE_FLOOR  1 makes the background-tasks stub the 2.1.257 floor (background_shell_floor)
 #   SIRIO_FIXTURE_REQUEST_LOG  the file the background-tasks stub appends every control request to
+#   SIRIO_FIXTURE_TITLE_STORE, SIRIO_FIXTURE_RENAME_ERROR, SIRIO_FIXTURE_HANDSHAKE_GATE, SIRIO_FIXTURE_RENAME_GATE
+#                  the rename stub's CLI title file, the error it answers every rename with, the file that holds its
+#                  handshake and the file that holds every rename's answer (rename_*)
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
 #                  every control request to (composer_keys reads them)
@@ -1086,6 +1119,9 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_USER_LOG=$RUN_DIR/fixture-user.log" "SIRIO_FIXTURE_CONTROL_LOG=$RUN_DIR/fixture-control.log"
     "SIRIO_FIXTURE_RESPONSE_LOG=$RUN_DIR/$name-responses.jsonl" "SIRIO_FIXTURE_GATE=${SIRIO_FIXTURE_GATE:-}" "SIRIO_FIXTURE_DONE=${SIRIO_FIXTURE_DONE:-}"
     "SIRIO_FIXTURE_FLOOR=${SIRIO_FIXTURE_FLOOR:-}" "SIRIO_FIXTURE_STOP_DELAY=${SIRIO_FIXTURE_STOP_DELAY:-}" "SIRIO_FIXTURE_REQUEST_LOG=$RUN_DIR/$name-requests.jsonl"
+    "SIRIO_FIXTURE_TITLE_STORE=${SIRIO_FIXTURE_TITLE_STORE:-}" "SIRIO_FIXTURE_RENAME_ERROR=${SIRIO_FIXTURE_RENAME_ERROR:-}"
+    "SIRIO_FIXTURE_HANDSHAKE_GATE=${SIRIO_FIXTURE_HANDSHAKE_GATE:-}"
+    "SIRIO_FIXTURE_RENAME_GATE=${SIRIO_FIXTURE_RENAME_GATE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -3664,6 +3700,236 @@ scenario_background_lane_stop() {
   stop_app
 }
 
+# ---- the rename_* scenarios (A4) -----------------------------------------------------
+# The marker rename_requests counts from: the fixture's control log is shared by every process of the
+# run (the chat's, the usage probe's), so a scenario counts only what came after its own start.
+RENAME_MARK=0
+control_log_lines() {
+  local lines
+  lines=$(wc -l <"$RUN_DIR/fixture-control.log" 2>/dev/null) || lines=0
+  echo $((lines))
+}
+
+# A fresh Sirio on the rename stub, with a Claude chat open and its CLI connected. SIRIO_FIXTURE_RENAME_ERROR
+# and SIRIO_FIXTURE_HANDSHAKE_GATE are set by the scenario before it calls this.
+rename_chat() { # name [no-wait]
+  use_stub rename
+  CALLS_MARK=$(wc -l <"$RUN_DIR/stub-calls.log" 2>/dev/null) || CALLS_MARK=0
+  CALLS_MARK=$((CALLS_MARK))
+  SIRIO_FIXTURE_TITLE_STORE="$RUN_DIR/$1-titles.json"
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  open_column
+  RENAME_MARK=$(control_log_lines)
+  [ "${2:-}" = no-wait ] || wait_panel "the chat is connected" 'c["status"] in ("idle", "completed")' 30
+}
+
+# Waits until the CLI has heard that many rename_session requests since the marker.
+wait_renames() { # count
+  local _
+  for _ in $(seq 1 60); do
+    [ "$(rename_requests | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))')" -ge "$1" ] && return 0
+    sleep 0.25
+  done
+  fail "the CLI never heard $1 rename_session requests (heard $(rename_requests))"
+}
+
+# The rename_session requests the CLI heard since the marker, as one JSON array.
+rename_requests() {
+  python3 -c '
+import json, sys
+mark, requests = int(sys.argv[2]), []
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+for line in lines[mark:]:
+    request = json.loads(line)
+    if request.get("subtype") == "rename_session":
+        requests.append(request)
+print(json.dumps(requests))' "$RUN_DIR/fixture-control.log" "$RENAME_MARK"
+}
+
+# check_renames DESC EXPR: EXPR over `r`, the rename_session requests since the marker.
+check_renames() {
+  local requests
+  requests=$(rename_requests)
+  python3 -c '
+import json, sys
+r = json.loads(sys.argv[1])
+sys.exit(0 if eval(sys.argv[2]) else 1)' "$requests" "$2" || fail "$1 (requests: $requests)"
+  echo "OK: $1"
+}
+
+# The listed tab's title, as `surface tabs read` gives it.
+tab_title() { # position
+  reply surface tabs read | python3 -c '
+import json, sys
+print(json.load(sys.stdin)[0]["tab." + sys.argv[1]].split("|", 2)[2])' "$1"
+}
+
+check_tab_title() { # position title
+  local held
+  held=$(tab_title "$1")
+  [ "$held" = "$2" ] || fail "tab $1 is titled '$held', not '$2'"
+  echo "OK: tab $1 is titled '$2'"
+}
+
+rename_tab() { # position title
+  ctl surface tabs rename "$1" --title "$2" >/dev/null || fail "renaming tab $1 to '$2' failed"
+}
+
+# Sends a prompt and waits for the turn it starts to end, whatever the transcript held before it.
+rename_turn() {
+  local before
+  before=$(find_panel "the assistant rows so far" 'str(len([r for r in c["transcript"] if r.get("kind") == "assistant"]))' 10)
+  send_prompt hello
+  wait_panel "the turn ended" "len([r for r in c['transcript'] if r.get('kind') == 'assistant']) > $before and c['status'] in ('idle', 'completed')" 30
+}
+
+# The --session-ids chats launched with since rename_chat began (the lines with --input-format and --session-id;
+# the usage probe has no session id), as a python list. `open_chat` opens a second chat and closes the first,
+# so which one the surface is cannot be told from the log's order: any of them is the chat's own.
+launched_session_ids() {
+  tail -n +$((CALLS_MARK + 1)) "$RUN_DIR/stub-calls.log" | grep -e '--input-format' | grep -e '--session-id' \
+    | sed -E 's/.*--session-id ([^ ]+).*/\1/' | python3 -c 'import sys; print(sorted(set(sys.stdin.read().split())))'
+}
+
+scenario_rename_session() {
+  rename_chat rename_session
+  local launched
+  launched=$(launched_session_ids)
+  [ "$launched" != "[]" ] || fail "no launch line with --session-id in the stub log"
+  echo "step: chats were launched as sessions $launched; renaming before any turn"
+  rename_tab 1 "Café ☕ notes"
+  check_tab_title 1 "Café ☕ notes"
+  wait_panel "the title is accepted" 'title_state() == "accepted" and c["agentTitle"]["title"] == "Café ☕ notes"' 15
+  check_renames "one rename_session reached the CLI: the title as typed, from the host, for the launch's own session" \
+    "len(r) == 1 and r[0]['title'] == 'Café ☕ notes' and r[0]['source'] == 'host' and r[0]['session_id'] in $launched"
+  rename_turn
+  rename_tab 1 "Release notes"
+  wait_panel "the second title is accepted" 'title_state() == "accepted" and c["agentTitle"]["title"] == "Release notes"' 15
+  check_renames "the second rename_session names the session the first turn's init gave" \
+    "len(r) == 2 and r[1]['title'] == 'Release notes' and r[1]['session_id'] == 'fixture-session-1'"
+  check_tab_title 1 "Release notes"
+  echo "OK: rename_session: a manual rename reached Claude Code with its non-ASCII title, before a turn and after one, for the right session"
+  stop_app
+}
+
+scenario_rename_session_failed() {
+  SIRIO_FIXTURE_RENAME_ERROR="session_id is not the current session"
+  SIRIO_FIXTURE_RENAME_GATE="$RUN_DIR/rename-gate"
+  touch "$SIRIO_FIXTURE_RENAME_GATE"
+  rename_chat rename_session_failed
+  local notice="Claude Code kept its earlier name: session_id is not the current session"
+  rename_tab 1 "First name"
+  check_tab_title 1 "First name"
+  wait_panel "the title failed with the CLI's own sentence" 'title_state() == "failed" and c["agentTitle"]["error"] == "session_id is not the current session"' 15
+  wait_panel "the transcript ends with the warning" "c['transcript'][-1].get('kind') == 'warning' and c['transcript'][-1]['text'] == '$notice' and len([r for r in c['transcript'] if r.get('kind') == 'warning']) == 1" 15
+  check_tab_title 1 "First name"
+  echo "step: the CLI now holds its answers; two renames go out before either is answered"
+  rm -f "$SIRIO_FIXTURE_RENAME_GATE"
+  rename_tab 1 "Name A"
+  rename_tab 1 "Name B"
+  wait_renames 3
+  check_panel "both are waiting: the state is sent, holding the last title" 'title_state() == "sent" and c["agentTitle"]["title"] == "Name B"'
+  touch "$SIRIO_FIXTURE_RENAME_GATE"
+  wait_panel "the last rename failed" 'title_state() == "failed" and c["agentTitle"]["title"] == "Name B"' 15
+  check_panel "A's late answer was dropped: one warning more, not two" "len([r for r in c['transcript'] if r.get('kind') == 'warning']) == 2"
+  check_renames "an error is that one rename's failure: all three renames were sent" "[x['title'] for x in r] == ['First name', 'Name A', 'Name B']"
+  echo "OK: rename_session_failed: an error shows beside the chat, the next renames are still sent, and a stale answer moves nothing"
+  stop_app
+}
+
+scenario_rename_session_retired() {
+  SIRIO_FIXTURE_RENAME_ERROR="Unknown control request subtype: rename_session"
+  rename_chat rename_session_retired
+  rename_tab 1 "First name"
+  wait_panel "the refusal retired the verb" 'title_state() == "retired"' 15
+  local rows
+  rows=$(find_panel "the transcript's length" 'str(len([r for r in c["transcript"] if r.get("kind") not in ("user", "assistant", "turn")]))' 10)
+  rename_tab 1 "Second name"
+  check_panel "the state is still retired, holding the second title" 'title_state() == "retired" and c["agentTitle"]["title"] == "Second name"'
+  check_tab_title 1 "Second name"
+  # The worker serializes what it is told, so a rename it was going to send is written before this turn ends.
+  rename_turn
+  check_renames "the retired verb sent exactly one request" "len(r) == 1 and r[0]['title'] == 'First name'"
+  check_panel "nothing was shown: no entry beside the turn's own, and no warning" "len([r for r in c['transcript'] if r.get('kind') not in ('user', 'assistant', 'turn')]) == $rows and not any(r.get('kind') == 'warning' for r in c['transcript'])"
+  echo "OK: rename_session_retired: a refusal retires the verb quietly, the next rename is held, not sent, and the tab keeps its title"
+  stop_app
+}
+
+scenario_rename_session_connecting() {
+  SIRIO_FIXTURE_HANDSHAKE_GATE="$RUN_DIR/gate"
+  rm -f "$SIRIO_FIXTURE_HANDSHAKE_GATE"
+  rename_chat rename_session_connecting no-wait
+  rename_tab 1 "Held name"
+  check_tab_title 1 "Held name"
+  check_panel "the title waits for the connection" 'title_state() == "pending" and c["agentTitle"]["title"] == "Held name"'
+  check_renames "nothing is sent while the handshake is held" "len(r) == 0"
+  # The fixture holds the handshake until the gate exists; releasing it is the connection's becoming ready.
+  touch "$SIRIO_FIXTURE_HANDSHAKE_GATE"
+  wait_panel "the held title is sent on ready and accepted" 'title_state() == "accepted"' 30
+  check_renames "the held title was sent once, when the connection came up" "len(r) == 1 and r[0]['title'] == 'Held name' and r[0]['source'] == 'host'"
+  echo "OK: rename_session_connecting: a rename made before the CLI was ready waited as pending and went out once on ready"
+  stop_app
+}
+
+scenario_rename_session_restored() {
+  rename_chat rename_session_restored
+  rename_tab 1 "Sirio name"
+  wait_panel "the title is accepted" 'title_state() == "accepted"' 15
+  rename_turn
+  # A saved layout is written shortly after a change; a quit flushes it as well (as in `restore`).
+  sleep 1
+  stop_app
+  echo '{"fixture-session-1": "Name from elsewhere"}' >"$SIRIO_FIXTURE_TITLE_STORE"
+  echo "step: Sirio starts again on the same database; the CLI's own title for the session is now another"
+  RENAME_MARK=$(control_log_lines)
+  local calls_mark
+  calls_mark=$(wc -l <"$RUN_DIR/stub-calls.log")
+  launch rename_session_restored
+  SURFACE=""
+  for _ in $(seq 1 100); do
+    SURFACE=$(E2E chat-surface 2>/dev/null || true)
+    [ -n "$SURFACE" ] && break
+    sleep 0.3
+  done
+  [ -n "$SURFACE" ] || fail "the chat was not restored"
+  open_column
+  wait_panel "the restored chat is connected" 'c["status"] in ("idle", "completed")' 30
+  tail -n +$((calls_mark + 1)) "$RUN_DIR/stub-calls.log" | grep -e '--input-format' | grep -q -e '--resume fixture-session-1' || fail "the relaunch did not resume fixture-session-1"
+  echo "OK: the relaunch resumed fixture-session-1"
+  rename_turn
+  check_tab_title 1 "Sirio name"
+  check_panel "no title state: the restore holds nothing, and adopted nothing" 'c["agentTitle"] == ""'
+  check_renames "the restored chat sent no rename_session" "len(r) == 0"
+  echo "OK: rename_session_restored: a restored chat keeps Sirio's name, sends nothing and does not adopt the CLI's"
+  stop_app
+}
+
+scenario_rename_auto_title_quiet() {
+  use_stub rename
+  local name=rename_auto_title_quiet
+  (cd "$ROOT/rust" && cargo run --quiet -p sirio_persistence --example appearance_seed -- --database "$RUN_DIR/$name.sqlite" --auto-naming on ${APPEARANCE:+--appearance "$APPEARANCE"}) || fail "could not seed auto-naming"
+  rename_chat "$name"
+  send_prompt "fix the login bug"
+  # The first-prompt title is not this one: only the summarizer writes `Summarized title`.
+  local held="" _
+  for _ in $(seq 1 120); do
+    held=$(tab_title 1)
+    [ "$held" = "Summarized title" ] && break
+    sleep 0.5
+  done
+  [ "$held" = "Summarized title" ] || fail "the summarizer's title never reached the tab (it is '$held')"
+  echo "OK: the tab is titled 'Summarized title'"
+  check_panel "the summarizer's title is not a manual rename: no title state" 'c["agentTitle"] == ""'
+  check_renames "an auto title is never sent to the CLI" "len(r) == 0"
+  echo "OK: rename_auto_title_quiet: the summarizer named the tab and Claude Code heard nothing"
+  stop_app
+}
+
 ran=0
 for name in "${SCENARIOS[@]}"; do
   echo "== scenario $name"
@@ -3674,6 +3940,10 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_DONE=""
   SIRIO_FIXTURE_FLOOR=""
   SIRIO_FIXTURE_STOP_DELAY=""
+  SIRIO_FIXTURE_TITLE_STORE=""
+  SIRIO_FIXTURE_RENAME_ERROR=""
+  SIRIO_FIXTURE_HANDSHAKE_GATE=""
+  SIRIO_FIXTURE_RENAME_GATE=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))

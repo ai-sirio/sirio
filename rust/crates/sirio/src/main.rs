@@ -1253,6 +1253,13 @@ enum ControlAction {
         position: usize,
         reply: ControlReply,
     },
+    /// Debug-only `surface.tabs.rename`: a manual rename, as the tab bar's
+    /// inline editor commits one.
+    RenameListedTab {
+        position: usize,
+        title: String,
+        reply: ControlReply,
+    },
     CloseListedTab {
         position: usize,
         /// Debug-only `confirm=yes`: closes a live terminal without the
@@ -3572,6 +3579,21 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "surface.tabs.select requires a positive index");
                 };
                 self.queue_action(request, move |reply| ControlAction::SelectListedTab { position, reply })
+            }
+            "surface.tabs.rename" if cfg!(debug_assertions) => {
+                let Some(position) = request
+                    .params
+                    .get("index")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|position| *position > 0)
+                else {
+                    return ControlResponse::failure(&request.id, "surface.tabs.rename requires a positive index");
+                };
+                let title = single_line_title(request.params.get("title").map_or("", String::as_str));
+                if title.is_empty() {
+                    return ControlResponse::failure(&request.id, "surface.tabs.rename requires a non-empty title");
+                }
+                self.queue_action(request, move |reply| ControlAction::RenameListedTab { position, title, reply })
             }
             "surface.tabs.close" => {
                 let Some(position) = request
@@ -6900,6 +6922,9 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::SelectListedTab { position, reply } => {
                                     let _ = reply.send(workspace.control_select_listed_tab(position, window, cx));
+                                }
+                                ControlAction::RenameListedTab { position, title, reply } => {
+                                    let _ = reply.send(workspace.control_rename_listed_tab(position, &title, cx));
                                 }
                                 ControlAction::CloseListedTab { position, confirmed, reply } => {
                                     let _ = reply.send(workspace.control_close_listed_tab(position, confirmed, window, cx));
@@ -23482,6 +23507,28 @@ impl SirioWorkspace {
         Ok(self.control_read_tabs(cx))
     }
 
+    /// Renames the `position`th tab of `control_read_tabs`'s list the way a
+    /// committed inline rename does, and reports the title it now holds.
+    fn control_rename_listed_tab(
+        &mut self,
+        position: usize,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let id = self.listed_tab_id(position)?;
+        if !self.apply_manual_tab_title(id, title, cx) {
+            return Err("surface.tabs.rename requires a non-empty title".to_string());
+        }
+        cx.notify();
+        let held = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .map(|tab| tab.title.clone())
+            .unwrap_or_default();
+        Ok(vec![("title".to_string(), held)])
+    }
+
     /// Closes the `position`th tab of `control_read_tabs`'s list the way its
     /// close button does (a dirty tab asks first), then reports the tabs.
     fn control_close_listed_tab(
@@ -24867,6 +24914,7 @@ impl SirioWorkspace {
             ("sessionState".to_string(), snapshot.session_state),
             // The session's background tasks as a JSON array (see `ChatControlSnapshot`).
             ("backgroundTasks".to_string(), snapshot.background_tasks),
+            ("agentTitle".to_string(), snapshot.agent_title),
             (
                 "taskOutputRetired".to_string(),
                 snapshot.task_output_retired.to_string(),
@@ -26956,11 +27004,22 @@ impl SirioWorkspace {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return false;
         };
-        tab.title = title;
+        tab.title = title.clone();
         // F-CORE-DOM-07: a user-driven rename permanently opts this tab out
         // of automatic renaming, mirroring Swift's `tab.titleIsAutoNamed =
         // false` on manual rename.
         tab.title_is_auto_named = false;
+        // A4: a manual rename is the only one that reaches Claude Code. Auto
+        // titles and restore write `tab.title` directly and never get here.
+        let mut chats = Vec::new();
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::Chat(chat) = content {
+                chats.push(chat.clone());
+            }
+        });
+        for chat in chats {
+            chat.update(cx, |chat, cx| chat.rename_agent_session(title.clone(), cx));
+        }
         self.sync_trace_titles(cx);
         self.schedule_save(cx);
         self.mark_activity_dirty();
@@ -49545,6 +49604,7 @@ done
             | ControlAction::ActChangeRequest { reply, .. }
             | ControlAction::ReadTabs { reply }
             | ControlAction::SelectListedTab { reply, .. }
+            | ControlAction::RenameListedTab { reply, .. }
             | ControlAction::CloseListedTab { reply, .. }
             | ControlAction::ReadLayout { reply }
             | ControlAction::OpenListOpen { reply, .. }
@@ -49729,6 +49789,7 @@ done
             "surface.tabs.read" => request::tabs_read(),
             "surface.tabs.select" => request::tabs_select(1),
             "surface.tabs.close" => request::tabs_close(1),
+            "surface.tabs.rename" => request::tabs_rename(1, "x"),
             "surface.layout.read" => request::layout_read(),
             "surface.open_list.open" => request::open_list_open("show"),
             "surface.file.read" => request::file_read(),

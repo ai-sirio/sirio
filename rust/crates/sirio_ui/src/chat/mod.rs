@@ -45,6 +45,7 @@ mod band_tests;
 #[cfg(test)]
 mod ely_tests;
 pub(crate) mod identity;
+mod agent_title;
 mod background;
 pub use background::{BackgroundEntry, tail_lines};
 pub(crate) mod background_view;
@@ -1145,6 +1146,9 @@ pub struct ChatControlSnapshot {
     pub background_tasks: String,
     /// The CLI refused to read task output: no tail is shown this session.
     pub task_output_retired: bool,
+    /// The title Sirio asked the native Claude session to carry: `""` until a
+    /// manual rename, then a JSON object `{title, state[, error]}`.
+    pub agent_title: String,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -2450,6 +2454,8 @@ pub struct Chat {
     /// drains *before* the notice announcing the end — so this counts what
     /// is still running and says nothing about what finished.
     background_tasks: usize,
+    /// The name Sirio asked the native Claude session to carry.
+    agent_title: agent_title::AgentTitle,
     /// How much of the model's reasoning this session receives. Unlike
     /// every other picker's state this is never read back from the agent —
     /// nothing reports it — so it holds only what this chat has chosen.
@@ -2833,6 +2839,7 @@ impl Chat {
             available_commands: Vec::new(),
             fast_mode: None,
             background_tasks: 0,
+            agent_title: agent_title::AgentTitle::new(),
             thinking_display: None,
             thinking_picker_open: false,
             thinking_picker_focus: cx.focus_handle().tab_stop(true),
@@ -3693,6 +3700,7 @@ impl Chat {
                 self.cli_state = None;
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
+                self.reset_agent_title();
                 self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
                 self.fail_trace_turn(&message, cx);
@@ -3715,6 +3723,7 @@ impl Chat {
                 self.cli_state = None;
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
+                self.reset_agent_title();
                 self.expire_unanswered();
                 let message = format!(
                     "{operation:?} timed out after {:.1}s",
@@ -3839,8 +3848,9 @@ impl Chat {
             sirio_chat::ChatEvent::BackgroundTask(event) => {
                 self.apply_background_event(event, cx);
             }
-            // Dropped until Task 3's title state consumes the answer.
-            sirio_chat::ChatEvent::SessionRenamed { .. } => {}
+            sirio_chat::ChatEvent::SessionRenamed { title, error } => {
+                self.apply_session_renamed(&title, error);
+            }
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
         // this chat's own `set_mode` resolving) only reaches the wire as an
@@ -4340,6 +4350,7 @@ impl Chat {
                 .unwrap_or_default(),
             background_tasks: self.background_tasks_json(),
             task_output_retired: self.background.output_retired(),
+            agent_title: self.agent_title_json(),
         }
     }
 
@@ -5626,6 +5637,7 @@ impl Chat {
             self.cli_state = None;
             self.cli_unprompted = false;
             self.reset_background_tasks(cx);
+            self.reset_agent_title();
             let message = format!("send failed: {error:#}");
             self.fail_trace_turn(&message, cx);
             self.push_entry(Entry::Error {
@@ -6122,6 +6134,7 @@ impl Chat {
         // A new process has no tasks, and an answer of the old one's is stale.
         self.connection_generation += 1;
         self.reset_background_tasks(cx);
+        self.reset_agent_title();
         // A new process is a new agent to ask: the guard only stops one
         // process answering one report in a loop, and what the last process
         // answered says nothing of this one.
@@ -6155,6 +6168,7 @@ impl Chat {
                         }
                         chat.mode_catalog = initial_mode_catalog;
                         chat.connecting = false;
+                        chat.send_title_on_ready();
                         if let Some(text) = chat.pending_send.take() {
                             chat.submit_turn(text, Vec::new(), Vec::new(), cx);
                         }
@@ -6217,6 +6231,7 @@ impl Chat {
         self.cli_state = None;
         self.cli_unprompted = false;
         self.reset_background_tasks(cx);
+        self.reset_agent_title();
         if self.streaming {
             self.expire_unanswered();
         }
@@ -16011,6 +16026,62 @@ two"
         assert!(
             !argv.split(' ').any(|arg| arg == "--resume"),
             "the new conversation runs on a process that resumes nothing: {argv}"
+        );
+    }
+
+    /// A refused rename retires the verb for that connection only: the wanted
+    /// title is sent again on the next one (a new conversation here), which
+    /// clears the retirement, and the repeated refusal retires it again. No
+    /// state-only verb starts a new connection, so the E2E cannot reach this.
+    #[gpui::test]
+    async fn a_new_connection_sends_the_wanted_title_again_after_a_refusal(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(init);
+        cx.executor().allow_parking();
+        let dir = TempDir::new();
+        let control_log = dir.0.join("control.jsonl");
+        let launch = sirio_chat::ClaudeLaunch::fixture(
+            "python3",
+            vec![
+                CLAUDE_FIXTURE.to_string(),
+                "normal".to_string(),
+                "--fixture-rename-error=Unknown control request subtype: rename_session"
+                    .to_string(),
+                format!("--fixture-control-log={}", control_log.display()),
+            ],
+        );
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(Some(LaunchSpec::Claude(launch)), std::env::temp_dir(), cx)
+        });
+        let renames = || {
+            std::fs::read_to_string(&control_log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("\"rename_session\""))
+                .count()
+        };
+        let state = |chat: &Chat| chat.agent_title_json();
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
+
+        chat.update(cx, |chat, cx| chat.rename_agent_session("Second name".into(), cx));
+        pump_chat_until(cx, &chat, |chat| state(chat).contains("\"retired\""));
+        assert_eq!(renames(), 1);
+
+        chat.update(cx, |chat, cx| chat.new_conversation(cx));
+        pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |chat| {
+            connected(chat) && state(chat).contains("\"retired\"") && renames() == 2
+        });
+        assert!(
+            std::fs::read_to_string(&control_log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("\"rename_session\""))
+                .all(|line| line.contains("\"title\":\"Second name\"")),
+            "both requests carry the wanted title"
         );
     }
 

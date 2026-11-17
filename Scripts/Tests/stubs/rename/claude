@@ -1,0 +1,35 @@
+#!/bin/sh
+# The `claude` of test-chat-session-panel-e2e.sh's rename_* scenarios: the version probe answers at once
+# (above sirio_claude::MIN_CLAUDE_VERSION, so the chat is native); a call with --input-format (the chat and
+# the usage probe) is the stream-json fixture in its normal mode, which answers `rename_session` and
+# records every control request in SIRIO_FIXTURE_CONTROL_LOG; any other `-p` call is the summarizer
+# (auto-naming), which prints one fixed title. SIRIO_FIXTURE_TITLE_STORE is the file the fixture keeps
+# the CLI's own session titles in, SIRIO_FIXTURE_RENAME_ERROR answers every rename with that error and
+# SIRIO_FIXTURE_HANDSHAKE_GATE holds a session's `initialize` answer until that file exists and
+# SIRIO_FIXTURE_RENAME_GATE holds every rename's answer until that file exists. Every
+# call is recorded in $SIRIO_STUB_LOG when the run names one.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
+case "$1" in
+  --version|-V|version)
+    echo "9.9.9 (Claude Code)"
+    exit 0 ;;
+esac
+for arg in "$@"; do
+  if [ "$arg" = "--input-format" ]; then
+    exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" normal \
+      --fixture-title-store="${SIRIO_FIXTURE_TITLE_STORE:-}" \
+      ${SIRIO_FIXTURE_RENAME_ERROR:+"--fixture-rename-error=$SIRIO_FIXTURE_RENAME_ERROR"} \
+      ${SIRIO_FIXTURE_HANDSHAKE_GATE:+"--fixture-handshake-gate=$SIRIO_FIXTURE_HANDSHAKE_GATE"} \
+      ${SIRIO_FIXTURE_RENAME_GATE:+"--fixture-rename-gate=$SIRIO_FIXTURE_RENAME_GATE"} \
+      "$@"
+  fi
+done
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then
+    echo "Summarized title"
+    exit 0
+  fi
+done
+echo "unexpected claude call: $*" >&2
+exit 1

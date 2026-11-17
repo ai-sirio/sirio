@@ -784,6 +784,18 @@ pub mod request {
         )
     }
 
+    /// Debug-only: renames the `position`th tab of `tabs_read`'s list (1-based)
+    /// the way a committed inline rename does.
+    pub fn tabs_rename(position: usize, title: &str) -> ControlRequest {
+        request(
+            "surface.tabs.rename",
+            BTreeMap::from([
+                ("index".to_string(), position.to_string()),
+                ("title".to_string(), title.to_string()),
+            ]),
+        )
+    }
+
     /// Closes the `position`th tab of `tabs_read`'s list (1-based) the way its
     /// close button does.
     pub fn tabs_close(position: usize) -> ControlRequest {

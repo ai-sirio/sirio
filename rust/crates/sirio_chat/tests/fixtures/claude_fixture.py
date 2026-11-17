@@ -104,12 +104,17 @@ def argv_value(name):
 # `{session_id: title}` read at start and rewritten on each accepted rename;
 # `--fixture-handshake-gate=<path>` holds the `initialize` answer of a session
 # launch (`--session-id` or `--resume`, never the usage probe) until the file
-# exists. These flags apply only to the main-loop modes: the `trace`,
+# exists; `--fixture-rename-gate=<path>` holds the answer (and the echo) of every
+# rename, in order, until the file exists, while later requests are still read.
+# These flags apply only to the main-loop modes: the `trace`,
 # `session_state` and `background_tasks` modes answer a rename with their
 # default `success {}` (no echo, no store, no error, no gate).
 RENAME_ERROR = flag_value("fixture-rename-error")
 TITLE_STORE_PATH = flag_value("fixture-title-store")
 HANDSHAKE_GATE_PATH = flag_value("fixture-handshake-gate")
+RENAME_GATE_PATH = flag_value("fixture-rename-gate")
+HELD_RENAMES = []
+HELD_RENAMES_LOCK = threading.Lock()
 # Set by `init_line`: from then on the CLI's current session is SESSION_ID.
 INIT_PRINTED = False
 
@@ -1658,6 +1663,29 @@ def sanitise_title(title):
 
 
 def answer_rename(request_id, request):
+    if RENAME_GATE_PATH and (HELD_RENAMES or not os.path.exists(RENAME_GATE_PATH)):
+        # Held: the main loop goes on reading, so a later rename is heard (and
+        # logged) while this one waits. They are answered in the order they came.
+        with HELD_RENAMES_LOCK:
+            HELD_RENAMES.append((request_id, request))
+            if len(HELD_RENAMES) == 1:
+                threading.Thread(target=release_held_renames, daemon=True).start()
+        return
+    answer_rename_now(request_id, request)
+
+
+def release_held_renames():
+    while not os.path.exists(RENAME_GATE_PATH):
+        time.sleep(0.05)
+    while True:
+        with HELD_RENAMES_LOCK:
+            if not HELD_RENAMES:
+                return
+            request_id, request = HELD_RENAMES.pop(0)
+        answer_rename_now(request_id, request)
+
+
+def answer_rename_now(request_id, request):
     if RENAME_ERROR:
         control_error(request_id, RENAME_ERROR)
         return
