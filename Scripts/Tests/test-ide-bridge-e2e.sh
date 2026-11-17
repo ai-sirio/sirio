@@ -190,10 +190,40 @@ set -eEuo pipefail
 #                    the worktree brings the tab; it survives that worktree's eviction; Accept
 #                    answers; and a Claude outside every Sirio shell (no owner) proposing a file of a
 #                    worktree not on screen is held under the file's worktree too
+#   reject_with_comments_clipboard
+#                    one Old-side comment on a line and one New-side comment on a range, written
+#                    through `surface.ide.comment` (the composer's own path): the state counts 2
+#                    comments and 2 cards and no open composer; Reject answers DIFF_REJECTED,
+#                    closes the tab, the state says last_delivery "clipboard", the toast says
+#                    "Comments copied: paste them into Claude", and the CLIPBOARD (read from outside
+#                    the app, on this run's display) is exactly the two `@<path>#L<n> ...` lines,
+#                    the path relative to the worktree, `#L<a>-<b>` for the range, `(proposed) `
+#                    before the New side's text
+#   comment_composer_anchor
+#                    a 300-line file changed at lines 2 and 150: a comment with commit=false opens
+#                    the composer at Old line 150 (the state shows its side and line, no comment,
+#                    no card); a line not in the diff and an unknown tab are errors that leave it
+#                    as it was; Reject answers DIFF_REJECTED and the CLIPBOARD, which the case
+#                    owned before, is unchanged: a draft is never delivered
+#   comment_refusals the verb's errors leave the tab as it was: an unknown tab, a line that is not
+#                    in the diff, a side that is neither old nor new, and (Ruling 27) a New-side
+#                    comment once Edit has changed the text
+#   comments_on_withdraw
+#                    two comments, then Claude's close_tab: TAB_CLOSED, the openDiff gets -32000,
+#                    and the clipboard holds the two lines with the toast
+#   comments_on_confirmation_reject
+#                    a comment, `act close`, the question, confirm_reject: DIFF_REJECTED, then the
+#                    clipboard and the toast
+#   comments_on_disconnect
+#                    a comment, then the client closes its socket: no decision, the clipboard and
+#                    the toast
 #
 # `surface.ide.act` (debug builds only) presses what a user presses: accept, reject, edit (with
 # `text`, which errors when Edit is unavailable), show_diff, close, confirm_reject, cancel,
 # close_others (`text` is the kept tab's position), close_worktree and remove_project.
+# `surface.ide.comment {tab_name, side: old|new, line, end_line?, text, commit?}` (debug builds only)
+# does what a click on the diff's gutter and typing do: it opens the composer at that anchor,
+# sets its text and adds the comment, unless commit=false leaves the text as a draft.
 #
 #
 # Three debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
@@ -267,6 +297,7 @@ if [ "$STATE_ONLY" -eq 0 ]; then
     command -v "$tool" >/dev/null || fail "$tool is required for captures; pass --state-only to skip them"
   done
 fi
+python3 -I -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null || fail "python3-gi with GTK 3 is required (it reads and owns the CLIPBOARD)"
 [ -n "$DISPLAY_TARGET" ] || [ "$START_XVFB" -eq 1 ] || fail "no display; pass --xvfb or --display :N"
 [ -z "$DISPLAY_TARGET" ] || [ "$DISPLAY_TARGET" != "${DISPLAY:-}" ] || fail "--display $DISPLAY_TARGET is your own \$DISPLAY; pass --xvfb, or an Xvfb you started on another number"
 
@@ -291,6 +322,7 @@ CASE="setup"
 CASES_PASSED=0
 CLIENT_N=0
 CLIENT_TAB=""
+CLIP_PID=""
 # The selection send delay of this run, in ms: every launch sets the debug-only
 # SIRIO_DEBUG_IDE_SEND_AFTER_MS to it (read under cfg(debug_assertions), absent from release
 # builds), so the app waits this long, not 100 ms, before it sends a connection's coalesced
@@ -345,6 +377,7 @@ cleanup() {
   [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
   [ -z "${PROXY_PID:-}" ] || kill "$PROXY_PID" 2>/dev/null || true
   [ -z "${OUTSIDE_PID:-}" ] || kill "$OUTSIDE_PID" 2>/dev/null || true
+  [ -z "$CLIP_PID" ] || kill "$CLIP_PID" 2>/dev/null || true
   cp "$RUN_DIR"/app.log "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/socket.jsonl "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/client-*.jsonl "$OUT_DIR/" 2>/dev/null || true
@@ -1982,6 +2015,198 @@ want = sys.argv[2].encode().decode("unicode_escape").encode()
 sys.exit(0 if open(sys.argv[1], "rb").read() == want else 1)' "$1" "$2" || fail "$CASE: $1 was changed by Sirio"
 }
 
+# ---- the CLIPBOARD, from outside the app (python3-gi with GTK 3 on this run's own display, the
+# way test-prompts-e2e.sh does: forced onto X11, a private HOME, nothing of the desktop's)
+
+# Owns this display's CLIPBOARD with a text until it is stopped (60 s at most).
+cat >"$RUN_DIR/clipown.py" <<'PY'
+import sys
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
+Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(sys.argv[1], -1)
+GLib.timeout_add_seconds(60, Gtk.main_quit)
+Gtk.main()
+PY
+# The CLIPBOARD of this display, as bytes, into FILE.
+clipboard_to() { # file
+  timeout 10 env -i PATH=/usr/bin:/bin HOME="$RUN_DIR/home" GDK_BACKEND=x11 DISPLAY="$DISPLAY_TARGET" \
+    python3 -I - "$1" <<'PY'
+import sys
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gtk
+text = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text()
+open(sys.argv[1], "wb").write(b"" if text is None else text.encode("utf-8"))
+PY
+}
+# Puts TEXT on this display's CLIPBOARD, held by clipown.py until clipboard_stop.
+clipboard_own() { # text
+  env -i PATH=/usr/bin:/bin HOME="$RUN_DIR/home" GDK_BACKEND=x11 DISPLAY="$DISPLAY_TARGET" \
+    python3 -I "$RUN_DIR/clipown.py" "$1" &
+  CLIP_PID=$!
+  sleep 1
+}
+clipboard_stop() {
+  [ -z "$CLIP_PID" ] || terminate "$CLIP_PID"
+  CLIP_PID=""
+}
+# Polls until the CLIPBOARD is exactly TEXT (printf %s: no trailing newline).
+expect_clipboard() { # label text
+  local tries=0
+  printf '%s' "$2" >"$RUN_DIR/clipboard.want"
+  while [ "$tries" -lt 50 ]; do
+    if clipboard_to "$RUN_DIR/clipboard.got" 2>/dev/null && cmp -s "$RUN_DIR/clipboard.got" "$RUN_DIR/clipboard.want"; then
+      echo "OK: $1 (the clipboard holds $(wc -c <"$RUN_DIR/clipboard.want" | tr -d ' ') bytes, as wanted)"
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$CASE: $1: the clipboard is not what was wanted. want: $(cat "$RUN_DIR/clipboard.want" | cut -c1-300) got: $(cut -c1-300 "$RUN_DIR/clipboard.got" 2>/dev/null)"
+}
+# `surface.ide.comment`: what a click on the gutter and typing do. Fails when the app refuses.
+comment() { # tab_name side line text [end_line] [commit]
+  sockcall surface.ide.comment "tab_name=$1" "side=$2" "line=$3" "text=$4" ${5:+"end_line=$5"} ${6:+"commit=$6"} >/dev/null
+}
+COMMENTS_TOAST='Comments copied: paste them into Claude'
+# A proposal of FILE (old four lines, a proposal that changes two of them and adds one) opened
+# as TAB, with an Old-side comment on line 2 and, when $3 is two, a New-side comment on the range 4-5.
+open_commented() { # tab_name file count
+  printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/$2"
+  open_diff "$1" "$WT/$2" 'alpha\nBETA\ngamma\nDELTA\nepsilon\n'
+  expect_proposal "$1" ready True
+  comment "$1" old 2 "old note"
+  [ "$3" != 2 ] || comment "$1" new 4 "new note" 5
+  expect_proposal "$1" comments "$3"
+}
+want_old() { printf '@%s#L2 old note' "$1"; }
+want_both() { printf '@%s#L2 old note\n@%s#L4-5 (proposed) new note' "$1" "$1"; }
+
+case_reject_with_comments_clipboard() {
+  proposal_client
+  expect_state "nothing was delivered yet" 'd["last_delivery"]' None
+  local toasts
+  toasts="$(toast_count "$COMMENTS_TOAST")"
+  printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cm1.txt"
+  open_diff cm1 "$WT/cm1.txt" 'alpha\nBETA\ngamma\nDELTA\nepsilon\n'
+  expect_proposal cm1 ready True
+  comment cm1 old 2 "old note"
+  expect_proposal cm1 composer None
+  expect_proposal cm1 cards 1
+  comment cm1 new 4 "new note" 5
+  expect_proposal cm1 composer None
+  expect_proposal cm1 cards 2
+  expect_proposal cm1 comments 2
+  expect_proposal cm1 reject_label "Reject with 2 comments"
+  act cm1 reject
+  assert_response "$(req_id cm1)" 'd["texts"] == ["DIFF_REJECTED", "cm1"]' "Reject answers DIFF_REJECTED"
+  expect_no_proposals
+  expect_no_tab '✻ cm1.txt'
+  expect_state "the delivery was the clipboard" 'd["last_delivery"]' clipboard
+  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
+  expect_clipboard "the clipboard holds the two lines" "$(want_both cm1.txt)"
+  end_app_client
+}
+
+case_comment_composer_anchor() {
+  proposal_client
+  seq -f 'line %g' 1 300 >"$WT/cm2.txt"
+  local changed
+  changed="$(seq 1 300 | awk '{ if ($1 == 2 || $1 == 150) print "CHANGED " $1; else print "line " $1 }' | awk '{ printf "%s\\n", $0 }')"
+  open_diff cm2 "$WT/cm2.txt" "$changed"
+  expect_proposal cm2 ready True
+  local toasts
+  toasts="$(toast_count "$COMMENTS_TOAST")"
+  clipboard_own "sentinel before the reject"
+  expect_clipboard "the case owns the clipboard" "sentinel before the reject"
+  comment cm2 old 150 "a draft" "" false
+  expect_proposal cm2 composer "{'side': 'old', 'line': 150}"
+  expect_proposal cm2 comments 0
+  expect_proposal cm2 cards 0
+  act cm2 reject
+  assert_response "$(req_id cm2)" 'd["texts"] == ["DIFF_REJECTED", "cm2"]' "Reject answers DIFF_REJECTED"
+  expect_no_proposals
+  expect_clipboard "a draft is never delivered: the clipboard is as it was" "sentinel before the reject"
+  expect_state "no toast for a draft" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$toasts"
+  clipboard_stop
+  end_app_client
+}
+
+# The verb's errors: each leaves the tab as it was.
+refused() { # description: the rest is a comment call that must fail
+  local what="$1"
+  shift
+  if "$@" 2>/dev/null; then fail "$CASE: $what was accepted"; fi
+  echo "OK: $what is refused"
+}
+case_comment_refusals() {
+  proposal_client
+  printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cm3.txt"
+  open_diff cm3 "$WT/cm3.txt" 'alpha\nBETA\ngamma\nDELTA\nepsilon\n'
+  expect_proposal cm3 ready True
+  refused "an unknown tab" comment nope old 2 "x"
+  refused "a line that is not in the diff" comment cm3 old 99 "x"
+  refused "a side that is neither old nor new" comment cm3 left 2 "x"
+  expect_proposal cm3 comments 0
+  expect_proposal cm3 cards 0
+  expect_proposal cm3 composer None
+  act cm3 edit 'edited\n'
+  expect_proposal cm3 editing True
+  refused "a New-side comment once Edit changed the text" comment cm3 new 1 "x"
+  expect_proposal cm3 comments 0
+  expect_proposal cm3 composer None
+  act cm3 reject
+  expect_no_proposals
+  end_app_client
+}
+
+case_comments_on_withdraw() {
+  proposal_client
+  local toasts
+  toasts="$(toast_count "$COMMENTS_TOAST")"
+  open_commented cm4 cm4.txt 2
+  client_do 'call tools/call {"name":"close_tab","arguments":{"tab_name":"cm4"}}'
+  wait_client "close_tab answered" 'r.get("dir") == "in" and r.get("frame", {}).get("result", {}).get("content", [{}])[0].get("text") == "TAB_CLOSED"' 1
+  assert_response "$(req_id cm4)" 'd == {"error": -32000}' "the withdrawn openDiff gets -32000, no decision"
+  expect_no_proposals
+  expect_state "the delivery was the clipboard" 'd["last_delivery"]' clipboard
+  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
+  expect_clipboard "the clipboard holds the two lines" "$(want_both cm4.txt)"
+  end_app_client
+}
+
+case_comments_on_confirmation_reject() {
+  proposal_client
+  local toasts
+  toasts="$(toast_count "$COMMENTS_TOAST")"
+  open_commented cm5 cm5.txt 1
+  act cm5 close
+  expect_state "closing asks first" 'd["confirmation"]["title"]' "Closing rejects Claude's change"
+  act_alone confirm_reject
+  assert_response "$(req_id cm5)" 'd["texts"] == ["DIFF_REJECTED", "cm5"]' "Reject in the confirmation answers DIFF_REJECTED"
+  expect_no_proposals
+  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
+  expect_clipboard "the clipboard holds the comment" "$(want_old cm5.txt)"
+  end_app_client
+}
+
+case_comments_on_disconnect() {
+  proposal_client
+  local toasts
+  toasts="$(toast_count "$COMMENTS_TOAST")"
+  open_commented cm6 cm6.txt 1
+  client_do close
+  wait_client "the connection closed" 'r.get("event") == "closed"' 1
+  expect_no_proposals
+  assert_no_decision "$(req_id cm6)" "a closed connection is answered nothing"
+  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
+  expect_clipboard "the clipboard holds the comment" "$(want_old cm6.txt)"
+  end_app_client
+}
+
 case_proposal_accept() {
   proposal_client
   printf 'one\ntwo\nthree\n' >"$WT/p.txt"
@@ -2767,6 +2992,12 @@ run_proposal_cases() {
   case_run edit_then_accept case_proposal_edit_then_accept
   case_run edit_keys case_proposal_edit_keys
   case_run reject case_proposal_reject
+  case_run reject_with_comments_clipboard case_reject_with_comments_clipboard
+  case_run comment_composer_anchor case_comment_composer_anchor
+  case_run comment_refusals case_comment_refusals
+  case_run comments_on_withdraw case_comments_on_withdraw
+  case_run comments_on_confirmation_reject case_comments_on_confirmation_reject
+  case_run comments_on_disconnect case_comments_on_disconnect
   case_run close_confirm case_proposal_close_confirm
   case_run close_others_guarded case_close_others_guarded
   case_run reject_leaves_no_inert_tab case_reject_leaves_no_inert_tab

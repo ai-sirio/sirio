@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use sirio_ide::{BridgeEvent, ConnId, DiffAnswer, DiffId, Gone, ReadOutcome, Refusal};
 use sirio_ui::modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, render_modal};
 use sirio_ui::sidebar::SidebarEvent;
-use sirio_ui::proposal_tab::{ProposalAction, ProposalEvent, ProposalInit, ProposalTab};
+use sirio_ui::proposal_tab::{CommentSide, ProposalAction, ProposalEvent, ProposalInit, ProposalTab};
 use sirio_theme::Theme;
 
 use super::IdeBridge;
@@ -194,6 +194,16 @@ impl SirioWorkspace {
             cx.update_global(|bridge: &mut IdeBridge, _| bridge.push_toast(message));
         }
         self.show_toast(message, cx);
+    }
+
+    /// Comments a proposal ends with go to the clipboard, for the user to paste into Claude: the
+    /// only delivery there is. The state records that one happened.
+    fn ide_copy_comments(&mut self, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if cx.has_global::<IdeBridge>() {
+            cx.update_global(|bridge: &mut IdeBridge, _| bridge.note_comments_on_clipboard());
+        }
+        self.ide_toast(COMMENTS_COPIED_TOAST, cx);
     }
 
     /// The bridge's `OpenDiff` and `DiffWithdrawn` events, onto the UI thread.
@@ -430,9 +440,7 @@ impl SirioWorkspace {
             self.ide_toast(CLOSED_TOAST, cx);
         }
         if let Some(text) = comments {
-            // Typing them into the owner's terminal is a later layer; the clipboard always works.
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.ide_toast(COMMENTS_COPIED_TOAST, cx);
+            self.ide_copy_comments(text, cx);
         }
         self.ide_remove_view(record.view.entity_id(), cx);
         // The subscription this runs from is dropped after it returns.
@@ -461,8 +469,7 @@ impl SirioWorkspace {
         };
         let record = self.ide_proposals.records.remove(index);
         if let Some(text) = record.view.read(cx).comments_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.ide_toast(COMMENTS_COPIED_TOAST, cx);
+            self.ide_copy_comments(text, cx);
         }
         self.ide_remove_view(record.view.entity_id(), cx);
         cx.defer(move |_| drop(record));
@@ -496,8 +503,7 @@ impl SirioWorkspace {
         }
         self.ide_toast(CLOSED_TOAST, cx);
         if !comments.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(comments.join("\n")));
-            self.ide_toast(COMMENTS_COPIED_TOAST, cx);
+            self.ide_copy_comments(comments.join("\n"), cx);
         }
         cx.defer(move |_| drop(doomed));
         cx.notify();
@@ -657,8 +663,7 @@ impl SirioWorkspace {
             self.ide_toast(CLOSED_TOAST, cx);
         }
         if !comments.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(comments.join("\n")));
-            self.ide_toast(COMMENTS_COPIED_TOAST, cx);
+            self.ide_copy_comments(comments.join("\n"), cx);
         }
         cx.defer(move |_| drop(dropped));
         match confirmation.then {
@@ -780,6 +785,10 @@ impl SirioWorkspace {
                     "refusal": tab.is_refused(),
                     "editing": tab.is_editing(),
                     "comments": tab.comment_count(),
+                    "cards": tab.card_count(),
+                    "composer": tab.composer_position().map(|(side, line)| {
+                        json!({"side": if side == CommentSide::Old { "old" } else { "new" }, "line": line})
+                    }),
                     "reject_label": tab.reject_label(),
                     "owner_named": tab.has_owner_title(),
                     "counts": tab.diff_counts().map(|(added, deleted)| json!([added, deleted])),
@@ -800,6 +809,34 @@ impl SirioWorkspace {
             })
         });
         (json!(proposals), confirmation.unwrap_or(Value::Null))
+    }
+
+    /// Debug-only `surface.ide.comment`: what a click on the gutter of the proposal named
+    /// `tab_name` and typing do (see `ProposalTab::comment_through_composer`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn control_ide_comment(
+        &mut self,
+        tab_name: &str,
+        side: &str,
+        line: u32,
+        end_line: Option<u32>,
+        text: &str,
+        commit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let side = match side {
+            "old" => CommentSide::Old,
+            "new" => CommentSide::New,
+            _ => return Err("side must be old or new".to_owned()),
+        };
+        let view = self
+            .ide_proposals
+            .by_tab_name(tab_name)
+            .map(|record| record.view.clone())
+            .ok_or_else(|| "no proposal has that tab_name".to_owned())?;
+        view.update(cx, |tab, cx| tab.comment_through_composer(side, line, end_line, text, commit, window, cx))?;
+        Ok(Vec::new())
     }
 
     /// Debug-only `surface.ide.act`: presses what a user presses, on the proposal named

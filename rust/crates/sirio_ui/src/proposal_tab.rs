@@ -561,6 +561,61 @@ impl ProposalTab {
             .collect();
     }
 
+    /// The side and last line of the open composer, if one is open.
+    pub fn composer_position(&self) -> Option<(CommentSide, u32)> {
+        self.composer.as_ref().map(|open| {
+            let side = match open.anchor.side {
+                AnnotationSide::Old => CommentSide::Old,
+                AnnotationSide::New => CommentSide::New,
+            };
+            (side, open.anchor.last())
+        })
+    }
+
+    /// How many comment cards the diff was handed: what `rebuild_cards` last made.
+    pub fn card_count(&self) -> usize {
+        self.cards.len()
+    }
+
+    /// The debug verb's entry: what a click on the gutter and typing do. The anchor is the one
+    /// the gutter would pick (lines `line` to `end_line`), the composer opens through
+    /// `open_composer` (so the diff scrolls to it), its text is set, and `commit` presses Add.
+    /// An error leaves the tab as it was.
+    #[allow(clippy::too_many_arguments)]
+    pub fn comment_through_composer(
+        &mut self,
+        side: CommentSide,
+        line: u32,
+        end_line: Option<u32>,
+        text: &str,
+        commit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let changes = self.changes.clone().ok_or_else(|| "the proposal's diff is not loaded".to_owned())?;
+        if side == CommentSide::New && self.proposal_was_edited(cx) {
+            return Err(PROPOSED_SIDE_CLOSED.to_owned());
+        }
+        if commit && text.trim().is_empty() {
+            return Err("a comment needs text".to_owned());
+        }
+        let (first, last) = (line.min(end_line.unwrap_or(line)), line.max(end_line.unwrap_or(line)));
+        let anchor = changes.read(cx).comment_anchor(
+            &self.display_path(),
+            annotation_side(side),
+            last,
+            (first != last).then_some(first),
+        )?;
+        self.open_composer(anchor, cx);
+        let view = self.composer.as_ref().map(|open| open.view.clone()).ok_or_else(|| "no composer opened".to_owned())?;
+        let input = view.update(cx, |view, cx| view.ensure_input(window, cx));
+        input.update(cx, |input, cx| input.set_text(text.to_owned(), cx));
+        if commit {
+            self.commit_composer(cx);
+        }
+        Ok(())
+    }
+
     fn open_composer(&mut self, anchor: CommentAnchor, cx: &mut Context<Self>) {
         if anchor.side == AnnotationSide::New && self.proposal_was_edited(cx) {
             self.notice = Some(PROPOSED_SIDE_CLOSED.to_owned());

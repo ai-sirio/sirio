@@ -401,6 +401,8 @@ pub(crate) struct IdeBridge {
     selection: Coalescer<ConnId, WeakEntity<FileView>>,
     /// What the commands said to the user, newest last; content-free copy only.
     toasts: Vec<String>,
+    /// How the comments of the last proposal that ended with some were delivered.
+    last_delivery: Option<&'static str>,
     /// How many resolutions finished that a hook started (a connection announcing itself, a
     /// worktree's terminals attaching, and those chains' retries), not the ones a request runs
     /// through `ide_when_resolved` for itself. A number only; the debug state shows it so a
@@ -437,6 +439,7 @@ pub(crate) fn start_at_launch(
         folders,
         selection: Coalescer::default(),
         toasts: Vec::new(),
+        last_delivery: None,
         hook_resolutions: 0,
     };
     let mut next = if enabled { bridge.begin_start() } else { None };
@@ -667,6 +670,11 @@ impl IdeBridge {
         self.selection.fire(&conn)
     }
 
+    /// Records that comments went to the clipboard, the only delivery there is.
+    pub(crate) fn note_comments_on_clipboard(&mut self) {
+        self.last_delivery = Some("clipboard");
+    }
+
     /// Records the copy of a toast the app showed.
     pub(crate) fn push_toast(&mut self, message: &str) {
         self.toasts.push(message.to_string());
@@ -709,7 +717,7 @@ impl IdeBridge {
             "confirmation": confirmation,
             "toasts": self.toasts,
             "hook_resolutions": self.hook_resolutions,
-            "last_delivery": null,
+            "last_delivery": self.last_delivery,
         });
         if let (Some(state), Value::Object(extra)) = (state.as_object_mut(), extra) {
             state.extend(extra);

@@ -1533,6 +1533,17 @@ enum ControlAction {
         text: Option<String>,
         reply: ControlReply,
     },
+    /// Debug-only `surface.ide.comment {tab_name, side, line, end_line?, text, commit?}`: what a
+    /// click on a proposal's gutter and typing do (`ide_bridge::proposals`).
+    IdeComment {
+        tab_name: String,
+        side: String,
+        line: u32,
+        end_line: Option<u32>,
+        text: String,
+        commit: bool,
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -3553,6 +3564,31 @@ impl ControlHandler for AppControlHandler {
                 let tab_name = request.params.get("tab_name").cloned();
                 let text = request.params.get("text").cloned();
                 self.queue_action(request, move |reply| ControlAction::IdeAct { tab_name, action, text, reply })
+            }
+            "surface.ide.comment" if cfg!(debug_assertions) => {
+                let number = |key: &str| request.params.get(key).and_then(|value| value.parse::<u32>().ok());
+                let (Some(tab_name), Some(side), Some(line), Some(text)) = (
+                    request.params.get("tab_name").cloned(),
+                    request.params.get("side").cloned(),
+                    number("line"),
+                    request.params.get("text").cloned(),
+                ) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.ide.comment requires tab_name, side=old|new, line, text, and optionally end_line and commit=false",
+                    );
+                };
+                let end_line = number("end_line");
+                let commit = request.params.get("commit").map(String::as_str) != Some("false");
+                self.queue_action(request, move |reply| ControlAction::IdeComment {
+                    tab_name,
+                    side,
+                    line,
+                    end_line,
+                    text,
+                    commit,
+                    reply,
+                })
             }
             "surface.attention.read" if cfg!(debug_assertions) => self.queue_action(request, |reply| {
                 ControlAction::Attention {
@@ -7069,6 +7105,11 @@ impl SirioWorkspace {
                                         window,
                                         cx,
                                     );
+                                    let _ = reply.send(result);
+                                }
+                                ControlAction::IdeComment { tab_name, side, line, end_line, text, commit, reply } => {
+                                    let result =
+                                        workspace.control_ide_comment(&tab_name, &side, line, end_line, &text, commit, window, cx);
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::ReadTabs { reply } => {
@@ -50204,6 +50245,7 @@ done
             | ControlAction::IdeState { reply }
             | ControlAction::IdeSwitch { reply, .. }
             | ControlAction::IdeAct { reply, .. }
+            | ControlAction::IdeComment { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -50337,6 +50379,7 @@ done
             "surface.ide.state" => request_with_params(method, &[]),
             "surface.ide.switch" => request_with_params(method, &[("on", "true")]),
             "surface.ide.act" => request_with_params(method, &[("action", "cancel")]),
+            "surface.ide.comment" => request_with_params(method, &[("tab_name", "p"), ("side", "old"), ("line", "1"), ("text", "x")]),
             "surface.attention.read" => request::attention_read(),
             "surface.attention.act" => request_with_params(method, &[("focus", "active")]),
             "surface.terminal.restart" | "surface.terminal.state" => {
