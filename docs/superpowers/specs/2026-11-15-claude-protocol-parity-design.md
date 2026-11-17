@@ -311,6 +311,31 @@ Each item is laid out the same way:
   - A fixture `can_use_tool` that carries the fields. The E2E checks the card's text and options,
     then the rules card.
   - Live: `list_permission_rules` answers on a configured `CLAUDE_CONFIG_DIR`.
+- **Deviations, accepted on 2026-11-17 (t2s, by the recommended-option rule).** The live probe
+  (`.superpowers/probe-a5/FINDINGS.md`, 2.1.326 over stdio) changes four points above:
+  - **Caption.** `display_name` always comes, but it is only the tool's name (`Bash`, or `Echo`
+    for `mcp__probe__echo`), so the card does not show it. The caption is the CLI's `title` when
+    one comes, else today's "Permission requested".
+  - **Path.** `blocked_path` comes only for Bash. It is the path the command writes, even inside
+    the working directory, and never comes for a Read or Write outside it. The card shows it as
+    "Path", not as a blocked path.
+  - **Reason.** `decision_reason` is absent when an `ask` rule matches and for some compound
+    commands. Only `decision_reason_type` comes then, plus `decision_reason_rule_source` for a
+    rule. The reason line says what the type means instead, for example "Matches an ask rule in
+    user settings".
+  - **Three fields proven by the fixture only.** `title`, `default_to_no` and
+    `suppress_always_allow_rule` never reach a stdio host on 2.1.326. They come from a desktop
+    host's worded asks behind a server flag, from auto mode's classifier fallbacks, or from an
+    incomplete safety check. Sirio honours them when they come; the live test cannot reach them.
+
+  Also decided:
+  - `requires_user_interaction` is carried and not shown, because the two tools that set it,
+    AskUserQuestion and ExitPlanMode, are already questions.
+  - The model writes Bash's `description`. It sits under the command and never replaces it.
+  - Both cards render invisible, bidi and control characters visibly. The CLI keeps them in a
+    rule "by design".
+  - The rules card lists `workspaceDirectories` without their `source`, which the probe found
+    mislabelled. It ignores the extra `parentSettingsIncluded`.
 
 ### A6 · Reload and connector toggle
 
