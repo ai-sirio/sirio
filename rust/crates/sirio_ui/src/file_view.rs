@@ -1296,6 +1296,16 @@ impl FileView {
         })
     }
 
+    /// The focus handles keys reach this view through: its own (a press on it focuses it) and
+    /// the code editor's. Keyboard focus is "in" the view when one of them contains it.
+    pub fn focus_handles(&self, cx: &App) -> Vec<gpui::FocusHandle> {
+        let mut handles = vec![self.editor_focus.clone()];
+        if let Some(code) = &self.code_editor {
+            handles.push(gpui::Focusable::focus_handle(&*code.read(cx), cx));
+        }
+        handles
+    }
+
     /// Re-reads the file and compares it against the last known disk state
     /// (F-EDIT-05/06). The shell calls this when a file tab is activated —
     /// "modify externally, return to Sirio" — and on window focus.

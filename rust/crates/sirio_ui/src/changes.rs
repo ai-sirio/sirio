@@ -828,6 +828,11 @@ impl ChangesTab {
         }
     }
 
+    /// The focus handle the diff list's keys go through (once it has drawn).
+    pub fn focus_handles(&self) -> Vec<FocusHandle> {
+        self.list_focus.iter().cloned().collect()
+    }
+
     pub fn set_commentable(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.commentable != on {
             self.commentable = on;

@@ -254,6 +254,10 @@ set -eEuo pipefail
 #   focus_in_primary_shows_proposal
 #                    a file shown in Secondary, a click into the Primary terminal, an openDiff: the
 #                    proposal is what Secondary shows
+#   bar_click_keeps_focus_out
+#                    (ruling 72) a proposal open, the keyboard in the Primary terminal, a click on the bar's
+#                    text (which tracks no focus): the keyboard is still outside Secondary, and the next
+#                    proposal is what Secondary shows
 #   symlink_title    a symlink CLAUDE.md -> AGENTS.md as the file: the tab is titled "✻ CLAUDE.md"
 #   parked_worktree  relaunched with the mounted-worktree cap seeded at 2 in the isolated database
 #                    (appearance_seed --limit-mounted 2) and a stale file left in the scratch
@@ -3038,6 +3042,37 @@ case_focus_in_primary_shows_proposal() {
 }
 
 # A symlink CLAUDE.md -> AGENTS.md shows as the name Claude sent.
+# A press on the proposal bar's text, which tracks no focus, must not take the keyboard into Secondary
+# (ruling 72): with the user typing in the Primary terminal, the next proposal is what Secondary shows.
+case_bar_click_keeps_focus_out() {
+  proposal_client
+  printf 'one\n' >"$WT/bc1.txt"; printf 'p\n' >"$WT/bc2.txt"
+  open_diff bc-1 "$WT/bc1.txt" 'x\n'
+  expect_proposal bc-1 on_screen True
+  expect_tab '✻ bc1.txt' >/dev/null
+  local window geometry width height pos
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  # The Primary terminal, then the proposal bar's text (the "Claude · ... proposes a change" line, at
+  # 59% across and 11% down, measured on ide-proposal-disk-changed.png).
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 35 / 100))" "$((height * 45 / 100))" click 1
+  sleep 0.8
+  expect_state "the keyboard focus is outside Secondary" 'd["secondary_focused"]' False
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 59 / 100))" "$((height * 114 / 1000))" click 1
+  sleep 0.8
+  expect_state "a click on the bar's text did not take the keyboard into Secondary" 'd["secondary_focused"]' False
+  open_diff bc-2 "$WT/bc2.txt" 'y\n'
+  expect_proposal bc-2 on_screen True
+  pos="$(expect_tab '✻ bc2.txt')"
+  expect_state "Secondary shows the new proposal" 'd["secondary_shown"]' "$pos"
+  act bc-2 reject
+  act bc-1 reject
+  expect_no_proposals
+  end_app_client
+}
+
 case_symlink_title() {
   proposal_client
   printf 'x\n' >"$WT/AGENTS.md"
@@ -3568,6 +3603,7 @@ run_proposal_cases() {
   case_run confirm_stable_worktree case_confirm_stable_worktree
   case_run focus_in_secondary_keeps_editor case_focus_in_secondary_keeps_editor
   case_run focus_in_primary_shows_proposal case_focus_in_primary_shows_proposal
+  case_run bar_click_keeps_focus_out case_bar_click_keeps_focus_out
   case_run symlink_title case_symlink_title
   case_run parked_worktree case_parked_worktree
 }

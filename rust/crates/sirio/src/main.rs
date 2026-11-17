@@ -6316,11 +6316,12 @@ struct SirioWorkspace {
     /// End All Terminal Sessions confirmation (SP2 spec §4.2): shown only
     /// when some session reports `foreground.running` or an agent.
     pending_end_all: Option<PendingEndAll>,
-    /// Wraps the Secondary half, so the window's keyboard focus inside it (in any of its tabs) can
-    /// be told from focus elsewhere.
-    secondary_focus: FocusHandle,
-    /// Whether the keyboard focus was inside the Secondary half in the last frame drawn: the
-    /// delivery loop that opens a proposal has no window to ask.
+    /// The window this workspace is drawn in, noted on every draw: the delivery that opens a
+    /// proposal reads the keyboard focus through it (`ide_focus_in_secondary`).
+    window_handle: std::cell::Cell<Option<gpui::AnyWindowHandle>>,
+    /// Whether the keyboard focus was inside a Secondary tab when last read (every draw, and each
+    /// time a proposal opens): what the debug state reports. No element wraps Secondary to track
+    /// it, because a wrapper takes the focus of every press nothing below it handles.
     secondary_focused: std::cell::Cell<bool>,
     /// Whether a window prompt (a native or drawn dialog) was up in the last frame drawn.
     prompt_up: std::cell::Cell<bool>,
@@ -7671,7 +7672,7 @@ impl SirioWorkspace {
             restore_focus_pending: false,
             pending_pane_close: None,
             pending_end_all: None,
-            secondary_focus: cx.focus_handle(),
+            window_handle: std::cell::Cell::new(None),
             secondary_focused: std::cell::Cell::new(false),
             prompt_up: std::cell::Cell::new(false),
             published_pane_directories: BTreeSet::new(),
@@ -21556,7 +21557,7 @@ impl SirioWorkspace {
     ) {
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
-        let focus_in_secondary = self.secondary_focused.get();
+        let focus_in_secondary = self.ide_focus_in_secondary(cx);
         let active_in_secondary = self
             .tabs
             .get(self.active_tab)
@@ -26609,11 +26610,53 @@ impl SirioWorkspace {
             .size_full()
             .bg(theme.ely.bg)
             .child(surface);
-        if role == PaneRole::Secondary {
-            group.track_focus(&self.secondary_focus).into_any_element()
-        } else {
-            group.into_any_element()
+        group.into_any_element()
+    }
+
+    /// The focus handles keys reach the tabs of the Secondary half through: each view's own (a
+    /// press on it focuses it), so that focus is "in" a tab when one of them contains it. A tab
+    /// whose views track none (a loading file, a browser) has none, and focus there reads as not
+    /// in Secondary, as it did for a press nothing below handled.
+    fn secondary_focus_handles(&self, cx: &App) -> Vec<FocusHandle> {
+        let mut handles = Vec::new();
+        for tab in self.tabs.iter().filter(|tab| tab.pane == PaneRole::Secondary) {
+            tab.panes.for_each(&mut |_, content| match content {
+                TabContent::Terminal { view } => handles.push(view.focus_handle(cx)),
+                TabContent::Chat(chat) => handles.push(chat.focus_handle(cx)),
+                TabContent::Trace(view) => handles.push(view.focus_handle(cx)),
+                TabContent::File { view } => handles.extend(view.read(cx).focus_handles(cx)),
+                TabContent::Changes(changes) => handles.extend(changes.read(cx).focus_handles()),
+                TabContent::Proposal(view) => handles.extend(view.read(cx).focus_handles(cx)),
+                TabContent::Browser(_)
+                | TabContent::ProjectSettings(_)
+                | TabContent::ChangeRequest(_)
+                | TabContent::CiLog(_) => {}
+            });
         }
+        handles
+    }
+
+    /// Whether the window's keyboard focus is inside a Secondary tab, from the frame last drawn.
+    fn focus_in_secondary(&self, window: &Window, cx: &App) -> bool {
+        self.secondary_focus_handles(cx)
+            .iter()
+            .any(|handle| handle.contains_focused(window, cx))
+    }
+
+    /// The same, asked through the window a delivery can reach (ruling 72): the keyboard focus
+    /// read when a proposal arrives, not a value a draw cached. The workspace is being updated, so
+    /// the window is read with the handles collected beforehand; when the window cannot be read
+    /// (it is mid-update), what the last draw saw stands.
+    fn ide_focus_in_secondary(&self, cx: &mut Context<Self>) -> bool {
+        let handles = self.secondary_focus_handles(cx);
+        let read = self.window_handle.get().and_then(|window| {
+            window
+                .update(cx, |_, window, cx| handles.iter().any(|handle| handle.contains_focused(window, cx)))
+                .ok()
+        });
+        let focused = read.unwrap_or_else(|| self.secondary_focused.get());
+        self.secondary_focused.set(focused);
+        focused
     }
 
     fn has_current_worktree(&self) -> bool {
@@ -30193,9 +30236,9 @@ impl SirioWorkspace {
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
-        // Where the keyboard focus is, from the frame last drawn (the handle was in it).
-        self.secondary_focused
-            .set(self.secondary_focus.contains_focused(window, cx));
+        // Where the keyboard focus is, from the frame last drawn (the handles were in it).
+        self.window_handle.set(Some(window.window_handle()));
+        self.secondary_focused.set(self.focus_in_secondary(window, cx));
         self.prompt_up.set(window.has_active_prompt());
         // Spec 2026-11-01-primary-rail §5, before anything reads the active tab.
         self.settle_primary_peek(window, cx);

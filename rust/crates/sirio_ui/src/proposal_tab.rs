@@ -354,6 +354,22 @@ impl ProposalTab {
         self.dirty_in_editor
     }
 
+    /// The focus handles keys reach this tab through: the diff list, the Edit body's code
+    /// editor and the open composer's input. Keyboard focus is "in" the tab when one of them
+    /// contains it (the bar's buttons and text take none).
+    pub fn focus_handles(&self, cx: &App) -> Vec<gpui::FocusHandle> {
+        let mut handles = self.changes.as_ref().map(|changes| changes.read(cx).focus_handles()).unwrap_or_default();
+        if let Some(code) = &self.code {
+            handles.push(code.read(cx).focus_handle(cx));
+        }
+        if let Some(open) = &self.composer
+            && let Some(input) = &open.view.read(cx).input
+        {
+            handles.push(input.focus_handle(cx));
+        }
+        handles
+    }
+
     /// Whether the bar warns that the file changed on disk after the proposal opened.
     pub fn is_disk_changed(&self) -> bool {
         self.disk_changed
