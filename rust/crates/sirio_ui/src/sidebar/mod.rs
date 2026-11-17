@@ -18,7 +18,7 @@ use ely_gpui_component::menus::{Hang, layer};
 use ely_gpui_component::{
     buttons::IconButton as EIconButton,
     data_display::{DotBadge, Tone},
-    primitives::{Icon as EIcon, IconName},
+    primitives::{Disclosure, Icon as EIcon, IconName},
     theme::{ControlSize as EControlSize, IconSize as EIconSize},
 };
 use gpui::{
@@ -757,6 +757,8 @@ pub struct Sidebar {
     /// What the debug layout read measures; see [`ProbeRects`].
     probe: std::rc::Rc<ProbeRects>,
     list_scroll: ScrollHandle,
+    /// The section header's chevron: the list under it is hidden. In memory only.
+    list_folded: bool,
     view: SidebarView,
     closed_sessions: Vec<sessions::ClosedSession>,
     session_views: std::collections::HashMap<String, gpui::Entity<sessions::SessionRowView>>,
@@ -1103,6 +1105,7 @@ impl Sidebar {
             cache_rows: !cfg!(test),
             probe: Default::default(),
             list_scroll: ScrollHandle::new(),
+            list_folded: false,
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
             session_views: std::collections::HashMap::new(),
@@ -1213,6 +1216,7 @@ impl Sidebar {
             cache_rows: !cfg!(test),
             probe: Default::default(),
             list_scroll: ScrollHandle::new(),
+            list_folded: false,
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
             session_views: std::collections::HashMap::new(),
@@ -4745,75 +4749,6 @@ impl Render for Sidebar {
             .bg(theme.ely.bg)
             .child(self.render_header(&theme, window, cx))
             .child(self.render_new_chat(&theme, cx))
-            .when(view == SidebarView::Projects, |this| {
-                // Open and fold the whole list, then the `+`: one row under
-                // the title, the three drawn at one size. They are icons, so
-                // the tooltip is the only place the bulk buttons' words
-                // appear.
-                this.child(
-                    div()
-                        .debug_selector(|| "sidebar-header-actions".to_owned())
-                        .mt(px(6.0))
-                        .h(px(20.0))
-                        .w_full()
-                        .pr(px(FILTER_LEFT_INSET))
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(4.0))
-                        .child(
-                            header_icon_button(
-                                "sidebar-expand-all",
-                                Icon::SquarePlus,
-                                "Expand all projects",
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_all_projects_expanded(true, cx);
-                            })),
-                        )
-                        .child(
-                            header_icon_button(
-                                "sidebar-collapse-all",
-                                Icon::SquareMinus,
-                                "Collapse all projects",
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_all_projects_expanded(false, cx);
-                            })),
-                        )
-                        .child(
-                            div()
-                                .id("add-project")
-                                .debug_selector(|| "add-project".to_string())
-                                .flex_none()
-                                .w(px(20.0))
-                                .h(px(20.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
-                                    this.add_project_menu.note_trigger_press();
-                                }))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_add_project(cx);
-                                }))
-                                .child(
-                                    div()
-                                        .debug_selector(|| "add-project-icon".to_owned())
-                                        .flex()
-                                        .flex_none()
-                                        .child(
-                                            IconElement::new(Icon::Plus, HEADER_ICON_SIZE)
-                                                .text_color(theme.ely.fg_subtle),
-                                        ),
-                                )
-                                .when_some(add_project_menu, |this, menu| this.child(menu)),
-                        ),
-                )
-            })
             .when(show_filter, |this| this.child(
                 div()
                     .id("filter-field")
@@ -4913,7 +4848,104 @@ impl Render for Sidebar {
                             }),
                     ),
             ))
-            .when(view == SidebarView::Projects, |this| this.child(
+            .child({
+                // Folds the list under it, whichever list the view shows. The
+                // bulk buttons appear on hover; the `+` is always drawn.
+                let folded = self.list_folded;
+                let title = if view == SidebarView::Projects { "Projects" } else { "Sessions" };
+                div()
+                    .id("sidebar-section-header")
+                    .debug_selector(|| "sidebar-section-header".to_owned())
+                    .group("sidebar-section-header")
+                    .flex_none()
+                    .h(px(28.0))
+                    .w_full()
+                    .px(px(FILTER_LEFT_INSET))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .id("sidebar-section-toggle")
+                            .debug_selector(|| "sidebar-section-toggle".to_owned())
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .cursor_pointer()
+                            .text_color(theme.ely.fg_subtle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.list_folded = !this.list_folded;
+                                cx.notify();
+                            }))
+                            .child(title)
+                            .child(Disclosure::new("sidebar-section-toggle", !folded)),
+                    )
+                    .when(view == SidebarView::Projects, |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap(px(4.0))
+                                .child(
+                                    header_icon_button(
+                                        "sidebar-expand-all",
+                                        Icon::SquarePlus,
+                                        "Expand all projects",
+                                        &theme,
+                                    )
+                                    .opacity(0.0)
+                                    .group_hover("sidebar-section-header", |style| style.opacity(1.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_all_projects_expanded(true, cx);
+                                    })),
+                                )
+                                .child(
+                                    header_icon_button(
+                                        "sidebar-collapse-all",
+                                        Icon::SquareMinus,
+                                        "Collapse all projects",
+                                        &theme,
+                                    )
+                                    .opacity(0.0)
+                                    .group_hover("sidebar-section-header", |style| style.opacity(1.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_all_projects_expanded(false, cx);
+                                    })),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-project")
+                                        .debug_selector(|| "add-project".to_string())
+                                        .flex_none()
+                                        .w(px(20.0))
+                                        .h(px(20.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
+                                            this.add_project_menu.note_trigger_press();
+                                        }))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.start_add_project(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .debug_selector(|| "add-project-icon".to_owned())
+                                                .flex()
+                                                .flex_none()
+                                                .child(
+                                                    IconElement::new(Icon::Plus, HEADER_ICON_SIZE)
+                                                        .text_color(theme.ely.fg_subtle),
+                                                ),
+                                        )
+                                        .when_some(add_project_menu, |this, menu| this.child(menu)),
+                                ),
+                        )
+                    })
+            })
+            .when(view == SidebarView::Projects && !self.list_folded, |this| this.child(
                 div()
                     .id("sidebar-tree")
                     .debug_selector(|| "sidebar-tree".to_owned())
@@ -4991,7 +5023,7 @@ impl Render for Sidebar {
                         )
                     }),
             ))
-            .when(view == SidebarView::Sessions, |this| {
+            .when(view == SidebarView::Sessions && !self.list_folded, |this| {
                 let empty = session_list.open.is_empty() && session_list.closed.is_empty();
                 this.child(
                     div()
@@ -8928,8 +8960,28 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-view-menu-check-projects").is_none());
     }
 
+    /// The section header's chevron folds the whole list away and back.
+    #[gpui::test]
+    async fn the_section_header_folds_the_whole_list(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let header = cx
+            .debug_bounds("sidebar-section-header")
+            .expect("the section header is drawn");
+        assert_eq!(header.size.height, px(28.0), "the section header is 28px");
+        assert!(cx.debug_bounds("sidebar-tree").is_some(), "the list starts drawn");
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(cx.debug_bounds("sidebar-tree").is_none(), "the list is folded away");
+        assert!(cx.debug_bounds("sidebar-section-header").is_some(), "the header stays");
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(cx.debug_bounds("sidebar-tree").is_some(), "the list is back");
+    }
+
     /// At the narrowest sidebar the `+` and both bulk buttons stay whole in
-    /// their own row under the title, at the same size, inside the sidebar.
+    /// the section header under the filter, at the same size, inside the sidebar.
     #[gpui::test]
     async fn at_the_narrowest_sidebar_the_header_controls_stay_whole(cx: &mut TestAppContext) {
         cx.update(Theme::init);
@@ -8959,6 +9011,7 @@ mod tests {
                 "{selector} sits in the header row"
             );
         }
+        let section = cx.debug_bounds("sidebar-section-header").expect("the section header");
         for selector in [
             "sidebar-collapse-all",
             "sidebar-expand-all",
@@ -8974,8 +9027,8 @@ mod tests {
                 filter.right()
             );
             assert!(
-                control.top() >= strip.bottom() && control.bottom() <= filter.top(),
-                "{selector} sits between the title and the filter"
+                control.top() >= filter.bottom() && control.bottom() <= section.bottom(),
+                "{selector} sits in the section header under the filter"
             );
         }
         // The glyphs, not their 20px boxes: the `+` was text and the bulk
