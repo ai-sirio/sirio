@@ -135,7 +135,7 @@ lines, against the empty-when-none rule. The CLI does not resend `running` while
 running, for example while a background agent works, so a prompt typed or dequeued then clears the
 state only if it is `idle`; `running` and `requires_action` stand. A `running` that arrives with no
 prompt streaming, after `idle` or no state, starts a turn the CLI began on its own (a Monitor task's
-event, a background shell's end); the claim and the Trace card read it as `idle` until the CLI says
+event, a shell's natural end); the claim and the Trace card read it as `idle` until the CLI says
 anything else, a prompt is sent or the state clears, because the stop policy has no debounce and
 each such turn would be a stop and a desktop notification (`requires_action` still overrides, and
 an open card makes it read as `requires_action`; `sessionState` stays the raw state). The state
@@ -154,6 +154,96 @@ state line or `permission_timeout` (#761); Stop pressed during `requires_action`
 with a pending card can do the same; and closing a chat tab asks for confirmation only while
 `is_streaming()`, so it can close while the CLI's background agent runs (#762). The watchdog (#699:
 `turn_in_flight`, `open_permissions`, `idle_for`) never reads the CLI state.
+
+**Background tasks** (shells, Monitors and background agents the CLI runs) live in a registry on the
+`Chat` (`sirio_ui::chat::background`), not as trace lanes. The CLI says `idle` as soon as a shell
+starts, so a span that outlived its turn would break the trace's own rules; only agents survive a
+turn's end, and `end_main_thread_work`, `Turn::close`, a span's child sweep, the 20-turn eviction
+and the waterfall's axis all assume a span ends with its turn. The producer still traces a
+background `Bash` or `Monitor` as its launch only (above), and a shell draws no bar of its own. An
+entry is created by a `background_tasks_changed` row or by a `task_started` with `is_backgrounded:
+true`. Its `live` flag means the CLI's last rows list it (a new entry starts live), and it has an
+outcome once a terminal line arrives. A task has ended when it is not live or has an outcome, and is
+running otherwise (its state word is `running`, or `stopping` after a Stop); `live` can stay true
+after an outcome, since the rows may come after the terminal line. The outcome is the first terminal
+`task_updated` or `task_notification` status and a later one never changes it (a stop says `killed`,
+then `stopped`); rows and terminal lines may come in either order, and a task the rows drop with no
+terminal line reads `ended`. An ended entry stays until the next prompt is submitted, then it is
+dropped. The registry is cleared, with its stopping marks, painted, in-flight, ended-window and
+trailer sets and refusal flag, and its poll loop dropped, on a transport error, a timeout, a failed
+prompt send, the event source closing and a new connection (`start_connection`); a late task event
+or read answer is dropped unless the chat still has a client and the answer's connection generation
+is the current one. The composer chip's number is the CLI's own count (`BackgroundTasksUpdate`), not
+the registry's, and the clear does not touch it. `surface.chat.read` reports the registry as the
+`backgroundTasks` JSON string (`taskId`, `toolUseId`, `kind`, `description`, `live`, `outcome`,
+`stopping`, `tail`, `tailNote`), whether the CLI refused to read output as `taskOutputRetired`, and
+whether the popover is drawn as `composerRow.backgroundPopover`.
+
+**A shell's tail** is read only for a task whose tail a frame painted since the last tick. A draw
+calls `Chat::paint_tail`: the Trace card's Background row (its last line) and the Trace tab's strip
+(its last 6 lines). In a debug build `surface.chat.paintTail` marks a tail painted and
+`surface.chat.stopTask` presses Stop. A poll loop ticks once a second while the registry holds a
+candidate, a running `local_bash` task (a Monitor is one) or one that ended less than 5 s ago and
+whose output has no trailer yet. An agent is never read. The exception to the painted rule is a read
+still pending at a tick: its task keeps its mark. While the caller waits (up to 5 s) no read of that
+task is sent; after the caller's timeout a tick that holds its mark asks again, and the worker
+answers `busy` with no write while it still holds the read. Once the CLI has answered that read or
+the worker has expired it, the next ask is a real read even if nothing paints any more. Each answer
+but `busy` updates the entry, notifies the chat and refreshes the Trace tab, so the next frame
+paints it and registers the paint again; this costs about one repaint of the chat a second while a
+tail is on screen. `tail_lines` cleans the CLI's last 8 KiB: it strips ANSI sequences, keeps what
+the last non-empty piece between `\r`s says (`abc\rX` reads `X`, where a terminal would show `Xbc`),
+drops the leading U+FFFDs of its first line and, when the answer is truncated and another line
+follows, the first line, and keeps 100 lines. A non-empty tail is never replaced by an empty one.
+After the end the CLI appends `[killed]` or `[exited with code N]` a moment later, so an ended shell
+is still read on painted ticks until its tail ends with a trailer or 5 s pass; after that it is
+never read again. Any other error, or the caller's 5 s timeout, shows as that task's note, `output
+unavailable: <first line>`; after a timeout the read stays pending in the worker until the CLI
+answers it (the answer is lost, the caller has gone) or it expires. A refusal
+(`sirio_claude::is_refusal`) retires the tails for the session, with no error shown (ADR 0001); they
+come back with the next connection. At the 2.1.257 floor the CLI refuses `get_task_output` this way,
+so a chat on the floor lists its tasks and can stop them but shows no tail. `stop_task` works at the
+floor.
+
+**The prompt watchdog** does not count the answer to a pending `get_task_output` as activity
+(`touch_activity`), because a 1 Hz poll would otherwise hold off `prompt_timeout` for a turn that
+hung on the model; every other line still counts, one that does not parse included, and #699's
+watchdog is otherwise unchanged. The worker keeps at most one pending read per task: a second
+request answers `Err("busy")` at once without a write, and the poll treats that as a tick that
+repaints nothing. A read the CLI never answers stays pending past the caller's timeout, which costs
+one stdin write per task and not one a second, and the worker expires it after 30 s.
+
+**Stop** is fire and forget. Pressing it sets the entry's `stopping` mark and sends one `stop_task`;
+the button then reads `Stopping…` and takes no click, so one press is one request. The CLI answers
+`success` either way, and the mark clears when its own `task_*` lines end the task or the rows drop
+it. A Stop the CLI ignores reads `Stopping…` until the task ends. Sirio does not declare
+`perTaskStopAffordance`, so the CLI still kills background agents when a turn is interrupted; on
+2.1.326 an interrupt killed no background shell, flag or no flag. The composer's task chip is a
+button that opens a popover listing every running task with its description, a kind word (`shell`,
+which a Monitor reads too, `agent`, the CLI's own `task_type` for any other, or none) and its Stop,
+and no tail. It closes when no task is running, and Escape closes it before it would cancel the
+turn. The Narrow and Minimal composer rows keep the count as a disabled row of ⋯ and have no
+popover. On the Trace card, an agent's lane carries a Stop while its task is running; every task
+whose Agent call the card does not draw as a lane (a shell, a Monitor, an agent of an earlier turn)
+is a row of the card's Background group, so each task has one place there. The Trace tab lists every
+task in a strip under the tree, drawn once the tab has a turn, with its state, a Stop while the task
+is running and, for a shell with no refusal, its tail.
+
+**A Monitor's own turns** follow A2's unprompted rule above. The CLI starts a turn of its own for
+each Monitor line and for a shell's natural end; a shell or Monitor stopped with `stop_task` goes
+`idle` with no turn, and a stopped agent does start one, with no `running` line before it in the
+probe, so A2's rule does not see it. Any `result` is a `TurnEnded`, whether or not Sirio has a
+prompt in flight: it adds a turn footer, stops streaming, sends the next queued prompt and disarms
+the watchdog. So each CLI-started turn leaves a footer, and a prompt sent while one runs can be
+shown finished, and the next queued prompt sent, at that turn's `result`. That is existing
+behaviour, not changed here. A Monitor is a `local_bash` task, so it has the shell's entry, tail and
+Stop. How a Monitor expires is not probed; an expiry with no terminal line still ends its entry,
+because the rows are the liveness signal.
+
+**A background shell outlives a chat's close and a reconnect (#765, a known limit).** It runs in its
+own session and process group, so killing the CLI's group does not reach it, and the registry's
+clear does not end it: after a reconnect Sirio neither shows it nor stops it.
+
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
 trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is
@@ -161,8 +251,10 @@ never saved and never restored, so `surface.layout.read` lists it as `trace` onl
 `surface.trace.read <surfaceId>` (`sirioctl surface trace read`, every build) reports `open`, and for
 a chat with a tab the shown `turn`, `turns`, `follow`, `dropped` (the spans the cap left out, 0 with
 none, which its header also says) and the visible `spans`, each with `id`, `parent`, `kind`, `state`,
-`ended`, `depth` and `folded`. `docs/superpowers/specs/2026-10-20-chat-session-panel-design.md`
-has the panel's design and `docs/superpowers/specs/2026-10-21-chat-trace-waterfall-design.md`
+`ended`, `depth` and `folded`. It also reports `background`, the strip's rows as a JSON string
+(`taskId`, `kind`, `description`, `state`, `stop`, `tail`, `tailNote`), whenever the tab is open.
+`docs/superpowers/specs/2026-10-20-chat-session-panel-design.md` has the panel's design and
+`docs/superpowers/specs/2026-10-21-chat-trace-waterfall-design.md`
 the folded cards, the Trace card and the tab; `claude_streams_the_lines_the_trace_reads`
 (`sirio_agents/tests/acp_conformance.rs`, opt-in because it spends a real turn, off the release
 gate) notices the day the CLI stops streaming the lines the trace reads.
