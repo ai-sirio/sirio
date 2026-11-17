@@ -188,7 +188,8 @@ lock and the `ci-linux.sh` stage that tests `vendor/gpui_linux` keep their shape
    (`sirio/src/shell_chrome.rs:29-36`). **Recommended: accept the upstream material** (it
    repairs the blur on the current macOS) as the one intended visible change of this step,
    checked by hand on a Mac; the alternative is vendoring gpui-pre-macos to restore
-   `Selection`. Pending Enzo's (or t2s's) confirmation.
+   `Selection`. **Decided 2026-11-17 (t2s, recommended option): accept upstream's material.**
+   The PR names it as the one visible change, for Enzo to check on a Mac.
 
 ### 5.4 The HTTP client gpui used to get for free
 
@@ -290,7 +291,8 @@ XDND transcript, under `artifacts/engine-swap/`, re-runnable from the commands a
   (§5.2); `perf-native` moves to gpui-pre-scheduler (§5.2).
 - The child-environment contract keeps the user's `WAYLAND_DISPLAY`, and gpui-pre's new
   link-opening order is accepted (§5.3.2).
-- **Open:** macOS `Blurred` material — recommended to accept upstream's (§5.3.4).
+- macOS `Blurred` takes upstream's material (§5.3.4), decided by t2s under the
+  recommended-option rule; the PR lists it for Enzo's Mac check.
 - Pixel gate at `capture-diff.py --tolerance 1`; engine-caused drift goes to Enzo at the end,
   never `--allow`ed (§6.2).
 - A new repeatable child-environment check in the sirioctl E2E's fake mount; the real
