@@ -194,6 +194,11 @@ pub struct ProposalTab {
     proposal: String,
     refusal: Option<String>,
     dirty_in_editor: bool,
+    /// The file on disk is no longer what the diff compares against (it changed after the
+    /// proposal opened). Stays until the proposal ends; the diff is not recomputed (spec 10.13).
+    disk_changed: bool,
+    /// The warning the bar drew on its last frame, for the debug state (set while drawing).
+    drawn_warning: std::cell::Cell<Option<&'static str>>,
     scratch: PathBuf,
     mode: Mode,
     /// Created on the first Edit (it needs a window); the source of truth for the text after.
@@ -233,6 +238,8 @@ impl ProposalTab {
             proposal: String::new(),
             refusal: None,
             dirty_in_editor: false,
+            disk_changed: false,
+            drawn_warning: std::cell::Cell::new(None),
             scratch: PathBuf::new(),
             mode: Mode::Diff,
             code: None,
@@ -274,6 +281,7 @@ impl ProposalTab {
         self.proposal = init.proposal;
         self.refusal = init.refusal;
         self.dirty_in_editor = init.dirty_in_editor;
+        self.disk_changed = false;
         self.scratch = init.scratch;
         self.recompute(cx);
     }
@@ -344,6 +352,36 @@ impl ProposalTab {
     /// Whether the bar warns that the file has unsaved edits in an editor tab.
     pub fn is_dirty_in_editor(&self) -> bool {
         self.dirty_in_editor
+    }
+
+    /// Whether the bar warns that the file changed on disk after the proposal opened.
+    pub fn is_disk_changed(&self) -> bool {
+        self.disk_changed
+    }
+
+    /// The warning the bar drew on its last frame (its words), if any.
+    pub fn drawn_warning(&self) -> Option<&'static str> {
+        self.drawn_warning.get()
+    }
+
+    /// Whether a look at the disk could still change the answer: there is a disk side to
+    /// compare (the proposal is not refused) and the warning is not up already.
+    pub fn wants_disk_check(&self) -> bool {
+        self.refusal.is_none() && !self.disk_changed
+    }
+
+    /// `now` is the file on disk as it reads now (`None`: it does not exist). When it is not
+    /// what the proposal opened against, the bar warns and keeps warning until the proposal
+    /// ends. The diff stays as it was: whether Claude writes the text verbatim or applies its
+    /// edit again is unknown, so no recomputed diff would be truthful in both cases.
+    pub fn note_disk(&mut self, now: Option<&[u8]>, cx: &mut Context<Self>) {
+        if self.disk_changed || self.refusal.is_some() {
+            return;
+        }
+        if self.original.as_deref().map(|bytes| bytes.as_slice()) != now {
+            self.disk_changed = true;
+            cx.notify();
+        }
     }
 
     /// The text of a proposal too large to draw (also the one an over-cap original gets).
@@ -764,6 +802,16 @@ impl ProposalTab {
             }
         };
         let in_edit = self.mode == Mode::Edit;
+        // The unsaved-edits warning wins where both apply: it is the one that decides whether
+        // Accept loses the user's work.
+        let warning = if self.dirty_in_editor {
+            Some(DIRTY_WARNING)
+        } else if self.disk_changed {
+            Some(DISK_CHANGED_WARNING)
+        } else {
+            None
+        };
+        self.drawn_warning.set(warning);
         div()
             .id("proposal-bar")
             .debug_selector(|| "proposal-bar".into())
@@ -799,14 +847,14 @@ impl ProposalTab {
                     .child(bar_button("proposal-reject", self.reject_label(), false, true, press(ProposalAction::Reject)))
                     .child(bar_button("proposal-accept", "Accept", true, self.accept_live(), press(ProposalAction::Accept))),
             )
-            .when(self.dirty_in_editor, |bar| {
+            .when_some(warning, |bar, warning| {
                 bar.child(
                     div()
                         .id("proposal-dirty")
                         .debug_selector(|| "proposal-dirty".into())
                         .text_size(theme.typography.scaled(12.0))
                         .text_color(theme.ely.warning)
-                        .child(selectable_text(DIRTY_WARNING).id("proposal-dirty-text")),
+                        .child(selectable_text(warning).id("proposal-dirty-text")),
                 )
             })
             .when_some(self.notice.clone(), |bar, notice| {
@@ -821,6 +869,10 @@ impl ProposalTab {
 }
 
 const DIRTY_WARNING: &str = "Unsaved edits in this file: accepting lets Claude overwrite it on disk";
+/// The file changed after the proposal opened (saved from its editor tab, or written by
+/// something else); the diff still shows the file as it was.
+pub const DISK_CHANGED_WARNING: &str =
+    "The file changed on disk since Claude proposed this change: the diff shows it as it was";
 
 impl Render for ProposalTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

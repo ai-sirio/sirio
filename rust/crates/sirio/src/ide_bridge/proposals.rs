@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{AnyElement, App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context, Entity, EntityId, FocusHandle, Subscription, Window};
 use serde_json::{Value, json};
-use sirio_ide::{BridgeEvent, ConnId, DiffAnswer, DiffId, Gone, ReadOutcome, Refusal};
+use sirio_ide::{BridgeEvent, ConnId, DiffAnswer, DiffId, Gone, ReadOutcome, Refusal, read_regular_file};
 use sirio_ui::modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, render_modal};
 use sirio_ui::sidebar::SidebarEvent;
 use sirio_ui::proposal_tab::{CommentSide, ProposalAction, ProposalEvent, ProposalInit, ProposalTab};
@@ -435,6 +435,34 @@ impl SirioWorkspace {
         }
     }
 
+    /// A file view of `path` saved, or reported that the disk moved (`FileViewEvent::Saved`,
+    /// `GitDiffStale`): every open proposal of that file looks at the disk once more, off the UI
+    /// thread, and warns for good when it is no longer what the proposal opened against
+    /// (ruling 87). `GitDiffStale` also fires on focus with nothing changed, which is why the
+    /// bytes are compared and the signal alone decides nothing. No new watcher: these are the
+    /// signals the editor tab already sends.
+    pub(crate) fn ide_proposal_disk_signal(&mut self, path: &Path, cx: &mut Context<Self>) {
+        for record in &self.ide_proposals.records {
+            if !paths_name_the_same_document(&record.path, path) || !record.view.read(cx).wants_disk_check() {
+                continue;
+            }
+            let (view, read_path) = (record.view.downgrade(), record.path.clone());
+            cx.spawn(async move |_, cx| {
+                let now = cx
+                    .background_spawn(async move { read_regular_file(&read_path, sirio_ui::editor::MAX_FILE_BYTES) })
+                    .await;
+                let now = match &now {
+                    ReadOutcome::Missing => None,
+                    ReadOutcome::Contents(bytes) => Some(bytes.as_slice()),
+                    // Unreadable or too large now: nothing to compare, nothing claimed.
+                    ReadOutcome::Refused(_) => return,
+                };
+                let _ = view.update(cx, |tab, cx| tab.note_disk(now, cx));
+            })
+            .detach();
+        }
+    }
+
     /// A proposal's bar was pressed: send the decision, then close the tab, whatever the send
     /// returned (`Ok` is queued, not delivered; `Gone` is a toast).
     fn ide_proposal_decided(&mut self, view: &Entity<ProposalTab>, event: &ProposalEvent, cx: &mut Context<Self>) {
@@ -798,6 +826,8 @@ impl SirioWorkspace {
                     "on_screen": self.proposal_tab_id(record.view.entity_id()).is_some(),
                     "ready": tab.accept_live(),
                     "dirty": tab.is_dirty_in_editor(),
+                    "disk_changed": tab.is_disk_changed(),
+                    "warning": tab.drawn_warning(),
                     "refusal": tab.is_refused(),
                     "editing": tab.is_editing(),
                     "comments": tab.comment_count(),

@@ -9535,9 +9535,11 @@ impl SirioWorkspace {
                     }
                     FileViewEvent::GitDiffStale(path) => {
                         workspace.refresh_git_diff(path, &view, cx);
+                        workspace.ide_proposal_disk_signal(path, cx);
                     }
                     FileViewEvent::Saved(path) => {
                         workspace.refresh_symbols_now(path, cx);
+                        workspace.ide_proposal_disk_signal(path, cx);
                         // A title-only save of a prompt notifies nothing else.
                         workspace.sync_prompt_tab_title(&view, cx);
                     }

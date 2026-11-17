@@ -196,6 +196,13 @@ set -eEuo pipefail
 #                    with Claude's text
 #   dirty_warning    the file is open in an editor tab; once its proposal is open, typing into it
 #                    (`surface.editor.type`) makes the state's dirty true and the bar warn
+#   disk_changed_warning
+#                    (ruling 87) a file open in an editor tab with its proposal open: focusing the tab
+#                    changes nothing, typing sets the unsaved warning, and the save replaces it with
+#                    "The file changed on disk since Claude proposed this change: the diff shows it as
+#                    it was" (drawn on the bar, read back from the state) for good; unsaved edits again
+#                    win, then the disk warning is back; the counts stay and Accept answers Claude's
+#                    text. A second proposal warns when something else writes the file
 #   captures         the tab in Unified and Split (`surface.changes.view`)
 #   no_decision_without_user
 #                    with an openDiff pending, switching the bridge off, the client dropping its
@@ -3159,6 +3166,63 @@ case_dirty_warning() {
   end_app_client
 }
 
+# The file changes on disk after its proposal opened (ruling 87): the bar warns for good and the diff,
+# the comments and Accept stay as they are; where unsaved edits also apply, that warning wins.
+case_disk_changed_warning() {
+  local disk_warning='The file changed on disk since Claude proposed this change: the diff shows it as it was'
+  local dirty_warning='Unsaved edits in this file: accepting lets Claude overwrite it on disk'
+  proposal_client
+  printf 'one\ntwo\n' >"$WT/disk.txt"
+  ctl surface editor open --path "$WT/disk.txt" >/dev/null
+  local file_pos
+  file_pos="$(expect_tab 'disk.txt')"
+  open_diff disk-1 "$WT/disk.txt" 'one\nTWO\n'
+  expect_proposal disk-1 ready True
+  expect_proposal disk-1 disk_changed False
+  # Focusing the file's tab asks for a fresh diff with nothing changed on disk: no warning.
+  ctl surface tabs select "$file_pos" >/dev/null
+  sleep 1.5
+  expect_proposal disk-1 disk_changed False
+  # The user types in the editor tab and saves.
+  sockcall surface.editor.type text=typed >/dev/null
+  expect_proposal disk-1 dirty True
+  ctl surface tabs select "$(tab_pos '✻ disk.txt')" >/dev/null
+  expect_proposal disk-1 warning "$dirty_warning"
+  ctl surface tabs select "$file_pos" >/dev/null
+  ctl surface editor save >/dev/null
+  expect_proposal disk-1 dirty False
+  expect_proposal disk-1 disk_changed True
+  ctl surface tabs select "$(tab_pos '✻ disk.txt')" >/dev/null
+  expect_proposal disk-1 warning "$disk_warning"
+  capture ide-proposal-disk-changed
+  # Unsaved edits again: that warning wins; once saved the disk one is back.
+  ctl surface tabs select "$file_pos" >/dev/null
+  sockcall surface.editor.type text=more >/dev/null
+  ctl surface tabs select "$(tab_pos '✻ disk.txt')" >/dev/null
+  expect_proposal disk-1 warning "$dirty_warning"
+  ctl surface tabs select "$file_pos" >/dev/null
+  ctl surface editor save >/dev/null
+  ctl surface tabs select "$(tab_pos '✻ disk.txt')" >/dev/null
+  expect_proposal disk-1 warning "$disk_warning"
+  # The diff, its counts and Accept are as they were: Accept answers Claude's text.
+  expect_proposal disk-1 ready True
+  expect_proposal disk-1 counts "[1, 1]"
+  act disk-1 accept
+  assert_response "$(req_id disk-1)" 'd["texts"] == ["FILE_SAVED", "one\nTWO\n"]' "Accept still answers Claude's text"
+  expect_no_proposals
+  # A write from outside (a terminal, a git command): the editor tab's own monitor reports it.
+  open_diff disk-2 "$WT/disk.txt" 'three\n'
+  expect_proposal disk-2 ready True
+  expect_proposal disk-2 disk_changed False
+  printf 'written elsewhere\n' >"$WT/disk.txt"
+  expect_proposal disk-2 disk_changed True
+  act disk-2 reject
+  assert_response "$(req_id disk-2)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  expect_no_proposals
+  close_tabs_of_kind file
+  end_app_client
+}
+
 case_proposal_captures() {
   proposal_client
   printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cap.txt"
@@ -3325,6 +3389,7 @@ run_proposal_cases() {
   case_run fifo_path case_fifo_path
   case_run too_large case_too_large
   case_run dirty_warning case_dirty_warning
+  case_run disk_changed_warning case_disk_changed_warning
   case_run captures case_proposal_captures
   case_run no_decision_without_user case_no_decision_without_user
   case_run worktree_close_guarded case_worktree_close_guarded
