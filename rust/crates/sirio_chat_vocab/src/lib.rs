@@ -341,6 +341,41 @@ pub enum CloseReason {
     Expired,
 }
 
+/// The Claude Code CLI's own account of what its session is doing, from its
+/// `session_state_changed` lines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliState {
+    /// Nothing is running and nothing waits for the user.
+    Idle,
+    /// A turn is running.
+    Running,
+    /// The session waits for the user (a permission or a question).
+    RequiresAction,
+}
+
+impl CliState {
+    /// Reads a wire word; `None` for any other.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "idle" => Some(Self::Idle),
+            "running" => Some(Self::Running),
+            "requires_action" => Some(Self::RequiresAction),
+            _ => None,
+        }
+    }
+
+    /// The wire word.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::RequiresAction => "requires_action",
+        }
+    }
+}
+
 /// Typed events emitted by one ACP session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatEvent {
@@ -466,6 +501,8 @@ pub enum ChatEvent {
         server: String,
         elicitation_id: String,
     },
+    /// The CLI reported its own session state.
+    CliState { state: CliState },
     /// The agent published or advanced its execution plan.
     PlanUpdate {
         /// Current plan rows; the client replaces any earlier plan.

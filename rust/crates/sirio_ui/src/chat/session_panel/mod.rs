@@ -383,7 +383,11 @@ impl Chat {
             self.client.as_ref().is_some_and(ChatClient::supports_connectors),
             &panel.flipped,
         ));
-        sections.extend(trace::section(&self.trace, std::time::Instant::now()));
+        sections.extend(trace::section(
+            &self.trace,
+            self.trace_headline(),
+            std::time::Instant::now(),
+        ));
         sections.extend(change_request::section(&panel.change_request));
         sections
     }

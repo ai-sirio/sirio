@@ -58,6 +58,24 @@ pub struct TraceStore {
     first: usize,
 }
 
+/// What the Trace card's title and pill read: the CLI's own state over the
+/// latest turn's, as `Chat::claim` does. `running` is Live and
+/// `requires_action` is Waiting, whatever the turn says (the CLI works past
+/// the turn's end, or waits on something the turn does not show), except that
+/// a turn that is Waiting (an open card) outranks `running`; `idle`, like
+/// no state, hands the decision back to the turn, because it can arrive
+/// before the turn's end or from a turn already over while a queued one runs.
+pub fn headline_state(turn: TurnState, cli: Option<sirio_chat::CliState>) -> TurnState {
+    match cli {
+        None | Some(sirio_chat::CliState::Idle) => turn,
+        Some(sirio_chat::CliState::Running) => match turn {
+            TurnState::Waiting => TurnState::Waiting,
+            _ => TurnState::Live,
+        },
+        Some(sirio_chat::CliState::RequiresAction) => TurnState::Waiting,
+    }
+}
+
 impl Default for TraceStore {
     fn default() -> Self {
         Self {

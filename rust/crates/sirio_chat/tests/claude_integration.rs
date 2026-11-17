@@ -9,8 +9,8 @@ use std::time::Duration;
 use futures::future::Either;
 use sirio_chat::ThinkingDisplay;
 use sirio_chat::{
-    AvailableCommandInfo, ChatEvent, ClaudeClient, ClaudeLaunch, CloseReason, ElicitationAction,
-    ElicitationPrompt, RequestKind, SessionNotice, SpanKind, TraceEvent,
+    AvailableCommandInfo, ChatEvent, ClaudeClient, ClaudeLaunch, CliState, CloseReason,
+    ElicitationAction, ElicitationPrompt, RequestKind, SessionNotice, SpanKind, TraceEvent,
 };
 use sirio_claude::FastMode;
 
@@ -1654,4 +1654,70 @@ fn an_unanswered_elicitation_expires_as_cancel_and_holds_off_the_watchdog() {
             serde_json::json!({"action": "cancel"})
         )]
     );
+}
+
+fn gated_session_state_launch(gate: &std::path::Path) -> ClaudeLaunch {
+    ClaudeLaunch::fixture(
+        PathBuf::from("python3"),
+        vec![
+            FIXTURE.into(),
+            "session_state".into(),
+            format!("--fixture-gate={}", gate.display()),
+        ],
+    )
+}
+
+// Failure list: see `message.rs` (the variable, serde, another shape) and
+// `events.rs` (an unknown state). This one is the end to end: the fixture
+// sends states only when the launch sets the variable, and the idle that
+// follows the last result must not be lost behind the first `TurnEnded`.
+#[test]
+fn the_cli_session_state_reaches_the_client_across_a_background_agent() {
+    let dir = std::env::temp_dir().join(format!("sirio-state-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let gate = dir.join("gate");
+    let _ = std::fs::remove_file(&gate);
+    let _ = std::fs::remove_file(dir.join("gate.2"));
+    let (client, events) = ClaudeClient::launch(gated_session_state_launch(&gate), dir.clone())
+        .expect("fixture claude should complete its handshake");
+    client.prompt("background").expect("prompt is accepted");
+
+    let mut states = Vec::new();
+    loop {
+        match next_event(&events) {
+            ChatEvent::CliState { state } => states.push(state),
+            ChatEvent::TurnEnded { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(states, [CliState::Running], "at the main result");
+
+    std::fs::write(&gate, "").expect("open the first gate");
+    std::fs::write(dir.join("gate.2"), "").expect("open the second gate");
+    let mut seen_tasks_drained = false;
+    let mut second_turn_ended = false;
+    loop {
+        match next_event(&events) {
+            ChatEvent::OtherSessionUpdate { kind } if kind == "BackgroundTasksUpdate(0)" => {
+                seen_tasks_drained = true;
+            }
+            ChatEvent::TurnEnded { .. } => second_turn_ended = true,
+            ChatEvent::CliState { state } => {
+                states.push(state);
+                if state == CliState::Idle {
+                    assert!(seen_tasks_drained, "idle came before the tasks drained");
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(states, [CliState::Running, CliState::Idle]);
+    while !second_turn_ended {
+        if matches!(next_event(&events), ChatEvent::TurnEnded { .. }) {
+            second_turn_ended = true;
+        }
+    }
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
 }

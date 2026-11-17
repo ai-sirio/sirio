@@ -1,5 +1,5 @@
-//! Helpers for the live Claude Code elicitation test in `acp_conformance.rs`: find the real
-//! binary, give it a private HOME and a fake model API, and drive it over stream-json.
+//! Helpers for the live Claude Code tests in `acp_conformance.rs` (MCP elicitation and session
+//! state): find the real binary, give it a private HOME and a fake model API, and drive it over stream-json.
 //!
 //! Test crates cannot share code, so `Resolve::Mise`, `refuse_wrapper`, `FAKE_KEY` and the
 //! config written by `Session::start` are a minimal copy of
@@ -20,6 +20,7 @@ const FAKE_KEY: &str = "sk-ant-api03-fake-key-for-local-live-test-0000000000";
 
 const FAKE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_elicit_api.py");
 const ELICIT_MCP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/elicit_mcp.py");
+const STATE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_state_api.py");
 
 /// The real binary of the newest installed mise `claude`, never the `latest` link or the
 /// wrapper in `~/.local/bin` (running that under a private HOME reinstalls claude there).
@@ -247,6 +248,16 @@ impl Session {
     /// Launches `claude` for a new chat session under `root` (a private HOME and work
     /// directory) with the eliciting MCP server and the fake model API.
     pub fn start(claude: &Path, python: &Path, root: &Path) -> Self {
+        Self::launch(claude, python, root, FAKE_API, true)
+    }
+
+    /// Launches `claude` for a new chat session under `root` against the fake API of the
+    /// session-state test (`fake_state_api.py`), with no MCP server.
+    pub fn start_state(claude: &Path, python: &Path, root: &Path) -> Self {
+        Self::launch(claude, python, root, STATE_API, false)
+    }
+
+    fn launch(claude: &Path, python: &Path, root: &Path, api_script: &str, with_mcp: bool) -> Self {
         let _ = std::fs::remove_dir_all(root);
         let home = root.join("home");
         let work = root.join("work");
@@ -259,7 +270,7 @@ impl Session {
         let api_log = std::fs::File::create(root.join("api.log")).unwrap();
         let mut api_command = Command::new(python);
         api_command
-            .args(["-I", FAKE_API, &port.to_string()])
+            .args(["-I", api_script, &port.to_string()])
             .env_clear()
             .env("PATH", ISOLATED_PATH)
             .stdin(Stdio::null())
@@ -293,10 +304,10 @@ impl Session {
         let session_id = format!("00000000-0000-4000-8000-{:012x}", u64::from(port));
         let line = sirio_claude::LaunchLine::chat(sirio_claude::ChatSession::New(&session_id));
         let mut command = Command::new(claude);
-        command
-            .args(&line.args)
-            .args(["--mcp-config", &mcp.to_string(), "--strict-mcp-config"])
-            .current_dir(&work);
+        command.args(&line.args).current_dir(&work);
+        if with_mcp {
+            command.args(["--mcp-config", &mcp.to_string(), "--strict-mcp-config"]);
+        }
         isolate(&mut command, &home, root);
         command
             .env("ANTHROPIC_API_KEY", FAKE_KEY)
@@ -346,4 +357,28 @@ impl Session {
             }
         }
     }
+
+    /// Like `next`, but says why there is no line: the deadline passed (`Timeout`) or the
+    /// CLI's stdout closed (`Closed`).
+    pub fn poll(&mut self, deadline: Instant) -> Polled {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(remaining) {
+                Ok(line) => {
+                    if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                        return Polled::Line(value);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => return Polled::Timeout,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Polled::Closed,
+            }
+        }
+    }
+}
+
+/// What `Session::poll` found.
+pub enum Polled {
+    Line(Value),
+    Timeout,
+    Closed,
 }

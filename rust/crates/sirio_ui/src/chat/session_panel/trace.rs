@@ -11,15 +11,17 @@
 //! - **Unfolded**, the body carries a canvas that asks for the next frame
 //!   from its own prepaint (`trace_frame::frame_driver`, the loop the Trace tab
 //!   shares). A chat that is not painted never prepaints, so a hidden chat asks
-//!   for nothing, and a turn that has ended arms nothing.
+//!   for nothing, and a turn whose headline is neither Live nor Waiting arms
+//!   nothing.
 //!   One delayed frame is pending at a time, which keeps it at 30 frames a
 //!   second or fewer, as gpui's own `Animation::with_max_fps` does. While
 //!   the turn only waits, with no span running (`Turn::is_moving`), the delay
 //!   is a second and the marks hold still: the clock and the "now" line are
 //!   all that move.
 //! - **Folded**, only the title's seconds move: a timer ticks once a second
-//!   and tells the chat while the turn runs, the column is open and a frame
-//!   painted it since the last tick. It ends with the turn.
+//!   and tells the chat while the headline is Live or Waiting (the CLI's state
+//!   over the turn's), the column is open and a frame painted it since the
+//!   last tick.
 //!
 //! Everything that moves is a function of the turn's own clock, painted by
 //! that one loop: the pulses, the band of the shimmering "now" text (Ely's
@@ -114,13 +116,19 @@ fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool)
     ]
 }
 
-/// The Trace card's snapshot: the latest turn's line, its numbers, one row
+/// The Trace card's snapshot, headed by `headline` (the CLI's state over the
+/// latest turn's, see `headline_state`): the latest turn's line, its numbers, one row
 /// per lane with a row after it for each permission that lane waits on, and
 /// the row that opens the tab. `None` for a chat that has no turn.
-pub(super) fn section(store: &TraceStore, now: Instant) -> Option<Section> {
+pub(super) fn section(
+    store: &TraceStore,
+    headline: Option<TurnState>,
+    now: Instant,
+) -> Option<Section> {
     let turn = store.latest()?;
+    let state = headline.unwrap_or_else(|| turn.state());
     let mut rows = vec![Row {
-        tag: turn_word(turn.state()).to_string(),
+        tag: turn_word(state).to_string(),
         ..Row::new("trace/turn", turn.title().to_string(), "")
     }];
     let stats = turn.stats(now);
@@ -164,7 +172,7 @@ pub(super) fn section(store: &TraceStore, now: Instant) -> Option<Section> {
     Some(Section {
         key: "trace",
         title: "Trace",
-        summary: turn.summary(now),
+        summary: turn.summary_for(state, now),
         note: String::new(),
         bar: Vec::new(),
         rows,
@@ -214,7 +222,8 @@ impl Chat {
         Err(format!("no row with an action has key {key}"))
     }
 
-    /// A turn started: its folded title moves once a second until it ends.
+    /// A turn started, or the CLI began working: the folded title moves once a
+    /// second while its headline is Live or Waiting.
     /// Called from the event, not from a paint, so a card nobody has drawn
     /// yet is ticking by the time it is. Starting again replaces the timer
     /// of the turn before.
@@ -223,7 +232,12 @@ impl Chat {
             loop {
                 cx.background_executor().timer(TICK).await;
                 let alive = this.update(cx, |chat, cx| {
-                    if !chat.trace.is_running() {
+                    // The CLI's own state keeps the title moving past the
+                    // turn's end (a background agent still working).
+                    if !matches!(
+                        chat.trace_headline(),
+                        Some(TurnState::Live | TurnState::Waiting)
+                    ) {
                         return false;
                     }
                     let panel = &chat.session_panel;
@@ -325,7 +339,7 @@ fn title_dot_alpha(turn: &Turn, folded: bool, now: Instant, reduced_motion: bool
 }
 
 /// The summary beside the card's title: `Live · 34s` in the running colour
-/// with a dot, plain and muted once the turn is over. The dot pulses only
+/// with a dot while the headline is Live or Waiting, plain and muted otherwise. The dot pulses only
 /// while the card is open, because a folded card asks for no frames.
 pub(super) fn title_summary(
     chat: &Chat,
@@ -334,7 +348,7 @@ pub(super) fn title_summary(
     theme: &Theme,
     cx: &App,
 ) -> AnyElement {
-    let state = chat.trace.latest().map(|turn| turn.state());
+    let state = chat.trace_headline();
     let marked = matches!(state, Some(TurnState::Live | TurnState::Waiting));
     let color = match state {
         Some(TurnState::Live) => theme.ely.info,
@@ -344,7 +358,9 @@ pub(super) fn title_summary(
     let alpha = chat.trace.latest().map_or(1.0, |turn| {
         title_dot_alpha(turn, folded, Instant::now(), cx.reduce_motion())
     });
+    let word = state.map_or("none", turn_word);
     div()
+        .debug_selector(move || format!("trace-title-{word}"))
         .flex()
         .items_center()
         .gap(px(5.0))
@@ -353,6 +369,7 @@ pub(super) fn title_summary(
         .when(marked, |line| {
             line.child(
                 div()
+                    .debug_selector(|| "trace-title-dot".into())
                     .flex_none()
                     .size(px(6.0))
                     .rounded_full()
@@ -375,7 +392,7 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
     let running = chat.trace.is_running();
     let reduced = cx.reduce_motion();
     let caption = theme.typography.footnote;
-    let state = turn.state();
+    let state = chat.trace_headline().unwrap_or_else(|| turn.state());
     let elapsed = turn.elapsed(now);
     let moving = turn.is_moving();
     let beat = Beat {
@@ -405,6 +422,7 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .min_w_0()
         .child(
             div()
+                .debug_selector(move || format!("trace-pill-{}", turn_word(state)))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -574,7 +592,13 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .child(frame_driver(
             chat.session_panel.frame.trace_frame_pending.clone(),
             chat.session_panel.trace_frames.clone(),
-            Pace::of(running, moving, reduced),
+            // An ended turn the CLI still shows as Live or Waiting keeps
+            // its clock moving, once a second.
+            Pace::of(
+                matches!(state, TurnState::Live | TurnState::Waiting),
+                moving,
+                reduced,
+            ),
             cx.entity_id().as_u64(),
         ))
         .into_any_element()
@@ -822,7 +846,7 @@ mod tests {
     use super::{Beat, entry};
     use crate::chat::tests::{
         lay_out_short, offline_chat_view, open_question_with_free_text, pump_chat_until,
-        push_answers, refresh_frame, top_entry,
+        push_answers, refresh_frame, silent_state_chat, submit_silent, top_entry,
     };
     use crate::chat::{Chat, ChatEvent, Entry, LaunchSpec};
     use gpui::{TestAppContext, VisualTestContext, px, size};
@@ -883,6 +907,242 @@ mod tests {
         };
         assert_eq!(cell("cost"), "≥ $3.28");
         assert_eq!(cell("tokens"), "≥ 48.2k");
+    }
+
+    // Failure list for the card following the CLI (Task 4, ruling 10: `idle`
+    // hands the decision back to the turn, as `Chat::claim` does):
+    // - "Done" while the CLI runs its own follow-up turn (`running`);
+    // - "Live" after the CLI went idle, once the turn is over;
+    // - an elapsed time that freezes on an ended turn shown as Live;
+    // - a Failed or Interrupted turn repainted as Done by `idle`;
+    // - a Live turn read as Done by an `idle` that outran the turn's end;
+    // - a pill (the `trace/turn` row's tag) that disagrees with the title.
+    #[gpui::test]
+    async fn the_trace_headline_follows_the_cli_state(cx: &mut TestAppContext) {
+        use sirio_chat::CliState::{Idle, Running, RequiresAction};
+        let (chat, cx) = silent_state_chat(cx);
+        let base = Instant::now();
+        let cli = |chat: &Entity<Chat>, cx: &mut VisualTestContext, state| {
+            chat.update(cx, |chat, cx| {
+                chat.handle_event(sirio_chat::ChatEvent::CliState { state }, cx)
+            });
+        };
+        // The title, its elapsed time at `now`, and the pill's word.
+        let card = |chat: &Entity<Chat>, cx: &mut VisualTestContext, now: Instant| {
+            chat.read_with(cx, |chat, _| {
+                let section = super::section(&chat.trace, chat.trace_headline(), now)
+                    .expect("the chat has a turn");
+                (section.summary, section.rows[0].tag.clone())
+            })
+        };
+        let end = |outcome: TurnOutcome, at: Instant| {
+            sirio_chat::ChatEvent::Trace(TraceEvent::TurnEnded {
+                at,
+                outcome,
+                measured_ms: None,
+                cost_usd: None,
+                tokens: None,
+            })
+        };
+
+        // A turn that ended Done, with no CLI state: as today.
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(started(base), cx);
+            chat.handle_event(end(TurnOutcome::Done, secs(base, 10.0)), cx);
+        });
+        assert_eq!(card(&chat, cx, secs(base, 60.0)), ("Done · 10s".into(), "done".into()));
+
+        // With no CLI state a live turn and an interrupted one read as today.
+        chat.update(cx, |chat, cx| chat.handle_event(started(secs(base, 20.0)), cx));
+        assert_eq!(card(&chat, cx, secs(base, 25.0)), ("Live · 5s".into(), "live".into()));
+        // A turn that has not ended, and the CLI waits on something: Waiting.
+        cli(&chat, cx, RequiresAction);
+        assert_eq!(
+            card(&chat, cx, secs(base, 25.0)),
+            ("Waiting for you · 5s".into(), "waiting".into())
+        );
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(end(TurnOutcome::Interrupted, secs(base, 30.0)), cx);
+            chat.cli_state = None;
+        });
+        assert_eq!(
+            card(&chat, cx, secs(base, 60.0)),
+            ("Interrupted · 10s".into(), "interrupted".into())
+        );
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(started(base), cx);
+            chat.handle_event(end(TurnOutcome::Done, secs(base, 10.0)), cx);
+        });
+        assert_eq!(card(&chat, cx, secs(base, 60.0)), ("Done · 10s".into(), "done".into()));
+
+        // The CLI runs its own follow-up: Live, and the clock keeps going.
+        cli(&chat, cx, Running);
+        assert_eq!(card(&chat, cx, secs(base, 60.0)), ("Live · 1m 00s".into(), "live".into()));
+        assert_eq!(card(&chat, cx, secs(base, 120.0)), ("Live · 2m 00s".into(), "live".into()));
+
+        cli(&chat, cx, RequiresAction);
+        assert_eq!(
+            card(&chat, cx, secs(base, 60.0)),
+            ("Waiting for you · 1m 00s".into(), "waiting".into())
+        );
+
+        // Once the CLI is idle the finished turn is Done again.
+        cli(&chat, cx, Idle);
+        assert_eq!(card(&chat, cx, secs(base, 60.0)), ("Done · 10s".into(), "done".into()));
+
+        // A running turn with an `idle` that outran its end: the turn decides.
+        chat.update(cx, |chat, cx| chat.handle_event(started(secs(base, 100.0)), cx));
+        assert_eq!(card(&chat, cx, secs(base, 130.0)), ("Live · 30s".into(), "live".into()));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(end(TurnOutcome::Done, secs(base, 140.0)), cx)
+        });
+        assert_eq!(card(&chat, cx, secs(base, 150.0)), ("Done · 40s".into(), "done".into()));
+
+        // `idle` never repaints an interrupted or failed turn as Done.
+        for (outcome, word, tag) in [
+            (TurnOutcome::Interrupted, "Interrupted · 5s", "interrupted"),
+            (TurnOutcome::Failed { reason: "boom".into() }, "Failed · 5s", "failed"),
+        ] {
+            chat.update(cx, |chat, cx| {
+                chat.handle_event(started(secs(base, 200.0)), cx);
+                chat.handle_event(end(outcome, secs(base, 205.0)), cx);
+            });
+            cli(&chat, cx, Idle);
+            assert_eq!(card(&chat, cx, secs(base, 300.0)), (word.into(), tag.into()));
+            // A CLI follow-up still shows as Live over it.
+            cli(&chat, cx, Running);
+            assert_eq!(card(&chat, cx, secs(base, 260.0)).1, "live");
+            cli(&chat, cx, Idle);
+        }
+    }
+
+    /// A `silent_state_chat` whose latest turn ended Done and whose session
+    /// panel is open, the Trace card unfolded or not.
+    fn ended_turn_chat<'a>(
+        cx: &'a mut TestAppContext,
+        unfolded: bool,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        chat.update(cx, |chat, cx| {
+            chat.set_session_panel_open(true, cx);
+            let base = Instant::now() - Duration::from_secs(10);
+            chat.handle_event(started(base), cx);
+            chat.handle_event(ended(secs(base, 5.0), None, None, None), cx);
+        });
+        if unfolded {
+            act(&chat, cx, SessionPanelAction::Toggle("trace".into())).expect("the card unfolds");
+        }
+        for _ in 0..4 {
+            refresh_frame(cx);
+        }
+        (chat, cx)
+    }
+
+    fn cli_event(chat: &Entity<Chat>, cx: &mut VisualTestContext, state: sirio_chat::CliState) {
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(sirio_chat::ChatEvent::CliState { state }, cx)
+        });
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+    }
+
+    /// The CLI keeps running past the turn, as it does for a background agent:
+    /// its `running` came while the prompt streamed. (A `running` that comes
+    /// only after the turn, with nothing streaming, is a turn the CLI started
+    /// on its own and reads as `idle`: see `Chat::cli_unprompted`.) No prompt
+    /// is submitted, so the worker opens no trace turn of its own.
+    fn cli_runs_past_the_turn(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            let state = sirio_chat::CliState::Running;
+            chat.handle_event(sirio_chat::ChatEvent::CliState { state }, cx);
+            chat.streaming = false;
+        });
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+    }
+
+    fn drawn(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+        cx.debug_bounds(selector).is_some()
+    }
+
+    #[gpui::test]
+    async fn the_painted_pill_and_title_carry_the_headline_state(cx: &mut TestAppContext) {
+        use sirio_chat::CliState::{Idle, RequiresAction, Running};
+        let (chat, cx) = ended_turn_chat(cx, true);
+        assert!(drawn(cx, "trace-pill-done") && drawn(cx, "trace-title-done"));
+        assert!(!drawn(cx, "trace-title-dot"), "a finished title has no dot");
+
+        cli_runs_past_the_turn(&chat, cx);
+        assert!(drawn(cx, "trace-pill-live"), "the pill follows the CLI");
+        assert!(drawn(cx, "trace-title-live"));
+        assert!(drawn(cx, "trace-title-dot"), "a live title carries its dot");
+        assert!(!drawn(cx, "trace-pill-done") && !drawn(cx, "trace-title-done"));
+
+        cli_event(&chat, cx, RequiresAction);
+        assert!(drawn(cx, "trace-pill-waiting") && drawn(cx, "trace-title-waiting"));
+
+        cli_event(&chat, cx, Idle);
+        assert!(drawn(cx, "trace-pill-done") && drawn(cx, "trace-title-done"));
+        assert!(!drawn(cx, "trace-title-dot"));
+    }
+
+    #[gpui::test]
+    async fn an_open_card_keeps_ticking_while_the_cli_runs_past_the_turn(
+        cx: &mut TestAppContext,
+    ) {
+        use sirio_chat::CliState::{Idle, Running};
+        let (chat, cx) = ended_turn_chat(cx, true);
+        let finished = frames(&chat, cx);
+        for _ in 0..3 {
+            next_frame(cx);
+        }
+        assert_eq!(frames(&chat, cx), finished, "a finished turn requests nothing");
+
+        cli_runs_past_the_turn(&chat, cx);
+        assert!(
+            frames_over(&chat, cx, 250) >= 2,
+            "an ended turn the CLI still runs keeps its title moving"
+        );
+
+        cli_event(&chat, cx, Idle);
+        let finished = frames(&chat, cx);
+        for _ in 0..3 {
+            next_frame(cx);
+        }
+        assert_eq!(frames(&chat, cx), finished, "idle stops it");
+    }
+
+    #[gpui::test]
+    async fn the_folded_title_ticks_while_the_cli_runs_past_the_turn(cx: &mut TestAppContext) {
+        use sirio_chat::CliState::{Idle, Running};
+        let (chat, cx) = ended_turn_chat(cx, false);
+        let notified = Rc::new(Cell::new(0u32));
+        let seen = notified.clone();
+        cx.update(|_, cx| {
+            cx.observe(&chat, move |_, _| seen.set(seen.get() + 1)).detach();
+        });
+        let tick = |cx: &mut VisualTestContext| {
+            let before = notified.get();
+            cx.cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            notified.get() - before
+        };
+        assert_eq!(tick(cx), 0, "an ended turn alone does not tick");
+
+        cli_runs_past_the_turn(&chat, cx);
+        assert_eq!(tick(cx), 1, "the CLI's work moves the folded title");
+        refresh_frame(cx);
+        assert_eq!(tick(cx), 1);
+
+        cli_event(&chat, cx, Idle);
+        assert_eq!(tick(cx), 0, "idle stops the tick");
+        refresh_frame(cx);
+        assert_eq!(tick(cx), 0);
     }
 
     fn secs(base: Instant, seconds: f64) -> Instant {

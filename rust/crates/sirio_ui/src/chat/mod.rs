@@ -1090,6 +1090,15 @@ enum Entry {
     },
 }
 
+/// What a chat says about its own progress, for the shell's activity
+/// indicators.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChatClaim {
+    Running,
+    NeedsInput,
+    Done,
+}
+
 /// A socket-safe projection of the one chat entity that GPUI renders.
 ///
 /// The shell owns protocol encoding; this type keeps the UI independent of
@@ -1124,6 +1133,9 @@ pub struct ChatControlSnapshot {
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
+    /// The CLI's own session state: `""` before one arrives, then `running`,
+    /// `idle` or `requires_action`.
+    pub session_state: String,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -2270,6 +2282,17 @@ pub struct Chat {
     /// the composer if it fails.
     pending_send: Option<String>,
     has_completed_turn: bool,
+    /// The CLI's own last `session_state_changed`, `None` until one arrives.
+    cli_state: Option<sirio_chat::CliState>,
+    /// The CLI's `running` began a turn of its own (a Monitor event, a
+    /// background shell's end): it arrived with no prompt streaming and after
+    /// `idle` or nothing. The claim and the Trace card read it as `idle` while
+    /// it lasts, because the stop policy has no debounce and each such turn
+    /// would be a stop and a desktop notification. Ended by any other CLI
+    /// state, a prompt (`streaming`) and every clear of `cli_state`. The
+    /// clears are defensive: the flag only matters while `cli_state` is
+    /// `Running`, and the one place that sets that also recomputes it.
+    cli_unprompted: bool,
     /// How many of `ChatClient::mcp_warnings()` have already been seen.
     /// `mcp_warnings()` returns the whole running list each call (it doesn't
     /// drain), so this is the cursor that keeps the list from growing
@@ -2730,6 +2753,8 @@ impl Chat {
             connecting: false,
             pending_send: None,
             has_completed_turn: false,
+            cli_state: None,
+            cli_unprompted: false,
             mcp_warnings_shown: 0,
             available_models: Vec::new(),
             model_config_id: None,
@@ -3622,6 +3647,9 @@ impl Chat {
             }
             sirio_chat::ChatEvent::TransportError(message) => {
                 self.client.take();
+                // The CLI that said it was running is gone.
+                self.cli_state = None;
+                self.cli_unprompted = false;
                 self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
                 self.fail_trace_turn(&message, cx);
@@ -3640,6 +3668,9 @@ impl Chat {
                 // belongs in the transcript like any other error rather than
                 // leaving the composer stuck in its streaming state.
                 self.client.take();
+                // The CLI that said it was running is gone.
+                self.cli_state = None;
+                self.cli_unprompted = false;
                 self.expire_unanswered();
                 let message = format!(
                     "{operation:?} timed out after {:.1}s",
@@ -3710,6 +3741,40 @@ impl Chat {
                 self.session_connectors_init(cx);
             }
             sirio_chat::ChatEvent::OtherSessionUpdate { .. } => {}
+            // The CLI's own account of its session. Every change lands here, so
+            // the `cx.notify()` that ends this handler wakes the shell's activity
+            // observer to read `claim()` again.
+            //
+            // Lines the worker read before its client was taken (a non-fatal
+            // `TransportError`) can still arrive; with no client there is no
+            // CLI to describe, and nothing would clear the state again.
+            sirio_chat::ChatEvent::CliState { state } => {
+                if self.client.is_some() {
+                    self.cli_unprompted = match (state, self.cli_state) {
+                        (
+                            sirio_chat::CliState::Running,
+                            None | Some(sirio_chat::CliState::Idle),
+                        ) => !self.is_streaming(),
+                        // `running` again inside a turn: still the same turn.
+                        (
+                            sirio_chat::CliState::Running,
+                            Some(sirio_chat::CliState::Running),
+                        ) => self.cli_unprompted,
+                        _ => false,
+                    };
+                    self.cli_state = Some(state);
+                    // The CLI can start working after the turn ended, when no
+                    // title tick runs.
+                    if !self.trace.is_running()
+                        && matches!(
+                            self.trace_headline(),
+                            Some(trace::TurnState::Live | trace::TurnState::Waiting)
+                        )
+                    {
+                        self.start_trace_title_tick(cx);
+                    }
+                }
+            }
             sirio_chat::ChatEvent::Trace(trace) => {
                 let started = matches!(trace, TraceEvent::TurnStarted { .. });
                 let changed = self.trace.apply(trace);
@@ -4220,6 +4285,10 @@ impl Chat {
                 .effort
                 .as_ref()
                 .and_then(|effort| effort.current_value.clone()),
+            session_state: self
+                .cli_state
+                .map(|state| state.as_str().to_string())
+                .unwrap_or_default(),
         }
     }
 
@@ -5490,11 +5559,20 @@ impl Chat {
             at: Some(chrono::Local::now()),
         });
         self.streaming = true;
+        self.cli_unprompted = false;
+        // A new prompt ends an idle CLI's rest, and the CLI has not said
+        // so yet. A running or waiting CLI stays so: it does not say it twice.
+        if self.cli_state == Some(sirio_chat::CliState::Idle) {
+            self.cli_state = None;
+        }
         if let Some(client) = &self.client
             && let Err(error) =
                 client.prompt_content(text, mention_paths, images, self.agent_cwd.clone())
         {
             self.client.take();
+            // The CLI that said it was running is gone.
+            self.cli_state = None;
+            self.cli_unprompted = false;
             let message = format!("send failed: {error:#}");
             self.fail_trace_turn(&message, cx);
             self.push_entry(Entry::Error {
@@ -5982,6 +6060,10 @@ impl Chat {
         // still open here would never hear of its end.
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
+        // A new process has said nothing yet; retry, a new conversation,
+        // launch and a failed launch all pass here.
+        self.cli_state = None;
+        self.cli_unprompted = false;
         // A new process is a new agent to ask: the guard only stops one
         // process answering one report in a loop, and what the last process
         // answered says nothing of this one.
@@ -6073,6 +6155,9 @@ impl Chat {
             return;
         }
         self.client.take();
+        // The CLI is gone, whatever it last said.
+        self.cli_state = None;
+        self.cli_unprompted = false;
         if self.streaming {
             self.expire_unanswered();
         }
@@ -7114,6 +7199,72 @@ impl Chat {
     /// this is what tells a chat waiting on the user from one that is working.
     pub fn awaits_user(&self) -> bool {
         self.entries.iter().any(question_dock::is_open)
+    }
+
+    /// The CLI state the claim and the Trace card read: the raw one, except
+    /// that a turn the CLI started on its own reads as `idle`, or as
+    /// `requires_action` while a card is open (it gets no trace wait of its
+    /// own, so `running` would draw the user's old turn as Live).
+    fn deciding_cli_state(&self) -> Option<sirio_chat::CliState> {
+        match self.cli_state {
+            Some(sirio_chat::CliState::Running) if self.cli_unprompted => Some(if self.awaits_user() {
+                sirio_chat::CliState::RequiresAction
+            } else {
+                sirio_chat::CliState::Idle
+            }),
+            state => state,
+        }
+    }
+
+    /// The CLI's own account of its session, once it has sent one.
+    pub fn cli_state(&self) -> Option<sirio_chat::CliState> {
+        self.cli_state
+    }
+
+    /// The state the Trace card's title and pill show: the latest turn's, under
+    /// the CLI's own (`trace::headline_state`). `None` before any turn.
+    pub fn trace_headline(&self) -> Option<trace::TurnState> {
+        self.trace
+            .latest()
+            .map(|turn| trace::headline_state(turn.state(), self.deciding_cli_state()))
+    }
+
+    /// What the chat claims about itself. The chat derives it from its turns:
+    /// waiting on the user while a streaming turn holds an open question,
+    /// running while the turn streams, done once a turn has completed,
+    /// nothing before that. The CLI's own state overrides that only when it
+    /// says more than the turns do: `running` (a background agent works past
+    /// the turn's `result`) and `requires_action` (the CLI waits on something
+    /// the turn does not show). `idle` overrides nothing: it can arrive before
+    /// the turn's held `TurnEnded`, or from a turn already over while a queued
+    /// one streams, and the turns then decide, so the status never reads Done
+    /// between two Running stretches. An open card outranks `running`: the
+    /// user is still asked, whatever else the CLI is doing.
+    ///
+    /// A turn the CLI began on its own (`cli_unprompted`) does not count: it
+    /// reads as before the CLI's states, so a Monitor's every event is no stop.
+    pub fn claim(&self) -> Option<ChatClaim> {
+        match self.deciding_cli_state() {
+            None | Some(sirio_chat::CliState::Idle) => {
+                if self.is_streaming() {
+                    Some(if self.awaits_user() {
+                        ChatClaim::NeedsInput
+                    } else {
+                        ChatClaim::Running
+                    })
+                } else if self.has_completed_turn() {
+                    Some(ChatClaim::Done)
+                } else {
+                    None
+                }
+            }
+            Some(sirio_chat::CliState::Running) => Some(if self.awaits_user() {
+                ChatClaim::NeedsInput
+            } else {
+                ChatClaim::Running
+            }),
+            Some(sirio_chat::CliState::RequiresAction) => Some(ChatClaim::NeedsInput),
+        }
     }
 }
 
@@ -14140,6 +14291,554 @@ two"
         cx.add_window_view(|_, cx| {
             Chat::from_test_command(LaunchSpec::Claude(launch), std::env::temp_dir(), cx)
         })
+    }
+
+    // Ways the chat can misread the CLI's own state (A2), on the fake `claude`:
+    // - the chat reads Done while the CLI says running (a background agent
+    //   still works after the turn's `result`);
+    // - a prompt sent mid-agent drops the Running state, so the chat reads
+    //   Done at that prompt's TurnEnded while the CLI still runs;
+    // - the chat is stuck at Running after the CLI is gone (transport error,
+    //   timeout, event source closed);
+    // - no claim after an early `idle` (idle before the held TurnEnded, or a
+    //   new prompt sent after idle while the CLI has not yet said running);
+    // - the state is lost on TurnEnded.
+
+    fn claude_chat_in_session_state_mode<'a>(
+        cx: &'a mut TestAppContext,
+        gate: &Path,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(init);
+        cx.executor().allow_parking();
+        let launch = sirio_chat::ClaudeLaunch::fixture(
+            "python3",
+            vec![
+                CLAUDE_FIXTURE.to_string(),
+                "session_state".to_string(),
+                format!("--fixture-gate={}", gate.display()),
+            ],
+        );
+        cx.add_window_view(|_, cx| {
+            Chat::from_test_command(LaunchSpec::Claude(launch), std::env::temp_dir(), cx)
+        })
+    }
+
+    fn send_prompt(chat: &Entity<Chat>, cx: &mut VisualTestContext, prompt: &str) {
+        pump_chat_until(cx, chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, prompt);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+
+    fn turn_ended() -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::TurnEnded {
+            stop_reason: "EndTurn".into(),
+        }
+    }
+
+    fn cli_state_event(state: sirio_chat::CliState) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::CliState { state }
+    }
+
+    fn claim_and_state(chat: &Entity<Chat>, cx: &VisualTestContext) -> (Option<ChatClaim>, String) {
+        chat.read_with(&cx.cx, |chat, _| {
+            (chat.claim(), chat.control_snapshot().session_state)
+        })
+    }
+
+    /// A chat on a live fixture CLI that writes no state lines of its own
+    /// (`silent`), so a test applies the CLI's events itself. The chat needs a
+    /// client for a `CliState` to count, and a prompt it sends is heard and ignored.
+    pub(super) fn silent_state_chat<'a>(
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        let (chat, cx) = claude_chat_in_session_state_mode(cx, Path::new(""));
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        (chat, cx)
+    }
+
+    pub(super) fn submit_silent(chat: &Entity<Chat>, cx: &mut VisualTestContext, text: &str) {
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn(text.into(), Vec::new(), Vec::new(), cx);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_background_agent_keeps_the_chat_running_until_the_cli_goes_idle(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let gate = dir.0.join("gate");
+        let (chat, cx) = claude_chat_in_session_state_mode(cx, &gate);
+        send_prompt(&chat, cx, "background");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.control_snapshot().status == "completed"
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Running), "running".to_string()),
+            "the main result ended the turn but the CLI still runs its agent"
+        );
+
+        std::fs::write(&gate, "").unwrap();
+        std::fs::write(dir.0.join("gate.2"), "").unwrap();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.cli_state() == Some(sirio_chat::CliState::Idle) && !chat.is_streaming()
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Done), "idle".to_string())
+        );
+    }
+
+    #[gpui::test]
+    async fn a_prompt_sent_while_the_cli_runs_keeps_the_chat_running(cx: &mut TestAppContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent first");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            chat.handle_event(turn_ended(), cx);
+        });
+        submit_silent(&chat, cx, "silent second");
+        chat.update(cx, |chat, cx| chat.handle_event(turn_ended(), cx));
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Running), "running".to_string())
+        );
+    }
+
+    #[gpui::test]
+    async fn a_new_prompt_after_idle_reads_running_before_the_cli_says_so(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent first");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            chat.handle_event(turn_ended(), cx);
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Idle), cx);
+        });
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.cli_state()),
+            Some(sirio_chat::CliState::Idle)
+        );
+        submit_silent(&chat, cx, "silent second");
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.claim(), Some(ChatClaim::Running));
+            assert_eq!(chat.cli_state(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn the_cli_asking_for_action_reads_as_needs_input(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let (chat, cx) = claude_chat_in_session_state_mode(cx, &dir.0.join("gate"));
+        send_prompt(&chat, cx, "ask");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::NeedsInput), "requires_action".to_string())
+        );
+
+        arm_dock(cx);
+        cx.update(|window, cx| chat.update(cx, |chat, cx| chat.activate_dock_row(0, window, cx)));
+        pump_chat_until(cx, &chat, |chat| {
+            chat.cli_state() == Some(sirio_chat::CliState::Idle) && !chat.is_streaming()
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Done), "idle".to_string())
+        );
+    }
+
+    /// A background agent's permission outlives the turn (R3): the turns alone
+    /// would say Done.
+    #[gpui::test]
+    async fn the_cli_asking_for_action_between_turns_reads_as_needs_input(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(turn_ended(), cx);
+            chat.handle_event(cli_state_event(sirio_chat::CliState::RequiresAction), cx);
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::NeedsInput), "requires_action".to_string())
+        );
+    }
+
+    async fn the_cli_goes_away(cx: &mut TestAppContext, event: sirio_chat::ChatEvent) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Running), "running".to_string())
+        );
+        chat.update(cx, |chat, cx| chat.handle_event(event, cx));
+        chat.read_with(cx, |chat, _| {
+            assert_ne!(chat.claim(), Some(ChatClaim::Running));
+            assert_eq!(chat.cli_state(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_transport_error_does_not_leave_the_chat_running(cx: &mut TestAppContext) {
+        the_cli_goes_away(cx, sirio_chat::ChatEvent::TransportError("died".into())).await;
+    }
+
+    #[gpui::test]
+    async fn a_timeout_does_not_leave_the_chat_running(cx: &mut TestAppContext) {
+        the_cli_goes_away(
+            cx,
+            sirio_chat::ChatEvent::Timeout {
+                operation: TimeoutOperation::Startup,
+                duration: std::time::Duration::from_secs(30),
+            },
+        )
+        .await;
+    }
+
+    #[gpui::test]
+    async fn a_reconnect_does_not_leave_the_chat_running(cx: &mut TestAppContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Running), "running".to_string())
+        );
+        // A new conversation reaches `start_connection`, as retry and launch do.
+        chat.update(cx, |chat, cx| chat.new_conversation(cx));
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.cli_state(), None);
+            assert_eq!(chat.claim(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn state_lines_from_a_client_already_taken_are_ignored(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.cli_state(), None);
+            assert_eq!(chat.claim(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_closed_event_source_does_not_leave_the_chat_running(cx: &mut TestAppContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            chat.streaming = true;
+        });
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.cli_state()),
+            Some(sirio_chat::CliState::Running),
+            "the CLI said running"
+        );
+        chat.update(cx, |chat, cx| chat.event_source_closed(cx));
+        chat.read_with(cx, |chat, _| {
+            assert_ne!(chat.claim(), Some(ChatClaim::Running));
+            assert_eq!(chat.cli_state(), None);
+        });
+    }
+
+    /// The CLI says `running` while a permission card is open (a background
+    /// agent's request beside main-thread work): the card outranks it, on the
+    /// dot and on the Trace card alike. With no card open `running` still wins.
+    #[gpui::test]
+    async fn an_open_card_outranks_the_cli_running(cx: &mut TestAppContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::Trace(sirio_chat::TraceEvent::TurnStarted {
+                    at: std::time::Instant::now(),
+                }),
+                cx,
+            );
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.claim(), Some(ChatClaim::Running));
+            assert_eq!(chat.trace_headline(), Some(trace::TurnState::Live));
+        });
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::Trace(sirio_chat::TraceEvent::WaitStarted {
+                    span: None,
+                    request_id: 9,
+                    at: std::time::Instant::now(),
+                }),
+                cx,
+            );
+            chat.handle_event(
+                sirio_chat::ChatEvent::PermissionRequest {
+                    request_id: 9,
+                    session_id: "session".into(),
+                    title: "Bash".into(),
+                    options: vec![sirio_chat::PermissionOption {
+                        id: "allow_once".into(),
+                        name: "Allow".into(),
+                        kind: "AllowOnce".into(),
+                        description: None,
+                    }],
+                    question: None,
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.awaits_user(), "the card is open");
+            assert_eq!(chat.claim(), Some(ChatClaim::NeedsInput));
+            assert_eq!(chat.trace_headline(), Some(trace::TurnState::Waiting));
+        });
+    }
+
+    // A turn the CLI starts on its own (a Monitor's event, a background shell's
+    // end) must not flip the status: the stop policy has no debounce, so each
+    // would be a stop and a notification. Ways this could fail:
+    //  1. after a user turn ended and the CLI said idle, an unprompted
+    //     `running` reads Running, or moves the Trace card off the turn's state;
+    //  2. a `requires_action` inside an unprompted turn does not read NeedsInput;
+    //  3. (a_background_agent_keeps_the_chat_running_until_the_cli_goes_idle) the
+    //     background-agent case stops reading Running;
+    //  4. (cannot fail: the flag's only reader needs `Running`, and the only
+    //     place that sets `Running` recomputes it, so no test)
+    //  5. a prompt sent during an unprompted turn reads anything but Running.
+
+    /// A chat whose user turn ended and whose CLI then said idle.
+    async fn ended_idle_chat<'a>(
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::Trace(sirio_chat::TraceEvent::TurnStarted {
+                    at: std::time::Instant::now(),
+                }),
+                cx,
+            );
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            chat.handle_event(turn_ended(), cx);
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Idle), cx);
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Done), "idle".to_string())
+        );
+        (chat, cx)
+    }
+
+    #[gpui::test]
+    async fn a_turn_the_cli_starts_on_its_own_does_not_flip_the_status(cx: &mut TestAppContext) {
+        let (chat, cx) = ended_idle_chat(cx).await;
+        let settled = chat.read_with(cx, |chat, _| chat.trace_headline());
+        for _ in 0..3 {
+            chat.update(cx, |chat, cx| {
+                chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            });
+            assert_eq!(
+                claim_and_state(&chat, cx),
+                (Some(ChatClaim::Done), "running".to_string()),
+                "sessionState stays the CLI's, the claim stays Done"
+            );
+            assert_eq!(chat.read_with(cx, |chat, _| chat.trace_headline()), settled);
+            // `running` again inside the same turn is still that turn.
+            chat.update(cx, |chat, cx| {
+                chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            });
+            assert_eq!(chat.read_with(cx, |chat, _| chat.claim()), Some(ChatClaim::Done));
+            chat.update(cx, |chat, cx| {
+                chat.handle_event(cli_state_event(sirio_chat::CliState::Idle), cx);
+            });
+            assert_eq!(chat.read_with(cx, |chat, _| chat.claim()), Some(ChatClaim::Done));
+        }
+    }
+
+    #[gpui::test]
+    async fn an_unprompted_turn_still_asks_the_user(cx: &mut TestAppContext) {
+        let (chat, cx) = ended_idle_chat(cx).await;
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            chat.handle_event(cli_state_event(sirio_chat::CliState::RequiresAction), cx);
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::NeedsInput), "requires_action".to_string())
+        );
+        // Once answered, the next `running` follows `requires_action`: the
+        // user took part, so it reads Running.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+        });
+        assert_eq!(chat.read_with(cx, |chat, _| chat.claim()), Some(ChatClaim::Running));
+    }
+
+    #[gpui::test]
+    async fn an_open_card_outranks_an_unprompted_running(cx: &mut TestAppContext) {
+        let (chat, cx) = ended_idle_chat(cx).await;
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::PermissionRequest {
+                    request_id: 11,
+                    session_id: "session".into(),
+                    title: "Bash".into(),
+                    options: vec![sirio_chat::PermissionOption {
+                        id: "allow_once".into(),
+                        name: "Allow".into(),
+                        kind: "AllowOnce".into(),
+                        description: None,
+                    }],
+                    question: None,
+                },
+                cx,
+            );
+        });
+        assert!(chat.read_with(cx, |chat, _| chat.awaits_user()));
+        assert_eq!(chat.read_with(cx, |chat, _| chat.claim()), Some(ChatClaim::NeedsInput));
+        assert_eq!(chat.read_with(cx, |chat, _| chat.trace_headline()), Some(trace::TurnState::Waiting));
+    }
+
+    #[gpui::test]
+    async fn a_prompt_during_an_unprompted_turn_reads_running(cx: &mut TestAppContext) {
+        let (chat, cx) = ended_idle_chat(cx).await;
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+        });
+        assert_eq!(chat.read_with(cx, |chat, _| chat.claim()), Some(ChatClaim::Done));
+        submit_silent(&chat, cx, "silent again");
+        assert_eq!(chat.read_with(cx, |chat, _| chat.claim()), Some(ChatClaim::Running));
+        // The user's turn ends while the CLI still runs: it is the user's now.
+        chat.update(cx, |chat, cx| chat.handle_event(turn_ended(), cx));
+        assert_eq!(chat.read_with(cx, |chat, _| chat.claim()), Some(ChatClaim::Running));
+    }
+
+    #[gpui::test]
+    async fn idle_hands_the_claim_back_to_the_turn(cx: &mut TestAppContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Idle), cx);
+        });
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Running), "idle".to_string()),
+            "idle before the held TurnEnded: the turn still streams"
+        );
+        chat.update(cx, |chat, cx| chat.handle_event(turn_ended(), cx));
+        assert_eq!(
+            claim_and_state(&chat, cx),
+            (Some(ChatClaim::Done), "idle".to_string()),
+            "after the held TurnEnded"
+        );
+    }
+
+    /// The claim after each event of one prompt's run, with or without a second
+    /// prompt queued behind it. `idle_first` is `idle` landing before the held
+    /// `TurnEnded` (order B) instead of after it (order A).
+    async fn claims_through_a_turn(
+        cx: &mut TestAppContext,
+        idle_first: bool,
+        queued: bool,
+    ) -> Vec<Option<ChatClaim>> {
+        let (chat, cx) = silent_state_chat(cx);
+        let mut seen = Vec::new();
+        let mut step = |cx: &mut VisualTestContext, event: Option<sirio_chat::ChatEvent>| {
+            chat.update(cx, |chat, cx| {
+                if let Some(event) = event {
+                    chat.handle_event(event, cx);
+                }
+            });
+            seen.push(chat.read_with(&cx.cx, |chat, _| chat.claim()));
+        };
+        submit_silent(&chat, cx, "silent first");
+        step(cx, None);
+        step(cx, Some(cli_state_event(sirio_chat::CliState::Running)));
+        if queued {
+            chat.update(cx, |chat, _| chat.queue.push_back("silent second".into()));
+        }
+        let idle = || cli_state_event(sirio_chat::CliState::Idle);
+        if idle_first {
+            step(cx, Some(idle()));
+            step(cx, Some(turn_ended()));
+        } else {
+            step(cx, Some(turn_ended()));
+            step(cx, Some(idle()));
+        }
+        if queued {
+            step(cx, Some(cli_state_event(sirio_chat::CliState::Running)));
+        }
+        seen
+    }
+
+    fn assert_never_done_between_runnings(seen: &[Option<ChatClaim>]) {
+        let running = Some(ChatClaim::Running);
+        let first = seen.iter().position(|claim| *claim == running);
+        let last = seen.iter().rposition(|claim| *claim == running);
+        if let (Some(first), Some(last)) = (first, last) {
+            assert!(
+                !seen[first..=last].contains(&Some(ChatClaim::Done)),
+                "Running, Done, Running would read as a stop between two turns: {seen:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn a_queued_prompt_never_reads_done_between_turns_idle_after_turn_end(
+        cx: &mut TestAppContext,
+    ) {
+        let seen = claims_through_a_turn(cx, false, true).await;
+        assert_never_done_between_runnings(&seen);
+        assert_eq!(seen.last(), Some(&Some(ChatClaim::Running)), "{seen:?}");
+    }
+
+    #[gpui::test]
+    async fn a_queued_prompt_never_reads_done_between_turns_idle_before_turn_end(
+        cx: &mut TestAppContext,
+    ) {
+        let seen = claims_through_a_turn(cx, true, true).await;
+        assert_never_done_between_runnings(&seen);
+        assert_eq!(seen.last(), Some(&Some(ChatClaim::Running)), "{seen:?}");
+    }
+
+    #[gpui::test]
+    async fn with_nothing_queued_the_turn_ends_done_idle_after_turn_end(
+        cx: &mut TestAppContext,
+    ) {
+        let seen = claims_through_a_turn(cx, false, false).await;
+        assert_never_done_between_runnings(&seen);
+        assert_eq!(seen.last(), Some(&Some(ChatClaim::Done)), "{seen:?}");
+    }
+
+    #[gpui::test]
+    async fn with_nothing_queued_the_turn_ends_done_idle_before_turn_end(
+        cx: &mut TestAppContext,
+    ) {
+        let seen = claims_through_a_turn(cx, true, false).await;
+        assert_never_done_between_runnings(&seen);
+        assert_eq!(seen.last(), Some(&Some(ChatClaim::Done)), "{seen:?}");
     }
 
     /// What the fake CLI heard the host answer, in order.

@@ -121,6 +121,11 @@ pub struct SystemPayload {
     pub slash_commands: Vec<String>,
     /// Commands whose UX is bound to a terminal; a desktop chat hides them.
     pub terminal_slash_commands: Vec<String>,
+    /// Present on `session_state_changed`: `idle`, `running` or
+    /// `requires_action`. Lenient, so a state of another shape on any
+    /// subtype cannot turn the line into `Other`.
+    #[serde(deserialize_with = "lenient")]
+    pub state: Option<String>,
     /// Present on `elicitation_complete`: the MCP server that finished it.
     pub mcp_server_name: Option<String>,
     /// Present on `elicitation_complete`: the id the url request carried.
@@ -661,6 +666,26 @@ mod tests {
     const AGENT_RESULT: &str = include_str!("../tests/fixtures/trace_agent_result.json");
     const RESULT_INTERRUPTED: &str =
         include_str!("../tests/fixtures/trace_result_interrupted.json");
+
+    // Failure list for the CLI's session state:
+    // - the variable is missing from the launch (launch.rs, and the
+    //   integration test, whose fixture sends states only when it is set);
+    // - serde drops the state (the integration test);
+    // - a non-string `state` on another subtype turns that payload into
+    //   `Other` (this test);
+    // - an unknown state emits an event (events.rs);
+    // - the state event is lost after the main `result` (the integration test).
+    #[test]
+    fn a_state_of_another_shape_leaves_its_system_line_readable() {
+        let line = r#"{"type":"system","subtype":"x","state":{"a":1},"session_id":"s"}"#;
+        match CliMessage::parse(line) {
+            Some(CliMessage::System(system)) => {
+                assert_eq!(system.session_id.as_deref(), Some("s"));
+                assert_eq!(system.state, None);
+            }
+            other => panic!("expected a readable system line, got {other:?}"),
+        }
+    }
 
     fn stream_event(line: &str) -> StreamEventPayload {
         let Some(CliMessage::StreamEvent(event)) = CliMessage::parse(line) else {
