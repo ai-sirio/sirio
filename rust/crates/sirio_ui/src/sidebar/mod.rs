@@ -699,6 +699,8 @@ pub struct Sidebar {
     view_menu: Popup<()>,
     /// The header bell's list of sessions that want the user.
     bell_menu: Popup<()>,
+    /// The New Chat row's list of agents for the selected worktree.
+    new_chat_menu: Popup<()>,
     /// When the bell opened (Unix ms): its entries' ages are read at this
     /// instant, so the list does not tick while it is open.
     bell_opened_at_ms: i64,
@@ -828,6 +830,7 @@ impl Sidebar {
     fn choose_view(&mut self, view: SidebarView, window: &mut Window, cx: &mut Context<Self>) {
         if self.view == view {
             self.close_view_menu(cx);
+            self.tree_focus.focus(window, cx);
             return;
         }
         self.view = view;
@@ -1081,6 +1084,7 @@ impl Sidebar {
             add_project_menu: Popup::default(),
             view_menu: Popup::default(),
             bell_menu: Popup::default(),
+            new_chat_menu: Popup::default(),
             bell_opened_at_ms: 0,
             bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
@@ -1189,6 +1193,7 @@ impl Sidebar {
             add_project_menu: Popup::default(),
             view_menu: Popup::default(),
             bell_menu: Popup::default(),
+            new_chat_menu: Popup::default(),
             bell_opened_at_ms: 0,
             bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
@@ -1901,6 +1906,7 @@ impl Sidebar {
         // right-click on the same row. Pointer dismissal still animates via
         // `close_context_menu`.
         self.context_menu.close();
+        self.new_chat_menu.close();
         cx.notify();
         if action == SidebarContextAction::RemoveProject {
             if let SidebarContextTarget::Project { id, .. } = target {
@@ -1951,6 +1957,7 @@ impl Sidebar {
         if !self.view_menu.take_press_was_open() {
             self.view_menu.open(());
             self.bell_menu.close();
+            self.new_chat_menu.close();
         }
         self.close_context_menu(cx);
         cx.notify();
@@ -1961,9 +1968,35 @@ impl Sidebar {
             self.bell_opened_at_ms = sessions::unix_now_ms();
             self.bell_menu.open(());
             self.view_menu.close();
+            self.new_chat_menu.close();
         }
         self.close_context_menu(cx);
         cx.notify();
+    }
+
+    fn toggle_new_chat_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.new_chat_menu.take_press_was_open() && self.selected_worktree_row().is_some() {
+            self.new_chat_menu.open(());
+            self.view_menu.close();
+            self.bell_menu.close();
+        }
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn close_new_chat_menu(&mut self, cx: &mut Context<Self>) {
+        if self.new_chat_menu.begin_close() {
+            reap_popup(cx, |sidebar| &mut sidebar.new_chat_menu);
+            cx.notify();
+        }
+    }
+
+    /// The row id of the selected worktree, the one New Chat opens in.
+    fn selected_worktree_row(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .find(|row| row.selected && row.kind == RowKind::Worktree)
+            .map(|row| row.id)
     }
 
     fn close_bell_menu(&mut self, cx: &mut Context<Self>) {
@@ -2310,10 +2343,10 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// The Search button: shows the field; an empty one is hidden again, one
-    /// holding text stays and takes focus.
+    /// The Search button: shows the field; an empty one that has focus is
+    /// hidden again, one holding text, or not focused, stays and takes focus.
     fn toggle_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.filter_shown && self.filter.is_empty() {
+        if self.filter_shown && self.filter.is_empty() && self.filter_focus.is_focused(window) {
             self.hide_filter(window, cx);
         } else {
             self.show_filter(window, cx);
@@ -3774,6 +3807,81 @@ impl Sidebar {
             .into_any_element()
     }
 
+    /// The 31 px New Chat row under the header: opens the agents that can
+    /// launch a chat in the selected worktree. Without a selected worktree it
+    /// is muted, opens nothing and says why in its tooltip.
+    fn render_new_chat(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let target = self
+            .selected_worktree_row()
+            .and_then(|row_id| self.context_target(row_id));
+        let enabled = target.is_some();
+        let menu = match (&target, self.new_chat_menu.get()) {
+            (Some(target), Some(_)) => {
+                let outside = cx.entity();
+                let card = menu_card("sidebar-new-chat-menu", cx)
+                    .debug_selector(|| "sidebar-new-chat-menu".to_owned())
+                    .w(px(240.0))
+                    .text_size(theme.typography.ui_size)
+                    .on_mouse_down_out(move |_, _, cx| {
+                        outside.update(cx, |sidebar, cx| sidebar.close_new_chat_menu(cx));
+                    })
+                    .child(Self::render_context_chat_agents(
+                        target,
+                        &self.chat_agents(),
+                        cx.entity(),
+                        *theme,
+                        cx,
+                    ));
+                Some(hang_below(
+                    "sidebar-new-chat-menu-layer",
+                    HANG_GAP,
+                    card,
+                    self.new_chat_menu.closing_since(),
+                    cx,
+                ))
+            }
+            _ => None,
+        };
+        let color = if enabled { theme.ely.fg } else { theme.ely.fg_muted };
+        div()
+            .relative()
+            .flex_none()
+            .w_full()
+            .h(px(31.0))
+            .px(px(8.0))
+            .child(
+                div()
+                    .id("sidebar-new-chat")
+                    .debug_selector(|| "sidebar-new-chat".to_owned())
+                    .size_full()
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.scaled(13.0))
+                    .text_color(color)
+                    .when(enabled, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme.ely.hover))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, _| this.new_chat_menu.note_trigger_press()),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_new_chat_menu(cx)))
+                    })
+                    .when(!enabled, |row| {
+                        row.tooltip(crate::controls::tooltip("Select a worktree first"))
+                    })
+                    .child(EIcon::new(IconName::SquarePen).size(EIconSize::Sm).color(color))
+                    .child(div().when(!enabled, |label| {
+                        label.debug_selector(|| "sidebar-new-chat-disabled".to_owned())
+                    }).child("New Chat")),
+            )
+            .when_some(menu, |this, menu| this.child(menu))
+            .into_any_element()
+    }
+
     /// The bell: a ghost icon button wearing a dot for the most severe thing
     /// that wants the user, and the list of those sessions under it.
     fn render_bell(&self, theme: &Theme, window_height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -4581,6 +4689,9 @@ impl Render for Sidebar {
                     } else if sidebar.bell_menu.is_open() {
                         sidebar.close_bell_menu(cx);
                         closed = true;
+                    } else if sidebar.new_chat_menu.is_open() {
+                        sidebar.close_new_chat_menu(cx);
+                        closed = true;
                     } else if sidebar.has_open_project_surface() {
                         sidebar.close_project_surface(cx);
                         closed = true;
@@ -4605,6 +4716,7 @@ impl Render for Sidebar {
             .overflow_hidden()
             .bg(theme.ely.bg)
             .child(self.render_header(&theme, window, cx))
+            .child(self.render_new_chat(&theme, cx))
             .when(view == SidebarView::Projects, |this| {
                 // Open and fold the whole list, then the `+`: one row under
                 // the title, the three drawn at one size. They are icons, so
@@ -8122,6 +8234,18 @@ mod tests {
             .unwrap();
         assert!(list_focused, "focus goes to the list");
 
+        // Shown, empty and not focused: Search focuses it instead of hiding.
+        click_control(&mut cx, "sidebar-search");
+        focus_list(&window, &mut cx);
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some(), "unfocused empty: kept");
+        let focused = window
+            .update(&mut cx, |s, window, _| s.filter_focus.is_focused(window))
+            .unwrap();
+        assert!(focused, "and focused");
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_none(), "focused empty: hidden");
+
         click_control(&mut cx, "sidebar-search");
         cx.simulate_input("ma");
         cx.run_until_parked();
@@ -8622,6 +8746,105 @@ mod tests {
             !events.borrow().iter().any(|event| matches!(event, SidebarEvent::ViewChanged(_))),
             "no ViewChanged for the view already shown"
         );
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "the list takes focus");
+    }
+
+    fn new_chat_fixture(
+        cx: &mut TestAppContext,
+        with_worktree: bool,
+    ) -> (gpui::WindowHandle<Sidebar>, VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(move |_window, cx| {
+            let mut sidebar = if with_worktree {
+                tests_support::sidebar_with_one_project(cx)
+            } else {
+                Sidebar::from_projects(Vec::new(), cx)
+            };
+            sidebar.apply_chat_launch_sources(vec![(
+                "codex".to_string(),
+                sirio_registry::LaunchSource::Builtin {
+                    program: "codex-acp".into(),
+                    args: vec![],
+                },
+            )]);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        (window, cx)
+    }
+
+    #[gpui::test]
+    async fn new_chat_offers_the_agents_for_the_selected_worktree(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let expected = window
+            .update(&mut cx, |s, _, _| {
+                let row = s.selected_worktree_row().expect("a selected worktree");
+                s.context_target(row).expect("its target")
+            })
+            .unwrap();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none());
+        click_control(&mut cx, "sidebar-new-chat");
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_some(), "the menu is drawn");
+        click_control(&mut cx, "sidebar-context-chat-agent-codex");
+        let emitted = events.borrow().iter().any(|event| {
+            matches!(event, SidebarEvent::ContextAction {
+                target,
+                action: SidebarContextAction::NewChatAgent("codex"),
+            } if *target == expected)
+        });
+        assert!(emitted, "the agent opens a chat in the selected worktree");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "the menu closes");
+    }
+
+    #[gpui::test]
+    async fn new_chat_is_disabled_without_a_selected_worktree(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, false);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        assert!(cx.debug_bounds("sidebar-new-chat-disabled").is_some(), "drawn muted");
+        click_control(&mut cx, "sidebar-new-chat");
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "no menu");
+        assert!(events.borrow().is_empty(), "no event");
+    }
+
+    #[gpui::test]
+    async fn the_header_menus_close_each_other_and_escape_closes_new_chat(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        click_control(&mut cx, "sidebar-new-chat");
+        click_control(&mut cx, "sidebar-title");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-view-menu").is_some());
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "title closes new chat");
+        // The open title menu hangs over the row, so open New Chat directly.
+        window.update(&mut cx, |s, _, cx| s.toggle_new_chat_menu(cx)).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "new chat closes title");
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_some());
+        click_control(&mut cx, "sidebar-bell");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "bell closes new chat");
+        window.update(&mut cx, |s, _, cx| s.toggle_new_chat_menu(cx)).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-menu").is_none(), "new chat closes bell");
+        cx.simulate_keystrokes("escape");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "escape closes it");
     }
 
     #[gpui::test]
