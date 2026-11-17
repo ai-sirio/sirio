@@ -748,7 +748,9 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # captures, --out-dir DIR keeps transcript.log, app.log, client-*.jsonl, socket.jsonl, the lockfile
 # (token redacted) and the PID-matched captures, --proposals-only runs only the openDiff cases (a
 # development shortcut: it prints "IDE BRIDGE PROPOSALS ONLY", not the evidence of a run) and --live.
-# Run it with the load under 4, TMPDIR on disk under ~/.cache/st, Zig 0.15.2 first on PATH.
+# Run it with the load under 4 and Zig 0.15.2 first on PATH. The run root is $SIRIO_E2E_TMP, else
+# ~/.cache/st/ide-e2e-tmp (on disk: /tmp is a small tmpfs); TMPDIR does not choose it (it only affects
+# the cargo build; the run sets its own TMPDIR inside the root).
 Scripts/Tests/test-ide-bridge-e2e.sh --xvfb   # -> prints "IDE BRIDGE E2E OK (<n> cases, state-only <0|1>)"
 
 # The live mode of the same script, by hand only (each run spends two real Claude turns against a
@@ -770,7 +772,10 @@ Scripts/Tests/test-ide-bridge-e2e.sh --xvfb   # -> prints "IDE BRIDGE E2E OK (<n
 # run's private HOME, database, socket, host root and Xvfb, Claude's configuration is seeded under
 # the private HOME and its environment is built from nothing with a fake key and a dead proxy, the
 # run aborts before anything starts when the private HOME is the real home or inside the real
-# ~/.claude, and the cleanup kills every process still holding the private HOME. The artifact adds
+# ~/.claude, the run root defaults to a fresh `mktemp -d /var/tmp/sirio-ide-live.XXXXXX` (mode 0700: /var/tmp is world-writable and the root holds the token and Claude's configuration) instead of ~/.cache/st (same
+# on-disk filesystem, but outside the home: a real claude reads the files of every ancestor of its
+# working directory; SIRIO_E2E_TMP overrides it, and a root inside the real home aborts before anything
+# starts), and the cleanup kills, and logs, every process still carrying the run's CLAUDE_CONFIG_DIR. The artifact adds
 # claude-version.txt (`claude --version` and the binary's path), fake.log and live-pane-*.txt.
 Scripts/Tests/test-ide-bridge-e2e.sh --xvfb --live   # -> prints "IDE BRIDGE LIVE OK (claude <version>, 2 cases)", or "SKIP: ..."
 

@@ -301,9 +301,15 @@ set -eEuo pipefail
 #                 API, DISABLE_AUTOUPDATER, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
 #                 CLAUDE_CODE_DISABLE_CLAUDE_MDS, CLAUDE_CONFIG_DIR and a dead HTTP(S) proxy; the run
 #                 aborts before anything starts when the private HOME is, or is inside, the real
-#                 home's .claude; the real ~/.claude, ~/.claude.json and ~/.claude/ide are never read
-#                 or written. Cleanup also kills every process still holding the private HOME in its
-#                 environment (a CLI's helpers). The artifact adds claude-version.txt, fake.log and
+#                 home's .claude, or the run root is inside the real home; the real ~/.claude, ~/.claude.json and ~/.claude/ide are never read
+#                 or written. Cleanup also kills, and logs, every process still carrying the
+#                 run's CLAUDE_CONFIG_DIR in its environment (a CLI's helpers). The run root
+#                 defaults to a fresh mktemp -d /var/tmp/sirio-ide-live.XXXXXX, mode 0700 (the same on-disk filesystem as /home,
+#                 outside the home: a real claude reads the files of every ancestor of its working
+#                 directory); SIRIO_E2E_TMP overrides it, and a root inside the real home aborts
+#                 the run before anything starts. The default 60-case path keeps its root under
+#                 ~/.cache/st (SIRIO_E2E_TMP also overrides that one); TMPDIR does not choose a
+#                 root, it only affects the cargo build. The artifact adds claude-version.txt, fake.log and
 #                 live-pane-*.txt (what the pane showed at each step) to the usual files.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -361,6 +367,10 @@ if [ "$LIVE" -eq 1 ]; then
   [ "$PROPOSALS_ONLY" -eq 0 ] || fail "--live and --proposals-only are two different runs"
   REAL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
   [ -n "$REAL_HOME" ] || fail "no home directory for this user"
+  LIVE_BASE="${SIRIO_E2E_TMP:-/var/tmp}"
+  case "$(realpath -m "$LIVE_BASE")/" in
+    "$(realpath "$REAL_HOME")/"*) fail "ABORT: the run root $LIVE_BASE is inside the real home (a real claude reads the files of every ancestor of its directory); use SIRIO_E2E_TMP outside it" ;;
+  esac
   LIVE_CLAUDE="${SIRIO_LIVE_CLAUDE:-}"
   if [ -z "$LIVE_CLAUDE" ]; then
     # The newest real install: a directory (not a link) named by dotted numbers, holding the binary.
@@ -415,7 +425,20 @@ done
 
 # ---------------------------------------------------------------- the run
 
+# The run root. The default path keeps it under ~/.cache/st (on disk: /tmp is a small tmpfs that
+# fills up with the binaries a run copies); no real Claude runs there. With --live the real
+# claude reads instruction and config files from every ancestor of its working directory, so the
+# root must lie outside the real home: it defaults to a fresh mktemp -d /var/tmp/sirio-ide-live.XXXXXX (the same
+# on-disk filesystem as /home), and SIRIO_E2E_TMP still overrides it, though the live guard
+# above refuses a root inside the real home before anything starts. TMPDIR does not choose the
+# root: it only affects the cargo build, and the run then sets its own TMPDIR inside the root.
 BASE="${SIRIO_E2E_TMP:-$HOME/.cache/st/ide-e2e-tmp}"
+if [ "$LIVE" -eq 1 ]; then
+  BASE="$LIVE_BASE"
+  # The default is a fresh directory of its own (mode 0700): /var/tmp is world-writable and the
+  # root holds the token and Claude's configuration.
+  [ -n "${SIRIO_E2E_TMP:-}" ] || BASE="$(mktemp -d /var/tmp/sirio-ide-live.XXXXXX)"
+fi
 mkdir -p "$BASE"
 RUN_DIR="$(mktemp -d "$BASE/ide-XXXXXX")"
 WT="$RUN_DIR/repo"
@@ -473,19 +496,17 @@ stop_hosts() {
     kill -KILL "$pid" 2>/dev/null || true
   done
 }
-# Live mode: kills every process that still holds the private HOME in its environment (a CLI's
-# background helpers outlive it), read from /proc (Linux), the shell, tee, the sleeps of the watchdogs and this script's own
-# subshells excepted.
+# Live mode: kills every process that still carries this run's Claude environment (a CLI's
+# background helpers outlive it), read from /proc (Linux): the entry CLAUDE_CONFIG_DIR under the
+# private HOME, which only the real claude and what it spawned have. Every kill is logged.
 kill_home_holders() {
   local dir pid comm
   for dir in /proc/[0-9]*; do
     pid="${dir#/proc/}"
-    [ "$pid" != "$$" ] && [ "$pid" != "$BASHPID" ] || continue
-    comm="$(cat "$dir/comm" 2>/dev/null || true)"
-    case "$comm" in bash|tee|sleep|"") continue ;; esac
     [ -r "$dir/environ" ] || continue
-    if { tr '\0' '\n' <"$dir/environ" || true; } 2>/dev/null | grep -qxF "HOME=$RUN_DIR/home"; then
-      echo "cleanup: killing $comm ($pid), which still holds the private HOME"
+    if { tr '\0' '\n' <"$dir/environ" || true; } 2>/dev/null | grep -qxF "CLAUDE_CONFIG_DIR=$RUN_DIR/home/.claude"; then
+      comm="$(cat "$dir/comm" 2>/dev/null || true)"
+      echo "cleanup: killing $comm ($pid), which still carries this run's Claude environment"
       kill -KILL "$pid" 2>/dev/null || true
     fi
   done
@@ -505,6 +526,7 @@ cleanup() {
   cp "$RUN_DIR"/socket.jsonl "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/client-*.jsonl "$OUT_DIR/" 2>/dev/null || true
   rm -rf "$RUN_DIR"
+  [ "$LIVE" -eq 0 ] || [ -n "${SIRIO_E2E_TMP:-}" ] || rmdir "$BASE" 2>/dev/null || true
   exit "$rc"
 }
 trap cleanup EXIT
@@ -1534,7 +1556,7 @@ PY
   done
   [ "$(tabs_field active)" = "$A_TAB" ] || fail "$CASE: the terminal's tab ($A_TAB) is not focused (active: $(tabs_field active))"
   echo "OK: the terminal's tab is focused"
-  case "$("$CTL" panel read "$A_PANE" 2>&1)" in *sel.rs*) fail "$CASE: something was written into the pane" ;; esac
+  case "$("$CTL" panel read "$A_PANE" 2>&1 | base64 -d 2>/dev/null)" in *sel.rs*) fail "$CASE: something was written into the pane" ;; esac
   echo "OK: nothing was written into the pane"
   capture ide-at-mention
 }
@@ -3362,12 +3384,16 @@ live_setup() {
 # TERM and the CLAUDE_CODE_SSE_PORT Sirio gave it), so the port is proved to reach a real Claude.
 live_start_claude() {
   local cmd
-  cmd="env -i HOME=$HOME PATH=/usr/bin:/bin LANG=C.UTF-8 SHELL=/bin/sh TMPDIR=$TMPDIR TERM=\$TERM"
+  local q_home q_tmp q_claude
+  q_home="$(printf '%q' "$HOME")"
+  q_tmp="$(printf '%q' "$TMPDIR")"
+  q_claude="$(printf '%q' "$LIVE_CLAUDE")"
+  cmd="env -i HOME=$q_home PATH=/usr/bin:/bin LANG=C.UTF-8 SHELL=/bin/sh TMPDIR=$q_tmp TERM=\$TERM"
   cmd="$cmd CLAUDE_CODE_SSE_PORT=\${CLAUDE_CODE_SSE_PORT-} ANTHROPIC_API_KEY=$FAKE_KEY"
   cmd="$cmd ANTHROPIC_BASE_URL=http://127.0.0.1:$FAKE_PORT DISABLE_AUTOUPDATER=1"
   cmd="$cmd CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"
-  cmd="$cmd CLAUDE_CONFIG_DIR=$HOME/.claude HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9"
-  cmd="$cmd NO_PROXY=127.0.0.1,localhost $LIVE_CLAUDE --permission-mode default"
+  cmd="$cmd CLAUDE_CONFIG_DIR=$q_home/.claude HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9"
+  cmd="$cmd NO_PROXY=127.0.0.1,localhost $q_claude --permission-mode default"
   LIVE_PANE="$(sockcall surface.terminal.open "cmd=$cmd; :" | jq_py 'd["pane"]')"
   [ -n "$LIVE_PANE" ] || fail "$CASE: surface.terminal.open named no pane"
   wait_pane started "Claude Code v" 300
@@ -3419,10 +3445,12 @@ case_live_reject_with_comment() {
   expect_clipboard "the clipboard holds Claude's line" "@probe.txt#L1 keep beta here"
   # 2.1.325 printed "User rejected update to probe.txt", 2.1.326 prints "Rejected update to probe.txt".
   wait_pane rejected "ejected update to probe.txt" 300
-  wait_file_is "$WT/probe.txt" 'beta\ngamma\n'
+  assert_file_is "$WT/probe.txt" 'beta\ngamma\n'
 }
 
 run_live() {
+  echo "run root: $RUN_DIR"
+  echo "$RUN_DIR" >"$OUT_DIR/run-root.txt"
   live_setup
   app_start
   select_repo
