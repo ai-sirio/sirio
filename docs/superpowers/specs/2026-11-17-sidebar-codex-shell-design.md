@@ -87,7 +87,8 @@ placeholder). **(my call)**
   of today's signals (decided with Enzo, §1.4): the Sessions segment's
   attention dot (`sessions::attention`: error, or needs input) and unread
   (`TabAttention.unread`). The dot takes the most severe: `theme.ely.danger`
-  for an error, `warning` for needs input, `focus` for unread; no dot when
+  for an error, `warning` for needs input, `info` for unread (the colour of a
+  row's unread dot today); no dot when
   none applies. A click opens a popover listing those sessions, the most
   severe first and newest first within each: title, its reason ("Error",
   "Needs input", "Unread"), project · branch, relative time (`sessions.rs`
@@ -98,8 +99,10 @@ placeholder). **(my call)**
 - **Right: Search**, a ghost `IconButton`. It shows the existing filter field
   under the header and focuses it. `Esc` clears and hides it; while it holds
   text it stays visible. Matching (`row_matches`) and the "folded projects open
-  while filtering" rule are unchanged. Any existing shortcut that focuses the
-  filter shows it first. **(my call)**
+  while filtering" rule are unchanged. No shortcut focuses the filter today.
+  Switching view clears the filter (as today) and now also hides it. The
+  sidebar's `Focusable` handle (used to give focus back when Settings closes)
+  is the filter while it is shown and the list otherwise. **(my call)**
 - Expand all, collapse all and add project leave the header (§3.3).
 
 ### §3.2 New Chat row — 31 px
@@ -123,7 +126,9 @@ nothing new. **(my call)**
 
 ### §3.4 The list
 
-- An Ely `ScrollArea`: overlay scrollbar that fades when idle.
+- An overlay scrollbar that fades when idle: Sirio's `scroll::bar` over the
+  list's `ScrollHandle`, which wraps Ely's `Scrollbar` (Ely's `ScrollArea` has
+  no caller in Sirio; the wrapper is the established pattern).
 - A 1 px `theme.ely.focus` border, radius 8, **only while the list has keyboard
   focus**. Codex's blue border reads as focus, not decoration. **(my call)**
 
@@ -149,14 +154,18 @@ Today's two-line card (`row.rs` `render_row`), with these changes:
   name; the card's box stays full width, so the hover wash spans the sidebar
   as Codex's does and `test-zed-layout-e2e.sh`'s "card starts and ends at the
   panel's content edge" still holds. **(my call)**
-- The leading slot is unchanged: the project's identity icon if set, else
-  GitBranch.
+- The leading slot is unchanged: GitBranch. (Corrected while planning: the
+  identity-icon branch in `row.rs` never runs for a card today.)
 - "idle" / "N agents" in `fg_subtle`.
 - Under the pointer: `theme.ely.hover` wash, radius 6, and on the title line
   two ghost icon buttons replace the status bloom: **★** (Set Primary; filled
-  and meaning Unset Primary on the primary) and **×** (Remove Worktree, not on
-  the primary; same confirmation dialog, `request_remove_worktree`). Off the
-  pointer the bloom and the ★ primary marker show as today.
+  and meaning Unset Primary on the primary; the same `ContextAction` the
+  context menu emits) and **×** (not on the primary). The × does exactly what
+  today's hover × does: it opens the worktree close menu
+  (`open_worktree_close_menu`: "Remove from disk", "Remove … remote and
+  disk"), which leads to the confirmation. (Corrected while planning: the
+  draft said it went straight to `request_remove_worktree`.) Off the pointer
+  the bloom and the ★ primary marker show as today.
 - Pills, their rings, the unread dot and the sub-line are unchanged.
 
 ### §3.7 Hover card
@@ -178,7 +187,10 @@ Today's two-line card (`row.rs` `render_row`), with these changes:
   Sessions view (`the_minute_clock_runs_only_in_the_sessions_view` stays
   true); a card left open for minutes may show a stale time. **(my call)**
 - Never shown during a drag, while a context menu or popover is open, or while
-  the sidebar is narrower than 200 px.
+  the sidebar is narrower than 200 px. It closes when the list scrolls or the
+  row it describes leaves the list (filtered out, folded, removed). A key
+  press may close it (bezel reports a keypress as hover loss). **(my calls,
+  made while planning)**
 
 ### §3.8 Sessions view
 
@@ -203,13 +215,15 @@ alter it is either kept behind the sidebar's call site or left out and listed
 under "Not ported" in `LOCAL-CHANGES.md`. The chat's E2E must stay green.
 **(my call)**
 
-**Ported from upstream onto bezel-gpui 0.3.8, only where upstream differs from
-the vendored copy:** `overlays::HoverCard` (and any side placement upstream
-has added), `layout::ScrollArea` and `Scrollbar`, `primitives::Disclosure`,
-`layout::Collapsible`, `data_display::DotBadge`. Each port goes into
-`LOCAL-CHANGES.md` the way #767's did. If upstream's `HoverCard` still places
-only above or below, the card is placed with `layer(id, Hang::At(point), …)`
-from the card's bounds.
+**Result of the comparison (made while planning): nothing is ported.**
+Against `2d827752`, `Disclosure`, `Collapsible` and `DotBadge` differ only in
+doc comments; `HoverCard`'s only change needs `HoverListenerMode`, which
+bezel-gpui 0.3.8 does not have; `ScrollArea`/`Scrollbar` gained a new source
+API and a press-blocking track strip that would change the chat's bars. No
+upstream hover or popover places beside its trigger. The comparison and its
+reasons go into `LOCAL-CHANGES.md` ("Compared, not ported, 2026-11-17"). The
+sidebar's hover card is Sirio's own: placed beside the sidebar and drawn with
+Ely's `raise` (deferred draw), because the sidebar's root clips its children.
 
 **Not used:** upstream `lists::{Tree, List, Sections}` and `layout::Sidebar`
 (a width-animated rail with no sections). D keeps Sirio's own rows.
@@ -240,7 +254,6 @@ card's placement and clamping is the likely one.
 
 ## §7 Left to the builder
 
-- What each upstream port actually changes, and whether a component needs one.
 - The hover card's placement code, and the ordering between it, menus and drags.
 - Animations (fold, card fade), within what Ely's motion already does.
 - How the work is split into commits.
