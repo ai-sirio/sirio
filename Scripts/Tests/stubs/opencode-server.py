@@ -12,6 +12,9 @@ API that Sirio reads, with the shapes Task 2 measured against the real service:
   POST /api/session                  {"location":{"directory":<abs dir>}} -> 200 {"data":Session.Info}
                                      a new, untitled session in that directory (session.created is
                                      emitted); the log line is `POST /api/session 200 <id> <dir>`
+  DELETE /api/session/<sid>          204 and session.deleted for a session it holds, 404 for
+                                     any other (what 2.3.0 answers, measured); the log line is
+                                     `DELETE /api/session/<sid> <status>`
   GET /api/event                     SSE: `data: {json}` frames and `: heartbeat` comments;
                                      the first frame is server.connected; nothing is replayed
 
@@ -325,6 +328,22 @@ class Handler(BaseHTTPRequestHandler):
             add_session(sid, directory)
             info = session_info(sid)
         return self.reply(200, {"data": info}, " %s %s" % (sid, directory))
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        parts = path.split("/")
+        if len(parts) != 4 or parts[1:3] != ["api", "session"]:
+            return self.reply(404)
+        if not self.authorized():
+            return self.reply(401)
+        sid = parts[3]
+        with LOCK:
+            if sid not in SESSIONS:
+                return self.reply(404)
+            directory = SESSIONS.pop(sid)["directory"]
+            ASKS.pop(sid, None)
+            emit("session.deleted", {"sessionID": sid}, directory)
+        return self.reply(204)
 
     def stream(self):
         mine = queue.Queue()

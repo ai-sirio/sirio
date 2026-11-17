@@ -179,7 +179,8 @@ fn usage() {
          \x20 surface chat panel <surfaceId> open|close|toggle <key>|activate <key>  (debug builds) drive a chat's session panel\n\
          \x20 surface trace read <surfaceId>     whether the chat has a Trace tab, and the turn and spans it shows\n\
          \x20 surface open-list open --entry show|chat|terminal|browser|changes|open-file|project-settings|other-agents|agent:<id>  (debug builds) click that row of the Open list\n\
-         \x20 surface terminal open [--cmd c | --agent a]  (debug builds) open an app terminal tab running c, or agent a\n\
+         \x20 surface terminal open [--cmd c | --agent a [--prompt p]]  (debug builds) open an app terminal tab running c, or agent a (with p as its first message)\n\
+         \x20 surface terminal restart <pane> [--overlay]  (debug builds) Restart a terminal tab as its context menu does, or press its Session lost overlay's Restart\n\
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
          \x20 surface project-add --kind path|clone|create --value <path|url|name> [--submit] [--answer 0|1|2]  (debug builds) start an add without the folder chooser; --answer 0|1|2 (path only) answers the not-a-git prompt: Initialize Git, Add without Git, Cancel\n\
          \x20 surface project-identity read     (debug builds) the Project added dialog's state, one key=value per line\n\
@@ -1240,6 +1241,7 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             &sirio_control::protocol::request::terminal_open(
                 parsed.value("cmd"),
                 parsed.value("agent"),
+                parsed.value("prompt"),
             ),
         ),
         ("terminal", "restart" | "state") => {
@@ -1248,7 +1250,7 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .get(2)
                 .ok_or_else(|| "Missing pane id".to_string())?;
             let request = if action == "restart" {
-                sirio_control::protocol::request::terminal_restart(pane)
+                sirio_control::protocol::request::terminal_restart(pane, parsed.flag("overlay"))
             } else {
                 sirio_control::protocol::request::terminal_state(pane)
             };

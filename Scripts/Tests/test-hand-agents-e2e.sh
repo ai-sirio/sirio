@@ -104,6 +104,14 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  session is linked, +1 at the end), and a session opened inside
 #                                  the TUI (`create ses_tui`) takes the link away; a relaunch with
 #                                  the host alive keeps the refs and the hidden tab linked
+#   opencode_switch_during_launch  a fresh OpenCode 2 tab whose session is still being created
+#                                  (`create delay 2`) when another worktree is selected: the parked
+#                                  tab still gets the late session, runs `opencode --session <id>`,
+#                                  its ref is that id and nothing is deleted; back in its worktree
+#                                  the same tab still runs it
+#   opencode_closed_during_launch  a fresh OpenCode 2 tab closed while its session is being created:
+#                                  Sirio deletes the session (`DELETE /api/session/<id>` 204), writes
+#                                  no ref and starts no process
 #   opencode_unavailable_service_launches_plain
 #                                  `create fail` (POST answered 500), `create delay 8` (the tab
 #                                  starts plain at the 3 s deadline while the control socket still
@@ -111,6 +119,14 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  OpenCode 1 (`oc-version` 1.18.33: no POST at all, the v1 plugin
 #                                  is written, reading its pane from the environment): plain
 #                                  `opencode`, no ref
+#   opencode_restart_sends_no_prompt
+#                                  an OpenCode 2 tab launched with a first prompt: the first launch is
+#                                  `opencode --session <id> --prompt P`; the Session lost overlay's
+#                                  Restart (the host killed under it) and the context menu's Restart
+#                                  both run `opencode --session <id>` with no prompt, ref unchanged
+#   agent_restart_sends_no_prompt  a claude tab launched with a first prompt: the first launch carries
+#                                  it, and the context menu's Restart and the Session lost overlay's
+#                                  Restart run `claude` without it
 #   opencode_v2_writes_no_plugin   OpenCode 2 and a worktree plugin: the real v1 plugin an
 #                                  OpenCode 1 tab made Sirio write (`make_real_v1_plugin`) and
 #                                  the legacy one that names a pane (what older builds wrote)
@@ -180,6 +196,11 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  mid-turn: one stop each, then a turn on the fresh host is one stop
 #   end_all_sessions_parity        `host.shutdown {force}` (End all sessions) under both: one stop each,
 #                                  the same notification; it shuts the host down
+#   agent_retry_after_taken_id_sends_prompt
+#                                  a control session holds the next pane id, so the host refuses it
+#                                  and a new claude tab moves to a fresh id and opens again: that
+#                                  retry is still the first launch and carries the first prompt;
+#                                  the held session is untouched
 #   opencode_resumes_without_host  last, because it stops the host itself: an OpenCode tab with its
 #                                  created session, the app quits and the host goes, the relaunch
 #                                  starts `opencode --session <id>` only after Sirio's v1 plugin is
@@ -1733,8 +1754,8 @@ case_opencode_agent_tab_resumes() {
   expect_posted "$base" 1 "the end of the first turn of an OpenCode tab Sirio launched"
   stepn "opencode agent tab A: first turn done, linked by its created session" "$sess_a"
   # A session opened inside the TUI (`/new`) that no pane created, born after A's: A cannot tell
-  # which session its TUI shows any more, so nothing is linked. The stub has no delete, so
-  # `ses_tui` stays in the folder; it is older than every session and pane the later cases make,
+  # which session its TUI shows any more, so nothing is linked. Nothing deletes
+  # `ses_tui`, so it stays in the folder; it is older than every session and pane the later cases make,
   # and the rule only looks at sessions born at or after a pane's own, so it disturbs none of them.
   oc "create ses_tui $OC_DIR"
   wait_status "$sess_a" null 4
@@ -1827,6 +1848,80 @@ case_opencode_unavailable_service_launches_plain() {
   echo "OK: OpenCode 1: no POST, plain opencode, no ref, the plugin is written"
   close_tab "$pane"
   rm -f "$W_REPO/.opencode/plugin/sirio-session.js"
+}
+
+# Opens a fresh OpenCode tab with `surface terminal open --agent opencode` and prints its pane id,
+# straight from the reply: the cases that act while its session is being created cannot spend the
+# time `open_pane` polls for.
+open_oc_tab_now() {
+  ctl surface terminal open --agent opencode --json | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)[0]["pane"])'
+}
+pane_runs_opencode() { oc_argv_of "$1" >/dev/null; }
+
+case_opencode_switch_during_launch() {
+  # A fresh OpenCode 2 tab whose session Sirio is still creating (`create delay 2`, under the
+  # 3 s deadline) when the user selects another worktree: the tab is parked, not gone, so the
+  # late reply still lands in it. It starts `opencode --session <id>` while parked, its ref is
+  # that id, and the session is not deleted; back in its worktree the same tab still runs it.
+  local wt_b seen pane id active
+  wt_b="$(worktree_id_of "$W/repo-b")"
+  [ -n "$wt_b" ] || fail "the project does not list the worktree repo-b"
+  oc "create delay 2"
+  seen="$(oc_log_count '^POST /api/session 200 ')"
+  pane="$(open_oc_tab_now)"
+  [ -n "$pane" ] || fail "surface terminal open --agent opencode named no pane"
+  ctl select-workspace --workspace "$wt_b" >/dev/null
+  # The switch must be done while the session is still being created, or this proves nothing.
+  [ "$(oc_log_count '^POST /api/session 200 ')" = "$seen" ] || fail "the service answered before the worktree switch was done: the case proves nothing"
+  echo "OK: repo-b selected while the session of $pane was being created"
+  wait_post_ok "$seen"
+  id="$OC_POST_ID"
+  oc "create ok"
+  wait_until 15 pane_runs_opencode "$pane" || fail "no opencode started for the tab $pane after its session $id was created"
+  echo "the parked tab $pane runs: opencode $(oc_argv_of "$pane")"
+  wait_ref "$pane" "$id" 10
+  wait_until 15 runs_resumed "$pane" "$id" || fail "the tab $pane, parked by the switch, did not start opencode --session $id (argv: $(oc_argv_of "$pane" || echo none))"
+  [ "$(oc_log_count "^DELETE /api/session/$id ")" = 0 ] || fail "the session $id of a tab that still exists was deleted"
+  echo "OK: the parked tab $pane runs its own session $id, and its ref is that id"
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+  runs_resumed "$pane" "$id" || fail "back in its worktree, the tab $pane no longer runs opencode --session $id (argv: $(oc_argv_of "$pane" || echo none))"
+  [ "$(session_ref_of "$pane")" = "$id" ] || fail "back in its worktree, pane $pane's ref is '$(session_ref_of "$pane")', not $id"
+  echo "OK: back in its worktree, the same tab still runs $id"
+  # The round trip can reorder the strip (the Chat tab comes back after the terminal tabs), so
+  # the pane-id order `tab_index_of` relies on no longer holds: the tab is the active one, as
+  # it was when the switch parked it.
+  active="$(ctl surface tabs read --json | python3 -I -c 'import json, sys
+tabs = json.load(sys.stdin)[0]
+tab = tabs.get("tab." + tabs["active"], "")
+print(tabs["active"] if tab.startswith("terminal|") and tab.endswith("|OpenCode") else "")')"
+  [ -n "$active" ] || fail "back in its worktree, the active tab is not the OpenCode tab of $pane"
+  ctl surface tabs close "$active" --confirm >/dev/null
+  wait_ref "$pane" "" 8
+}
+
+case_opencode_closed_during_launch() {
+  # A fresh OpenCode 2 tab closed while Sirio is still creating its session: no tab is left for
+  # the session, so Sirio deletes it on the service (DELETE /api/session/<id>) rather than leave
+  # an empty session nobody opens; nothing runs in the pane and no ref is written.
+  local seen pane id
+  oc "create delay 2"
+  seen="$(oc_log_count '^POST /api/session 200 ')"
+  pane="$(open_oc_tab_now)"
+  [ -n "$pane" ] || fail "surface terminal open --agent opencode named no pane"
+  ctl surface tabs close "$(tab_index_of "$pane")" --confirm >/dev/null
+  [ "$(oc_log_count '^POST /api/session 200 ')" = "$seen" ] || fail "the service answered before the tab was closed: the case proves nothing"
+  echo "OK: the tab of $pane was closed while its session was being created"
+  wait_post_ok "$seen"
+  id="$OC_POST_ID"
+  oc "create ok"
+  wait_until 10 oc_log_more "^DELETE /api/session/$id 204\$" 0 || fail "the session $id Sirio created for a tab closed before its launch was left on the service (no DELETE /api/session/$id 204)"
+  echo "OK: the session $id of the closed tab was deleted"
+  expect_no_ref "$pane" "a tab closed while its session was being created"
+  hold_ref "$pane" "" 1
+  ! oc_argv_of "$pane" >/dev/null || fail "an opencode runs for pane $pane, whose tab was closed before its launch: $(oc_argv_of "$pane")"
+  echo "OK: no ref and no process for the closed tab $pane"
 }
 
 # Has Sirio itself write the real v1 plugin: an OpenCode 1 tab (`oc-version` 1.18.33) is opened,
@@ -2617,6 +2712,194 @@ print(len({(json.loads(l)["title"], json.loads(l)["body"]) for l in sys.stdin}))
   [ "$(attention_get "$SESS_B" status)" = "$(attention_get "$SESS_A" status)" ] || fail "the hidden tab reads '$(attention_get "$SESS_B" status)' after End all sessions, the attached tab '$(attention_get "$SESS_A" status)'"
 }
 
+# "<pid> <arguments after the program>" of the newest process of the stub agent $2
+# ($RUN/bin/$2) that runs in pane $1, on one line; fails when the pane runs none. A `--version`
+# probe is not the tab's process.
+agent_proc_of() { # pane name
+  python3 -I -c '
+import os, sys
+pane, exe = sys.argv[1:3]
+best = None
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        with open("/proc/" + pid + "/environ", "rb") as f:
+            env = f.read().split(b"\0")
+        if ("SIRIO_PANE_ID=" + pane).encode() not in env:
+            continue
+        with open("/proc/" + pid + "/cmdline", "rb") as f:
+            argv = [a.decode(errors="replace") for a in f.read().split(b"\0")]
+        with open("/proc/" + pid + "/stat") as f:
+            started = int(f.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        continue
+    for i, word in enumerate(argv):
+        if word == exe:
+            rest = [a for a in argv[i + 1:] if a]
+            if "--version" not in rest and (best is None or started > best[0]):
+                best = (started, pid + " " + " ".join(rest))
+            break
+if best is None:
+    sys.exit(1)
+print(best[1])
+' "$1" "$RUN/bin/$2"
+}
+# Waits up to $4 s until pane $1 runs the stub agent $2 in a process other than pid $3, and
+# sets PROC to that process's "<pid> <arguments>".
+PROC=""
+new_proc_of() { # pane name old-pid
+  PROC="$(agent_proc_of "$1" "$2")" || return 1
+  [ "${PROC%% *}" != "$3" ]
+}
+wait_new_proc() { # pane name old-pid seconds
+  wait_until "$4" new_proc_of "$1" "$2" "$3" || fail "pane $1 started no new $2 after pid $3 within $4 s (now: $(agent_proc_of "$1" "$2" || echo none))"
+}
+# Whether the arguments $1 carry the prompt $2 as one word.
+args_carry() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
+# Kills the world's host under the tabs of panes $@, waits until each shows Session lost, and
+# starts a fresh host (a new terminal starts one) for the Restarts that follow. That terminal's
+# pane is left in LOST_HOST_PANE for the case to close.
+LOST_HOST_PANE=""
+lose_the_host_under() { # pane...
+  local pane
+  kill_world_hosts
+  for pane in "$@"; do
+    wait_until 30 session_lost_is "$pane" true || fail "the tab of $pane does not show Session lost after its host died"
+  done
+  LOST_HOST_PANE="$(ctl surface terminal open --cmd 'sleep 600' --json | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)[0]["pane"])')" || fail "no terminal opened after the host died"
+  [ -n "$LOST_HOST_PANE" ] || fail "the terminal opened after the host died named no pane"
+  wait_until 30 host_up || fail "no new host started after the host died"
+}
+session_lost_is() { # pane want
+  [ "$(ctl surface terminal state "$1" --json 2>/dev/null | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)[0].get("sessionLost", ""))' 2>/dev/null)" = "$2" ]
+}
+RESTART_PROMPT="SIRIO-FIRST-PROMPT"
+
+case_opencode_restart_sends_no_prompt() {
+  # An OpenCode 2 tab Sirio launched with a first prompt (what a hand-off sends): the first
+  # launch is `opencode --session <id> --prompt P`, and P is now in that session. No later
+  # launch of the tab sends it again: the Session lost overlay's own Restart, after the host
+  # died, and the context menu's Restart (`surface terminal restart`) both resume
+  # `--session <id>` alone.
+  local seen pane id old args
+  alive "$OC_PID" || oc_stub_restart
+  seen="$(oc_log_count '^POST /api/session 200 ')"
+  open_pane --agent opencode --prompt "$RESTART_PROMPT"
+  pane="$PANE"
+  wait_post_ok "$seen"
+  id="$OC_POST_ID"
+  wait_until 15 runs_resumed "$pane" "$id" || fail "the OpenCode tab $pane did not start opencode --session $id (argv: $(oc_argv_of "$pane" || echo none))"
+  PROC="$(agent_proc_of "$pane" opencode)"
+  old="${PROC%% *}"; args="${PROC#* }"
+  args_carry "$args" "$RESTART_PROMPT" || fail "the first launch of $pane did not send its prompt: opencode $args"
+  echo "OK: first launch: opencode $args"
+  lose_the_host_under "$pane"
+  ctl surface terminal restart "$pane" --overlay >/dev/null || fail "the Session lost overlay of $pane offers no Restart"
+  wait_new_proc "$pane" opencode "$old" 30
+  old="${PROC%% *}"; args="${PROC#* }"
+  echo "the overlay's Restart runs: opencode $args"
+  args_carry "$args" "--session $id" || fail "the overlay's Restart of $pane does not resume its session $id: opencode $args"
+  args_carry "$args" --prompt && fail "the overlay's Restart of $pane sent the first prompt into its session again: opencode $args"
+  echo "OK: the overlay's Restart resumes $id with no prompt"
+  ctl surface terminal restart "$pane" >/dev/null || fail "surface terminal restart $pane was refused"
+  wait_new_proc "$pane" opencode "$old" 30
+  args="${PROC#* }"
+  echo "the context menu's Restart runs: opencode $args"
+  args_carry "$args" "--session $id" || fail "the context menu's Restart of $pane does not resume its session $id: opencode $args"
+  args_carry "$args" --prompt && fail "the context menu's Restart of $pane sent the first prompt again: opencode $args"
+  echo "OK: the context menu's Restart resumes $id with no prompt"
+  [ "$(session_ref_of "$pane")" = "$id" ] || fail "pane $pane's ref is '$(session_ref_of "$pane")' after the Restarts, not $id"
+  close_tab "$pane"
+  close_tab "$LOST_HOST_PANE"
+}
+
+case_agent_restart_sends_no_prompt() {
+  # A claude tab Sirio launched with a first prompt: the first launch is `claude P`; the context
+  # menu's Restart and, after the host died, the Session lost overlay's Restart run `claude`
+  # with no P (a Restart starts the agent again; the first prompt was the first launch's).
+  local pane old args
+  open_pane --agent claude --prompt "$RESTART_PROMPT"
+  pane="$PANE"
+  wait_until 15 agent_proc_of "$pane" claude >/dev/null || fail "no claude started for $pane"
+  PROC="$(agent_proc_of "$pane" claude)"
+  old="${PROC%% *}"; args="${PROC#* }"
+  args_carry "$args" "$RESTART_PROMPT" || fail "the first launch of $pane did not send its prompt: claude $args"
+  echo "OK: first launch: claude $args"
+  ctl surface terminal restart "$pane" >/dev/null || fail "surface terminal restart $pane was refused"
+  wait_new_proc "$pane" claude "$old" 30
+  old="${PROC%% *}"; args="${PROC#* }"
+  echo "the context menu's Restart runs: claude $args"
+  args_carry "$args" "$RESTART_PROMPT" && fail "the context menu's Restart of $pane sent the first prompt again: claude $args"
+  echo "OK: the context menu's Restart runs claude with no prompt"
+  lose_the_host_under "$pane"
+  ctl surface terminal restart "$pane" --overlay >/dev/null || fail "the Session lost overlay of $pane offers no Restart"
+  wait_new_proc "$pane" claude "$old" 30
+  args="${PROC#* }"
+  echo "the overlay's Restart runs: claude $args"
+  args_carry "$args" "$RESTART_PROMPT" && fail "the overlay's Restart of $pane sent the first prompt again: claude $args"
+  echo "OK: the overlay's Restart runs claude with no prompt"
+  close_tab "$pane"
+  close_tab "$LOST_HOST_PANE"
+}
+
+pane_ids() { # every pane id `panel list` shows, space separated
+  ctl panel list --json 2>/dev/null | python3 -I -c 'import json, sys; print(" ".join(r["id"] for r in json.load(sys.stdin)))'
+}
+# Sets MOVED to the first pane of `panel list` that is not in $1 and is not $2.
+MOVED=""
+new_pane_besides() { # known-ids held-id
+  MOVED="$(python3 -I -c 'import sys
+old = set(sys.argv[1].split()) | {sys.argv[2]}
+new = [p for p in sys.argv[3].split() if p not in old]
+print(new[0] if new else "")' "$1" "$2" "$(pane_ids)")"
+  [ -n "$MOVED" ]
+}
+
+case_agent_retry_after_taken_id_sends_prompt() {
+  # The host refuses the pane id a new tab asks for (a control session holds it: IdTaken), and
+  # the tab moves to a fresh pane id and opens again. That is still the tab's first launch, so
+  # the first prompt is sent; only a later Restart leaves it out.
+  local first n held before asked pane args
+  first="$(ctl surface terminal open --cmd 'sleep 600' --json | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)[0]["pane"])')"
+  [ -n "$first" ] || fail "surface terminal open --cmd named no pane"
+  n="${first#pane-}"
+  held="pane-$((n + 1))"
+  "$PROBE" term-create "$W_REPO" --id "$held" -- sleep 300 >/dev/null || fail "host_probe term-create $held failed"
+  wait_until 10 host_lists "$held" || fail "the control session $held is not listed by the host"
+  echo "OK: $held, the next pane id, is held by a control session"
+  before="$(pane_ids)"
+  # The reply names the id the tab asked for: it must be the held one, or no id was refused and
+  # the case would only prove a first launch.
+  asked="$(ctl surface terminal open --agent claude --prompt "$RESTART_PROMPT" --json | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)[0]["pane"])')" || fail "surface terminal open --agent claude was refused"
+  [ "$asked" = "$held" ] || fail "the claude tab asked for ${asked:-no pane}, not the held $held: the host refused no id"
+  wait_until 30 new_pane_besides "$before" "$held" || fail "no new pane other than the held $held appeared for the claude tab"
+  pane="$MOVED"
+  echo "OK: the claude tab moved from the refused $held to $pane"
+  wait_until 15 agent_proc_of "$pane" claude >/dev/null || fail "no claude started for $pane after the refused id $held"
+  args="$(agent_proc_of "$pane" claude)"; args="${args#* }"
+  args_carry "$args" "$RESTART_PROMPT" || fail "the retry after the refused id $held did not send the first prompt: claude $args"
+  echo "OK: the retry on $pane sent the first prompt: claude $args"
+  host_lists "$held" || fail "the control session $held is no longer listed after the retry"
+  echo "OK: the control session $held is untouched"
+  # `panel list` shows the control session too, and `tab_index_of` counts every pane it
+  # shows: it goes first, so that the tabs close at their own index.
+  "$PROBE" term-close "$held" >/dev/null || fail "host_probe term-close $held failed"
+  wait_until 10 panel_lacks "$held" || fail "panel list still shows the ended control session $held"
+  close_tab "$pane"
+  close_tab "$first"
+}
+panel_lacks() { # pane
+  case " $(pane_ids) " in *" $1 "*) return 1 ;; esac
+  return 0
+}
+# Whether the world's host lists session $1.
+host_lists() { # session
+  "$PROBE" term-list 2>/dev/null | grep -q "^session=$1 "
+}
+
 # The OpenCode stub, started again when an earlier case stopped it (`no_service_degrades`):
 # the new process registers a new port and password where the service does, and reads
 # $RUN/oc.cmd from its start.
@@ -2745,6 +3028,8 @@ run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch
 run_case opencode_agent_tab_resumes
 run_case opencode_unavailable_service_launches_plain
+run_case opencode_switch_during_launch
+run_case opencode_closed_during_launch
 run_case opencode_v2_writes_no_plugin
 run_case opencode_unknown_version_writes_no_plugin
 run_case closed_tab_ref_is_not_inherited
@@ -2768,6 +3053,9 @@ run_case close_hidden_worktree_mid_turn_is_silent
 run_case background_exit_while_app_down_is_silent
 run_case background_host_lost
 run_case end_all_sessions_parity
+run_case opencode_restart_sends_no_prompt
+run_case agent_restart_sends_no_prompt
+run_case agent_retry_after_taken_id_sends_prompt
 run_case opencode_resumes_without_host
 
 [ "$CASES_RUN" -gt 0 ] || { echo "FAIL: --only named no case" >&2; exit 1; }

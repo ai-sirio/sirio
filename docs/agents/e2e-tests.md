@@ -134,7 +134,12 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # linked), a service that cannot create the session (500, an answer later than the 3 s deadline
 # with the control socket still answering in under a second, an OpenCode 1 on the PATH: plain
 # `opencode`, no ref, and under 1 the worktree plugin written, reading its pane from the
-# environment), OpenCode 2 leaving no worktree
+# environment), a fresh OpenCode 2 tab whose session is created while a worktree switch has parked it (it
+# still runs `opencode --session <id>` and keeps its ref, and nothing is deleted), one closed while its
+# session is created (Sirio deletes that session through `DELETE /api/session/<id>`, writes no ref and
+# starts no process), an OpenCode 2 tab launched with a first prompt whose Restart, from the context menu
+# and from the Session lost overlay (the host killed under it), resumes `--session <id>` with no prompt,
+# a claude tab launched with a first prompt whose two Restarts run `claude` without it, a claude tab whose pane id the host refuses (a control session holds it) and that opens again on a fresh id, still sending the first prompt, OpenCode 2 leaving no worktree
 # plugin (the real v1 plugin an OpenCode 1 tab made Sirio write, and the legacy one that
 # names a pane, removed; a copy of it whose
 # sirioctl line is not a JSON string literal, a user's file, and one under Sirio's header line
