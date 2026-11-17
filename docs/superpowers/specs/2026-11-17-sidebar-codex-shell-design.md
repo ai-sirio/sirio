@@ -96,9 +96,12 @@ placeholder). **(my call)**
   Sessions view does (`SelectTab` / `SelectParkedTab`) and closes the
   popover. Empty state: "Nothing needs you". The existing tests of the
   attention dot move from the segment to the Bell.
-- **Right: Search**, a ghost `IconButton`. It shows the existing filter field
-  under the header and focuses it. `Esc` clears and hides it; while it holds
-  text it stays visible. Matching (`row_matches`) and the "folded projects open
+- **Right: Search**, a ghost `IconButton`. It toggles the existing filter field
+  under the header: hidden → shown and focused; shown and empty → hidden, focus
+  to the list; shown with text → stays, focused. `Esc` clears and hides it.
+  It never hides on blur (decided while building: a field that vanishes when
+  focus leaves shifts the list under a click and strands focus that a dialog
+  restores to it). Choosing a view from the title menu focuses the list. Matching (`row_matches`) and the "folded projects open
   while filtering" rule are unchanged. No shortcut focuses the filter today.
   Switching view clears the filter (as today) and now also hides it. The
   sidebar's `Focusable` handle (used to give focus back when Settings closes)
