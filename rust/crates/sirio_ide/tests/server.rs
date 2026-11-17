@@ -150,9 +150,10 @@ fn offered_mcp_subprotocol_is_echoed() {
 fn initialize_echoes_protocol_version_and_names_sirio() {
     let h = default_harness();
     let mut c = connect(h.port);
-    let v = c.call(7, "initialize", json!({"protocolVersion":"2025-11-25","capabilities":{}}));
+    // Not the server's default version, so a constant in place of the echo fails.
+    let v = c.call(7, "initialize", json!({"protocolVersion":"2025-03-26","capabilities":{}}));
     assert_eq!(v["jsonrpc"], "2.0");
-    assert_eq!(v["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
     assert_eq!(v["result"]["serverInfo"]["name"], "sirio");
     assert!(v["result"]["capabilities"]["tools"].is_object());
 }
@@ -370,6 +371,22 @@ fn get_diagnostics_with_a_non_file_uri_is_32602_and_no_event() {
 }
 
 #[test]
+fn get_diagnostics_with_an_empty_or_relative_path_is_32602_and_no_event() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    for (n, uri) in ["file://", "file://localhost/x.rs", "file://rel/x.rs"].into_iter().enumerate() {
+        let v = c.call(
+            30 + n as u64,
+            "tools/call",
+            json!({"name":"getDiagnostics","arguments":{"uri":uri}}),
+        );
+        assert_eq!(v["error"]["code"], -32602, "{uri}");
+    }
+    assert!(h.events.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
 fn get_diagnostics_past_deadline_is_an_error() {
     let h = harness(BridgeOptions { diagnostics_deadline: Duration::from_millis(200) });
     let mut c = connect(h.port);
@@ -453,6 +470,84 @@ fn shutdown_closes_every_connection_and_the_port() {
         assert!(c.0.read().is_err());
     }
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+}
+
+// ---- a connection thread that does not end in time (Ruling 86) ----
+//
+// Every way `Bridge::shutdown` could fail here, written before the code:
+// - `shutdown_returns_within_its_deadline_when_a_connection_thread_never_returns`: a connection
+//   thread stuck in `on_event` (as one stuck in a read on a stalled mount is) holds `shutdown` up
+//   past the deadline, or for ever, and the port stays bound;
+// - `a_thread_that_outlives_shutdown_delivers_nothing_afterwards`: the stuck thread, once it
+//   comes back, ends its connection and tells the app (`Disconnected`) about a bridge that has
+//   been shut down;
+// - `shutdown_still_reports_the_connections_that_end_in_time`: the silence is not applied during
+//   the wait, so a connection that ends within the deadline is reported as before.
+
+/// A harness whose `on_event` parks on the first `Connected` it sees until `release` is sent.
+/// The parked event is dropped; every other one is forwarded.
+fn parking_harness() -> (Harness, mpsc::Sender<()>) {
+    let listener = bind(None).expect("bind");
+    let (tx, events) = mpsc::channel();
+    let (release, gate) = mpsc::channel::<()>();
+    let gate = std::sync::Mutex::new(gate);
+    let bridge = Bridge::start(listener, TOKEN.to_string(), BridgeOptions::default(), move |e| {
+        if matches!(e, BridgeEvent::Connected { .. }) {
+            let _ = gate.lock().unwrap().recv();
+            return;
+        }
+        let _ = tx.send(e);
+    })
+    .expect("start");
+    let port = bridge.port();
+    (Harness { bridge, port, events }, release)
+}
+
+/// A client that announced itself, so the connection thread is parked in `on_event`.
+fn park_a_connection(h: &Harness) -> Client {
+    let mut c = connect(h.port);
+    c.call(1, "initialize", json!({"protocolVersion":"2025-03-26"}));
+    c.send(json!({"jsonrpc":"2.0","method":"ide_connected","params":{"pid":1}}));
+    // The thread reads the frame within a poll or two and parks in `on_event`.
+    std::thread::sleep(Duration::from_millis(300));
+    c
+}
+
+#[test]
+fn shutdown_returns_within_its_deadline_when_a_connection_thread_never_returns() {
+    let (h, release) = parking_harness();
+    let port = h.port;
+    let _client = park_a_connection(&h);
+    let started = Instant::now();
+    h.bridge.shutdown();
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(900), "shutdown took {took:?}");
+    assert_eq!(bind(Some(port)).unwrap().local_addr().unwrap().port(), port);
+    let _ = release.send(());
+}
+
+#[test]
+fn a_thread_that_outlives_shutdown_delivers_nothing_afterwards() {
+    let (h, release) = parking_harness();
+    let _client = park_a_connection(&h);
+    let Harness { bridge, events, .. } = h;
+    bridge.shutdown();
+    release.send(()).unwrap();
+    // The released thread ends its connection; nothing of it reaches the app.
+    assert!(events.recv_timeout(Duration::from_millis(800)).is_err());
+}
+
+#[test]
+fn shutdown_still_reports_the_connections_that_end_in_time() {
+    let h = default_harness();
+    let mut a = connect(h.port);
+    let conn = a.handshake(&h, 7);
+    let Harness { bridge, events, .. } = h;
+    bridge.shutdown();
+    match events.recv_timeout(Duration::from_secs(2)) {
+        Ok(BridgeEvent::Disconnected { conn: gone }) => assert_eq!(gone, conn),
+        other => panic!("expected the disconnect, got {other:?}"),
+    }
 }
 
 // ---- openDiff, close_tab, closeAllDiffTabs ----

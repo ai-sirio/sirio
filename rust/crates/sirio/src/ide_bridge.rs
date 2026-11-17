@@ -10,10 +10,14 @@
 //! (`SirioWorkspace::start_ide_delivery`), the way `opencode.rs` hands over its watch's.
 //!
 //! Three rules shape the code:
-//! - Nothing here blocks the UI thread on the network or the disk. `sirio_ide::bind` can wait on
-//!   a pathological network, and a lockfile write fsyncs: both run at launch (before the event
-//!   loop) or on the background executor (`StartJob::run`), and every lockfile write after the
-//!   first goes through one writer thread that keeps only the newest content (`LockWriter`).
+//! - Nothing here blocks the UI thread on the network or the disk without a limit.
+//!   `sirio_ide::bind` can wait on a pathological network, and a lockfile write fsyncs: both run
+//!   at launch (before the event loop) or on the background executor (`StartJob::run`), and every
+//!   lockfile write after the first goes through one writer thread that keeps only the newest
+//!   content (`LockWriter`). The two waits that remain are on the UI thread at quit and at
+//!   switch-off, and both have a deadline: the lockfile's removal (`REMOVE_DEADLINE`) and the
+//!   connection threads (`Bridge::shutdown`, 500 ms in all, after which a thread still running is
+//!   left to end alone and tells the app nothing).
 //! - A lockfile never names a port nobody listens on while Sirio is alive: it is removed before
 //!   the listener is dropped (`IdeBridge::shutdown`).
 //! - The port lives in [`SSE_PORT`], not in the control state, which `sync_control_state`
@@ -158,7 +162,11 @@ pub(crate) fn resolve(
     worktrees: &[PathBuf],
 ) -> Vec<Resolved> {
     #[cfg(windows)]
-    let table = sirio_activity::process::parent_table().unwrap_or_default();
+    let table = sirio_activity::process::parent_table().unwrap_or_else(|error| {
+        // Without the snapshot no connection has an owner: say so once per resolution.
+        eprintln!("[ide] the process snapshot failed: {}", error.kind());
+        Default::default()
+    });
     #[cfg(windows)]
     let mut parent = |pid: u32| table.get(&pid).copied();
     #[cfg(not(windows))]
@@ -256,7 +264,9 @@ impl LockWriter {
                     }
                 }
                 LockMessage::Remove(done) => {
-                    let _ = lockfile.remove();
+                    if let Err(error) = lockfile.remove() {
+                        eprintln!("[ide] the lockfile was not removed: {}", error.kind());
+                    }
                     let _ = done.send(());
                     return;
                 }

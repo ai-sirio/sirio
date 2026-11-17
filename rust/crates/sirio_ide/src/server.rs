@@ -33,6 +33,10 @@ pub const DIAGNOSTICS_DEADLINE: Duration = Duration::from_millis(400);
 const AUTH_HEADER: &str = "x-claude-code-ide-authorization";
 /// How often the acceptor and every connection loop look for work.
 const POLL: Duration = Duration::from_millis(50);
+/// How long `Bridge::shutdown` waits, in all, for the connection threads to end. A thread still
+/// running then (a read stuck on a stalled mount, a send blocked on Windows) is left to end on
+/// its own: the port is already free and it no longer reaches the app.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_millis(500);
 /// A client that has not finished its handshake by then is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -130,6 +134,8 @@ struct Shared {
     options: BridgeOptions,
     on_event: Box<dyn Fn(BridgeEvent) + Send + Sync>,
     stop: AtomicBool,
+    /// Set when `shutdown` returns: a thread that outlives it delivers no event to the app.
+    silent: AtomicBool,
     diffs: Mutex<Pending>,
     conns: Mutex<HashMap<ConnId, Sender<Command>>>,
     /// A clone of every accepted socket, so `shutdown` can unblock a read, send or flush.
@@ -142,6 +148,14 @@ impl Shared {
         conns.get(&conn).is_some_and(|tx| tx.send(command).is_ok())
     }
 
+    /// Tell the app, unless `shutdown` has returned (a late thread must not reach it). An event
+    /// whose check passed in the instant before the flag was set can still arrive.
+    fn emit(&self, event: BridgeEvent) {
+        if !self.silent.load(Ordering::SeqCst) {
+            (self.on_event)(event);
+        }
+    }
+
     fn diffs(&self) -> std::sync::MutexGuard<'_, Pending> {
         self.diffs.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -151,7 +165,9 @@ impl Shared {
 pub struct Bridge {
     shared: Arc<Shared>,
     port: u16,
-    acceptor: Option<JoinHandle<()>>,
+    /// Ends once the listener is dropped and every socket cut; it hands back the connection
+    /// threads, which `shutdown` then waits for, but not for ever.
+    acceptor: Option<JoinHandle<Vec<JoinHandle<()>>>>,
 }
 
 impl Bridge {
@@ -170,6 +186,7 @@ impl Bridge {
             options,
             on_event: Box::new(on_event),
             stop: AtomicBool::new(false),
+            silent: AtomicBool::new(false),
             diffs: Mutex::new(Pending::default()),
             conns: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
@@ -211,12 +228,24 @@ impl Bridge {
         let _ = self.shared.send_to(id.conn, Command::Diagnostics(id.clone(), files));
     }
 
-    /// Close every connection and the listening port, and wait for the threads.
+    /// Close every connection and the listening port, and wait for the threads, up to
+    /// [`SHUTDOWN_DEADLINE`] in all. A thread still running then is left to end by itself, and
+    /// from here on it tells the app nothing.
     pub fn shutdown(mut self) {
+        let deadline = Instant::now() + SHUTDOWN_DEADLINE;
         self.shared.stop.store(true, Ordering::SeqCst);
+        let mut connections = Vec::new();
         if let Some(acceptor) = self.acceptor.take() {
-            let _ = acceptor.join();
+            if wait_until_finished(&acceptor, deadline) {
+                connections = acceptor.join().unwrap_or_default();
+            }
         }
+        for handle in connections {
+            if wait_until_finished(&handle, deadline) {
+                let _ = handle.join();
+            }
+        }
+        self.shared.silent.store(true, Ordering::SeqCst);
     }
 }
 
@@ -226,7 +255,18 @@ impl Drop for Bridge {
     }
 }
 
-fn accept_loop(listener: TcpListener, shared: &Arc<Shared>) {
+/// Whether `handle`'s thread ended, waiting for it until `deadline`.
+fn wait_until_finished<T>(handle: &JoinHandle<T>, deadline: Instant) -> bool {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    true
+}
+
+fn accept_loop(listener: TcpListener, shared: &Arc<Shared>) -> Vec<JoinHandle<()>> {
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
     while !shared.stop.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -247,14 +287,13 @@ fn accept_loop(listener: TcpListener, shared: &Arc<Shared>) {
         connections.retain(|h| !h.is_finished());
     }
     // Free the port first, then cut every socket: a connection stuck in a handshake, a send or
-    // the closing flush must not hold shutdown up.
+    // the closing flush must not hold shutdown up. The threads are not joined here: `shutdown`
+    // waits for them only until its deadline.
     drop(listener);
     for stream in shared.streams.lock().unwrap_or_else(|p| p.into_inner()).values() {
         let _ = stream.shutdown(Shutdown::Both);
     }
-    for handle in connections {
-        let _ = handle.join();
-    }
+    connections
 }
 
 /// Equality that does not stop at the first differing byte.
@@ -367,7 +406,7 @@ fn serve(shared: &Shared, stream: TcpStream, id: ConnId) {
     let _ = conn.ws.close(None);
     let _ = conn.ws.flush();
     shared.streams.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-    (shared.on_event)(BridgeEvent::Disconnected { conn: id });
+    shared.emit(BridgeEvent::Disconnected { conn: id });
 }
 
 impl Conn<'_> {
@@ -473,7 +512,7 @@ impl Conn<'_> {
         }
         if let Some(pid) = params.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()) {
             self.announced = true;
-            (self.shared.on_event)(BridgeEvent::Connected { conn: self.id, pid });
+            self.shared.emit(BridgeEvent::Connected { conn: self.id, pid });
         }
     }
 
@@ -503,7 +542,12 @@ impl Conn<'_> {
         let (uri, path) = match arguments.and_then(|a| a.get("uri")) {
             None | Some(Value::Null) => (None, None),
             Some(Value::String(uri)) => match from_file_uri(uri) {
-                Some(path) => (Some(uri.clone()), Some(path)),
+                // A relative or empty path would be resolved against Sirio's own working
+                // directory, as an `openDiff` path would: refused the same way.
+                Some(path) if path.is_absolute() => (Some(uri.clone()), Some(path)),
+                Some(_) => {
+                    return self.send(mcp::error(id, mcp::INVALID_PARAMS, "uri must be an absolute file:// URI"));
+                }
                 None => {
                     return self.send(mcp::error(id, mcp::INVALID_PARAMS, "uri must be a file:// URI"));
                 }
@@ -517,7 +561,7 @@ impl Conn<'_> {
             rpc_id: id.clone(),
             deadline: Instant::now() + self.shared.options.diagnostics_deadline,
         });
-        (self.shared.on_event)(BridgeEvent::Diagnostics { id: diag, conn: self.id, path });
+        self.shared.emit(BridgeEvent::Diagnostics { id: diag, conn: self.id, path });
         Ok(())
     }
 
@@ -550,7 +594,7 @@ impl Conn<'_> {
         let diff = DiffId { n: NEXT_DIFF.fetch_add(1, Ordering::SeqCst) };
         let replaced = self.shared.diffs().insert(diff.clone(), self.id, tab_name.to_string(), id.clone());
         let replaces = replaced.as_ref().map(|w| w.id.clone());
-        (self.shared.on_event)(BridgeEvent::OpenDiff {
+        self.shared.emit(BridgeEvent::OpenDiff {
             id: diff,
             conn: self.id,
             old_path,
@@ -573,7 +617,7 @@ impl Conn<'_> {
         };
         let withdrawn = self.shared.diffs().close_tab(self.id, tab_name);
         if let Some(w) = withdrawn {
-            (self.shared.on_event)(BridgeEvent::DiffWithdrawn { id: w.id });
+            self.shared.emit(BridgeEvent::DiffWithdrawn { id: w.id });
             self.send(withdrawn_error(&w.rpc_id))?;
         }
         // Claude also closes tabs it has already been answered for: nothing pending is fine.
@@ -587,7 +631,7 @@ impl Conn<'_> {
         let count = withdrawn.len();
         if !withdrawn.is_empty() {
             let ids = withdrawn.iter().map(|w| w.id.clone()).collect();
-            (self.shared.on_event)(BridgeEvent::DiffsWithdrawn { ids });
+            self.shared.emit(BridgeEvent::DiffsWithdrawn { ids });
         }
         for w in withdrawn {
             self.send(withdrawn_error(&w.rpc_id))?;
