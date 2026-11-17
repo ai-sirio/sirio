@@ -21131,6 +21131,12 @@ impl SirioWorkspace {
                 serde_json::to_string(&snapshot.spans)
                     .expect("the trace tab's spans are serializable"),
             ),
+            // The strip of background tasks under the tree (A3).
+            (
+                "background".to_string(),
+                serde_json::to_string(&snapshot.background)
+                    .expect("the trace tab's background strip is serializable"),
+            ),
         ])
     }
 

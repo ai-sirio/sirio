@@ -21,6 +21,11 @@
 //!   is drawn, 30 times a second at most while a span runs and once a second
 //!   while the turn only waits. Nothing here runs a gpui animation.
 //! - **Narrow.** Below 560 px each bar is stacked under its name.
+//! - **Background tasks** (A3). A strip under the tree lists the chat's tasks:
+//!   state, Stop and, for a shell, its last 6 tail lines. The strip's draw is
+//!   what tells the chat to read a tail (`paint_tail`), so a tab that is not
+//!   drawn costs the CLI nothing. It hears of the registry through
+//!   `ChatEvent::BackgroundChanged` as well as `TraceChanged`.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
@@ -31,13 +36,14 @@ use ely_gpui_component::{forms::Checkbox, primitives::IconName};
 use gpui::{
     AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollStrategy,
-    Styled, Subscription, UniformListScrollHandle, WeakEntity, Window,
+    StatefulInteractiveElement as _, Styled, Subscription, UniformListScrollHandle, WeakEntity, Window,
     actions, canvas, div, prelude::FluentBuilder as _, px, relative, uniform_list,
 };
 use sirio_chat::SpanKind;
 use sirio_theme::Theme;
 
 use crate::chat::trace::{Axis, TraceStore, TreeRow, Turn, TurnState, axis, format_duration};
+use crate::chat::background_view::stop_button;
 use crate::chat::{Chat, ChatEvent};
 use crate::ely_ui;
 use crate::trace_frame::{Pace, Pending, frame_driver};
@@ -74,6 +80,26 @@ pub enum TraceTabEvent {
     Close,
 }
 
+/// How many lines of a shell's tail the strip draws.
+const STRIP_TAIL_LINES: usize = 6;
+
+/// One task of the strip, as `surface.trace.read` reports it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundStripRow {
+    pub task_id: String,
+    pub kind: String,
+    pub description: String,
+    /// `running`, `stopping`, `done`, `interrupted`, `failed` or `ended`.
+    pub state: &'static str,
+    /// Whether its Stop is drawn (the task is still running).
+    pub stop: bool,
+    /// The tail lines the strip draws: a shell's last 6, none for another task
+    /// or once the CLI refused to read output.
+    pub tail: Vec<String>,
+    pub tail_note: Option<String>,
+}
+
 /// What `surface.trace.read` reports.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraceTabSnapshot {
@@ -88,6 +114,8 @@ pub struct TraceTabSnapshot {
     /// the root), `kind` (`root`, `subagent`, `llm` or `tool`), `state`,
     /// `ended` (`0` or `1`), `depth` and `folded` (`0` or `1`).
     pub spans: Vec<BTreeMap<String, String>>,
+    /// The strip of background tasks under the tree, in start order.
+    pub background: Vec<BackgroundStripRow>,
 }
 
 pub struct TraceTab {
@@ -142,7 +170,7 @@ impl TraceTab {
     pub fn new(chat: Entity<Chat>, cx: &mut Context<Self>) -> Self {
         let subscriptions = [
             cx.subscribe(&chat, |tab, _, event: &ChatEvent, cx| {
-                if matches!(event, ChatEvent::TraceChanged) {
+                if matches!(event, ChatEvent::TraceChanged | ChatEvent::BackgroundChanged) {
                     tab.sync(cx);
                     cx.notify();
                 }
@@ -187,7 +215,38 @@ impl TraceTab {
                 .read(cx, |store| store.turn(self.turn).map_or(0, Turn::dropped_spans))
                 .unwrap_or(0),
             spans: encode(&rows, &self.folded),
+            background: self.strip_rows(cx),
         }
+    }
+
+    /// The strip's tasks as drawn. It only reads: the draw (`render_background`)
+    /// is what says a tail was painted.
+    fn strip_rows(&self, cx: &App) -> Vec<BackgroundStripRow> {
+        let Some(chat) = self.chat.upgrade() else {
+            return Vec::new();
+        };
+        let chat = chat.read(cx);
+        let retired = chat.task_output_retired();
+        chat.background_entries()
+            .iter()
+            .map(|entry| {
+                let shows_tail = entry.is_shell() && !retired;
+                BackgroundStripRow {
+                    task_id: entry.task_id.clone(),
+                    kind: entry.kind().to_string(),
+                    description: entry.description.clone(),
+                    state: entry.state_word(),
+                    stop: !entry.ended(),
+                    tail: if shows_tail {
+                        let skip = entry.tail.len().saturating_sub(STRIP_TAIL_LINES);
+                        entry.tail[skip..].to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    tail_note: entry.tail_note.clone().filter(|_| shows_tail),
+                }
+            })
+            .collect()
     }
 
     fn read<R>(&self, cx: &App, read: impl FnOnce(&TraceStore) -> R) -> Option<R> {
@@ -544,6 +603,112 @@ impl TraceTab {
             .into_any_element()
     }
 
+    /// The strip of background tasks under the tree, `None` while the chat has
+    /// none. Drawing it is what tells the chat a shell's tail is on screen
+    /// (`paint_tail`): the poll reads the tasks painted since its last tick.
+    fn render_background(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat = self.chat.upgrade()?;
+        let rows = self.strip_rows(cx);
+        if rows.is_empty() {
+            return None;
+        }
+        // A refused read leaves no tail to draw: nothing is painted then.
+        if !chat.read(cx).task_output_retired() {
+            for row in rows.iter().filter(|row| row.kind == "shell") {
+                chat.read(cx).paint_tail(&row.task_id);
+            }
+        }
+        let stopping: HashSet<String> = chat
+            .read(cx)
+            .background_entries()
+            .iter()
+            .filter(|entry| entry.stopping)
+            .map(|entry| entry.task_id.clone())
+            .collect();
+        let items = rows.into_iter().map(|row| {
+            let task_id = row.task_id.clone();
+            let tone = match row.state {
+                "failed" => theme.ely.danger,
+                "running" | "stopping" => theme.ely.fg,
+                _ => theme.ely.fg_muted,
+            };
+            let stop = row.stop.then(|| {
+                let weak = self.chat.clone();
+                let id = task_id.clone();
+                stop_button(
+                    format!("trace-tab-stop-{task_id}"),
+                    stopping.contains(&task_id),
+                    theme,
+                    move |_, cx| {
+                        if let Some(chat) = weak.upgrade() {
+                            chat.update(cx, |chat, cx| chat.stop_background_task(&id, cx));
+                        }
+                    },
+                )
+            });
+            div()
+                .debug_selector({
+                    let selector = format!("trace-tab-background-{task_id}");
+                    move || selector.clone()
+                })
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .py(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(row.description.clone()),
+                        )
+                        .child(div().flex_none().text_color(theme.ely.fg_subtle).child(row.kind.clone()))
+                        .child(div().flex_none().text_color(tone).child(row.state))
+                        .children(stop),
+                )
+                .children(row.tail.iter().map(|line| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.ely.fg_muted)
+                        .child(line.clone())
+                }))
+                .children(row.tail_note.clone().map(|note| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.ely.fg_subtle)
+                        .child(note)
+                }))
+        });
+        Some(
+            div()
+                .id("trace-tab-background")
+                .debug_selector(|| "trace-tab-background".into())
+                .flex_none()
+                .max_h(px(220.0))
+                .overflow_y_scroll()
+                .px(px(12.0))
+                .py(px(6.0))
+                .border_t_1()
+                .border_color(theme.ely.border)
+                .child(
+                    div()
+                        .text_size(theme.typography.scaled(9.5))
+                        .text_color(theme.ely.fg_subtle)
+                        .child("BACKGROUND"),
+                )
+                .children(items)
+                .into_any_element(),
+        )
+    }
+
     /// The axis's tick labels, over the bars' column.
     fn render_axis(&self, shown: &Shown, style: &RowStyle) -> AnyElement {
         let theme = &style.theme;
@@ -646,6 +811,7 @@ impl Render for TraceTab {
         .track_scroll(&self.scroll)
         .size_full();
         let handle = self.scroll.0.borrow().base_handle.clone();
+        let background = self.render_background(&theme, cx);
         root.child(header)
             .child(axis_row)
             .child(
@@ -656,6 +822,7 @@ impl Render for TraceTab {
                     .child(list)
                     .child(crate::scroll::bar("trace-tab-bar", &handle)),
             )
+            .children(background)
             .child(frame_driver(
                 self.frame_pending.clone(),
                 self.frames.clone(),

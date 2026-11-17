@@ -57,6 +57,10 @@ pub struct SessionPanelSnapshot {
     /// chat is narrower than `MIN_CHAT_WIDTH`.
     pub overlay: bool,
     pub sections: Vec<SectionSnapshot>,
+    /// The Stop buttons of the Trace card's Background rows as last drawn, while the card is
+    /// unfolded: task id to `[x, y, width, height]` in window pixels.
+    #[serde(rename = "stopButtons")]
+    pub stop_buttons: std::collections::BTreeMap<String, [f32; 4]>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -82,6 +86,9 @@ pub struct RowSnapshot {
     pub action: Option<String>,
     /// A line under the row that wraps in full: what a failed action said.
     pub note: String,
+    /// The background task this row stops, while it runs (A3): its Stop is
+    /// the row's own button.
+    pub stop: Option<String>,
 }
 
 /// One line of a card, as it is drawn and as the snapshot reports it.
@@ -120,6 +127,8 @@ pub(super) struct Row {
     pub(super) detail_below: bool,
     /// A muted line under the row, wrapping rather than truncated.
     pub(super) note: String,
+    /// The background task a Stop on this row ends, while it runs.
+    pub(super) stop: Option<String>,
 }
 
 /// How a status dot reads, resolved to a theme colour when it is drawn.
@@ -151,6 +160,7 @@ impl Row {
             short: None,
             detail_below: false,
             note: String::new(),
+            stop: None,
         }
     }
 
@@ -218,6 +228,9 @@ pub(super) struct Frame {
     /// it stays at 30 frames a second or fewer. Shared with the loop's timer
     /// task, which clears it.
     trace_frame_pending: crate::trace_frame::Pending,
+    /// Where the Trace card's Background rows drew their Stop buttons, by task id, in window
+    /// pixels `[x, y, width, height]`: what a real click is aimed at.
+    stop_buttons: std::cell::RefCell<std::collections::BTreeMap<String, [f32; 4]>>,
 }
 
 /// Where the column is drawn, which the chat's width decides.
@@ -386,6 +399,7 @@ impl Chat {
         sections.extend(trace::section(
             &self.trace,
             self.trace_headline(),
+            self.background_entries(),
             std::time::Instant::now(),
         ));
         sections.extend(change_request::section(&panel.change_request));
@@ -539,6 +553,7 @@ impl Chat {
                             expanded: row.expanded,
                             action: row.action,
                             note: row.note,
+                            stop: row.stop,
                         })
                         .collect(),
                 })
@@ -551,6 +566,11 @@ impl Chat {
             drawn: self.session_panel_drawn(),
             overlay: matches!(self.session_panel_placement(), Some(Placement::Overlay(_))),
             sections,
+            stop_buttons: if panel.open && !panel.collapsed.contains("trace") {
+                panel.frame.stop_buttons.borrow().clone()
+            } else {
+                Default::default()
+            },
         }
     }
 

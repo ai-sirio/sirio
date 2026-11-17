@@ -154,6 +154,22 @@ set -euo pipefail
 #   background_agent_stop  a background agent is a live `agent` entry that is never read; Stop ends it
 #                      killed and not live
 #   background_ended_dropped  an ended entry is dropped by the next prompt
+# The next scenarios (A3, the surfaces) never call paintTail: a real frame drives the poll, so they run
+# painted (--state-only --display :N paints on a private display with no captures), except
+# background_stop_click, which sends a real X click at the Stop button's drawn position and so needs a framed
+# run at 2200x1000. The others press Stop with the panel verb `activate trace/stop/<task id>`, which the card's
+# Stop buttons call too (the popover's and the tab's call `stop_background_task` directly; the GPUI tests click
+# every button). The fixture's request log counts what the CLI was asked:
+#   background_tail_card  with the Trace card folded a live shell is never read (3 s); unfolded, the
+#                      row `trace/background/bshell001` gets `line 2` or later as its note; folded again,
+#                      the request log stops growing
+#   background_tail_tab   the same with the Trace tab opened (`tab()["background"]` carries the tail) and
+#                      then closed, the card folded throughout
+#   background_stop_click a real click on the card row's Stop button (`stopButtons` of the column's read
+#                      gives where it drew it): the row reads stopping, then interrupted, a second click
+#                      sends nothing and the log holds one stop_task
+#   background_lane_stop  a background agent has no row in the group (its lane carries Stop): the lane row
+#                      has `stop`, pressing it ends the agent, and it is never read
 # The elicitation scenarios use Scripts/Tests/stubs/elicitation/claude, the fixture's elicitation mode.
 # The composer_keys scenario (this script's own; test-ely-chat-ui-e2e.py has one of the same name)
 # uses the default stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every
@@ -194,7 +210,7 @@ set -euo pipefail
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
 # whatever the code does.
-# trace_keys, file_links, clipboard_keys, composer_keys and composer_resize need a framed run at --window-size 2200x1000
+# trace_keys, file_links, clipboard_keys, composer_keys, composer_resize and background_stop_click need a framed run at --window-size 2200x1000
 # (no --state-only): they click at pixels or send real keys.
 #
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
@@ -235,7 +251,8 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   elicitation_form elicitation_url elicitation_withdrawn unhandled_request
   session_state_background session_state_ask session_state_unprompted
   background_shell background_shell_unpainted background_shell_floor background_agent_stop
-  background_ended_dropped)
+  background_ended_dropped background_tail_card background_tail_tab background_stop_click
+  background_lane_stop)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -265,10 +282,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize background_tail_card background_tail_tab background_stop_click background_lane_stop "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize background_stop_click "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -630,6 +647,8 @@ def evaluate(expr, surface, p, c):
     def tab():
         result = dict(rpc("surface.trace.read", {"surfaceId": surface}))
         result["spans"] = json.loads(result.get("spans") or "[]")
+        # The strip of background tasks below the tree (A3).
+        result["background"] = json.loads(result.get("background") or "[]")
         return result
 
     def T(span_id):
@@ -768,6 +787,23 @@ elif command == "composer-overflow-xy":
             print(f"  read failed: {e}", file=sys.stderr)
         if time.time() > deadline:
             print("FAIL: composer-overflow-xy: the overflow trigger was never measured", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+elif command == "stop-button-xy":
+    # stop-button-xy SURFACE SECONDS TASK_ID: wait for the Stop button of the card's Background row
+    # for TASK_ID to be drawn and print the window pixel at its centre as "x y".
+    surface, seconds, task_id = sys.argv[2], float(sys.argv[3]), sys.argv[4]
+    deadline = time.time() + seconds
+    while True:
+        try:
+            box = state(surface)[0].get("stopButtons", {}).get(task_id)
+            if box:
+                print(f"{round(box[0] + box[2] / 2)} {round(box[1] + box[3] / 2)}")
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print(f"FAIL: stop-button-xy: the Stop button of {task_id} was never drawn", file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
 elif command == "composer-menu":
@@ -1015,6 +1051,8 @@ capture() { # name
 #   SIRIO_STUB_LOG  the shim's call log; SIRIO_CSP_E2E_RUN marks this run's processes
 #   SIRIO_FIXTURE_DONE  the file the monitor script writes after its last turn (session_state_unprompted)
 #   SIRIO_FIXTURE_GATE  the file session_state_background touches to release the fixture's held steps
+#   SIRIO_FIXTURE_STOP_DELAY  seconds the background-tasks stub waits before it answers a stop_task (default 1;
+#                        background_stop_click sets 5 so that a framed run's slow frames cannot skip `stopping`)
 #   SIRIO_FIXTURE_FLOOR  1 makes the background-tasks stub the 2.1.257 floor (background_shell_floor)
 #   SIRIO_FIXTURE_REQUEST_LOG  the file the background-tasks stub appends every control request to
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
@@ -1047,7 +1085,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_CSP_E2E_RUN=$RUN_DIR" "TRACE_STEP_MS=${TRACE_STEP_MS:-400}"
     "SIRIO_FIXTURE_USER_LOG=$RUN_DIR/fixture-user.log" "SIRIO_FIXTURE_CONTROL_LOG=$RUN_DIR/fixture-control.log"
     "SIRIO_FIXTURE_RESPONSE_LOG=$RUN_DIR/$name-responses.jsonl" "SIRIO_FIXTURE_GATE=${SIRIO_FIXTURE_GATE:-}" "SIRIO_FIXTURE_DONE=${SIRIO_FIXTURE_DONE:-}"
-    "SIRIO_FIXTURE_FLOOR=${SIRIO_FIXTURE_FLOOR:-}" "SIRIO_FIXTURE_REQUEST_LOG=$RUN_DIR/$name-requests.jsonl"
+    "SIRIO_FIXTURE_FLOOR=${SIRIO_FIXTURE_FLOOR:-}" "SIRIO_FIXTURE_STOP_DELAY=${SIRIO_FIXTURE_STOP_DELAY:-}" "SIRIO_FIXTURE_REQUEST_LOG=$RUN_DIR/$name-requests.jsonl"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -3541,6 +3579,91 @@ scenario_background_ended_dropped() {
   stop_app
 }
 
+# How many get_task_output requests the fixture heard in the named launch, once SECONDS have passed
+# with nothing asked of it: the log is sampled twice, 3 s apart, after a pause that lets a read in
+# flight at the fold land (it is logged when sent, so at most one late send follows).
+expect_reads_stop() { # launch-name desc
+  local before after
+  sleep 2.5
+  before=$(fixture_requests "$1" get_task_output)
+  sleep 3
+  after=$(fixture_requests "$1" get_task_output)
+  [ "$before" = "$after" ] || fail "$2: the log grew from $before to $after get_task_output requests"
+  echo "OK: $2 ($after requests, none new in 3 s)"
+}
+
+scenario_background_tail_card() {
+  background_chat background_tail_card
+  send_prompt shell
+  wait_panel "bshell001 is a live shell" 'bg("bshell001") is not None and bg("bshell001")["live"]' 30
+  wait_panel "the Trace card is drawn, folded" "S('trace') is not None and S('trace')['expanded'] is False" 30
+  sleep 3
+  [ "$(fixture_requests background_tail_card get_task_output)" = 0 ] || fail "a folded card read the shell: $(fixture_requests background_tail_card get_task_output) get_task_output requests in 3 s"
+  echo "OK: the folded card cost the CLI no get_task_output"
+  unfold_cards trace
+  wait_panel "the unfolded card's row reaches line 2 or later" 'R("trace", "trace/background/bshell001") is not None and re.match(r"line [2-9]", R("trace", "trace/background/bshell001")["note"])' 30
+  [ "$(fixture_requests background_tail_card get_task_output)" -ge 1 ] || fail "the card shows a tail but the log holds no get_task_output"
+  fold_cards trace
+  expect_reads_stop background_tail_card "the folded card stopped reading"
+  echo "OK: background_tail_card: no reads folded, the unfolded card's row shows the tail, folding stops the reads"
+  stop_app
+}
+
+scenario_background_tail_tab() {
+  background_chat background_tail_tab
+  send_prompt shell
+  wait_panel "bshell001 is a live shell" 'bg("bshell001") is not None and bg("bshell001")["live"]' 30
+  wait_panel "the Trace card is drawn, folded" "S('trace') is not None and S('trace')['expanded'] is False" 30
+  sleep 3
+  [ "$(fixture_requests background_tail_tab get_task_output)" = 0 ] || fail "a chat with its card folded read the shell"
+  panel_ctl activate trace/open >/dev/null
+  wait_trace_tab "the layout lists a trace tab" present 20
+  wait_panel "the tab's strip carries the shell's tail, line 2 or later, nothing else new" 'any(t["taskId"] == "bshell001" and t["tail"] and re.match(r"line [2-9]", t["tail"][-1]) for t in tab()["background"])' 30
+  [ "$(fixture_requests background_tail_tab get_task_output)" -ge 1 ] || fail "the tab shows a tail but the log holds no get_task_output"
+  echo "step: the trace tab is closed; the card stays folded"
+  ctl surface tabs close "$(tab_positions trace)" --confirm >/dev/null
+  wait_trace_tab "the trace tab is closed" absent 20
+  expect_reads_stop background_tail_tab "the closed tab stopped reading"
+  echo "OK: background_tail_tab: the tab's strip shows the tail while it is drawn, closing it stops the reads"
+  stop_app
+}
+
+scenario_background_stop_click() {
+  SIRIO_FIXTURE_STOP_DELAY=5
+  background_chat background_stop_click
+  send_prompt shell
+  wait_panel "bshell001 is a live shell" 'bg("bshell001") is not None and bg("bshell001")["live"]' 30
+  unfold_cards trace
+  wait_panel "the group's row for it is running and carries its Stop" 'R("trace", "trace/background/bshell001") is not None and R("trace", "trace/background/bshell001")["tag"] == "running" and R("trace", "trace/background/bshell001")["stop"] == "bshell001"' 30
+  local xy
+  xy=$(E2E stop-button-xy "$SURFACE" 15 bshell001) || fail "the Stop button was never drawn"
+  echo "step: a real click on the Stop button of the row, drawn at window pixel $xy"
+  click_at_window "$xy"
+  wait_panel "the row reads stopping" 'R("trace", "trace/background/bshell001")["tag"] == "stopping"' 5
+  echo "step: a second real click at the same place"
+  click_at_window "$xy"
+  wait_panel "the row reads interrupted and has no Stop left" 'R("trace", "trace/background/bshell001")["tag"] == "interrupted" and R("trace", "trace/background/bshell001")["stop"] is None' 15
+  [ "$(fixture_requests background_stop_click stop_task)" = 1 ] || fail "the fixture heard $(fixture_requests background_stop_click stop_task) stop_task requests, not exactly one"
+  echo "OK: background_stop_click: a real click on the row's Stop reads stopping, then interrupted, a second click sent nothing, one stop_task"
+  stop_app
+}
+
+scenario_background_lane_stop() {
+  background_chat background_lane_stop
+  send_prompt agent
+  wait_panel "aagent001 is a live agent" 'bg("aagent001") is not None and bg("aagent001")["live"]' 30
+  unfold_cards trace
+  wait_panel "the agent's lane carries Stop" 'lane("toolu_a1") is not None and lane("toolu_a1")["stop"] == "aagent001"' 30
+  check_panel "the group holds no second row for it" 'R("trace", "trace/background/aagent001") is None'
+  panel_ctl activate trace/stop/aagent001 >/dev/null
+  wait_panel "Stop ends the agent: killed, not live" 'bg("aagent001")["outcome"] == "killed" and not bg("aagent001")["live"]' 15
+  check_panel "its lane has no Stop left" 'lane("toolu_a1")["stop"] is None'
+  [ "$(fixture_requests background_lane_stop get_task_output)" = 0 ] || fail "an agent's output was asked for"
+  [ "$(fixture_requests background_lane_stop stop_task)" = 1 ] || fail "the fixture heard $(fixture_requests background_lane_stop stop_task) stop_task requests, not exactly one"
+  echo "OK: background_lane_stop: the agent's lane has the Stop, the group no row, and the agent is never read"
+  stop_app
+}
+
 ran=0
 for name in "${SCENARIOS[@]}"; do
   echo "== scenario $name"
@@ -3550,6 +3673,7 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_GATE=""
   SIRIO_FIXTURE_DONE=""
   SIRIO_FIXTURE_FLOOR=""
+  SIRIO_FIXTURE_STOP_DELAY=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))

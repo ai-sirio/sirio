@@ -1356,7 +1356,9 @@ BG_REQUEST_LOG = next(
      if arg.startswith("--fixture-request-log=")),
     "",
 )
-BG_STOP_DELAY = 1.0
+# `SIRIO_FIXTURE_STOP_DELAY` (seconds) lengthens it: a framed run's slow frames can keep a control read
+# waiting past a second, and the `stopping` state a test looks for would be over by then.
+BG_STOP_DELAY = float(os.environ.get("SIRIO_FIXTURE_STOP_DELAY") or 1.0)
 BG_OUTPUT_SECONDS = 6
 BG_PROMPTS = queue.Queue()
 # Every task the session has started, by id: its type, when it began, when its

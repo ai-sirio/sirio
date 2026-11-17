@@ -1210,6 +1210,16 @@ impl Chat {
             self.composer_row.compact_needed.set(compact_needed);
             self.composer_row.narrow_needed.set(narrow_needed);
             self.composer_row.layout.set(layout);
+            // The render that picks Narrow is the last one a cached, idle chat gets, so the
+            // popover the row no longer draws is closed, and the keyboard handed back, from
+            // here: a later render may never come.
+            if layout.is_narrow() && self.background_popover_open {
+                self.close_background_popover();
+                cx.defer_in(window, |chat, window, cx| {
+                    chat.settle_background_popover(window, cx);
+                    cx.notify();
+                });
+            }
             self.composer_row.needed.set(needed);
             self.composer_row.docked.set(docked);
             layout

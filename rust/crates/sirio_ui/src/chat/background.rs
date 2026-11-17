@@ -67,9 +67,27 @@ impl BackgroundEntry {
         !self.live || self.outcome.is_some()
     }
 
-    /// A shell or a Monitor: what the CLI can read the output of.
-    fn is_shell(&self) -> bool {
+    /// A shell or a Monitor: what the CLI can read the output of, and so the
+    /// only task whose tail a surface draws.
+    pub fn is_shell(&self) -> bool {
         self.task_type.as_deref() == Some(SHELL_TYPE)
+    }
+
+    /// What every surface says of the task: `running`, `stopping`, or how it
+    /// ended: `done` (`completed`), `interrupted` (`killed`, `stopped`),
+    /// `failed`, any other outcome `ended`. A task the CLI's rows dropped with
+    /// no terminal line is `ended` too. The first terminal status decides, as
+    /// the entry keeps it.
+    pub fn state_word(&self) -> &'static str {
+        match self.outcome.as_deref() {
+            Some("completed") => "done",
+            Some("killed" | "stopped") => "interrupted",
+            Some("failed") => "failed",
+            Some(_) => "ended",
+            None if !self.live => "ended",
+            None if self.stopping => "stopping",
+            None => "running",
+        }
     }
 
     /// The word the control read gives for the task's kind.
@@ -540,9 +558,17 @@ impl Chat {
         Some(std::sync::Arc::new(control))
     }
 
+    /// The tasks still running, in start order: what the composer's popover lists.
+    pub fn live_background_tasks(&self) -> impl Iterator<Item = &BackgroundEntry> {
+        self.background.entries().iter().filter(|entry| !entry.ended())
+    }
+
     /// The registry changed under a surface: it repaints, and the Trace tab
-    /// hears of it.
+    /// hears of it. The popover lists live tasks, so it goes with the last.
     fn background_changed(&mut self, cx: &mut Context<Self>) {
+        if self.live_background_tasks().next().is_none() {
+            self.close_background_popover();
+        }
         cx.emit(ChatEvent::BackgroundChanged);
         cx.notify();
     }
@@ -655,7 +681,7 @@ impl Chat {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     // Failure list for `tail_lines`, written before the function. It is wrong if:
@@ -801,15 +827,17 @@ mod tests {
     use crate::chat::{Chat, ChatEvent};
 
     /// The connection's task calls, answered at once and counted.
-    struct Fake {
+    pub(in crate::chat) struct Fake {
         reads: Mutex<Vec<String>>,
+        stops: Mutex<Vec<String>>,
         answer: Mutex<Result<TaskOutput, String>>,
     }
 
     impl Fake {
-        fn answering(output: &str) -> Arc<Self> {
+        pub(in crate::chat) fn answering(output: &str) -> Arc<Self> {
             Arc::new(Self {
                 reads: Mutex::new(Vec::new()),
+                stops: Mutex::new(Vec::new()),
                 answer: Mutex::new(Ok(TaskOutput {
                     output: output.to_string(),
                     total_bytes: output.len() as u64,
@@ -818,8 +846,13 @@ mod tests {
             })
         }
 
-        fn reads(&self) -> usize {
+        pub(in crate::chat) fn reads(&self) -> usize {
             self.reads.lock().unwrap().len()
+        }
+
+        /// The tasks Stop was sent for, in order.
+        pub(in crate::chat) fn stops(&self) -> Vec<String> {
+            self.stops.lock().unwrap().clone()
         }
     }
 
@@ -829,7 +862,9 @@ mod tests {
             self.answer.lock().unwrap().clone()
         }
 
-        fn stop(&self, _task_id: &str) {}
+        fn stop(&self, task_id: &str) {
+            self.stops.lock().unwrap().push(task_id.to_string());
+        }
     }
 
     fn rows(task_id: &str) -> sirio_chat::ChatEvent {

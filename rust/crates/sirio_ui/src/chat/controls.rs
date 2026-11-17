@@ -941,9 +941,12 @@ impl Chat {
         // this is only ever "how many are still going" — what *finished*
         // arrives separately, as a notice in the transcript, because the
         // list is already empty by the time that is known.
+        let background_entity = entity.clone();
+        let background_frame = self.composer_row.clone();
         let background_tasks = (self.background_tasks > 0).then(|| {
             let running = self.background_tasks;
             div()
+                .relative()
                 .id("background-tasks-chip")
                 .debug_selector(|| "background-tasks-chip".into())
                 .flex()
@@ -955,9 +958,27 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 .text_color(theme.ely.fg_subtle)
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|style| style.bg(bezel_theme.element_hover))
                 .tooltip(crate::controls::tooltip(background_tasks_label(running)))
+                .on_click(move |_, window, cx| {
+                    background_entity
+                        .update(cx, |chat, cx| chat.toggle_background_popover(window, cx));
+                })
+                // Measures the chip; paints nothing.
+                .child(
+                    canvas(
+                        move |bounds, _, _| background_frame.background_chip.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .child(format!("⌁ {running}"))
         });
+        let background_popover = (!narrow)
+            .then(|| self.render_background_popover(theme, Hang::AboveEnd, cx))
+            .flatten();
 
         // The thinking display. Drawn only while the transport has it and
         // the CLI has not refused the verb; unset shows no value at all,
@@ -1313,7 +1334,13 @@ impl Chat {
             })
             // Narrow has neither the task count nor the ring: they are rows in ⋯.
             .when(background_tasks.is_some() && !narrow, |row| {
-                row.child(div().relative().flex_none().children(background_tasks))
+                row.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .children(background_tasks)
+                        .children(background_popover),
+                )
             })
             .when(thinking_control.is_some(), |row| {
                 row.child(

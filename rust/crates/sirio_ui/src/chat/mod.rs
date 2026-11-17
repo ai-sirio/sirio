@@ -47,6 +47,7 @@ mod ely_tests;
 pub(crate) mod identity;
 mod background;
 pub use background::{BackgroundEntry, tail_lines};
+pub(crate) mod background_view;
 mod bypass;
 mod composer_height;
 mod composer_row;
@@ -2355,6 +2356,13 @@ pub struct Chat {
     /// Bypass permissions, picked and not yet confirmed (`bypass.rs`).
     bypass_ask: Option<AgentMode>,
     context_popover_open: bool,
+    /// The background-task popover (A3), hung from the composer's task chip. It
+    /// lists the live tasks and never outlives them: `background_changed` closes it.
+    background_popover_open: bool,
+    background_popover_focus: FocusHandle,
+    /// The popover closed while it may have held the keyboard: the next render hands it
+    /// back to the composer (`settle_background_popover`).
+    background_focus_return: bool,
     /// The effort list, anchored to the effort chip. Its own popover rather
     /// than a section of the model picker: effort is a scale of the agent's
     /// own levels, not one more model.
@@ -2767,6 +2775,8 @@ impl Chat {
             },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
+            background_popover_focus: cx.focus_handle().tab_stop(true),
+            background_focus_return: false,
             effort_picker_focus: cx.focus_handle().tab_stop(true),
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
@@ -2798,6 +2808,7 @@ impl Chat {
             mode_picker_open: false,
             bypass_ask: None,
             context_popover_open: false,
+            background_popover_open: false,
             effort_picker_open: false,
             agent_session_id: resumed_session,
             continues_agent_session,
@@ -3095,6 +3106,7 @@ impl Chat {
             // open, so Escape has to resolve from its context too.
             KeyBinding::new("escape", Cancel, Some("ChatModelSearch")),
             KeyBinding::new("escape", Cancel, Some("ChatContextPopover")),
+            KeyBinding::new("escape", Cancel, Some("ChatBackgroundPopover")),
             KeyBinding::new("escape", Cancel, Some("ChatEffortPicker")),
             KeyBinding::new("escape", Cancel, Some("ChatThinkingPicker")),
             KeyBinding::new("escape", Cancel, Some("ChatOverflowMenu")),
@@ -6018,6 +6030,7 @@ impl Chat {
             || self.mode_picker_open
             || self.thinking_picker_open
             || self.context_popover_open
+            || self.background_popover_visible()
             || self.effort_picker_open
             || self.overflow_open
             || self.history_open
@@ -6028,6 +6041,7 @@ impl Chat {
             self.mode_picker_open = false;
             self.thinking_picker_open = false;
             self.context_popover_open = false;
+            self.background_popover_open = false;
             self.effort_picker_open = false;
             self.overflow_open = false;
             self.history_open = false;
@@ -7352,6 +7366,7 @@ impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
+        self.settle_background_popover(window, cx);
         // Read before any loader renews this view's lease.
         if sirio_perf::enabled() && crate::motion::Painter::of(cx).woken(cx) {
             sirio_perf::event("motion.Chat.woken", cx.entity_id().as_u64());
