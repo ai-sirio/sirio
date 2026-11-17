@@ -25786,6 +25786,17 @@ impl SirioWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        // A split is refused as `split_focused_with_placement` refuses an impossible one: nothing
+        // happens (and, checked first, no shell is started for it). A Proposal tab is answered
+        // for by Accept, Reject or the close confirmation, and closing it closes the whole tab
+        // and every session in it, so it never holds a terminal beside it (spec 10, ruling 88).
+        if self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id && tab.kind == TabKind::Proposal)
+        {
+            return;
+        }
         let pane_id = self.next_pane_id;
         let working_directory = self.working_directory.clone();
         let terminal = cx.new(|cx| {

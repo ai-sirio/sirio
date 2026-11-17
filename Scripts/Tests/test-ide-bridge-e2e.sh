@@ -203,6 +203,10 @@ set -eEuo pipefail
 #                    it was" (drawn on the bar, read back from the state) for good; unsaved edits again
 #                    win, then the disk warning is back; the counts stay and Accept answers Claude's
 #                    text. A second proposal warns when something else writes the file
+#   proposal_split_refused
+#                    (ruling 88) `pane.split` (all four directions) on the active Proposal tab changes
+#                    nothing: the same panes and tabs, the proposal intact; Accept then closes only the
+#                    proposal, and every terminal session is still alive
 #   captures         the tab in Unified and Split (`surface.changes.view`)
 #   no_decision_without_user
 #                    with an openDiff pending, switching the bridge off, the client dropping its
@@ -3223,6 +3227,39 @@ case_disk_changed_warning() {
   end_app_client
 }
 
+# A Proposal tab is never split (ruling 88): a split would put a terminal in it, and Accept, Reject or
+# Claude's closeAllDiffTabs closes the whole tab, ending that terminal's session unasked.
+case_proposal_split_refused() {
+  proposal_client
+  printf 'one\n' >"$WT/split.txt"
+  open_diff split-1 "$WT/split.txt" 'two\n'
+  expect_proposal split-1 ready True
+  local pos panes_before tabs_before direction
+  pos="$(expect_tab '✻ split.txt')"
+  ctl surface tabs select "$pos" >/dev/null
+  [ "$(tabs_field active)" = "$pos" ] || fail "$CASE: the proposal's tab is not the active one, so the split below would not meet it"
+  panes_before="$("$CTL" panel list --json | python3 -I -c 'import json, sys; print(len(json.load(sys.stdin)))')"
+  tabs_before="$(tab_count)"
+  for direction in right down left up; do
+    ctl pane split --direction "$direction" >/dev/null
+  done
+  sleep 1
+  [ "$("$CTL" panel list --json | python3 -I -c 'import json, sys; print(len(json.load(sys.stdin)))')" = "$panes_before" ] \
+    || fail "$CASE: pane.split added a pane to the Proposal tab"
+  [ "$(tab_count)" = "$tabs_before" ] || fail "$CASE: pane.split changed the tab count"
+  echo "OK: pane.split on the active Proposal tab changed nothing ($panes_before panes, $tabs_before tabs)"
+  expect_proposal split-1 ready True
+  act split-1 accept
+  assert_response "$(req_id split-1)" 'd["texts"] == ["FILE_SAVED", "two\n"]' "Accept answers"
+  expect_no_proposals
+  [ "$(tab_count)" = "$((tabs_before - 1))" ] || fail "$CASE: Accept closed other tabs than the proposal's ($tabs_before then $(tab_count))"
+  # `panel list` counts the Proposal tab's own pane: it goes with the tab, nothing else does.
+  [ "$("$CTL" panel list --json | python3 -I -c 'import json, sys; print(len(json.load(sys.stdin)))')" = "$((panes_before - 1))" ] \
+    || fail "$CASE: Accept ended more than the proposal's own pane"
+  echo "OK: Accept closed only the proposal; every terminal session is alive"
+  end_app_client
+}
+
 case_proposal_captures() {
   proposal_client
   printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cap.txt"
@@ -3390,6 +3427,7 @@ run_proposal_cases() {
   case_run too_large case_too_large
   case_run dirty_warning case_dirty_warning
   case_run disk_changed_warning case_disk_changed_warning
+  case_run proposal_split_refused case_proposal_split_refused
   case_run captures case_proposal_captures
   case_run no_decision_without_user case_no_decision_without_user
   case_run worktree_close_guarded case_worktree_close_guarded
