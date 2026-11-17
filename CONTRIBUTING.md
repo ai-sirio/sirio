@@ -46,7 +46,7 @@ The Rust workspace is 25 crates under `rust/crates/`. Leaves have no local depen
 | Crate | Role |
 |-------|------|
 | `sirio` | The app: window shell, tabs/panes, control-socket dispatch, tray, command palette |
-| `sirio_ui` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings), built on [Ely](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components) and Sirio's own `motion`, `scroll`, `popup`, `combobox` and `settings::scaffold` modules |
+| `sirio_ui` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings), built on [Ely](https://github.com/ELY-Open-Source/Ely-GPUI-Components) and Sirio's own `motion`, `scroll`, `popup`, `combobox` and `settings::scaffold` modules |
 | `sirio_terminal` | Terminal panes on `libghostty-vt`, PTY handling via `portable-pty`, splits |
 | `sirio_activity` | Layered agent-activity detection (hooks / title / content / process), no GPUI dependency |
 | `sirio_control` | `ControlServer` (unix socket) + `PaneRegistry` + the `sirioctl` CLI |
