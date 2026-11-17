@@ -156,21 +156,26 @@ set -eEuo pipefail
 #                    and from git, and the pane's session ends
 #   reject_leaves_no_inert_tab
 #                    a dirty file tab among Close Others: Reject in the confirmation answers
-#                    DIFF_REJECTED and the proposal's tab is gone at once, though the dirty-tab prompt
-#                    is then cancelled (Escape) and the dirty tab stays
+#                    DIFF_REJECTED and the proposal's tab is gone at once; the dirty-tab prompt is up
+#                    (the state says so), a click on Cancel closes it (the state says so), the dirty tab stays
 #   confirm_stable_tabs
 #                    a Close Others question is open, another worktree is selected, Reject: no tab
-#                    of that worktree closes and nothing is answered (the question held identities,
-#                    not positions)
+#                    of that worktree (clean file tabs, which close without asking) closes and nothing
+#                    is answered (the question held identities, not positions)
 #   confirm_stable_worktree
 #                    three worktrees a-gone, b-asked, c-next made with git under one directory (git
 #                    lists them sorted by path): the removal question of b-asked is open while a-gone
 #                    is removed behind the app's back and the sidebar rescans, so b-asked's row moves
 #                    up by one (asserted from the listing); Reject removes b-asked (looked up again
 #                    by path) and neither c-next nor any other worktree
-#   secondary_focus_keeps_editor
-#                    the focus in an editor tab of Secondary: an openDiff opens its tab in the strip
-#                    without taking the active tab, and the editor still takes keys
+#   focus_in_secondary_keeps_editor
+#                    the Primary terminal is the active tab and the user clicks (xdotool) into the file
+#                    shown in Secondary, then an openDiff arrives: the proposal joins the strip, the
+#                    app's pane state says Secondary still shows the file, and keys typed after (xdotool)
+#                    land in that file's buffer (read from the editor state)
+#   focus_in_primary_shows_proposal
+#                    a file shown in Secondary, a click into the Primary terminal, an openDiff: the
+#                    proposal is what Secondary shows
 #   symlink_title    a symlink CLAUDE.md -> AGENTS.md as the file: the tab is titled "✻ CLAUDE.md"
 #   project_close_guarded
 #                    the same for the sidebar's "Remove project from Sirio?" (RemoveProject, driven by
@@ -1826,8 +1831,17 @@ ensure_worktree() { # branch
   local path
   path="$(branch_worktree "$1")"
   if [ -z "$path" ]; then
-    ctl new-workspace --project "$(project_id "$WT")" --branch "$1" >/dev/null
+    ctl new-workspace --project "$(project_id "$WT")" --branch "$1" >/dev/null 2>&1 || true
     path="$(branch_worktree "$1")"
+    # A worktree git has but the sidebar dropped (an older refresh landed after it) comes back
+    # with the rescan a select runs.
+    local tries=0
+    while [ -z "$path" ] && [ "$tries" -lt 20 ]; do
+      tries=$((tries + 1))
+      "$CTL" select-workspace --workspace "$WT_ID" >/dev/null 2>&1 || true
+      sleep 0.5
+      path="$(branch_worktree "$1")"
+    done
   fi
   [ -n "$path" ] || fail "$CASE: no worktree on branch $1"
   printf '%s' "$path"
@@ -2309,6 +2323,15 @@ for row in json.load(sys.stdin):
 # A Close Others question, then another worktree is selected: Reject touches no tab of it.
 case_confirm_stable_tabs() {
   local keep before second i
+  # Clean file tabs in the other worktree first: they close without asking, so a close that
+  # reached them would show. Switching away and back restores each strip with position ids, so a
+  # question that held ids would find them in the other worktree.
+  second="$(ensure_worktree ide-second)"
+  select_new_worktree "$second"
+  for i in 1 2 3 4 5 6; do
+    printf 'f%s\n' "$i" >"$second/t$i.txt"
+    ctl surface editor open --path "$second/t$i.txt" >/dev/null
+  done
   ctl select-workspace --workspace "$WT_ID" >/dev/null
   proposal_client
   printf 'one\n' >"$WT/s1.txt"; printf 'f1\n' >"$WT/sf1.txt"; printf 'f2\n' >"$WT/sf2.txt"
@@ -2320,9 +2343,7 @@ case_confirm_stable_tabs() {
   expect_proposal tabs-1 ready True
   act_alone close_others "$keep"
   expect_state "Close Others asks first" 'd["confirmation"]["then"]' close_tabs
-  second="$(ensure_worktree ide-second)"
   select_new_worktree "$second"
-  for i in 1 2 3 4 5 6; do sockcall surface.terminal.open "cmd=sleep 300" >/dev/null; done
   before="$(tab_count)"
   act_alone confirm_reject
   sleep 1
@@ -2330,7 +2351,7 @@ case_confirm_stable_tabs() {
   echo "OK: no tab of the other worktree closed ($before tabs)"
   expect_state "the question is gone and the proposal kept" 'len(d["proposals"])' 1
   assert_unanswered "$(req_id tabs-1)" "nothing was answered for a question about another worktree"
-  close_tabs_of_kind terminal
+  close_tabs_of_kind file
   ctl select-workspace --workspace "$WT_ID" >/dev/null
   act tabs-1 reject
   assert_response "$(req_id tabs-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
@@ -2357,33 +2378,84 @@ case_reject_leaves_no_inert_tab() {
   act_alone confirm_reject
   assert_response "$(req_id inert-1)" 'd["texts"] == ["DIFF_REJECTED", "inert-1"]' "Reject answers"
   expect_no_tab '✻ id1.txt'
+  expect_state "the dirty-tab prompt is up" 'd["prompt_up"]' True
+  capture ide-proposal-dirty-prompt
   echo "OK: the proposal's tab is gone while the dirty-tab prompt is still up"
   window="$(find_window)"
-  [ -z "$window" ] || DISPLAY="$DISPLAY_TARGET" xdotool key --window "$window" Escape
-  sleep 1
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID to cancel the prompt in"
+  # Cancel is the second button of the centred dialog (measured on ide-proposal-dirty-prompt.png).
+  local geometry width height
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 50 / 100))" "$((height * 552 / 1000))" click 1
+  expect_state "Cancel closed the prompt" 'd["prompt_up"]' False
   [ "$(tab_pos 'idd.txt')" != 0 ] || fail "$CASE: the dirty tab was closed"
   expect_no_proposals
   close_tabs_of_kind file
   end_app_client
 }
 
-# Keyboard focus in an editor of Secondary: the proposal opens beside it, the editor stays.
-case_secondary_focus_keeps_editor() {
+# Where the keyboard focus is decides what Secondary shows when a proposal arrives (spec 4.7).
+# The Primary terminal is the active tab and the user clicks into the file shown in Secondary
+# (the click does not change the active tab): the proposal joins the strip, Secondary still shows
+# the file, and keys typed afterwards land in its buffer (read from the editor state).
+case_focus_in_secondary_keeps_editor() {
   proposal_client
-  printf 'one\n' >"$WT/sec.txt"; printf 'two\n' >"$WT/sec2.txt"
-  ctl surface editor open --path "$WT/sec.txt" >/dev/null
-  local pos active
-  pos="$(expect_tab 'sec.txt')"
-  active="$(tabs_field active)"
-  [ "$active" = "$pos" ] || fail "$CASE: the editor is not the active tab ($active, $pos)"
-  open_diff sec-1 "$WT/sec2.txt" 'x\n'
-  expect_proposal sec-1 on_screen True
-  expect_tab '✻ sec2.txt' >/dev/null
-  [ "$(tabs_field active)" = "$pos" ] || fail "$CASE: the proposal took the active tab from the editor"
-  sockcall surface.editor.type text=z >/dev/null || fail "$CASE: the editor was unmounted (no file to type in)"
-  echo "OK: the editor stays active and takes keys; the proposal is in the strip"
-  act sec-1 reject
-  assert_response "$(req_id sec-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  printf 'one\ntwo\nthree\n' >"$WT/fs.txt"; printf 'p\n' >"$WT/fs2.txt"
+  ctl surface editor open --path "$WT/fs.txt" >/dev/null
+  local filepos window geometry width height
+  filepos="$(expect_tab 'fs.txt')"
+  ctl surface tabs select "$CLIENT_TAB" >/dev/null
+  [ "$(tabs_field active)" = "$CLIENT_TAB" ] || fail "$CASE: the terminal is not the active tab"
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 62 / 100))" "$((height * 18 / 100))" click 1
+  sleep 0.8
+  [ "$(tabs_field active)" = "$CLIENT_TAB" ] || fail "$CASE: the click made another tab the active one; the layout under test is gone"
+  expect_state "the keyboard focus is in Secondary" 'd["secondary_focused"]' True
+  expect_state "Secondary shows the file" 'd["secondary_shown"]' "$filepos"
+  open_diff fs-1 "$WT/fs2.txt" 'x\n'
+  expect_proposal fs-1 on_screen True
+  expect_tab '✻ fs2.txt' >/dev/null
+  expect_state "Secondary still shows the file, not the proposal" 'd["secondary_shown"]' "$filepos"
+  DISPLAY="$DISPLAY_TARGET" xdotool type --delay 60 "KEYS"
+  sleep 0.5
+  # Only now make the file the active tab, to read its buffer through the editor state.
+  ctl surface tabs select "$filepos" >/dev/null
+  case "$("$CTL" surface editor state --json | jq_py 'd[0].get("text", "")')" in
+    *KEYS*) ;;
+    *) fail "$CASE: the typed keys did not reach the file's buffer ($("$CTL" surface editor state --json | jq_py 'd[0].get("text", "")' | head -c 120))" ;;
+  esac
+  echo "OK: the keys typed after the proposal opened landed in the file's buffer"
+  act fs-1 reject
+  assert_response "$(req_id fs-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  close_tabs_of_kind file
+  end_app_client
+}
+
+# The other direction: a file is shown in Secondary and the user clicks into the Primary terminal:
+# the proposal becomes what Secondary shows.
+case_focus_in_primary_shows_proposal() {
+  proposal_client
+  printf 'one\n' >"$WT/fp.txt"; printf 'p\n' >"$WT/fp2.txt"
+  ctl surface editor open --path "$WT/fp.txt" >/dev/null
+  expect_tab 'fp.txt' >/dev/null
+  local window geometry width height pos
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 35 / 100))" "$((height * 45 / 100))" click 1
+  sleep 0.8
+  expect_state "the keyboard focus left Secondary" 'd["secondary_focused"]' False
+  open_diff fp-1 "$WT/fp2.txt" 'x\n'
+  expect_proposal fp-1 on_screen True
+  pos="$(expect_tab '✻ fp2.txt')"
+  expect_state "Secondary shows the proposal" 'd["secondary_shown"]' "$pos"
+  act fp-1 reject
+  assert_response "$(req_id fp-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
   close_tabs_of_kind file
   end_app_client
 }
@@ -2712,7 +2784,8 @@ run_proposal_cases() {
   case_run worktree_close_guarded case_worktree_close_guarded
   case_run project_close_guarded case_project_close_guarded
   case_run confirm_stable_worktree case_confirm_stable_worktree
-  case_run secondary_focus_keeps_editor case_secondary_focus_keeps_editor
+  case_run focus_in_secondary_keeps_editor case_focus_in_secondary_keeps_editor
+  case_run focus_in_primary_shows_proposal case_focus_in_primary_shows_proposal
   case_run symlink_title case_symlink_title
   case_run parked_worktree case_parked_worktree
 }

@@ -678,7 +678,7 @@ impl IdeBridge {
     /// `surface.ide.state`: what the bridge holds, with no token, no selection and no text of a
     /// proposal; a path appears only as a worktree root. `live` is every terminal Sirio holds: an
     /// owner whose pane is not among them is shown as none, as it is for every action.
-    pub(crate) fn state_json(&self, live: &[LivePane], proposals: Value, confirmation: Value) -> String {
+    pub(crate) fn state_json(&self, live: &[LivePane], proposals: Value, confirmation: Value, extra: Value) -> String {
         let mut connections: Vec<(&ConnId, &Connection)> = self.connections.iter().collect();
         connections.sort_by_key(|(conn, _)| conn.0);
         let connections: Vec<Value> = connections
@@ -700,7 +700,7 @@ impl IdeBridge {
                 })
             })
             .collect();
-        json!({
+        let mut state = json!({
             "enabled": self.enabled,
             "port": self.running.as_ref().map(|running| running.port),
             "lockfile": self.running.as_ref().map(|running| running.lock.name.as_str()),
@@ -710,8 +710,11 @@ impl IdeBridge {
             "toasts": self.toasts,
             "hook_resolutions": self.hook_resolutions,
             "last_delivery": null,
-        })
-        .to_string()
+        });
+        if let (Some(state), Value::Object(extra)) = (state.as_object_mut(), extra) {
+            state.extend(extra);
+        }
+        state.to_string()
     }
 }
 

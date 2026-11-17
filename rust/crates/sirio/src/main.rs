@@ -6269,6 +6269,14 @@ struct SirioWorkspace {
     /// End All Terminal Sessions confirmation (SP2 spec §4.2): shown only
     /// when some session reports `foreground.running` or an agent.
     pending_end_all: Option<PendingEndAll>,
+    /// Wraps the Secondary half, so the window's keyboard focus inside it (in any of its tabs) can
+    /// be told from focus elsewhere.
+    secondary_focus: FocusHandle,
+    /// Whether the keyboard focus was inside the Secondary half in the last frame drawn: the
+    /// delivery loop that opens a proposal has no window to ask.
+    secondary_focused: std::cell::Cell<bool>,
+    /// Whether a window prompt (a native or drawn dialog) was up in the last frame drawn.
+    prompt_up: std::cell::Cell<bool>,
     /// F-WIN-10: a transient, floating, auto-dismissing notice -- distinct
     /// from `Sidebar::set_notice`'s persistent inline banner, which stays
     /// silent when the sidebar isn't the visible surface. `toast_id` tags
@@ -7611,6 +7619,9 @@ impl SirioWorkspace {
             restore_focus_pending: false,
             pending_pane_close: None,
             pending_end_all: None,
+            secondary_focus: cx.focus_handle(),
+            secondary_focused: std::cell::Cell::new(false),
+            prompt_up: std::cell::Cell::new(false),
             published_pane_directories: BTreeSet::new(),
             toast: None,
             next_toast_id: 0,
@@ -11693,9 +11704,20 @@ impl SirioWorkspace {
         }
         let live = self.ide_live_panes(cx);
         let (proposals, confirmation) = self.ide_proposals_state(cx);
+        // The position (as `surface.tabs.read` numbers them) of the tab Secondary shows.
+        let shown = self
+            .center_split
+            .active(PaneRole::Secondary)
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .map(|index| index + 1);
+        let extra = serde_json::json!({
+            "secondary_shown": shown,
+            "secondary_focused": self.secondary_focused.get(),
+            "prompt_up": self.prompt_up.get(),
+        });
         vec![(
             "state".to_string(),
-            cx.global::<ide_bridge::IdeBridge>().state_json(&live, proposals, confirmation),
+            cx.global::<ide_bridge::IdeBridge>().state_json(&live, proposals, confirmation, extra),
         )]
     }
 
@@ -21465,9 +21487,11 @@ impl SirioWorkspace {
     }
 
     /// Opens Claude's proposed edit as a tab of the current worktree's Secondary half
-    /// (spec 2026-11-15 4.7): it becomes Secondary's shown tab and Secondary is revealed, but
-    /// the keyboard stays where it was, so the user may answer in the terminal. The one
-    /// exception is a user already in the Secondary half, whose active tab it then replaces.
+    /// (spec 2026-11-15 4.7): Secondary is revealed and the keyboard stays where it was, so the
+    /// user may answer in the terminal. When the window's keyboard focus is inside Secondary, in
+    /// any of its tabs, the proposal joins the strip and Secondary keeps its shown tab (the
+    /// editor being typed in is never unmounted); anywhere else, or with no focus, it becomes
+    /// Secondary's shown tab.
     fn add_proposal_tab(
         &mut self,
         view: Entity<sirio_ui::proposal_tab::ProposalTab>,
@@ -21476,6 +21500,7 @@ impl SirioWorkspace {
     ) {
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        let focus_in_secondary = self.secondary_focused.get();
         let active_in_secondary = self
             .tabs
             .get(self.active_tab)
@@ -21498,8 +21523,13 @@ impl SirioWorkspace {
         // Keyboard focus in Secondary stays on the tab it is in (an editor being typed in is
         // never unmounted): the proposal is in the strip beside it. Anywhere else it becomes
         // Secondary's shown tab.
-        if !active_in_secondary {
+        if !focus_in_secondary {
             self.center_split.set_active(PaneRole::Secondary, Some(tab_id));
+            // The active tab is what the workspace calls focused: when it was a Secondary tab
+            // the proposal now covers, it follows.
+            if active_in_secondary {
+                self.active_tab = self.tabs.len() - 1;
+            }
         }
         self.mark_activity_dirty();
         cx.notify();
@@ -26506,13 +26536,17 @@ impl SirioWorkspace {
                         .into_any_element()
                 }
             });
-        div()
+        let group = div()
             .flex()
             .flex_row()
             .size_full()
             .bg(theme.ely.bg)
-            .child(surface)
-            .into_any_element()
+            .child(surface);
+        if role == PaneRole::Secondary {
+            group.track_focus(&self.secondary_focus).into_any_element()
+        } else {
+            group.into_any_element()
+        }
     }
 
     fn has_current_worktree(&self) -> bool {
@@ -30092,6 +30126,10 @@ impl SirioWorkspace {
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
+        // Where the keyboard focus is, from the frame last drawn (the handle was in it).
+        self.secondary_focused
+            .set(self.secondary_focus.contains_focused(window, cx));
+        self.prompt_up.set(window.has_active_prompt());
         // Spec 2026-11-01-primary-rail §5, before anything reads the active tab.
         self.settle_primary_peek(window, cx);
         // Spec 2026-09-24 §5: a tab drag that ended without a drop leaves
