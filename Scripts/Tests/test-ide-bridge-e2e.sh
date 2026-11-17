@@ -3670,7 +3670,7 @@ live_setup() {
   # The fake model API (the committed scenario file), on a free loopback port, HOLD 1 s.
   local port
   port="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-  python3 -I "$ROOT/rust/crates/sirio_term_session/tests/live/fake_messages.py" "$port" 1 >"$RUN_DIR/fake.log" 2>&1 &
+  FAKE_MESSAGES_ROOT="$WT" python3 -I "$ROOT/rust/crates/sirio_term_session/tests/live/fake_messages.py" "$port" 1 >"$RUN_DIR/fake.log" 2>&1 &
   FAKE_PID=$!
   local tries=0
   while ! python3 -I -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 2).close()' "$port" 2>/dev/null; do

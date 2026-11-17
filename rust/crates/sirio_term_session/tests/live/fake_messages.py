@@ -1,12 +1,14 @@
 # Stand-in for the Anthropic Messages API, enough for a Claude Code turn.
-# usage: fake_messages.py PORT HOLD_SECONDS
+# usage: [FAKE_MESSAGES_ROOT=<dir>] fake_messages.py PORT HOLD_SECONDS
 # Holds each /v1/messages request HOLD seconds (so "working" can be observed), then streams
 # either "ok" or, when the latest user turn says "run tool" and carries no tool result yet,
 # a Bash tool call that sleeps 3 s and touches `probe-file` in Claude's cwd. When it says
 # "run edit" (an Edit not yet answered): an Edit of `<cwd>/probe.txt` ("alpha" -> "beta");
-# "run edit twice" streams it in two successive turns (beta -> alpha the second time, so both apply).
+# "run edit twice" streams it in two successive turns (beta -> alpha the second time, so both apply;
+# that needs FAKE_MESSAGES_ROOT, see below).
 # Only the latest prompt decides; every response has its own message id, so Claude keeps the turns apart.
 # The cwd is the "Primary working directory" Claude reports in its request, else this process's.
+# The file is read only under $FAKE_MESSAGES_ROOT (realpath), else the Edit is alpha -> beta.
 # Binds 127.0.0.1 only. Nothing here is a credential.
 import itertools, json, os, re, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,16 +17,24 @@ HOLD = float(sys.argv[2])
 TOOL_INPUT = {"command": "sleep 3; touch probe-file", "description": "Create a probe file"}
 EDIT_OLD, EDIT_NEW = "alpha", "beta"
 COUNTER = itertools.count(1)
+# The only directory whose probe.txt the fake may read (the live E2E's worktree); unset, nothing is read.
+ROOT = os.path.realpath(os.environ["FAKE_MESSAGES_ROOT"]) if os.environ.get("FAKE_MESSAGES_ROOT") else None
 
 
 def edit_input(request):
     """The Edit of `<cwd>/probe.txt`: alpha -> beta, and beta -> alpha once the file holds beta, so
-    successive Edits keep applying."""
+    successive Edits keep applying. The file is read only under $FAKE_MESSAGES_ROOT (realpath), else the
+    Edit is alpha -> beta."""
     found = re.search(r"Primary working directory: ([^\\\n]+)", json.dumps(request, ensure_ascii=False))
     cwd = found.group(1).strip() if found else os.getcwd()
     path = cwd + "/probe.txt"
+    real = os.path.realpath(path)
     try:
-        text = open(path).read()
+        if ROOT and real.startswith(ROOT + os.sep):
+            text = open(real).read()
+        else:
+            print("probe.txt not read: outside FAKE_MESSAGES_ROOT (or it is unset)", flush=True)
+            text = EDIT_OLD
     except OSError:
         text = EDIT_OLD
     old, new = (EDIT_NEW, EDIT_OLD) if EDIT_OLD not in text and EDIT_NEW in text else (EDIT_OLD, EDIT_NEW)
