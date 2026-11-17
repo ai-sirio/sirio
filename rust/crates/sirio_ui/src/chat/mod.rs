@@ -3687,6 +3687,7 @@ impl Chat {
                 self.streaming = false;
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
+                self.ask_session_permissions(cx);
                 // The turn may have switched the branch.
                 if self.session_panel_open() {
                     self.reread_session_branch(cx);
@@ -5798,6 +5799,11 @@ impl Chat {
         if let Some(client) = &self.client {
             let _ = client.respond_permission(request_id, option.id.clone());
         }
+        // Always allow adds a rule: the card reads it now, not at the turn's
+        // end. The ask follows the answer on the same channel.
+        if option.id == "allow_always" {
+            self.ask_session_permissions(cx);
+        }
         self.clear_question_answer_focus();
         cx.notify();
     }
@@ -6185,6 +6191,7 @@ impl Chat {
                         }
                         chat.ensure_session_context();
                         chat.refresh_session_connectors(cx);
+                        chat.ask_session_permissions(cx);
                     });
 
                     while let Ok(event) = events.recv().await {
