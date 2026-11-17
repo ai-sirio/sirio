@@ -730,6 +730,8 @@ pub struct ChangesTab {
     /// diff on every frame, and one wheel tick over a large diff cost
     /// seconds. Kept in step with the row stream by `sync_list_rows`.
     list_state: ListState,
+    /// The row stream `list_state` was last spliced to: what the list draws, item by item.
+    list_rows: Rc<Vec<ListRow>>,
     /// Fingerprint of the row stream `list_state` was last spliced to
     /// (kinds, sections, paths, keys -- never text). A refresh that
     /// re-reads an unchanged diff leaves it alone; an expand, a collapse
@@ -1019,6 +1021,7 @@ impl ChangesTab {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             new_side_commentable: true,
             gutter_press: None,
@@ -1663,18 +1666,9 @@ impl ChangesTab {
     /// Whether the list laid out the item that draws `line` of `path` on `side` inside its
     /// viewport (partly in view counts): `Some(false)` when that item lies wholly above or below
     /// it, `None` when no row draws the line or the list has not laid the item out yet. Read
-    /// from `ListState`'s own layout, through the row stream the list renders.
+    /// from `ListState`'s own layout, through the row stream the list was spliced with.
     pub fn line_in_view(&self, path: &Path, side: AnnotationSide, line: u32) -> Option<bool> {
-        let mut rows = Vec::new();
-        for section in self.section_rows(self.unified_mode) {
-            rows.push(ListRow::Header {
-                section: section.section,
-                count: section.count,
-                collapsed: section.collapsed,
-            });
-            rows.extend(section.rows.into_iter().map(ListRow::Change));
-        }
-        let index = line_row_index(&rows, path, side, Some(line as usize))?;
+        let index = line_row_index(&self.list_rows, path, side, Some(line as usize))?;
         let above = self.list_state.item_is_above_viewport(index)?;
         let below = self.list_state.item_is_below_viewport(index)?;
         Some(!above && !below)
@@ -2109,7 +2103,14 @@ impl ChangesTab {
         perf_baseline::list_build(rows.len());
         if fingerprint != self.list_fingerprint {
             let old_count = self.list_state.item_count();
+            // `splice` over the whole stream puts the scroll top back to the first item; a
+            // composer growing under the user's keystrokes must not take the view with it.
+            let scroll_top = self.list_state.logical_scroll_top();
             self.list_state.splice(0..old_count, rows.len());
+            if scroll_top.item_ix > 0 && !rows.is_empty() {
+                let item_ix = scroll_top.item_ix.min(rows.len() - 1);
+                self.list_state.scroll_to(gpui::ListOffset { item_ix, offset_in_item: scroll_top.offset_in_item });
+            }
             #[cfg(test)]
             perf_baseline::splice();
             self.list_fingerprint = fingerprint;
@@ -2167,7 +2168,9 @@ impl ChangesTab {
                 }
             }
         }
-        Rc::new(rows)
+        let rows = Rc::new(rows);
+        self.list_rows = rows.clone();
+        rows
     }
 
     /// Puts row `index` at the top of the view. A reveal runs in the rebuild
@@ -5326,6 +5329,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -7275,6 +7279,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -7371,6 +7376,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -7661,6 +7667,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -8138,6 +8145,7 @@ mod tests {
                 annotation_views: Rc::default(),
                 open_threads: Rc::default(),
                 reveal_annotation: None,
+                list_rows: Rc::default(),
                 commentable: false,
                 gutter_press: None,
                 last_pick: None,
@@ -8609,6 +8617,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,

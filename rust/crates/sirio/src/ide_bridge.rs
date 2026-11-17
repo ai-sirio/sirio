@@ -403,6 +403,9 @@ pub(crate) struct IdeBridge {
     toasts: Vec<String>,
     /// How the comments of the last proposal that ended with some were delivered.
     last_delivery: Option<&'static str>,
+    /// How many times comments went to the clipboard since launch (one per ending, however many
+    /// proposals it closed): the state tells one delivery from the next with it.
+    deliveries: u64,
     /// How many resolutions finished that a hook started (a connection announcing itself, a
     /// worktree's terminals attaching, and those chains' retries), not the ones a request runs
     /// through `ide_when_resolved` for itself. A number only; the debug state shows it so a
@@ -440,6 +443,7 @@ pub(crate) fn start_at_launch(
         selection: Coalescer::default(),
         toasts: Vec::new(),
         last_delivery: None,
+        deliveries: 0,
         hook_resolutions: 0,
     };
     let mut next = if enabled { bridge.begin_start() } else { None };
@@ -566,7 +570,8 @@ impl IdeBridge {
             }
             BridgeEvent::Diagnostics { .. }
             | BridgeEvent::OpenDiff { .. }
-            | BridgeEvent::DiffWithdrawn { .. } => {}
+            | BridgeEvent::DiffWithdrawn { .. }
+            | BridgeEvent::DiffsWithdrawn { .. } => {}
         }
     }
 
@@ -673,6 +678,7 @@ impl IdeBridge {
     /// Records that comments went to the clipboard, the only delivery there is.
     pub(crate) fn note_comments_on_clipboard(&mut self) {
         self.last_delivery = Some("clipboard");
+        self.deliveries += 1;
     }
 
     /// Records the copy of a toast the app showed.
@@ -718,6 +724,7 @@ impl IdeBridge {
             "toasts": self.toasts,
             "hook_resolutions": self.hook_resolutions,
             "last_delivery": self.last_delivery,
+            "deliveries": self.deliveries,
         });
         if let (Some(state), Value::Object(extra)) = (state.as_object_mut(), extra) {
             state.extend(extra);

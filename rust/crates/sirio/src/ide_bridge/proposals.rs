@@ -233,7 +233,8 @@ impl SirioWorkspace {
                 };
                 self.ide_open_diff(opening, cx);
             }
-            BridgeEvent::DiffWithdrawn { id } => self.ide_diff_withdrawn(&id, cx),
+            BridgeEvent::DiffWithdrawn { id } => self.ide_diffs_withdrawn(&[id], cx),
+            BridgeEvent::DiffsWithdrawn { ids } => self.ide_diffs_withdrawn(&ids, cx),
             _ => {}
         }
     }
@@ -298,7 +299,12 @@ impl SirioWorkspace {
             record.path = path;
             record.title = title.clone();
             let view = record.view.clone();
+            // The old proposal ends here, like a withdraw: what was written on it is delivered.
+            let comments = view.read(cx).comments_text();
             view.update(cx, |tab, cx| tab.replace(init, cx));
+            if let Some(text) = comments {
+                self.ide_copy_comments(text, cx);
+            }
             let view_id = view.entity_id();
             if let Some(tab_id) = self.proposal_tab_id(view_id)
                 && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
@@ -432,8 +438,9 @@ impl SirioWorkspace {
             return;
         };
         let record = self.ide_proposals.records.remove(index);
+        // Accept answers Claude as before; the comments the user wrote still reach the clipboard.
         let (answer, comments) = match event {
-            ProposalEvent::Accept(text) => (DiffAnswer::Saved(text.clone()), None),
+            ProposalEvent::Accept(text) => (DiffAnswer::Saved(text.clone()), record.view.read(cx).comments_text()),
             ProposalEvent::Reject { comments } => (DiffAnswer::Rejected, comments.clone()),
         };
         if answer_diff(cx, &record.id, answer).is_err() {
@@ -460,19 +467,25 @@ impl SirioWorkspace {
         self.ide_prune_confirmation(cx);
     }
 
-    /// Claude closed the proposal (`close_tab`, `closeAllDiffTabs`): the tab goes without asking.
-    /// Comments written so far move to the clipboard.
-    fn ide_diff_withdrawn(&mut self, id: &DiffId, cx: &mut Context<Self>) {
-        self.ide_proposals.waiting.remove(id);
-        let Some(index) = self.ide_proposals.records.iter().position(|record| &record.id == id) else {
-            return;
-        };
-        let record = self.ide_proposals.records.remove(index);
-        if let Some(text) = record.view.read(cx).comments_text() {
-            self.ide_copy_comments(text, cx);
+    /// Claude closed proposals (`close_tab`, or every one with `closeAllDiffTabs`): the tabs go
+    /// without asking, and the comments written on them move to the clipboard in one delivery.
+    fn ide_diffs_withdrawn(&mut self, ids: &[DiffId], cx: &mut Context<Self>) {
+        let mut comments = Vec::new();
+        let mut dropped = Vec::new();
+        for id in ids {
+            self.ide_proposals.waiting.remove(id);
+            let Some(index) = self.ide_proposals.records.iter().position(|record| &record.id == id) else {
+                continue;
+            };
+            let record = self.ide_proposals.records.remove(index);
+            comments.extend(record.view.read(cx).comments_text());
+            self.ide_remove_view(record.view.entity_id(), cx);
+            dropped.push(record);
         }
-        self.ide_remove_view(record.view.entity_id(), cx);
-        cx.defer(move |_| drop(record));
+        if !comments.is_empty() {
+            self.ide_copy_comments(comments.join("\n"), cx);
+        }
+        cx.defer(move |_| drop(dropped));
         cx.notify();
     }
 
@@ -785,9 +798,9 @@ impl SirioWorkspace {
                     "refusal": tab.is_refused(),
                     "editing": tab.is_editing(),
                     "comments": tab.comment_count(),
-                    "cards": tab.card_count(),
-                    "composer": tab.composer_position(cx).map(|(side, line, in_view)| {
-                        json!({"side": if side == CommentSide::Old { "old" } else { "new" }, "line": line, "in_view": in_view})
+                    "cards": tab.card_count(cx),
+                    "composer": tab.composer_position(cx).map(|(side, line, in_view, draft_len)| {
+                        json!({"side": if side == CommentSide::Old { "old" } else { "new" }, "line": line, "in_view": in_view, "draft_len": draft_len})
                     }),
                     "reject_label": tab.reject_label(),
                     "owner_named": tab.has_owner_title(),

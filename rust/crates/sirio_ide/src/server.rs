@@ -99,9 +99,12 @@ pub enum BridgeEvent {
         tab_name: String,
         replaces: Option<DiffId>,
     },
-    /// Claude closed the proposal (`close_tab` or `closeAllDiffTabs`); it was answered with an
-    /// error that carries no decision, so close the tab without asking.
+    /// Claude closed one proposal (`close_tab`); it was answered with an error that carries no
+    /// decision, so close the tab without asking.
     DiffWithdrawn { id: DiffId },
+    /// Claude closed every proposal of the connection at once (`closeAllDiffTabs`): one event,
+    /// so what the user wrote on them can be delivered together.
+    DiffsWithdrawn { ids: Vec<DiffId> },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -578,10 +581,15 @@ impl Conn<'_> {
     }
 
     fn close_all_diff_tabs(&mut self, id: &Value) -> Result<(), Dead> {
-        let withdrawn = self.shared.diffs().close_all(self.id);
+        let mut withdrawn = self.shared.diffs().close_all(self.id);
+        // The order they were opened in, so what the user wrote on them reads in that order.
+        withdrawn.sort_by_key(|w| w.id.n);
         let count = withdrawn.len();
+        if !withdrawn.is_empty() {
+            let ids = withdrawn.iter().map(|w| w.id.clone()).collect();
+            (self.shared.on_event)(BridgeEvent::DiffsWithdrawn { ids });
+        }
         for w in withdrawn {
-            (self.shared.on_event)(BridgeEvent::DiffWithdrawn { id: w.id });
             self.send(withdrawn_error(&w.rpc_id))?;
         }
         self.send(mcp::result(id, mcp::text_result(&format!("CLOSED_{count}_DIFF_TABS"))))

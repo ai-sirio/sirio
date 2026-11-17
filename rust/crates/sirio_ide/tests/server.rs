@@ -657,13 +657,12 @@ fn close_all_counts_its_own_connection_only() {
     assert_eq!(frames[0]["error"]["code"], -32000);
     assert_eq!(frames[1]["error"]["code"], -32000);
     assert_eq!(frames[2]["result"]["content"], json!([{"type":"text","text":"CLOSED_2_DIFF_TABS"}]));
-    let mut withdrawn = Vec::new();
-    for _ in 0..2 {
-        match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
-            BridgeEvent::DiffWithdrawn { id } => withdrawn.push(id),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
+    // One event carries both: the user's comments on them are delivered together.
+    let withdrawn = match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+        BridgeEvent::DiffsWithdrawn { ids } => ids,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(withdrawn.len(), 2);
     assert!(withdrawn.contains(&a1.id) && withdrawn.contains(&a2.id));
     // B's proposal is untouched and still answerable.
     assert!(b.recv(Duration::from_millis(200)).is_none());

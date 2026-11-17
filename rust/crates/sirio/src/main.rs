@@ -3578,8 +3578,18 @@ impl ControlHandler for AppControlHandler {
                         "surface.ide.comment requires tab_name, side=old|new, line, text, and optionally end_line and commit=false",
                     );
                 };
-                let end_line = number("end_line");
-                let commit = request.params.get("commit").map(String::as_str) != Some("false");
+                let end_line = match request.params.get("end_line") {
+                    None => None,
+                    Some(_) => match number("end_line") {
+                        Some(end_line) => Some(end_line),
+                        None => return ControlResponse::failure(&request.id, "surface.ide.comment: end_line is not a line number"),
+                    },
+                };
+                let commit = match request.params.get("commit").map(String::as_str) {
+                    None | Some("true") => true,
+                    Some("false") => false,
+                    Some(_) => return ControlResponse::failure(&request.id, "surface.ide.comment: commit must be true or false"),
+                };
                 self.queue_action(request, move |reply| ControlAction::IdeComment {
                     tab_name,
                     side,
@@ -11643,7 +11653,9 @@ impl SirioWorkspace {
                     }
                     if matches!(
                         event,
-                        sirio_ide::BridgeEvent::OpenDiff { .. } | sirio_ide::BridgeEvent::DiffWithdrawn { .. }
+                        sirio_ide::BridgeEvent::OpenDiff { .. }
+                            | sirio_ide::BridgeEvent::DiffWithdrawn { .. }
+                            | sirio_ide::BridgeEvent::DiffsWithdrawn { .. }
                     ) {
                         workspace.ide_proposal_event(event, cx);
                         return;

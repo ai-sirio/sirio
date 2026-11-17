@@ -561,9 +561,10 @@ impl ProposalTab {
             .collect();
     }
 
-    /// The side and last line of the open composer, and whether the diff's list laid that line
-    /// out in view (`None` while it has not laid it out), if a composer is open.
-    pub fn composer_position(&self, cx: &App) -> Option<(CommentSide, u32, Option<bool>)> {
+    /// The side and last line of the open composer, whether the diff's list laid that line out
+    /// in view (`None` while it has not laid it out), and how many characters the draft holds
+    /// (never the text), if a composer is open.
+    pub fn composer_position(&self, cx: &App) -> Option<(CommentSide, u32, Option<bool>, usize)> {
         self.composer.as_ref().map(|open| {
             let side = match open.anchor.side {
                 AnnotationSide::Old => CommentSide::Old,
@@ -573,13 +574,22 @@ impl ProposalTab {
                 .changes
                 .as_ref()
                 .and_then(|changes| changes.read(cx).line_in_view(&open.anchor.path, open.anchor.side, open.anchor.last()));
-            (side, open.anchor.last(), in_view)
+            (side, open.anchor.last(), in_view, open.view.read(cx).text(cx).chars().count())
         })
     }
 
-    /// How many comment cards the diff was handed: what `rebuild_cards` last made.
-    pub fn card_count(&self) -> usize {
-        self.cards.len()
+    /// How many comment cards the diff draws for this proposal: read from the diff's own
+    /// report of where each annotation was placed, not from the comments held.
+    pub fn card_count(&self, cx: &App) -> usize {
+        self.changes.as_ref().map_or(0, |changes| {
+            changes
+                .read(cx)
+                .report()
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.key != COMPOSER_KEY && annotation.placed != "hidden")
+                .count()
+        })
     }
 
     /// The debug verb's entry: what a click on the gutter and typing do. The anchor is the one
@@ -597,6 +607,9 @@ impl ProposalTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.mode == Mode::Edit {
+            return Err("no diff is shown while the proposal is being edited".to_owned());
+        }
         let changes = self.changes.clone().ok_or_else(|| "the proposal's diff is not loaded".to_owned())?;
         if side == CommentSide::New && self.proposal_was_edited(cx) {
             return Err(PROPOSED_SIDE_CLOSED.to_owned());
@@ -611,6 +624,7 @@ impl ProposalTab {
             last,
             (first != last).then_some(first),
         )?;
+        self.notice = None;
         self.open_composer(anchor, cx);
         let view = self.composer.as_ref().map(|open| open.view.clone()).ok_or_else(|| "no composer opened".to_owned())?;
         let input = view.update(cx, |view, cx| view.ensure_input(window, cx));

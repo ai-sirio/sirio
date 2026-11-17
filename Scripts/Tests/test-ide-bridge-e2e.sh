@@ -200,24 +200,43 @@ set -eEuo pipefail
 #                    the path relative to the worktree, `#L<a>-<b>` for the range, `(proposed) `
 #                    before the New side's text
 #   comment_composer_anchor
-#                    a 300-line file with every tenth line changed (thirty hunks, so line 150 starts well below the viewport): a comment with commit=false opens
-#                    the composer at Old line 150 (the state shows its side and line, no comment,
-#                    no card, and in_view true: the diff's list, whose layout gpui computed, has
-#                    scrolled that line's row into its viewport); a line not in the diff and an unknown tab are errors that leave it
-#                    as it was; Reject answers DIFF_REJECTED and the CLIPBOARD, which the case
-#                    owned before, is unchanged: a draft is never delivered
-#   comment_refusals the verb's errors leave the tab as it was: an unknown tab, a line that is not
-#                    in the diff, a side that is neither old nor new, and (Ruling 27) a New-side
-#                    comment once Edit has changed the text
+#                    a 300-line file with every tenth line changed (thirty hunks, so line 150
+#                    starts well below the viewport): a comment with commit=false opens the
+#                    composer at Old line 150 holding a seven-character draft (the state shows
+#                    side, line, draft length, no comment, no card, and in_view true: the diff's
+#                    list, whose layout gpui computed, has scrolled that line's row into its
+#                    viewport); Reject answers DIFF_REJECTED and the CLIPBOARD, which the case
+#                    owned before, is unchanged and `deliveries` has not moved: a draft is never
+#                    delivered
+#   composer_typing_keeps_line
+#                    the same composer, then a real click into its text box and real keys
+#                    (xdotool): the draft grows to the typed length and in_view is still true (a
+#                    keystroke re-splices the diff's list; the view must not jump to the top)
+#   comment_refusals the verb's errors leave the tab as it was and name their reason: an unknown
+#                    tab, a line that is not in the diff, a side that is neither old nor new, an
+#                    end_line that is no number, a commit that is neither true nor false, a
+#                    comment while Edit shows no diff, and (Ruling 27) a New-side comment on the
+#                    diff of the edited text
 #   comments_on_withdraw
-#                    two comments, then Claude's close_tab: TAB_CLOSED, the openDiff gets -32000,
-#                    and the clipboard holds the two lines with the toast
+#                    two comments and an open draft, then Claude's close_tab: TAB_CLOSED, the
+#                    openDiff gets -32000, one delivery, and the clipboard holds the two comments
+#                    and not the draft
+#   comments_on_close_all
+#                    two proposals with a comment each, then closeAllDiffTabs: both openDiffs get
+#                    -32000, ONE delivery (the copy and its toast are one step), and the clipboard holds both comments
+#   comments_on_replace
+#                    a comment, then an openDiff with the same tab_name: the old openDiff gets
+#                    -32000, one delivery, the clipboard holds the old proposal's comment
+#   comments_on_accept
+#                    a comment, then Accept: FILE_SAVED, one delivery, the clipboard holds it
 #   comments_on_confirmation_reject
-#                    a comment, `act close`, the question, confirm_reject: DIFF_REJECTED, then the
-#                    clipboard and the toast
+#                    a comment, `act close`, the question, confirm_reject: DIFF_REJECTED, one
+#                    delivery, then the clipboard
 #   comments_on_disconnect
-#                    a comment, then the client closes its socket: no decision, the clipboard and
-#                    the toast
+#                    a comment, then the client closes its socket: no decision, one delivery and
+#                    the clipboard
+#   (`deliveries` in the state counts the clipboard deliveries since launch, so each case tells its
+#   own from an earlier one's; the newest toast is the copy's.)
 #
 # `surface.ide.act` (debug builds only) presses what a user presses: accept, reject, edit (with
 # `text`, which errors when Edit is unavailable), show_diff, close, confirm_reject, cancel,
@@ -1922,6 +1941,19 @@ for line in open(sys.argv[1], encoding="utf-8"):
 print(found)
 PY
 }
+# The JSON-RPC id of the FIRST openDiff the client sent for tab_name $1.
+req_id_first() { # tab_name
+  python3 -I - "$CLIENT_LOG" "$1" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    r = json.loads(line)
+    f = r.get("frame", {})
+    if r.get("dir") == "out" and f.get("method") == "tools/call" and f["params"].get("name") == "openDiff" \
+            and f["params"]["arguments"].get("tab_name") == sys.argv[2]:
+        print(f["id"])
+        break
+PY
+}
 # The answer to request $1 as JSON: {"texts": [...]} for a result, {"error": code} for an error,
 # nothing while it is unanswered.
 response_json() { # call-N
@@ -2073,6 +2105,14 @@ comment() { # tab_name side line text [end_line] [commit]
   sockcall surface.ide.comment "tab_name=$1" "side=$2" "line=$3" "text=$4" ${5:+"end_line=$5"} ${6:+"commit=$6"} >/dev/null
 }
 COMMENTS_TOAST='Comments copied: paste them into Claude'
+# How many times comments went to the clipboard since launch (one per ending).
+deliveries() { state_expr 'd["deliveries"]'; }
+# One delivery since BEFORE (a count taken with `deliveries`), and the newest toast is the copy's.
+expect_one_delivery() { # before
+  expect_state "exactly one clipboard delivery" 'd["deliveries"]' "$(($1 + 1))"
+  expect_state "the delivery is the clipboard" 'd["last_delivery"]' clipboard
+  expect_state "the newest toast says so" 'd["toasts"][-1]' "$COMMENTS_TOAST"
+}
 # A proposal of FILE (old four lines, a proposal that changes two of them and adds one) opened
 # as TAB, with an Old-side comment on line 2 and, when $3 is two, a New-side comment on the range 4-5.
 open_commented() { # tab_name file count
@@ -2083,14 +2123,22 @@ open_commented() { # tab_name file count
   [ "$3" != 2 ] || comment "$1" new 4 "new note" 5
   expect_proposal "$1" comments "$3"
 }
+# A 300-line file with every tenth line changed (thirty hunks): line 150 starts below the viewport.
+open_long() { # tab_name file
+  seq -f 'line %g' 1 300 >"$WT/$2"
+  local changed
+  changed="$(seq 1 300 | awk '{ if ($1 % 10 == 0) print "CHANGED " $1; else print "line " $1 }' | awk '{ printf "%s\\n", $0 }')"
+  open_diff "$1" "$WT/$2" "$changed"
+  expect_proposal "$1" ready True
+}
 want_old() { printf '@%s#L2 old note' "$1"; }
 want_both() { printf '@%s#L2 old note\n@%s#L4-5 (proposed) new note' "$1" "$1"; }
 
 case_reject_with_comments_clipboard() {
   proposal_client
   expect_state "nothing was delivered yet" 'd["last_delivery"]' None
-  local toasts
-  toasts="$(toast_count "$COMMENTS_TOAST")"
+  local before
+  before="$(deliveries)"
   printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cm1.txt"
   open_diff cm1 "$WT/cm1.txt" 'alpha\nBETA\ngamma\nDELTA\nepsilon\n'
   expect_proposal cm1 ready True
@@ -2106,59 +2154,94 @@ case_reject_with_comments_clipboard() {
   assert_response "$(req_id cm1)" 'd["texts"] == ["DIFF_REJECTED", "cm1"]' "Reject answers DIFF_REJECTED"
   expect_no_proposals
   expect_no_tab '✻ cm1.txt'
-  expect_state "the delivery was the clipboard" 'd["last_delivery"]' clipboard
-  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
+  expect_one_delivery "$before"
   expect_clipboard "the clipboard holds the two lines" "$(want_both cm1.txt)"
   end_app_client
 }
 
 case_comment_composer_anchor() {
   proposal_client
-  seq -f 'line %g' 1 300 >"$WT/cm2.txt"
-  local changed
-  changed="$(seq 1 300 | awk '{ if ($1 % 10 == 0) print "CHANGED " $1; else print "line " $1 }' | awk '{ printf "%s\\n", $0 }')"
-  open_diff cm2 "$WT/cm2.txt" "$changed"
-  expect_proposal cm2 ready True
-  local toasts
-  toasts="$(toast_count "$COMMENTS_TOAST")"
+  open_long cm2 cm2.txt
+  local before
+  before="$(deliveries)"
   clipboard_own "sentinel before the reject"
   expect_clipboard "the case owns the clipboard" "sentinel before the reject"
   comment cm2 old 150 "a draft" "" false
   # in_view is read from the diff list's own layout (gpui's ListState) for line 150's row; the
   # scroll to the composer lands on a later layout, so it is polled for.
-  expect_proposal cm2 composer "{'side': 'old', 'line': 150, 'in_view': True}"
+  expect_proposal cm2 composer "{'side': 'old', 'line': 150, 'in_view': True, 'draft_len': 7}"
   expect_proposal cm2 comments 0
   expect_proposal cm2 cards 0
   act cm2 reject
   assert_response "$(req_id cm2)" 'd["texts"] == ["DIFF_REJECTED", "cm2"]' "Reject answers DIFF_REJECTED"
   expect_no_proposals
   expect_clipboard "a draft is never delivered: the clipboard is as it was" "sentinel before the reject"
-  expect_state "no toast for a draft" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$toasts"
+  expect_state "nothing was delivered" 'd["deliveries"]' "$before"
   clipboard_stop
   end_app_client
 }
 
-# The verb's errors: each leaves the tab as it was.
-refused() { # description: the rest is a comment call that must fail
-  local what="$1"
-  shift
-  if "$@" 2>/dev/null; then fail "$CASE: $what was accepted"; fi
-  echo "OK: $what is refused"
+# The user types into the composer with real keys after the scroll has landed: the diff keeps
+# showing the line it is about.
+case_composer_typing_keeps_line() {
+  proposal_client
+  open_long cm7 cm7.txt
+  comment cm7 old 150 "" "" false
+  expect_proposal cm7 composer "{'side': 'old', 'line': 150, 'in_view': True, 'draft_len': 0}"
+  capture ide-composer-typing
+  local window geometry width height active
+  active="$(tabs_field active)"
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  # A click into the composer's text box (measured on ide-composer-typing.png: 68% across, 31%
+  # down), then keys, as a user writes a comment.
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 68 / 100))" "$((height * 31 / 100))" click 1
+  sleep 0.3
+  [ "$(tabs_field active)" = "$active" ] || fail "$CASE: the click made another tab the active one; the layout under test is gone"
+  DISPLAY="$DISPLAY_TARGET" xdotool type --delay 60 "typed"
+  expect_proposal cm7 composer "{'side': 'old', 'line': 150, 'in_view': True, 'draft_len': 5}"
+  act cm7 reject
+  expect_no_proposals
+  end_app_client
+}
+
+# The verb's errors: each leaves the tab as it was, and each names its reason (a timeout or a
+# stall is not a refusal).
+refused() { # description expected-error-text command...
+  local what="$1" want="$2" err
+  shift 2
+  if err="$("$@" 2>&1 >/dev/null)"; then fail "$CASE: $what was accepted"; fi
+  case "$err" in
+    *"$want"*) echo "OK: $what is refused ($want)" ;;
+    *) fail "$CASE: $what was refused for another reason: $err" ;;
+  esac
 }
 case_comment_refusals() {
   proposal_client
   printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cm3.txt"
   open_diff cm3 "$WT/cm3.txt" 'alpha\nBETA\ngamma\nDELTA\nepsilon\n'
   expect_proposal cm3 ready True
-  refused "an unknown tab" comment nope old 2 "x"
-  refused "a line that is not in the diff" comment cm3 old 99 "x"
-  refused "a side that is neither old nor new" comment cm3 left 2 "x"
+  refused "an unknown tab" "no proposal has that tab_name" comment nope old 2 "x"
+  refused "a line that is not in the diff" "That line is not in the diff." comment cm3 old 99 "x"
+  refused "a side that is neither old nor new" "side must be old or new" comment cm3 left 2 "x"
+  refused "an end_line that is not a number" "end_line is not a line number" \
+    sockcall surface.ide.comment tab_name=cm3 side=old line=2 end_line=two text=x
+  refused "a commit that is not true or false" "commit must be true or false" \
+    sockcall surface.ide.comment tab_name=cm3 side=old line=2 commit=maybe text=x
   expect_proposal cm3 comments 0
   expect_proposal cm3 cards 0
   expect_proposal cm3 composer None
-  act cm3 edit 'edited\n'
+  # Edit shows no diff, so no gutter: a click cannot comment there either.
+  act cm3 edit 'edited'
   expect_proposal cm3 editing True
-  refused "a New-side comment once Edit changed the text" comment cm3 new 1 "x"
+  refused "a comment while the proposal is being edited" "no diff is shown while the proposal is being edited" comment cm3 old 2 "x"
+  # Back on the diff of the edited text, the proposed side takes no new comment (Ruling 27).
+  act cm3 show_diff
+  expect_proposal cm3 editing False
+  expect_proposal cm3 ready True
+  refused "a New-side comment once Edit changed the text" "The proposed side takes no new comment" comment cm3 new 1 "x"
   expect_proposal cm3 comments 0
   expect_proposal cm3 composer None
   act cm3 reject
@@ -2168,44 +2251,94 @@ case_comment_refusals() {
 
 case_comments_on_withdraw() {
   proposal_client
-  local toasts
-  toasts="$(toast_count "$COMMENTS_TOAST")"
+  local before
+  before="$(deliveries)"
   open_commented cm4 cm4.txt 2
+  comment cm4 old 4 "a draft" "" false
+  expect_proposal cm4 comments 2
   client_do 'call tools/call {"name":"close_tab","arguments":{"tab_name":"cm4"}}'
   wait_client "close_tab answered" 'r.get("dir") == "in" and r.get("frame", {}).get("result", {}).get("content", [{}])[0].get("text") == "TAB_CLOSED"' 1
   assert_response "$(req_id cm4)" 'd == {"error": -32000}' "the withdrawn openDiff gets -32000, no decision"
   expect_no_proposals
-  expect_state "the delivery was the clipboard" 'd["last_delivery"]' clipboard
-  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
-  expect_clipboard "the clipboard holds the two lines" "$(want_both cm4.txt)"
+  expect_one_delivery "$before"
+  expect_clipboard "the clipboard holds the two comments and not the draft" "$(want_both cm4.txt)"
+  end_app_client
+}
+
+# closeAllDiffTabs is one ending: the comments of every proposal it closes arrive together.
+case_comments_on_close_all() {
+  proposal_client
+  local before
+  before="$(deliveries)"
+  open_commented ca1 ca1.txt 1
+  open_commented ca2 ca2.txt 1
+  client_do 'call tools/call {"name":"closeAllDiffTabs","arguments":{}}'
+  wait_client "closeAllDiffTabs answered" 'r.get("dir") == "in" and r.get("frame", {}).get("result", {}).get("content", [{}])[0].get("text") == "CLOSED_2_DIFF_TABS"' 1
+  assert_response "$(req_id ca1)" 'd == {"error": -32000}' "the first gets -32000"
+  assert_response "$(req_id ca2)" 'd == {"error": -32000}' "the second gets -32000"
+  expect_no_proposals
+  expect_one_delivery "$before"
+  expect_clipboard "the clipboard holds both proposals' comments" "$(want_old ca1.txt)
+$(want_old ca2.txt)"
+  end_app_client
+}
+
+# An openDiff with the tab_name of an open proposal ends the old one: its comments are delivered.
+case_comments_on_replace() {
+  proposal_client
+  local before
+  before="$(deliveries)"
+  open_commented cm8 cm8.txt 1
+  printf 'one\n' >"$WT/cm8b.txt"
+  open_diff cm8 "$WT/cm8b.txt" 'two\n'
+  assert_response "$(req_id_first cm8)" 'd == {"error": -32000}' "the replaced openDiff gets -32000, no decision"
+  expect_one_delivery "$before"
+  expect_clipboard "the clipboard holds the old proposal's comment" "$(want_old cm8.txt)"
+  expect_proposal cm8 comments 0
+  act cm8 reject
+  expect_no_proposals
+  end_app_client
+}
+
+# Accept answers Claude as always; the comments the user wrote still reach the clipboard.
+case_comments_on_accept() {
+  proposal_client
+  local before
+  before="$(deliveries)"
+  open_commented cm9 cm9.txt 1
+  act cm9 accept
+  assert_response "$(req_id cm9)" 'd["texts"][0] == "FILE_SAVED"' "Accept answers FILE_SAVED"
+  expect_no_proposals
+  expect_one_delivery "$before"
+  expect_clipboard "the clipboard holds the comment" "$(want_old cm9.txt)"
   end_app_client
 }
 
 case_comments_on_confirmation_reject() {
   proposal_client
-  local toasts
-  toasts="$(toast_count "$COMMENTS_TOAST")"
+  local before
+  before="$(deliveries)"
   open_commented cm5 cm5.txt 1
   act cm5 close
   expect_state "closing asks first" 'd["confirmation"]["title"]' "Closing rejects Claude's change"
   act_alone confirm_reject
   assert_response "$(req_id cm5)" 'd["texts"] == ["DIFF_REJECTED", "cm5"]' "Reject in the confirmation answers DIFF_REJECTED"
   expect_no_proposals
-  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
+  expect_one_delivery "$before"
   expect_clipboard "the clipboard holds the comment" "$(want_old cm5.txt)"
   end_app_client
 }
 
 case_comments_on_disconnect() {
   proposal_client
-  local toasts
-  toasts="$(toast_count "$COMMENTS_TOAST")"
+  local before
+  before="$(deliveries)"
   open_commented cm6 cm6.txt 1
   client_do close
   wait_client "the connection closed" 'r.get("event") == "closed"' 1
   expect_no_proposals
   assert_no_decision "$(req_id cm6)" "a closed connection is answered nothing"
-  expect_state "the toast says so" "len([t for t in d[\"toasts\"] if t == \"$COMMENTS_TOAST\"])" "$((toasts + 1))"
+  expect_one_delivery "$before"
   expect_clipboard "the clipboard holds the comment" "$(want_old cm6.txt)"
   end_app_client
 }
@@ -2998,7 +3131,11 @@ run_proposal_cases() {
   case_run reject_with_comments_clipboard case_reject_with_comments_clipboard
   case_run comment_composer_anchor case_comment_composer_anchor
   case_run comment_refusals case_comment_refusals
+  case_run composer_typing_keeps_line case_composer_typing_keeps_line
   case_run comments_on_withdraw case_comments_on_withdraw
+  case_run comments_on_close_all case_comments_on_close_all
+  case_run comments_on_replace case_comments_on_replace
+  case_run comments_on_accept case_comments_on_accept
   case_run comments_on_confirmation_reject case_comments_on_confirmation_reject
   case_run comments_on_disconnect case_comments_on_disconnect
   case_run close_confirm case_proposal_close_confirm
