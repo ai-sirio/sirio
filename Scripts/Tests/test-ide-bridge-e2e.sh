@@ -148,10 +148,17 @@ set -eEuo pipefail
 #                    TAB_CLOSED for that request id (read from the client's transcript)
 #   worktree_close_guarded
 #                    two Claudes wait on a worktree (one in its pane, one outside every Sirio
-#                    shell): `workspace.close` over the socket fails; closing the worktree asks
-#                    first and ends no session; Cancel keeps the worktree and both connections;
-#                    Reject answers DIFF_REJECTED (read by the outside client), then the sessions
-#                    end
+#                    shell): `workspace.close` over the socket fails; the sidebar's confirmed
+#                    "Remove worktree?" (driven by `act close_worktree`) asks before git touches the
+#                    checkout or any session ends; Cancel keeps the checkout on disk, listed by
+#                    `git worktree list`, its branch and both connections; Reject answers
+#                    DIFF_REJECTED (read by the outside client), then the checkout is gone from disk
+#                    and from git, and the pane's session ends
+#   project_close_guarded
+#                    the same for the sidebar's "Remove project from Sirio?" (RemoveProject, driven by
+#                    `act remove_project`) on a second project: it asks first and ends no session;
+#                    Cancel keeps the project listed and both Claudes connected; Reject answers
+#                    DIFF_REJECTED (read by the outside client), then the project is gone
 #   parked_worktree  relaunched with the mounted-worktree cap seeded at 2 in the isolated database
 #                    (appearance_seed --limit-mounted 2) and a stale file left in the scratch
 #                    directory (which the launch sweeps; the directory is 0700): a proposal for a
@@ -161,7 +168,7 @@ set -eEuo pipefail
 #
 # `surface.ide.act` (debug builds only) presses what a user presses: accept, reject, edit (with
 # `text`, which errors when Edit is unavailable), show_diff, close, confirm_reject, cancel,
-# close_others (`text` is the kept tab's position) and close_worktree.
+# close_others (`text` is the kept tab's position), close_worktree and remove_project.
 #
 #
 # Three debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
@@ -2116,7 +2123,7 @@ case_worktree_close_guarded() {
   echo "OK: workspace.close refuses: $(head -n 1 "$RUN_DIR/close.out")"
   expect_state "the refusal closed nothing" 'len(d["connections"])' 2
   act wt-1 close_worktree
-  expect_state "closing the worktree asks first" 'd["confirmation"]["then"]' worktree_removed
+  expect_state "closing the worktree asks first" 'd["confirmation"]["then"]' remove_worktree
   expect_state "about both proposals" 'sorted(d["confirmation"]["proposals"])' "['wt-1', 'wt-2']"
   sleep 1
   expect_state "no session ended while asking" 'len(d["connections"])' 2
@@ -2129,10 +2136,70 @@ case_worktree_close_guarded() {
 import json, sys
 print([r["mounted"] for r in json.load(sys.stdin) if r["id"] == sys.argv[1]][0])' "$third_id")" = true ] \
     || fail "$CASE: Cancel unmounted the worktree"
-  echo "OK: Cancel keeps the worktree mounted and the clients connected"
+  [ -d "$third" ] || fail "$CASE: Cancel removed the checkout directory"
+  git -C "$WT" worktree list --porcelain | grep -Fxq "worktree $third" || fail "$CASE: after Cancel git no longer lists $third"
+  git -C "$WT" rev-parse --verify -q refs/heads/ide-third >/dev/null || fail "$CASE: Cancel deleted the local branch"
+  echo "OK: Cancel keeps the checkout on disk, listed by git, its branch, the worktree mounted and the clients connected"
   act wt-1 close_worktree
   act_alone confirm_reject
-  assert_response "$(req_id wt-2)" 'd["texts"] == ["DIFF_REJECTED", "wt-2"]' "Reject answers DIFF_REJECTED before the worktree closes"
+  assert_response "$(req_id wt-2)" 'd["texts"] == ["DIFF_REJECTED", "wt-2"]' "Reject answers DIFF_REJECTED before the checkout is removed"
+  local tries=0
+  while [ -d "$third" ] && [ "$tries" -lt 100 ]; do tries=$((tries + 1)); sleep 0.2; done
+  [ ! -d "$third" ] || fail "$CASE: the checkout is still on disk after Reject"
+  git -C "$WT" worktree list --porcelain | grep -Fxq "worktree $third" && fail "$CASE: git still lists $third after Reject"
+  echo "OK: after Reject the checkout directory is gone and git no longer lists it"
+  expect_state "the pane's Claude went with its sessions, the outside one stayed" 'len(d["connections"])' 1
+  expect_no_proposals
+  end_outside_client
+  CLIENT_LOG="$in_log" CLIENT_FIFO="$in_fifo"
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+}
+
+# The sidebar's "Remove project from Sirio?" continues into RemoveProject, which asks first when a
+# worktree of the project holds a proposal. A second project of its own, so the run keeps its repo.
+case_project_close_guarded() {
+  local repo2="$RUN_DIR/repo2" id2 in_log in_fifo tries=0
+  rm -rf "$repo2"
+  mkdir -p "$repo2"
+  git -C "$repo2" init -q -b main
+  git -C "$repo2" config user.email tester@example.invalid
+  git -C "$repo2" config user.name Tester
+  printf 'seed\n' >"$repo2/seed.txt"
+  git -C "$repo2" add seed.txt
+  git -C "$repo2" commit -q -m initial
+  ctl project add "$repo2" >/dev/null
+  id2="$(worktree_id "$repo2")"
+  [ -n "$id2" ] || fail "$CASE: the second project is not listed"
+  ctl select-workspace --workspace "$id2" >/dev/null
+  printf 'p\nq\n' >"$repo2/q.txt"
+  printf 'u\nv\n' >"$repo2/q2.txt"
+  proposal_client
+  open_diff pj-1 "$repo2/q.txt" 'p\nQ\n'
+  expect_proposal pj-1 ready True
+  in_log="$CLIENT_LOG"
+  in_fifo="$CLIENT_FIFO"
+  start_outside_client "$repo2"
+  wait_client "the outside client connected" 'r.get("event") == "connected"' 1
+  open_diff pj-2 "$repo2/q2.txt" 'u\nV\n'
+  expect_proposal pj-2 ready True
+  expect_state "two Claudes are connected" 'len(d["connections"])' 2
+  act pj-1 remove_project
+  expect_state "removing the project asks first" 'd["confirmation"]["then"]' remove_project
+  sleep 1
+  expect_state "no session ended while asking" 'len(d["connections"])' 2
+  act_alone cancel
+  sleep 1
+  expect_state "Cancel keeps both clients connected" 'len(d["connections"])' 2
+  expect_state "and both proposals" 'len(d["proposals"])' 2
+  [ -n "$(worktree_id "$repo2")" ] || fail "$CASE: Cancel removed the project from the sidebar"
+  assert_unanswered "$(req_id pj-2)" "Cancel answers nothing"
+  echo "OK: Cancel keeps the project listed and the sessions alive"
+  act pj-1 remove_project
+  act_alone confirm_reject
+  assert_response "$(req_id pj-2)" 'd["texts"] == ["DIFF_REJECTED", "pj-2"]' "Reject answers DIFF_REJECTED before the project goes"
+  while [ -n "$(worktree_id "$repo2")" ] && [ "$tries" -lt 100 ]; do tries=$((tries + 1)); sleep 0.2; done
+  [ -z "$(worktree_id "$repo2")" ] || fail "$CASE: the project is still listed after Reject"
+  echo "OK: after Reject the project is gone"
   expect_state "the pane's Claude went with its sessions, the outside one stayed" 'len(d["connections"])' 1
   expect_no_proposals
   end_outside_client
@@ -2427,6 +2494,7 @@ run_proposal_cases() {
   case_run captures case_proposal_captures
   case_run no_decision_without_user case_no_decision_without_user
   case_run worktree_close_guarded case_worktree_close_guarded
+  case_run project_close_guarded case_project_close_guarded
   case_run parked_worktree case_parked_worktree
 }
 

@@ -3541,12 +3541,12 @@ impl ControlHandler for AppControlHandler {
                 let action = match request.params.get("action").map(String::as_str) {
                     Some(
                         action @ ("accept" | "reject" | "edit" | "show_diff" | "close" | "confirm_reject"
-                        | "cancel" | "close_worktree" | "close_others"),
+                        | "cancel" | "close_worktree" | "remove_project" | "close_others"),
                     ) => action.to_string(),
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.ide.act requires action=accept|reject|edit|show_diff|close|confirm_reject|cancel|close_worktree|close_others",
+                            "surface.ide.act requires action=accept|reject|edit|show_diff|close|confirm_reject|cancel|close_worktree|remove_project|close_others",
                         );
                     }
                 };
@@ -7398,6 +7398,7 @@ impl SirioWorkspace {
             });
         }
 
+        sidebar.update(cx, |sidebar, _| sidebar.set_host_continues_removal(true));
         cx.subscribe(&sidebar, |workspace, _, event: &SidebarEvent, cx| {
             workspace.handle_sidebar_event(event, cx)
         })
@@ -12279,11 +12280,6 @@ impl SirioWorkspace {
                 self.select_worktree_from_sidebar(path.clone(), cx);
             }
             SidebarEvent::WorktreeRemoved { project_id, path } => {
-                // Claude waiting on a change in this worktree: ask before any session ends. The
-                // rest of this event runs when the user rejects (it is dispatched again then).
-                if self.ide_guard_worktree_removal(project_id, path, cx) {
-                    return;
-                }
                 let removed_current = paths_name_the_same_document(&self.working_directory, path);
                 let selector = path.to_string_lossy().into_owned();
                 let _ = self.close_workspace(&selector, cx);
@@ -12322,6 +12318,10 @@ impl SirioWorkspace {
                     }
                 }
                 self.refresh_closed_sessions(cx);
+            }
+            // The sidebar's confirmed removal: asks first when Claude waits on a change in it.
+            SidebarEvent::WorktreeRemovalRequested { row_id, remote, path } => {
+                self.ide_request_worktree_removal(*row_id, remote.clone(), path, cx);
             }
             SidebarEvent::CloseTab(id) => self.close_tab_by_id(*id, None, cx),
             SidebarEvent::OpenProjectSettings(id) => {

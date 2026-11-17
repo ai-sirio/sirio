@@ -104,9 +104,9 @@ struct Record {
 pub(crate) enum Then {
     /// Close these tabs (the original `close_tab` or Close Others / Close Tabs to the Right).
     CloseTabs(Vec<usize>),
-    /// The sidebar removed this worktree: the rest of `SidebarEvent::WorktreeRemoved` (ending
-    /// its sessions, refreshing the catalog) goes on.
-    WorktreeRemoved { project_id: String, path: PathBuf },
+    /// The sidebar's confirmed "Remove worktree?" goes on: git removes the checkout, then
+    /// `WorktreeRemoved` ends its sessions.
+    RemoveWorktree { row_id: usize, remote: Option<sirio_git::UpstreamBranch> },
     /// Remove this project from Sirio.
     RemoveProject(String),
 }
@@ -115,7 +115,7 @@ impl Then {
     fn name(&self) -> &'static str {
         match self {
             Then::CloseTabs(_) => "close_tabs",
-            Then::WorktreeRemoved { .. } => "worktree_removed",
+            Then::RemoveWorktree { .. } => "remove_worktree",
             Then::RemoveProject(_) => "remove_project",
         }
     }
@@ -503,25 +503,32 @@ impl SirioWorkspace {
             .collect()
     }
 
-    /// The sidebar removed `worktree`: asks first, before any of its sessions ends, when it
-    /// holds a proposal. `true` means asked; the caller must stop, and Reject runs the whole
-    /// event again once the proposals are answered.
-    pub(crate) fn ide_guard_worktree_removal(
+    /// The sidebar's "Remove worktree?" was confirmed (`WorktreeRemovalRequested`): when the
+    /// worktree holds a proposal, asks before git touches the checkout or any session ends;
+    /// Reject answers the proposals and then goes on, Cancel leaves everything as it was. With
+    /// none, the removal goes on at once. This is the one entry the removal passes through.
+    pub(crate) fn ide_request_worktree_removal(
         &mut self,
-        project_id: &str,
+        row_id: usize,
+        remote: Option<sirio_git::UpstreamBranch>,
         worktree: &Path,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) {
         let views = self.proposal_views_of_worktree(worktree);
         if views.is_empty() {
-            return false;
+            self.ide_continue_worktree_removal(row_id, remote, cx);
+            return;
         }
-        let then = Then::WorktreeRemoved {
-            project_id: project_id.to_owned(),
-            path: worktree.to_path_buf(),
-        };
-        self.ide_ask(views, then, cx);
-        true
+        self.ide_ask(views, Then::RemoveWorktree { row_id, remote }, cx);
+    }
+
+    fn ide_continue_worktree_removal(
+        &mut self,
+        row_id: usize,
+        remote: Option<sirio_git::UpstreamBranch>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar.update(cx, |sidebar, cx| sidebar.remove_worktree_row(row_id, remote, cx));
     }
 
     /// The release `workspace.close` verb cannot ask: whether `worktree` holds a proposal.
@@ -590,9 +597,7 @@ impl SirioWorkspace {
         cx.defer(move |_| drop(dropped));
         match confirmation.then {
             Then::CloseTabs(ids) => self.request_close_ids(ids, window, cx),
-            Then::WorktreeRemoved { project_id, path } => {
-                self.handle_sidebar_event(&SidebarEvent::WorktreeRemoved { project_id, path }, cx);
-            }
+            Then::RemoveWorktree { row_id, remote } => self.ide_continue_worktree_removal(row_id, remote, cx),
             Then::RemoveProject(id) => {
                 self.remove_project(&id, cx);
                 self.refresh_closed_sessions(cx);
@@ -796,7 +801,21 @@ impl SirioWorkspace {
                     .ok_or_else(|| "the proposal has no tab on screen".to_owned())?;
                 self.request_close_tab_by_id(tab_id, window, cx);
             }
+            // What the sidebar's confirmed "Remove worktree?" does, through the same entry.
             "close_worktree" => {
+                let path = PathBuf::from(&worktree);
+                let row_id = self
+                    .sidebar
+                    .read(cx)
+                    .worktree_row_for(&path)
+                    .ok_or_else(|| "the proposal's worktree has no sidebar row".to_owned())?;
+                self.handle_sidebar_event(
+                    &SidebarEvent::WorktreeRemovalRequested { row_id, remote: None, path },
+                    cx,
+                );
+            }
+            // What the sidebar's confirmed "Remove project from Sirio?" does.
+            "remove_project" => {
                 let path = PathBuf::from(&worktree);
                 let project_id = self
                     .project_catalog
@@ -807,9 +826,7 @@ impl SirioWorkspace {
                     })
                     .map(|project| project.id.clone())
                     .ok_or_else(|| "the proposal's worktree is in no project".to_owned())?;
-                if !self.ide_guard_worktree_removal(&project_id, &path, cx) {
-                    return Err("the worktree holds no proposal".to_owned());
-                }
+                self.handle_sidebar_event(&SidebarEvent::RemoveProject(project_id), cx);
             }
             other => return Err(format!("unknown surface.ide.act action: {other}")),
         }
