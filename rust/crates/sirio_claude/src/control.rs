@@ -183,6 +183,22 @@ impl ControlRequest {
         )
     }
 
+    /// Renames the session on the CLI's side. `source: "host"` marks it as the
+    /// host's doing; `session_id` names the session the host means, and a
+    /// current CLI refuses one that is not its own.
+    #[must_use]
+    pub fn rename_session(request_id: &str, title: &str, session_id: Option<&str>) -> Value {
+        let mut request = json!({
+            "subtype": "rename_session",
+            "title": title,
+            "source": "host",
+        });
+        if let (Some(session_id), Some(fields)) = (session_id, request.as_object_mut()) {
+            fields.insert("session_id".to_string(), json!(session_id));
+        }
+        Self::envelope(request_id, request)
+    }
+
     /// Reads the tail of a background shell's or Monitor's output.
     #[must_use]
     pub fn get_task_output(request_id: &str, task_id: &str) -> Value {

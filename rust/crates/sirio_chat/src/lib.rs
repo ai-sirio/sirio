@@ -160,6 +160,14 @@ impl ChatClient {
         }
     }
 
+    /// Asks the agent to rename its session. Only native Claude has the verb.
+    pub fn rename_session(&self, title: String) -> std::result::Result<(), String> {
+        match self {
+            Self::Claude(client) => client.rename_session(title),
+            Self::Acp(_) => Err("this agent cannot rename its session".to_string()),
+        }
+    }
+
     /// MCP-configuration-flavored lines observed on the agent's stderr.
     #[must_use]
     pub fn mcp_warnings(&self) -> Vec<String> {

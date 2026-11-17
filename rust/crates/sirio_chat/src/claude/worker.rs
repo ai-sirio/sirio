@@ -84,6 +84,9 @@ pub(super) enum Command {
     /// Stop a background task. Nothing waits on it: the task's own `task_*`
     /// lines say how it ended.
     StopTask { task_id: String },
+    /// Rename the session on the CLI's side. The answer is reported as
+    /// `ChatEvent::SessionRenamed`.
+    RenameSession { title: String },
     /// Ask the CLI for its context breakdown outside a turn. The answer is
     /// stored and signalled, never replied: the surface reads it back.
     RefreshContext,
@@ -685,6 +688,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
     // The task reads the CLI has not answered, by request id: at most one per
     // task, and the worker's own record of which answers are its polls.
     let mut pending_task_reads: HashMap<String, PendingTaskRead> = HashMap::new();
+    // The renames the CLI has not answered yet, by request id, each with the
+    // title that was sent.
+    let mut pending_renames: HashMap<String, String> = HashMap::new();
     let timeout_reason: Arc<Mutex<Option<ChatError>>> = Arc::new(Mutex::new(None));
     let permission_counter = AtomicU64::new(1);
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
@@ -1060,6 +1066,14 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                         "the agent refused the sign-in request".to_string(),
                                     ),
                                 });
+                            }
+                            if let Some(title) = pending_renames.remove(&envelope.request_id) {
+                                let _ = event_tx
+                                    .send(ChatEvent::SessionRenamed {
+                                        title,
+                                        error: envelope.error.clone(),
+                                    })
+                                    .await;
                             }
                             if let Some(read) = pending_task_reads.remove(&envelope.request_id) {
                                 let _ =
@@ -1593,6 +1607,25 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 ": could not write the stop request".into(),
                             );
                         }
+                    }
+                    Ok(Command::RenameSession { title }) => {
+                        // The worker's own id at write time: the launch's id,
+                        // replaced by `init` and by a refused-resume retry.
+                        let id = next_request_id();
+                        let session_id = shared.session_id();
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::rename_session(&id, &title, session_id.as_deref()),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the rename request".into(),
+                            );
+                        }
+                        pending_renames.insert(id, title);
                     }
                     Ok(Command::RefreshContext) => {
                         let id = next_request_id();

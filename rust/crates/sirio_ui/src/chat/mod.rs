@@ -3839,6 +3839,8 @@ impl Chat {
             sirio_chat::ChatEvent::BackgroundTask(event) => {
                 self.apply_background_event(event, cx);
             }
+            // Dropped until Task 3's title state consumes the answer.
+            sirio_chat::ChatEvent::SessionRenamed { .. } => {}
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
         // this chat's own `set_mode` resolving) only reaches the wire as an
