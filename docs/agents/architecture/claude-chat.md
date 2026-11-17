@@ -105,7 +105,8 @@ origin, and its tooltip reads `Saved in Claude Code's settings for this folder`.
 Sirio sends `mcp_toggle` only for that click or that action, never on connect, restore, reconnect,
 reload, retry or a new session. The switch's state is read only from `mcp_status`: a server reading
 `disabled` is off, so a row's `switch` in the `sessionPanel` JSON is `true`, `false` or, once the
-switches are hidden, `null`; while a toggle is open the row reads `switching…` and shows the state
+switches are hidden, `null`, and `switchEnabled` says whether the switch takes a click (`false` while a call
+about the server is open, `null` with no switch); while a toggle is open the row reads `switching…` and shows the state
 asked for, and a second flip of that server fails and sends nothing. A switch to the state the row
 already shows sends nothing. The saved state is Claude Code's: it writes it per folder, in its own
 settings, and a sibling worktree, being another folder, does not share it. For a user or project
@@ -113,7 +114,9 @@ server this was seen on a live run; for claude.ai and plugin servers it rests on
 2.1.326 binary, not a live run. Sirio never reads or writes `.claude.json` or any other
 Claude Code settings file; it learns the state only from the CLI's `mcp_status`. Flipping a
 server off drops its sign-in poll, and a toggle that fails leaves the CLI's sentence under the row
-while the switch keeps what `mcp_status` last said. A CLI that refuses `mcp_toggle`
+while the switch keeps what `mcp_status` last said; a toggle that succeeds but whose follow-up read fails
+says `Switched, but the new state could not be read: <error>` under the row. Row labels and these notes
+go through `visible_text`. A CLI that refuses `mcp_toggle`
 (`sirio_chat::is_refusal`) hides every switch until the next connection (`switches_retired`). The
 switch sits in a wrapper that stops a mouse-down, so a click on it never reaches the row's own
 Sign in or Reconnect; its element id is a hash of the row key, never the key or the row's index, since
@@ -138,8 +141,9 @@ refusal is recognised by its `error_code` (`reload_plugins_busy`), never its tex
 applied with load errors says `<n> plugins failed to load.`; any other failure says `Reload failed:`
 and the CLI's sentence. A second Reload while one runs fails and sends nothing, the row reading
 `reloading…`. A refusal of either verb (`sirio_chat::is_refusal`) hides the row until the next
-connection, so the 2.1.257 floor degrades to no row where the verbs are missing, and the busy refusal is
-not asked for where the capability is missing. `reload_output_styles` is never sent.
+connection. On the 2.1.257 floor the row stays: it has both verbs and refuses only `reload_output_styles`,
+which is never sent. The floor has no capabilities, so `refuse_if_busy` is not sent there, and it ignores the
+hold and sends no `held` key, which reads as applied.
 `surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full`,
 `compact`, `narrow` or `minimal`, the `band`, `root`, `send`, `chips`, `overflowButton`, `field` (the text field's box, its vertical padding
 included) and `edge` (the strip along the composer's top that a drag resizes by) boxes as `[x, y, w, h]`,

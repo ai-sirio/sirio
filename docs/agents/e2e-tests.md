@@ -399,11 +399,12 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # A6, the connector switch: connector_switch (a switch per server read from mcp_status, a repeat sends
 # nothing, Notion off loses its Sign in; three mcp_toggle and no mcp_authenticate after its mark),
 # connector_switch_in_flight (switching…, a second flip fails and sends nothing), connector_switch_waiting
-# (switching a waiting server off drops its poll: one mcp_status after the mark), connector_switch_refused
+# (switching a waiting server off drops its poll: exactly one mcp_status after the mcp_toggle line), connector_switch_refused
 # (every switch hidden, rows and notes unchanged), connector_switch_missing (the CLI's sentence as a note,
-# the switch unchanged) and connector_switch_click (framed, 2200x1000: a real X click at `switchButtons`
+# the switch unchanged), connector_switch_unread (SIRIO_FIXTURE_TOGGLE=unread: the toggle applies, the next
+# mcp_status fails, and the row's note says the new state could not be read) and connector_switch_click (framed, 2200x1000: a real X click at `switchButtons`
 # toggles that server and starts no sign-in, with two captures). New fixture variables, passed by launch()
-# and reset per scenario: SIRIO_FIXTURE_TOGGLE (refused or missing) and SIRIO_FIXTURE_TOGGLE_GATE (a file
+# and reset per scenario: SIRIO_FIXTURE_TOGGLE (refused, missing or unread) and SIRIO_FIXTURE_TOGGLE_GATE (a file
 # whose absence holds every mcp_toggle answer). Every count reads only the lines after a control_log_lines mark.
 # A6, the reload row, on the same stub (the twelve reload_* scenarios, each ending with no mcp_toggle after its
 # mark): reload_plugins_and_skills (reload_plugins with the hold and refuse_if_busy, then reload_skills; the row is

@@ -9,6 +9,7 @@
 
 use super::{Row, RowSwitch, Section, Tone};
 use crate::chat::Chat;
+use crate::chat::visible_text::visible_text;
 use gpui::{AppContext as _, Context as GpuiContext, Task};
 use sirio_chat::{McpControl, McpOrigin, McpServer, McpState, is_refusal};
 use std::collections::{HashMap, HashSet};
@@ -309,7 +310,7 @@ pub(super) fn section(
                     connectors
                         .failures
                         .get(&server.name)
-                        .map(|(failure, _)| failure.clone())
+                        .map(|(failure, _)| visible_text(failure, false))
                         .unwrap_or_default(),
                 ),
             };
@@ -327,7 +328,7 @@ pub(super) fn section(
                     on: connectors.switched_on(server),
                     enabled: connectors.switch_enabled(server),
                 }),
-                ..Row::new(&server_key(server), server.name.clone(), &detail)
+                ..Row::new(&server_key(server), visible_text(&server.name, false), &detail)
             });
         }
     }
@@ -552,14 +553,22 @@ impl Chat {
                 .await;
             let _ = this.update(cx, |chat, cx| {
                 chat.session_panel.connectors.busy.remove(&name);
-                if let Err(error) = outcome {
-                    let text = format!("{error:#}");
-                    let connectors = &mut chat.session_panel.connectors;
-                    if is_refusal(&text) {
-                        connectors.switches_retired = true;
-                    } else {
-                        connectors.fail(name, text);
+                let connectors = &mut chat.session_panel.connectors;
+                match (&outcome, &answer) {
+                    (Err(error), _) => {
+                        let text = format!("{error:#}");
+                        if is_refusal(&text) {
+                            connectors.switches_retired = true;
+                        } else {
+                            connectors.fail(name, text);
+                        }
                     }
+                    // Claude Code has saved the setting, but the row cannot show it.
+                    (Ok(_), Err(error)) => connectors.fail(
+                        name,
+                        format!("Switched, but the new state could not be read: {error:#}"),
+                    ),
+                    (Ok(_), Ok(_)) => {}
                 }
                 chat.connectors_changed(answer, cx);
             });

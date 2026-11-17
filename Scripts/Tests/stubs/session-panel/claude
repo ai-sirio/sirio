@@ -8,7 +8,7 @@
 #   SIRIO_FIXTURE_RELOAD          --fixture-reload          the kind of reload_plugins answer (apply, held, busy, busy-text, refused, errors)
 #   SIRIO_FIXTURE_RELOAD_GATE     --fixture-reload-gate     holds every reload_plugins answer until the file exists
 #   SIRIO_FIXTURE_SKILLS          --fixture-skills          refused: reload_skills is an unsupported subtype
-#   SIRIO_FIXTURE_TOGGLE          --fixture-toggle          refused or missing: how mcp_toggle fails
+#   SIRIO_FIXTURE_TOGGLE          --fixture-toggle          refused, missing or unread: how mcp_toggle fails
 #   SIRIO_FIXTURE_TOGGLE_GATE     --fixture-toggle-gate     holds every mcp_toggle answer until the file exists
 #   SIRIO_FIXTURE_CLI_BUSY_GATE   --fixture-cli-busy-gate   the CLI reports a running turn until the file exists
 #   SIRIO_FIXTURE_RESULT_GATE     --fixture-result-gate     holds the turn's result until the file exists

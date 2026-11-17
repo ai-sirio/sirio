@@ -138,7 +138,9 @@ RESULT_GATE_PATH = flag_value("fixture-result-gate")
 # no `refuse_if_busy` handling. `--fixture-reload=<kind>` picks the
 # `reload_plugins` answer (apply, held, busy, busy-text, refused, errors);
 # `--fixture-toggle=<kind>` makes every `mcp_toggle` fail (`refused` answers an
-# unsupported subtype, `missing` a server not found); `--fixture-reload-gate`
+# unsupported subtype, `missing` a server not found), except `unread`: the toggle
+# applies, and the first `mcp_status` after it answers a control error;
+# `--fixture-reload-gate`
 # and `--fixture-toggle-gate` hold each answer until the file exists, checked
 # when the request arrives, while later requests are still read;
 # `--fixture-cli-busy-gate=<path>` has the CLI report a running turn after the
@@ -351,6 +353,8 @@ PLUGIN_READ = False
 CURRENT_COMMANDS = []
 PLUGIN_SERVER = "plugin:pa:m"
 RLO = "\u202e"
+# `--fixture-toggle=unread`: set by an applied toggle, spent by the next `mcp_status`.
+UNREAD_NEXT = [False]
 
 
 def session_panel_servers():
@@ -371,6 +375,9 @@ def session_panel_servers():
         if PLUGIN_APPLIED:
             servers.append({"name": PLUGIN_SERVER,
                             "status": "connected" if PLUGIN_READ else "pending",
+                            "source": "plugin", "scope": "plugin"})
+            servers.append({"name": "plugin:pa:" + RLO + "x",
+                            "status": "connected",
                             "source": "plugin", "scope": "plugin"})
             PLUGIN_READ = True
         shown = []
@@ -424,6 +431,8 @@ def answer_toggle(request_id, request):
             RESTARTING.add(name)
         else:
             DISABLED.add(name)
+        if TOGGLE_KIND == "unread":
+            UNREAD_NEXT[0] = True
     control_ok(request_id)
 
 
@@ -2169,6 +2178,12 @@ def main():
                         count.write("mcp_status\n")
                 global STATUS_ANSWERS
                 STATUS_ANSWERS += 1
+                with PANEL_LOCK:
+                    unread = UNREAD_NEXT[0]
+                    UNREAD_NEXT[0] = False
+                if unread:
+                    control_error(request_id, "mcp_status: the servers could not be read")
+                    continue
                 control_response(request_id, {"mcpServers": session_panel_servers()})
             elif subtype == "mcp_reconnect":
                 name = request.get("serverName")

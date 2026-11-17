@@ -38,11 +38,13 @@ set -euo pipefail
 #   connector_switch_in_flight  (SIRIO_FIXTURE_TOGGLE_GATE) a row reads switching… while its toggle is open,
 #                      a second flip fails and sends nothing, and the row reads disabled once it answers
 #   connector_switch_waiting    a server waiting for its sign-in is switched off: the sign-in poll is dropped
-#                      (one mcp_status after the switch, the switch's own)
+#                      (exactly one mcp_status after the mcp_toggle line, the switch's own)
 #   connector_switch_refused    (SIRIO_FIXTURE_TOGGLE=refused) a refused mcp_toggle hides every switch and
 #                      leaves the rows and their notes as they were
 #   connector_switch_missing    (SIRIO_FIXTURE_TOGGLE=missing) a failed toggle puts the CLI's sentence under
 #                      the row, and the switch keeps the state mcp_status reported
+#   connector_switch_unread     (SIRIO_FIXTURE_TOGGLE=unread) the toggle applies but the mcp_status after it fails: the row
+#                      carries a note that the switch was saved and the new state could not be read
 #   connector_switch_click      (framed, 2200x1000) a real X click at the switch's drawn bounds toggles that
 #                      server and starts no sign-in; a capture of the card and one with the pointer on the switch
 #   reload_plugins_and_skills  (A6) the Connectors card's `Plugins and skills` row, Reload: reload_plugins with the hold and
@@ -326,7 +328,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors connector_switch connector_switch_in_flight
-  connector_switch_waiting connector_switch_refused connector_switch_missing connector_switch_click
+  connector_switch_waiting connector_switch_refused connector_switch_missing connector_switch_unread connector_switch_click
   reload_plugins_and_skills reload_floor reload_held reload_held_then_busy reload_busy_refusal reload_busy_cli
   reload_busy_turn reload_busy_before_skills reload_in_flight reload_refused reload_skills_refused reload_errors
   change_request rate_limit_shared restore
@@ -1722,6 +1724,8 @@ scenario_connector_switch_in_flight() {
   panel_ctl switch "$CODEGRAPH" off >/dev/null
   wait_panel "the user server reads switching… with its switch off" \
     "R('connectors', '$CODEGRAPH')['detail'] == 'switching…' and R('connectors', '$CODEGRAPH')['switch'] is False"
+  check_panel "the switch takes no click while the toggle is open" \
+    "R('connectors', '$CODEGRAPH')['switchEnabled'] is False"
   if panel_ctl switch "$CODEGRAPH" on >/dev/null 2>&1; then
     fail "a second flip of a server whose toggle is open was accepted"
   fi
@@ -1730,6 +1734,7 @@ scenario_connector_switch_in_flight() {
   : >"$SIRIO_FIXTURE_TOGGLE_GATE"
   wait_panel "the user server reads disabled once the CLI answers" \
     "R('connectors', '$CODEGRAPH')['detail'] == 'disabled' and R('connectors', '$CODEGRAPH')['switch'] is False" 15
+  check_panel "the switch takes a click again" "R('connectors', '$CODEGRAPH')['switchEnabled'] is True"
   expect_since "$mark" mcp_toggle 1 "one toggle in all"
   echo "OK: connector_switch_in_flight: switching… while the toggle is open, a second flip failed and sent nothing"
   stop_app
@@ -1780,6 +1785,20 @@ scenario_connector_switch_missing() {
     "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$CODEGRAPH')['detail'] == 'failed'"
   expect_since "$mark" mcp_toggle 1 "one failed toggle"
   echo "OK: connector_switch_missing: a failed toggle is a note and the switch keeps the state mcp_status gave"
+  stop_app
+}
+
+scenario_connector_switch_unread() {
+  SIRIO_FIXTURE_TOGGLE=unread
+  switch_chat connector_switch_unread
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the row says the switch was saved and the state could not be read" \
+    "R('connectors', '$CODEGRAPH')['note'].startswith('Switched, but the new state could not be read')" 15
+  sleep 1
+  expect_since "$mark" mcp_toggle 1 "one toggle"
+  echo "OK: connector_switch_unread: a switch whose follow-up read failed says so on its row"
   stop_app
 }
 
@@ -1914,6 +1933,8 @@ scenario_reload_held() {
   echo "step: Reload anyway"
   panel_ctl activate "$RELOAD" >/dev/null
   reload_idle_row "the note is empty and the action is Reload"
+  wait_panel "the plugin server's row label shows the bidi override as text" \
+    "any(r['label'] == 'plugin:pa:⟨U+202E⟩x' for r in rows('connectors'))" 15
   expect_since "$mark" reload_plugins 2 "the held one and the one anyway"
   [ "$(reload_flags "$mark" 1)" = "hold=true busy=true" ] || fail "the first reload_plugins did not carry the hold: $(reload_flags "$mark" 1)"
   [ "$(reload_flags "$mark" 2)" = "hold=absent busy=true" ] || fail "Reload anyway still carried the hold: $(reload_flags "$mark" 2)"
@@ -2073,7 +2094,7 @@ scenario_reload_skills_refused() {
   expect_since "$mark" reload_plugins 1 "one plugin reload"
   [ "$(control_after_first "$mark" reload_plugins reload_skills)" = 1 ] || fail "reload_skills did not follow reload_plugins"
   check_panel "the server rows are unchanged but for the plugin's" \
-    "set(r['key'] for r in rows('connectors') if r['depth'] == 1) - set(['$PLUGIN_SERVER']) == set(['$CODEGRAPH', '$NOTION']) and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
+    "set(r['key'] for r in rows('connectors') if r['depth'] == 1 and not r['key'].startswith('connectors/plugins/')) == set(['$CODEGRAPH', '$NOTION']) and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
   sleep 1
   expect_since "$mark" reload_skills 1 "a refused skill reload is not sent again"
   reload_no_toggle "$mark"

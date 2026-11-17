@@ -102,6 +102,9 @@ pub struct RowSnapshot {
     pub stop: Option<String>,
     /// The connector switch's state, `None` for a row with no switch.
     pub switch: Option<bool>,
+    /// Whether the connector switch takes a click now, `None` for a row with no switch.
+    #[serde(rename = "switchEnabled")]
+    pub switch_enabled: Option<bool>,
 }
 
 /// One line of a card, as it is drawn and as the snapshot reports it.
@@ -617,7 +620,8 @@ impl Chat {
                             action: row.action,
                             note: row.note,
                             stop: row.stop,
-                            switch: row.switch.map(|switch| switch.on),
+                            switch: row.switch.as_ref().map(|switch| switch.on),
+                            switch_enabled: row.switch.as_ref().map(|switch| switch.enabled),
                         })
                         .collect(),
                 })
