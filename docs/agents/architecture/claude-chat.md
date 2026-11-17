@@ -248,6 +248,38 @@ because the rows are the liveness signal.
 own session and process group, so killing the CLI's group does not reach it, and the registry's
 clear does not end it: after a reconnect Sirio neither shows it nor stops it.
 
+**A session's name (A4).** A manual rename of a tab (the tab bar's inline editor, the Set Title
+modal, or the debug-only `surface.tabs.rename`) reaches every native Claude chat of the tab through
+`apply_manual_tab_title`, and the chat asks the CLI to carry it:
+`rename_session {title, source:"host", session_id}`
+(`ControlRequest::rename_session`). Both fields go to every CLI, because the 2.1.257 floor ignores
+them, so there is no version gate. The worker fills `session_id` at write time from its own id (the
+launch's, replaced by `init` and by a refused-resume retry), never from the chat's
+`agent_session_id`, which is unset until the first turn; 2.1.326 refuses an id that is not its
+current session. Auto titles (the first prompt's, the summarizer's) and restore write the tab title
+directly and never reach the CLI. A restored chat sends nothing, because whether its title was typed
+by hand is not persisted.
+
+**The chat's title state** (`sirio_ui::chat::agent_title`; `agentTitle` in `surface.chat.read`, `""`
+until a manual rename, then a JSON string `{title, state[, error]}`). With no client the wanted
+title is `pending`. Every connection that becomes ready sends it once (`sent`), since a new process
+knows nothing of the last one's answer, and a connection that ends puts it back to `pending` and
+clears its refusal and error. An answer (`ChatEvent::SessionRenamed`, carrying the title Sirio sent)
+counts only with a client, while the state is `sent` and the title is the one wanted: anything else
+is a late answer to an older rename or connection. Success is `accepted`. A refusal (`is_refusal`)
+is `retired`: later renames wait unsent until the next connection, and nothing is shown. Any other
+error is `failed`, with the warning `Claude Code kept its earlier name: <error>` in the transcript;
+a rename that keeps failing warns once per connection. No answer changes the tab's title.
+
+**One way only.** The CLI's `system/session_title_changed` (the echo of an accepted rename, and the
+line 2.1.326 prints first when it resumes a titled session, before the handshake answer) stays an
+`OtherSessionUpdate` that the chat drops: Sirio never adopts a name the CLI reports. Where the name
+lands, per the probe: on 2.1.326 `claude agents --json` lists a live session under it and `claude -p
+--resume "<title>"` resolves it, and the transcript gets a `custom-title` line once a turn has
+created the file. The floor writes that line and a sidecar but never the `agents` registry, and
+sends no echo. The CLI turns control characters into spaces, trims, keeps 200 code points and
+refuses an empty title; the tab keeps Sirio's own text.
+
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
 trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is

@@ -2092,3 +2092,191 @@ fn task_output_answers_do_not_hold_off_the_prompt_timeout() {
     drop(client);
     let _ = std::fs::remove_file(&log);
 }
+
+// ---------------------------------------------------------------------------
+// `rename_session`: what a host rename puts on the wire and how the answer
+// comes back.
+//
+// Ways this can fail, written before the code:
+//  - the field is not called `title`, so the CLI renames nothing;
+//  - `source` is missing, so the CLI treats the rename as its own;
+//  - `session_id` is the UI's id, the launch id after `init` renamed the
+//    session, or a dead resume id, and a current CLI refuses it;
+//  - the answer is never reported;
+//  - an error is reported as success;
+//  - the fixture's default `success {}` hides a missing echo, so the
+//    fixture answers a rename only after it printed the echo itself, and the
+//    first test asserts the echo arrived before the answer;
+//  - the fold turns the CLI's echo into the answer, so Sirio would report the
+//    CLI's sanitised title instead of the one it sent (one-way rule).
+// ---------------------------------------------------------------------------
+
+/// A fixture launch that logs its control requests and its launches.
+fn rename_launch(tag: &str, mode: &str, extra: &[String]) -> (ClaudeLaunch, PathBuf, PathBuf) {
+    let base = std::env::temp_dir().join(format!("sirio-rename-{tag}-{}", std::process::id()));
+    let control = PathBuf::from(format!("{}.control", base.display()));
+    let launches = PathBuf::from(format!("{}.launch", base.display()));
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+    let mut args = vec![
+        FIXTURE.to_string(),
+        mode.to_string(),
+        format!("--fixture-control-log={}", control.display()),
+        format!("--fixture-launch-log={}", launches.display()),
+    ];
+    args.extend(extra.iter().cloned());
+    (
+        ClaudeLaunch::fixture(PathBuf::from("python3"), args),
+        control,
+        launches,
+    )
+}
+
+/// The lines of a JSON-lines log. The fixture escapes non-ASCII, so a
+/// substring test would miss it: parse.
+fn json_lines(log: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn renames_in(control: &std::path::Path) -> Vec<serde_json::Value> {
+    json_lines(control)
+        .into_iter()
+        .filter(|request| request["subtype"] == "rename_session")
+        .collect()
+}
+
+fn next_rename_answer(events: &sirio_chat::EventStream) -> (String, Option<String>) {
+    loop {
+        if let ChatEvent::SessionRenamed { title, error } = next_event(events) {
+            return (title, error);
+        }
+    }
+}
+
+#[test]
+fn rename_session_writes_title_source_and_the_launch_session_id() {
+    let (launch, control, launches) = rename_launch("wire", "normal", &[]);
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    client
+        .rename_session("Café ☕ notes".to_string())
+        .expect("the worker is running");
+    let seen = events_until(&events, |event| {
+        matches!(event, ChatEvent::SessionRenamed { .. })
+    });
+    let Some(ChatEvent::SessionRenamed { title, error }) = seen.last() else {
+        panic!("the last event is the answer: {seen:?}");
+    };
+    assert_eq!(title, "Café ☕ notes");
+    assert_eq!(*error, None);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            ChatEvent::OtherSessionUpdate { kind } if kind == "system/session_title_changed"
+        )),
+        "the CLI's echo must arrive before the answer: {seen:?}"
+    );
+
+    let renames = renames_in(&control);
+    assert_eq!(renames.len(), 1, "{renames:?}");
+    assert_eq!(renames[0]["title"], "Café ☕ notes");
+    assert_eq!(renames[0]["source"], "host");
+    let launched = json_lines(&launches);
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    assert!(launched[0]["session_id"].is_string(), "{launched:?}");
+    assert_eq!(renames[0]["session_id"], launched[0]["session_id"]);
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn the_answer_carries_the_title_sirio_sent_not_the_cli_echo() {
+    let (launch, control, launches) = rename_launch("raw", "normal", &[]);
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    client
+        .rename_session("  Tab\there  ".to_string())
+        .expect("the worker is running");
+    let (title, error) = next_rename_answer(&events);
+    assert_eq!(title, "  Tab\there  ", "the raw string, not the sanitised echo");
+    assert_eq!(error, None);
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn rename_after_a_turn_names_the_session_init_reported() {
+    let (launch, control, launches) = rename_launch("after-turn", "normal", &[]);
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    client.prompt("hello").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+    client
+        .rename_session("After the turn".to_string())
+        .expect("the worker is running");
+    let (_, error) = next_rename_answer(&events);
+    assert_eq!(error, None);
+
+    let renames = renames_in(&control);
+    assert_eq!(renames.len(), 1, "{renames:?}");
+    assert_eq!(renames[0]["session_id"], "fixture-session-1");
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn rename_session_reports_the_cli_error() {
+    let (launch, control, launches) = rename_launch(
+        "error",
+        "normal",
+        &["--fixture-rename-error=session_id is not the current session".to_string()],
+    );
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    client
+        .rename_session("Refused".to_string())
+        .expect("the worker is running");
+    let (title, error) = next_rename_answer(&events);
+    assert_eq!(title, "Refused");
+    assert_eq!(
+        error.as_deref(),
+        Some("session_id is not the current session")
+    );
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn rename_after_refused_resume_names_the_new_session() {
+    let (launch, control, launches) = rename_launch("refused", "refuse_resume", &[]);
+    let (mut client, events) =
+        ClaudeClient::launch(launch.resuming("dead-id"), std::env::temp_dir())
+            .expect("a refused resume still yields a usable session");
+    assert!(client.resumed_session_refused());
+    client
+        .rename_session("Fresh start".to_string())
+        .expect("the worker is running");
+    let (_, error) = next_rename_answer(&events);
+    assert_eq!(error, None);
+
+    let renames = renames_in(&control);
+    assert_eq!(renames.len(), 1, "{renames:?}");
+    let logged = renames[0]["session_id"].as_str().expect("a session id");
+    assert_ne!(logged, "dead-id");
+    let retry = json_lines(&launches)
+        .into_iter()
+        .rfind(|line| line["resume"].is_null())
+        .expect("the retry launch is logged");
+    assert_eq!(retry["session_id"], logged);
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}

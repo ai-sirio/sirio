@@ -228,6 +228,15 @@ impl ClaudeClient {
         self.shared.fast_mode()
     }
 
+    /// Renames the session on the CLI's side. Fire and forget: the CLI's
+    /// answer arrives as `ChatEvent::SessionRenamed`. It fails only when the
+    /// worker is gone.
+    pub fn rename_session(&self, title: String) -> std::result::Result<(), String> {
+        self.command_tx
+            .send_blocking(worker::Command::RenameSession { title })
+            .map_err(|error| format!("the Claude worker is not running: {error}"))
+    }
+
     /// Turn fast mode on or off. The cell only moves once the CLI agrees.
     pub fn set_fast_mode(&self, enabled: bool) -> Result<()> {
         self.command_tx

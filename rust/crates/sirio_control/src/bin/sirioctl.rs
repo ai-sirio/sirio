@@ -188,6 +188,7 @@ fn usage() {
          \x20 surface prompts read             (debug builds) the saved prompts view, its cards and their window bounds, one key=value per line\n\
          \x20 surface files read               (debug builds) the Files tree rows, their flags and window bounds, one key=value per line\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
+         \x20 surface tabs rename <N> --title <T>  (debug builds) rename the Nth tab as the tab bar's inline editor does; a native Claude chat tells Claude Code the new name\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
          \x20 surface editor open --path p      (debug builds) open a file as a tab; prints its editor state\n\
          \x20 surface editor open-snapshot --sha=s --path=p  (debug builds) open p (repository-relative) at the full commit id s as a read-only snapshot tab; prints its editor state\n\
@@ -1271,6 +1272,18 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 sirio_control::protocol::request::tabs_close(position)
             };
             require_ok(socket, &request)
+        }
+        ("tabs", "rename") => {
+            let position = parsed
+                .positional
+                .get(2)
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|position| *position > 0)
+                .ok_or_else(|| "Tab index must be a positive integer".to_string())?;
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::tabs_rename(position, &parsed.require("title")?),
+            )
         }
         ("file", "read") => require_ok(socket, &sirio_control::protocol::request::file_read()),
         ("editor", "open") => require_ok(

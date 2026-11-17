@@ -365,6 +365,14 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # `elicitation_withdrawn` (the agent withdraws the form: it reads withdrawn, still after the turn,
 # and nothing answered it) and `unhandled_request` (an unknown control request gets an error answer
 # naming future_thing, and the turn still ends).
+# The rename_* scenarios (A4) use Scripts/Tests/stubs/rename/claude, the fixture answering
+# `rename_session` as Claude Code 2.1.326 does. A manual rename through the debug-only `surface tabs
+# rename` reaches the CLI with its title, `source` host and the session's id, before a turn and
+# after one (rename_session); an error warns and the next rename still goes, and a late answer to an
+# older rename moves nothing (rename_session_failed); a refusal retires the verb quietly
+# (rename_session_retired); a rename made before the handshake waits and goes once on ready
+# (rename_session_connecting); a restored chat sends nothing and adopts nothing
+# (rename_session_restored); a summarizer title never reaches the CLI (rename_auto_title_quiet).
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 

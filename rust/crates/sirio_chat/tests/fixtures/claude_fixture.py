@@ -9,6 +9,7 @@ talks to a network or reads the user's configuration.
 
 import json
 import os
+import unicodedata
 import queue
 import sys
 import threading
@@ -59,9 +60,10 @@ RESPONSE_LOG_PATH = next(
     (arg[len("--fixture-response-log="):] for arg in sys.argv if arg.startswith("--fixture-response-log=")),
     None,
 )
-# A launch argument names the file each process appends its `--resume` id to
-# at startup, one JSON line per launch, `null` for a fresh session: the
-# session every launch and relaunch asked for, as the CLI heard it.
+# A launch argument names the file each process appends one JSON line to at
+# startup, `{"resume": <the --resume id or null>, "session_id": <the
+# --session-id argument or null>}`: the session every launch and relaunch
+# asked for, as the CLI heard it.
 LAUNCH_LOG_PATH = next(
     (arg[len("--fixture-launch-log="):] for arg in sys.argv if arg.startswith("--fixture-launch-log=")),
     None,
@@ -80,6 +82,43 @@ PID_PATH = (
     else None
 )
 SESSION_ID = "fixture-session-1"
+
+
+def flag_value(name):
+    """The value of `--<name>=<value>`; an empty value counts as absent."""
+    prefix = f"--{name}="
+    value = next((arg[len(prefix):] for arg in sys.argv if arg.startswith(prefix)), "")
+    return value or None
+
+
+def argv_value(name):
+    """The argument after `<name>`, or None when absent or empty."""
+    if name not in sys.argv:
+        return None
+    at = sys.argv.index(name)
+    return (sys.argv[at + 1] if at + 1 < len(sys.argv) else "") or None
+
+
+# `rename_session`: `--fixture-rename-error=<text>` answers every rename with
+# that error; `--fixture-title-store=<path>` is a JSON object
+# `{session_id: title}` read at start and rewritten on each accepted rename;
+# `--fixture-handshake-gate=<path>` holds the `initialize` answer of a session
+# launch (`--session-id` or `--resume`, never the usage probe) until the file
+# exists; `--fixture-rename-gate=<path>` holds the answer (and the echo) of every
+# rename, in order, until the file exists, while later requests are still read.
+# These flags apply only to the main-loop modes: the `trace`,
+# `session_state` and `background_tasks` modes answer a rename with their
+# default `success {}` (no echo, no store, no error, no gate).
+RENAME_ERROR = flag_value("fixture-rename-error")
+TITLE_STORE_PATH = flag_value("fixture-title-store")
+HANDSHAKE_GATE_PATH = flag_value("fixture-handshake-gate")
+RENAME_GATE_PATH = flag_value("fixture-rename-gate")
+HELD_RENAMES = []
+HELD_RENAMES_LOCK = threading.Lock()
+# True from the first held rename until the release thread has answered them all.
+RENAMES_DRAINING = False
+# Set by `init_line`: from then on the CLI's current session is SESSION_ID.
+INIT_PRINTED = False
 
 if PID_PATH:
     with open(PID_PATH, "w", encoding="utf-8") as pid_file:
@@ -139,6 +178,8 @@ def init_line(version="2.1.273"):
     # The init list names a server and its state, never its source: that is
     # what the real CLI's `system/init` carries, and `mcp_status` is the only
     # place a connector's origin shows.
+    global INIT_PRINTED
+    INIT_PRINTED = True
     mcp_servers = (
         [{"name": "codegraph", "status": "pending"}] if MODE == "session_panel" else []
     )
@@ -1588,10 +1629,110 @@ def bg_main():
     turns.join()
 
 
+def current_session():
+    """The session a rename addresses: the launch's own id until this process
+    has printed an `init` line, the fixture's `SESSION_ID` after."""
+    if INIT_PRINTED:
+        return SESSION_ID
+    return argv_value("--session-id") or argv_value("--resume") or SESSION_ID
+
+
+def read_title_store():
+    if not TITLE_STORE_PATH:
+        return {}
+    try:
+        with open(TITLE_STORE_PATH, encoding="utf-8") as store:
+            data = json.load(store)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def title_echo(title, session_id):
+    send({
+        "type": "system",
+        "subtype": "session_title_changed",
+        "title": title,
+        "uuid": trace_uuid(),
+        "session_id": session_id,
+    })
+
+
+def sanitise_title(title):
+    """As the real CLI does: control characters become spaces, trim, 200 code points."""
+    cleaned = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in title)
+    return cleaned.strip()[:200]
+
+
+def answer_rename(request_id, request):
+    global RENAMES_DRAINING
+    if RENAME_GATE_PATH:
+        # Held: the main loop goes on reading, so a later rename is heard (and
+        # logged) while this one waits. They are answered in the order they came:
+        # while the release thread drains, a new rename queues behind the rest.
+        with HELD_RENAMES_LOCK:
+            if RENAMES_DRAINING or not os.path.exists(RENAME_GATE_PATH):
+                HELD_RENAMES.append((request_id, request))
+                if not RENAMES_DRAINING:
+                    RENAMES_DRAINING = True
+                    threading.Thread(target=release_held_renames, daemon=True).start()
+                return
+    answer_rename_now(request_id, request)
+
+
+def release_held_renames():
+    global RENAMES_DRAINING
+    while True:
+        # Checked before each answer: a gate removed mid-drain holds the rest.
+        while not os.path.exists(RENAME_GATE_PATH):
+            time.sleep(0.05)
+        with HELD_RENAMES_LOCK:
+            if not HELD_RENAMES:
+                # Every held rename is answered; the next one goes straight out.
+                RENAMES_DRAINING = False
+                return
+            request_id, request = HELD_RENAMES.pop(0)
+        answer_rename_now(request_id, request)
+
+
+def answer_rename_now(request_id, request):
+    if RENAME_ERROR:
+        control_error(request_id, RENAME_ERROR)
+        return
+    current = current_session()
+    given = request.get("session_id")
+    if given is not None and given != current:
+        control_error(request_id, "session_id is not the current session")
+        return
+    title = sanitise_title(str(request.get("title", "")))
+    if not title:
+        control_error(request_id, "title must be non-empty")
+        return
+    if TITLE_STORE_PATH:
+        store = read_title_store()
+        store[current] = title
+        with open(TITLE_STORE_PATH, "w", encoding="utf-8") as out:
+            json.dump(store, out)
+    title_echo(title, current)
+    control_response(request_id, {})
+
+
+def wait_for_handshake_gate():
+    if not HANDSHAKE_GATE_PATH:
+        return
+    if "--session-id" not in sys.argv and "--resume" not in sys.argv:
+        return
+    while not os.path.exists(HANDSHAKE_GATE_PATH):
+        time.sleep(0.05)
+
+
 def main():
     if LAUNCH_LOG_PATH:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
-            log.write(json.dumps({"resume": resume_arg()}) + "\n")
+            log.write(json.dumps({
+                "resume": resume_arg(),
+                "session_id": argv_value("--session-id"),
+            }) + "\n")
     if MODE == "trace":
         trace_main()
         return
@@ -1613,6 +1754,10 @@ def main():
         sys.stderr.write("fixture: unknown session\n")
         sys.stderr.flush()
         os._exit(1)
+    resumed = resume_arg()
+    if resumed and resumed in read_title_store():
+        # A resumed session that has a stored title says so first (Q7).
+        title_echo(read_title_store()[resumed], resumed)
     if MODE == "refuse_resume_early_init":
         # The fresh session the worker comes back with names itself in an
         # unprompted init, before the handshake is answered.
@@ -1659,6 +1804,7 @@ def main():
                 if MODE == "malformed":
                     sys.stdout.write("not-json\n")
                     sys.stdout.flush()
+                wait_for_handshake_gate()
                 control_response(request_id, initialize_payload())
                 if MODE == "commands_changed":
                     # A plugin or skill loaded mid-session. The CLI resends
@@ -1761,6 +1907,8 @@ def main():
                     "authUrl": "http://127.0.0.1:9/authorize",
                     "requiresUserAction": True,
                 })
+            elif subtype == "rename_session":
+                answer_rename(request_id, request)
             elif subtype == "rewind_files":
                 if MODE == "no_rewind":
                     send({

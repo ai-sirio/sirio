@@ -285,6 +285,9 @@ Each item is laid out the same way:
 - **Proof.**
   - The fixture records the request. The E2E renames the tab through the debug surface.
   - Live: after the rename, the session's title as the CLI lists it.
+- **As built.** The probe (`.superpowers/probe-a4/FINDINGS.md`, Q2) showed the 2.1.257 floor
+  ignores `source` and `session_id`, so the condition above resolves to always sending both. The
+  E2E's rename verb, `surface.tabs.rename`, is debug-only.
 
 ### A5 · Permission detail and the rules card
 

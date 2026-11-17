@@ -543,6 +543,15 @@ pub enum ChatEvent {
     /// client emits these. The count in `OtherSessionUpdate` and the notice
     /// for a task's end stay beside them.
     BackgroundTask(BackgroundTaskEvent),
+    /// The CLI's answer to a host rename. `title` is the one Sirio sent;
+    /// `error` is `None` on success, otherwise the CLI's own sentence. Only
+    /// the native Claude client emits it.
+    SessionRenamed {
+        /// The title that was sent.
+        title: String,
+        /// The CLI's error text, when it refused.
+        error: Option<String>,
+    },
 }
 
 /// One row of the CLI's list of live background tasks.

@@ -695,6 +695,7 @@ fn apply_event(state: &mut ChatState, event: ChatEvent) -> EventFold {
         | ChatEvent::OtherSessionUpdate { .. }
         | ChatEvent::CliState { .. }
         | ChatEvent::BackgroundTask(_)
+        | ChatEvent::SessionRenamed { .. }
         | ChatEvent::Trace(_) => EventFold::default(),
     }
 }
