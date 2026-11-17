@@ -1,7 +1,7 @@
 # The sidebar in Codex's shell
 
 **Date:** 2026-11-17
-**Status:** draft, awaiting Enzo's approval of the written document
+**Status:** approved by Enzo, 2026-11-17
 **Builds on:** `2026-11-08-zed-layout-parity-design.md` (the sidebar's metrics),
 `2026-09-24-sidebar-sessions-view-design.md` (the Sessions view),
 `2026-11-01-unread-sessions-design.md` (unread and status on a row).
