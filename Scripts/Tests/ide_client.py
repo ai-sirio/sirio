@@ -6,7 +6,8 @@ It runs inside a Sirio terminal pane, so it reads what a real Claude reads there
 token. It speaks RFC 6455 with the standard library only: it offers the `mcp`
 subprotocol, sends the token in `x-claude-code-ide-authorization`, checks that the server
 echoes `mcp`, then sends `initialize`, `notifications/initialized` and
-`ide_connected {pid: os.getpid()}`.
+`ide_connected {pid: os.getpid()}` (`--no-announce` leaves that last one out: the way a Claude that
+omits or delays it looks to Sirio).
 
 Commands arrive as lines on a FIFO:
   call <method> <json>    a JSON-RPC request; waits for its response (10 s)
@@ -220,7 +221,7 @@ def lockfile_token(port):
         return json.load(handle)["authToken"]
 
 
-def connect(port, token, transcript):
+def connect(port, token, transcript, announce=True):
     """Connect and announce; returns the Connection, or None when the server refuses."""
     try:
         sock, subprotocol = handshake(port, token)
@@ -237,7 +238,8 @@ def connect(port, token, transcript):
     status = "none" if answer is None else ("error" if "error" in answer else "ok")
     transcript.write({"event": "initialized", "status": status})
     connection.send_json({"jsonrpc": "2.0", "method": "notifications/initialized"})
-    connection.send_json({"jsonrpc": "2.0", "method": "ide_connected", "params": {"pid": os.getpid()}})
+    if announce:
+        connection.send_json({"jsonrpc": "2.0", "method": "ide_connected", "params": {"pid": os.getpid()}})
     return connection
 
 
@@ -245,10 +247,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fifo", required=True)
     parser.add_argument("--transcript", required=True)
+    parser.add_argument("--no-announce", action="store_true", help="never send ide_connected")
     args = parser.parse_args()
     transcript = Transcript(args.transcript)
     port = int(os.environ["CLAUDE_CODE_SSE_PORT"])
-    connection = connect(port, lockfile_token(port), transcript)
+    connection = connect(port, lockfile_token(port), transcript, announce=not args.no_announce)
     next_id = 0
     # Opened read-write so the FIFO never reports end-of-file between writers.
     fifo = os.open(args.fifo, os.O_RDWR)
@@ -262,7 +265,7 @@ def main():
             if verb == "token":
                 if connection:
                     connection.close()
-                connection = connect(port, rest.strip(), transcript)
+                connection = connect(port, rest.strip(), transcript, announce=not args.no_announce)
             elif verb in ("call", "notify", "send"):
                 method, _, payload = rest.partition(" ")
                 params = json.loads(payload) if payload.strip() else {}

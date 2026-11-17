@@ -104,8 +104,14 @@ impl Client {
         self.call(1, "initialize", json!({"protocolVersion":"2025-11-25"}));
         self.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
         self.send(json!({"jsonrpc":"2.0","method":"ide_connected","params":{"pid":pid}}));
+        // The connection is opened when its handshake completes, before it announces itself.
+        let opened = match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            BridgeEvent::Opened { conn } => conn,
+            other => panic!("unexpected {other:?}"),
+        };
         match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
             BridgeEvent::Connected { conn, pid: p } => {
+                assert_eq!(conn, opened);
                 assert_eq!(p, pid);
                 conn
             }
@@ -472,6 +478,56 @@ fn shutdown_closes_every_connection_and_the_port() {
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
 }
 
+// ---- a connection the app learns of when its handshake completes (Ruling 89) ----
+//
+// Every way the app could miss a connection that never sends `ide_connected`, written before the
+// code:
+// - `a_finished_handshake_opens_a_connection_before_any_announcement`: no event says the
+//   connection exists until `ide_connected`, so an `openDiff` of a Claude that omits, delays or
+//   reshapes it meets a connection the app does not know and is dropped;
+// - `an_open_diff_of_a_client_that_never_announces_follows_its_opened_event`: the `OpenDiff`
+//   reaches the app with no `Opened` before it, or for another connection;
+// - `a_connection_that_never_announces_is_reported_gone`: its `Disconnected` never comes, so the
+//   proposal it left open stays for ever.
+
+#[test]
+fn a_finished_handshake_opens_a_connection_before_any_announcement() {
+    let h = default_harness();
+    let _client = connect(h.port);
+    match h.events.recv_timeout(Duration::from_secs(5)) {
+        Ok(BridgeEvent::Opened { .. }) => {}
+        other => panic!("expected the connection to be opened, got {other:?}"),
+    }
+    assert!(h.events.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
+fn an_open_diff_of_a_client_that_never_announces_follows_its_opened_event() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let conn = match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+        BridgeEvent::Opened { conn } => conn,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(next_open_diff(&h).conn, conn);
+}
+
+#[test]
+fn a_connection_that_never_announces_is_reported_gone() {
+    let h = default_harness();
+    let c = connect(h.port);
+    let conn = match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+        BridgeEvent::Opened { conn } => conn,
+        other => panic!("unexpected {other:?}"),
+    };
+    drop(c);
+    match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+        BridgeEvent::Disconnected { conn: gone } => assert_eq!(gone, conn),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
 // ---- a connection thread that does not end in time (Ruling 86) ----
 //
 // Every way `Bridge::shutdown` could fail here, written before the code:
@@ -531,6 +587,8 @@ fn a_thread_that_outlives_shutdown_delivers_nothing_afterwards() {
     let (h, release) = parking_harness();
     let _client = park_a_connection(&h);
     let Harness { bridge, events, .. } = h;
+    // The connection was opened before the shutdown; that event is not what is asserted on.
+    assert!(matches!(events.recv_timeout(Duration::from_secs(2)), Ok(BridgeEvent::Opened { .. })));
     bridge.shutdown();
     release.send(()).unwrap();
     // The released thread ends its connection; nothing of it reaches the app.
@@ -813,6 +871,10 @@ fn disconnect_drops_pending_and_emits_disconnected() {
     let mut announced = connect(h.port);
     let conn_a = announced.handshake(&h, 1);
     let mut silent = connect(h.port);
+    match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+        BridgeEvent::Opened { .. } => {}
+        other => panic!("unexpected {other:?}"),
+    }
     announced.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
     let a = next_open_diff(&h);
     assert_eq!(a.conn, conn_a);

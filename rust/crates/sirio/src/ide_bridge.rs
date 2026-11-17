@@ -210,10 +210,12 @@ fn deepest_worktree(directory: &Path, worktrees: &[PathBuf]) -> Option<PathBuf> 
         .cloned()
 }
 
-/// What the app holds about one connection that announced itself.
+/// What the app holds about one connection whose handshake completed. `pid` is Claude's own,
+/// known once it announced itself with `ide_connected`; a connection that has not (or never
+/// will) has none, no owner to resolve, and serves its requests ownerless (spec 4.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Connection {
-    pub(crate) pid: u32,
+    pub(crate) pid: Option<u32>,
     pub(crate) owner: Option<OwnerPane>,
     pub(crate) worktree: Option<PathBuf>,
 }
@@ -567,15 +569,22 @@ impl IdeBridge {
     /// workspace's too (`proposals`), never this table's, so they are ignored here.
     pub(crate) fn on_event(&mut self, event: BridgeEvent) {
         match event {
+            BridgeEvent::Opened { conn } => {
+                self.connections.entry(conn).or_insert(Connection {
+                    pid: None,
+                    owner: None,
+                    worktree: None,
+                });
+            }
             BridgeEvent::Connected { conn, pid } => {
-                self.connections.insert(
-                    conn,
-                    Connection {
-                        pid,
+                self.connections
+                    .entry(conn)
+                    .or_insert(Connection {
+                        pid: None,
                         owner: None,
                         worktree: None,
-                    },
-                );
+                    })
+                    .pid = Some(pid);
             }
             BridgeEvent::Disconnected { conn } => {
                 self.connections.remove(&conn);
@@ -607,13 +616,14 @@ impl IdeBridge {
         !self.connections.is_empty()
     }
 
-    /// Connections with no owner, with the pid each connected with.
+    /// Connections with no owner, with the pid each announced itself with: one that has not
+    /// announced has no pid to resolve and is not listed.
     pub(crate) fn ownerless(&self) -> Vec<(ConnId, u32)> {
         let mut found: Vec<(ConnId, u32)> = self
             .connections
             .iter()
             .filter(|(_, connection)| connection.owner.is_none())
-            .map(|(conn, connection)| (*conn, connection.pid))
+            .filter_map(|(conn, connection)| Some((*conn, connection.pid?)))
             .collect();
         found.sort_by_key(|(conn, _)| conn.0);
         found

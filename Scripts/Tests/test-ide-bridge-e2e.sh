@@ -189,6 +189,12 @@ set -eEuo pipefail
 #   disconnect_closes
 #                    the client closing its socket closes the tab with the toast "Claude closed its
 #                    proposed change" and sends no decision
+#   unannounced_open_diff
+#                    (ruling 89) a client that never sends ide_connected is a connection from its handshake
+#                    (the state shows it with no pid and no owner): its openDiff opens a tab, ownerless
+#                    (the bar names no terminal), in the repository's worktree, and Reject answers it; a
+#                    second one is killed with its proposal open and a comment on it: the proposal closes,
+#                    the toast "Claude closed its proposed change" shows, the comment reaches the clipboard
 #   new_file         a path that does not exist yet opens, all added ("+2 -0"); Sirio creates nothing
 #   fifo_path        a FIFO as old_file_path opens a tab saying why, with no Edit (act edit fails);
 #                    Reject still answers
@@ -1928,7 +1934,7 @@ assert not [u for u in uris if u.startswith("file://" + other + "/")], uris
 # A client run by this script itself, outside every Sirio shell (spec 4.2's `claude` started in an
 # outside terminal): its ancestry meets no pane's shell, its cwd is $1. Sets CLIENT_FIFO,
 # CLIENT_LOG and OUTSIDE_PID.
-start_outside_client() { # cwd
+start_outside_client() { # cwd [client args, e.g. --no-announce]
   CLIENT_N=$((CLIENT_N + 1))
   CLIENT_FIFO="$RUN_DIR/client-$CLIENT_N.fifo"
   CLIENT_LOG="$RUN_DIR/client-$CLIENT_N.jsonl"
@@ -1936,7 +1942,9 @@ start_outside_client() { # cwd
   mkfifo "$CLIENT_FIFO"
   local port
   port="$(state_expr 'd["port"]')"
-  (cd "$1" && exec env CLAUDE_CODE_SSE_PORT="$port" python3 "$CLIENT" --fifo "$CLIENT_FIFO" --transcript "$CLIENT_LOG" >/dev/null 2>&1) &
+  local cwd="$1"
+  shift
+  (cd "$cwd" && exec env CLAUDE_CODE_SSE_PORT="$port" python3 "$CLIENT" --fifo "$CLIENT_FIFO" --transcript "$CLIENT_LOG" "$@" >/dev/null 2>&1) &
   OUTSIDE_PID=$!
   wait_client_ready
 }
@@ -3105,6 +3113,47 @@ case_disconnect_closes() {
   end_app_client
 }
 
+# A Claude that never sends ide_connected (it omits it, or sends it late or reshaped) is a connection
+# from its handshake on (ruling 89): its openDiff opens as an ownerless proposal instead of vanishing,
+# and its disconnect closes the proposal like any other, delivering what was written on it.
+case_proposal_unannounced() {
+  local before closed
+  start_outside_client "$WT" --no-announce
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  expect_state "the handshake alone made it a connection, with no pid and no owner" '[(c["pid"], c["owner_pane"]) for c in d["connections"]]' "[(None, None)]"
+  printf 'one\n' >"$WT/un1.txt"
+  open_diff un-1 "$WT/un1.txt" 'two\n'
+  expect_proposal un-1 ready True
+  expect_proposal un-1 owner_named False
+  expect_proposal un-1 worktree "$WT"
+  expect_tab '✻ un1.txt' >/dev/null
+  act un-1 reject
+  assert_response "$(req_id un-1)" 'd["texts"] == ["DIFF_REJECTED", "un-1"]' "Reject answers the client that never announced itself"
+  expect_no_proposals
+  end_outside_client
+  expect_state "no connection once it is gone" 'len(d["connections"])' 0
+  # A second one is killed with its proposal open and a comment on it.
+  start_outside_client "$WT" --no-announce
+  wait_client "connected" 'r.get("event") == "connected"' 1
+  printf 'one\n' >"$WT/un2.txt"
+  before="$(delivery_mark)"
+  closed="$(state_expr 'd["toast_totals"].get("Claude closed its proposed change", 0)')"
+  open_diff un-2 "$WT/un2.txt" 'two\n'
+  expect_proposal un-2 ready True
+  expect_proposal un-2 owner_named False
+  comment un-2 old 1 "note"
+  expect_proposal un-2 comments 1
+  kill -KILL "$OUTSIDE_PID"
+  wait "$OUTSIDE_PID" 2>/dev/null || true
+  OUTSIDE_PID=""
+  expect_no_proposals
+  expect_no_tab '✻ un2.txt'
+  expect_state "the toast says Claude closed it" 'd["toast_totals"].get("Claude closed its proposed change", 0)' "$((closed + 1))"
+  expect_one_delivery "$before"
+  expect_clipboard "the comment reaches the clipboard" "@un2.txt#L1 note"
+  expect_state "no connection once it is gone" 'len(d["connections"])' 0
+}
+
 case_new_file() {
   proposal_client
   rm -f "$WT/brand-new.txt"
@@ -3487,6 +3536,7 @@ run_proposal_cases() {
   case_run close_all case_close_all
   case_run replace_in_place case_replace_in_place
   case_run disconnect_closes case_disconnect_closes
+  case_run unannounced_open_diff case_proposal_unannounced
   case_run new_file case_new_file
   case_run fifo_path case_fifo_path
   case_run too_large case_too_large

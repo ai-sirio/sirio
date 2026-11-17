@@ -81,6 +81,10 @@ pub struct Gone;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeEvent {
+    /// A client finished the WebSocket handshake (the token was right): the connection exists,
+    /// announced or not. Every later event of `conn` follows this one, so the app can serve an
+    /// `openDiff` of a Claude that has not (or never will) send `ide_connected`, ownerless.
+    Opened { conn: ConnId },
     /// Claude announced itself with `ide_connected`; `pid` is Claude's own.
     Connected { conn: ConnId, pid: u32 },
     /// A connection that passed the handshake is gone, announced or not (the app ignores ids it
@@ -395,6 +399,7 @@ fn serve(shared: &Shared, stream: TcpStream, id: ConnId) {
     let (tx, rx) = mpsc::channel();
     shared.conns.lock().unwrap_or_else(|p| p.into_inner()).insert(id, tx);
     let mut conn = Conn { shared, id, ws, pending: Vec::new(), announced: false };
+    shared.emit(BridgeEvent::Opened { conn: id });
     let _ = conn.run(&rx);
     // From here no `tx.send` can succeed, so `answer_diff` on an ending connection is `Gone`.
     drop(rx);
