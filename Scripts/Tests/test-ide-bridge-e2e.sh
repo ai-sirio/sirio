@@ -163,9 +163,11 @@ set -eEuo pipefail
 #                    of that worktree closes and nothing is answered (the question held identities,
 #                    not positions)
 #   confirm_stable_worktree
-#                    the worktree removal question is open while another worktree is removed behind
-#                    the app's back and the sidebar rescans: Reject removes the asked worktree
-#                    (looked up again by path) and no other
+#                    three worktrees a-gone, b-asked, c-next made with git under one directory (git
+#                    lists them sorted by path): the removal question of b-asked is open while a-gone
+#                    is removed behind the app's back and the sidebar rescans, so b-asked's row moves
+#                    up by one (asserted from the listing); Reject removes b-asked (looked up again
+#                    by path) and neither c-next nor any other worktree
 #   secondary_focus_keeps_editor
 #                    the focus in an editor tab of Secondary: an openDiff opens its tab in the strip
 #                    without taking the active tab, and the editor still takes keys
@@ -2237,56 +2239,59 @@ case_project_close_guarded() {
   ctl select-workspace --workspace "$WT_ID" >/dev/null
 }
 
-# A worktree made now that is still listed after the catalog refreshes in flight have landed:
-# one that began before it existed can drop it from the sidebar, so a dropped one is made again
-# under another branch name.
-settled_worktree() { # branch
-  local n path
-  for n in "" 2 3 4; do
-    path="$(ensure_worktree "$1$n" 2>/dev/null || true)"
-    sleep 2
-    if [ -n "$path" ] && [ -n "$(branch_worktree "$1$n")" ]; then
-      printf '%s' "$path"
-      return 0
-    fi
-  done
-  fail "$CASE: no worktree named $1 stayed in the sidebar"
-}
-
-# A pending question holds identities, not positions (a sidebar row id is the project's id plus
-# the worktree's index). The removal question of aaa-shift is open while ide-second, which comes
-# before it, is removed behind the app's back and a new worktree is made: the rows move up, and
-# the old index now names the new worktree. Reject removes aaa-shift and nothing else.
+# A pending question holds identities, not positions (a sidebar row id is the project's index
+# times 1000 plus the worktree's index). Git lists linked worktrees sorted by path, so three made
+# under one fresh directory are adjacent and in order: a-gone, b-asked, c-next. The removal
+# question of b-asked is open while a-gone is removed behind the app's back and the sidebar
+# rescans: b-asked's row moves up by one, and the old row id now names c-next. Reject removes
+# b-asked (looked up again by path) and not c-next.
 case_confirm_stable_worktree() {
-  local doomed other trigger tries=0
-  doomed="$(settled_worktree aaa-shift)"
-  trigger="$(settled_worktree aaa-trigger)"
-  select_new_worktree "$doomed"
-  other="$(branch_worktree ide-second)"
-  [ -n "$other" ] || fail "$CASE: no ide-second worktree to remove before it"
-  printf 'a\n' >"$doomed/r.txt"
-  start_outside_client "$doomed"
+  local dir="$RUN_DIR/rowdir" name tries=0 order
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  for name in a-gone b-asked c-next; do
+    git -C "$WT" worktree add -q -b "e69-$name" "$dir/$name"
+  done
+  # The listing order of this directory's worktrees, as the sidebar and list-workspaces give it.
+  order() {
+    "$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+print(",".join(r["path"][len(sys.argv[1]) + 1:] for r in json.load(sys.stdin) if r["path"].startswith(sys.argv[1] + "/")))' "$dir"
+  }
+  # A select rescans the project; wait until the three are listed.
+  while [ "$(order)" != "a-gone,b-asked,c-next" ] && [ "$tries" -lt 40 ]; do
+    tries=$((tries + 1))
+    ctl select-workspace --workspace "$WT_ID" >/dev/null
+    sleep 0.5
+  done
+  [ "$(order)" = "a-gone,b-asked,c-next" ] || fail "$CASE: the sidebar lists '$(order)', not a-gone,b-asked,c-next"
+  printf 'a\n' >"$dir/b-asked/r.txt"
+  start_outside_client "$dir/b-asked"
   wait_client "the outside client connected" 'r.get("event") == "connected"' 1
-  open_diff st-1 "$doomed/r.txt" 'b\n'
+  open_diff st-1 "$dir/b-asked/r.txt" 'b\n'
   expect_proposal st-1 ready True
   act st-1 close_worktree
   expect_state "the removal asks first" 'd["confirmation"]["then"]' remove_worktree
-  # A mounted worktree survives a refresh whatever git says: unmount it first.
-  ctl close-workspace --workspace "$other" >/dev/null
-  git -C "$WT" worktree remove --force "$other"
-  git -C "$WT" branch -D ide-second >/dev/null
-  # Selecting a worktree rescans the project on the background executor.
-  ctl select-workspace --workspace "$WT_ID" >/dev/null
-  while [ -n "$(branch_worktree ide-second)" ] && [ "$tries" -lt 100 ]; do tries=$((tries + 1)); sleep 0.2; done
-  [ -z "$(branch_worktree ide-second)" ] || fail "$CASE: the sidebar still lists the removed worktree, so no row moved"
-  echo "rows after the move: $("$CTL" list-workspaces --json | python3 -I -c 'import json, sys; print([r["branch"] for r in json.load(sys.stdin)])')"
+  # a-gone leaves behind the app's back: unmount it, remove it, rescan until it is unlisted.
+  ctl close-workspace --workspace "$dir/a-gone" >/dev/null 2>&1 || true
+  git -C "$WT" worktree remove --force "$dir/a-gone"
+  git -C "$WT" branch -D e69-a-gone >/dev/null
+  tries=0
+  while [ "$(order)" != "b-asked,c-next" ] && [ "$tries" -lt 40 ]; do
+    tries=$((tries + 1))
+    ctl select-workspace --workspace "$WT_ID" >/dev/null
+    sleep 0.5
+  done
+  [ "$(order)" = "b-asked,c-next" ] || fail "$CASE: the rows did not move (listing: $(order))"
+  echo "OK: b-asked moved up one place under the question (listing: $(order))"
   expect_state "the question is still open" 'd["confirmation"]["then"]' remove_worktree
   act_alone confirm_reject
   assert_response "$(req_id st-1)" 'd["texts"] == ["DIFF_REJECTED", "st-1"]' "Reject answers DIFF_REJECTED"
   tries=0
-  while [ -d "$doomed" ] && [ "$tries" -lt 150 ]; do tries=$((tries + 1)); sleep 0.2; done
-  [ ! -d "$doomed" ] || fail "$CASE: the worktree the question was about is still on disk"
-  [ -d "$trigger" ] || fail "$CASE: another worktree was removed in its place"
+  while [ -d "$dir/b-asked" ] && [ "$tries" -lt 150 ]; do tries=$((tries + 1)); sleep 0.2; done
+  [ ! -d "$dir/b-asked" ] || fail "$CASE: the worktree the question was about is still on disk"
+  [ -d "$dir/c-next" ] || fail "$CASE: c-next was removed in b-asked's place"
+  git -C "$WT" worktree list --porcelain | grep -Fxq "worktree $dir/c-next" || fail "$CASE: git lost c-next"
   "$CTL" list-workspaces --json | python3 -I -c '
 import json, os, subprocess, sys
 listed = subprocess.run(["git", "-C", sys.argv[1], "worktree", "list", "--porcelain"], capture_output=True, text=True).stdout
@@ -2294,11 +2299,9 @@ for row in json.load(sys.stdin):
     if row["path"] == sys.argv[2]:
         continue
     assert os.path.isdir(row["path"]), "removed " + row["path"]
-    assert "worktree " + row["path"] in listed, "git lost " + row["path"]' "$WT" "$doomed" \
-    || fail "$CASE: a worktree other than the asked one is gone (rows moved under the question)"
-  git -C "$WT" worktree list --porcelain | grep -Fxq "worktree $trigger" || fail "$CASE: git lost $trigger"
-  [ -d "$WT" ] || fail "$CASE: the repository is gone"
-  echo "OK: only the asked worktree was removed; the one made meanwhile is intact on disk and in git"
+    assert "worktree " + row["path"] in listed, "git lost " + row["path"]' "$WT" "$dir/b-asked" \
+    || fail "$CASE: a worktree other than the asked one is gone"
+  echo "OK: only b-asked was removed; c-next and every other worktree are intact on disk and in git"
   end_outside_client
   ctl select-workspace --workspace "$WT_ID" >/dev/null
 }
