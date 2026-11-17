@@ -674,12 +674,13 @@ Not ported (2026-11 sync):
   holds its item): skip. Sirio uses no button rows, `ed75621` depends on their code,
   and no Sirio menu changes its items while it is open.
 - `2c62b4f`, `64293a8`, `2ce3368` (manual `ContextMenu`, `ContextMenu` styles sizing
-  its host): skip, but `2ce3368` still needs a ruling. The manual mode is new API
-  with no Sirio caller, and `64293a8` is a doc line. `2ce3368` changes the stateful
-  `ContextMenu`, which three Sirio surfaces use (`rust/crates/sirio_ui/src/changes.rs:2105`,
+  its host): skip. The manual mode is new API with no Sirio caller, and `64293a8` is a
+  doc line. `2ce3368` adds `impl Styled for ContextMenu` over a stored `base: Div`.
+  Without that impl no caller can style a `ContextMenu`; none of Sirio's three
+  (`rust/crates/sirio_ui/src/changes.rs:2105`,
   `rust/crates/sirio_ui/src/right_panel/prompts.rs:507`,
-  `rust/crates/sirio_ui/src/right_panel/change_requests.rs:1164`), so "no Sirio
-  caller" does not cover it.
+  `rust/crates/sirio_ui/src/right_panel/change_requests.rs:1164`) does, and an
+  unstyled `ContextMenu` renders exactly as before.
 - `ca6d2e2` (a floating option list occludes the wheel): skip. The only Sirio caller
   of `Select` is the merge method (`rust/crates/sirio_ui/src/change_request_tab/merge.rs:271`),
   whose 2 or 3 rows never scroll. The commit's one-line change to `forms/options.rs`
