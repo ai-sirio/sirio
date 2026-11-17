@@ -1,13 +1,25 @@
 # Ely integration (chat and editor)
 
 Upstream: https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components
-(formerly https://github.com/ZacharyZhang-NY/Ely-GPUI-Components; the
-repository moved and its history was rewritten.)
+(the host the 2026-11 sync compared against). Upstream has since moved to
+https://github.com/ELY-Open-Source/Ely-GPUI-Components; its history was
+rewritten in the move. The GitHub repository
+https://github.com/ZacharyZhang-NY/Ely-GPUI-Components is a stale mirror: its
+`main` stops at 2026-10-09.
 Revision: `e17e31a6890c09ebcfa8b61133d7bc7c625edf69`
-Upstream `main` no longer contains this revision: `e17e31a6` is not an
+`e17e31a6` equals `e3957f78` on upstream's rewritten `main`: same author date
+(2026-09-30T00:29:08-04:00) and identical tree (checked 2026-11-16). The 2026-11
+sync compared `e3957f78..7f7a715d` on
+https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components. `7f7a715d` is an
+ancestor of the moved repository's HEAD, `2d827752` (2026-11-15), which is split
+into crates under `crates/` and uses `gpui-pre =0.3.12` where Sirio is on
+`bezel-gpui =0.3.8`. Of the 259 commits after `7f7a715d`, those touching the
+ported files are refactors, accessibility and API changes; none is a newer
+caret, IME or tabs behaviour fix.
+Upstream `main` no longer has this revision's hash: `e17e31a6` is not an
 ancestor of `origin/main` in the upstream clone's existing refs (checked
-2026-10-17 without fetching). Vendored sources therefore come from this
-revision, not from upstream `main`.
+2026-10-17 without fetching). The vendored sources are this revision's content,
+which the rewritten `main` carries as `e3957f78`.
 Package: `ely-gpui-component` 0.1.0, Rust 1.95, MIT OR Apache-2.0.
 The upstream MIT and Apache license texts accompany these sources.
 
@@ -621,8 +633,8 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
 - `73a8bf2`: `src/motion/slide.rs` verbatim (a slide whose `selected` is not
   among its values logs and returns no marker instead of panicking). It
   completes `919f26f`'s stale-place handling for `Tabs`, whose `render` calls
-  `slide` with `selected` unconditionally. Skipped: its `buttons/segmented.rs`
-  (not vendored) and `buttons/tests.rs`.
+  `slide` with `selected` unconditionally. Skipped, not vendored:
+  `buttons/segmented.rs`, `buttons/tests.rs` and `tasks/panics.md`.
 - Local change on top of that `tabs.rs`: `src/navigation/tabs.rs:140`,
   `compact` (icons only, no notes, empty tooltips) additionally requires
   `tabs.iter().any(|tab| !tab.label.is_empty())`. Upstream goes compact for any
@@ -632,7 +644,9 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   To-review count and got an empty compact tooltip per tab. It now never goes
   compact: it keeps its notes (the To-review count), gets no empty compact
   tooltips and scrolls like any other strip. A sync must keep the condition.
-- Skipped, not vendored: `collab/remote.rs` and `terminal/paint.rs`.
+- Skipped, not vendored: `collab/remote.rs`, `terminal/paint.rs` and
+  `tasks/github.md` (`33df23c`); `forms/tests/stale.rs`, `forms/tests/mod.rs`,
+  `forms/date/cron.rs`, `forms/unit.rs` and `tasks/panics.md` (`e2d880f`).
 - Skipped, not taken (vendored files whose hunks of these commits were left
   out; the port documents them and does not apply them):
   - `e2d880f`'s `select()` hunk in `src/forms/text/mod.rs`: `select` keeps its
@@ -641,6 +655,52 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   - `6d95b24`'s part in `src/layout/scroll.rs`.
   - The tests of `2a18e9d` and `152d881`: they live in `forms/tests/`, which is
     not vendored.
+
+Not ported (2026-11 sync):
+
+- `38deadd`, `e21336f` (focus returns past overlays dropped without Close): skip.
+  The code runs only in the `on_focus_lost` of a root `FocusScope`
+  (`primitives/focus.rs`), and no Sirio code or vendored overlay builds one. Sirio
+  restores focus itself (`restore_focus_pending`, `rust/crates/sirio/src/main.rs`).
+- `a9b30c7` (K02), `029632b` (F6) (Tab and Shift-Tab under the `ElyFocus` context,
+  and F6): skip. The vendored `primitives/focus.rs` has no `ElyFocus` context or key
+  bindings, and `init_chat` registers no Tab binding (`src/lib.rs`, "Local source
+  changes").
+- `d4fdb69`, `5a53c08` (submenu hover intent, flip left, panel occlusion): skip.
+  `MenuItem::submenu` has no caller in `rust/crates`, and the vendored `menus/panel.rs`
+  (LOCAL-CHANGES, `menus/{model,draw,panel}.rs`) already occludes and stays in the
+  window. `menus/aim.rs` is not vendored.
+- `3c35daa`, `a1718b6`, `1b8d678`, `ed75621` (`Menu::buttons` rows, and the mark that
+  holds its item): skip. Sirio uses no button rows, `ed75621` depends on their code,
+  and no Sirio menu changes its items while it is open.
+- `2c62b4f`, `64293a8`, `2ce3368` (manual `ContextMenu`, `ContextMenu` styles sizing
+  its host): skip, but `2ce3368` still needs a ruling. The manual mode is new API
+  with no Sirio caller, and `64293a8` is a doc line. `2ce3368` changes the stateful
+  `ContextMenu`, which three Sirio surfaces use (`rust/crates/sirio_ui/src/changes.rs:2105`,
+  `rust/crates/sirio_ui/src/right_panel/prompts.rs:507`,
+  `rust/crates/sirio_ui/src/right_panel/change_requests.rs:1164`), so "no Sirio
+  caller" does not cover it.
+- `ca6d2e2` (a floating option list occludes the wheel): skip. The only Sirio caller
+  of `Select` is the merge method (`rust/crates/sirio_ui/src/change_request_tab/merge.rs:271`),
+  whose 2 or 3 rows never scroll. The commit's one-line change to `forms/options.rs`
+  is not taken.
+- `617a8d6`, `b29d66c`, `9fb607b`, `cd61653` (code editor fixes): already ported, see
+  "Ports from upstream `main` (Task 1b)".
+- `4a8f940` (two code editor comments): skip. Comments only, in `editor/line.rs` and
+  `editor/measure.rs`.
+- `c771248`, `5caf5aa` (code colours per language): skip. Sirio colours its code through
+  the editor's highlighter hook (`set_highlighter`, `rust/crates/sirio_ui/src/file_view/code_surface.rs`),
+  whose spans come from `code_spans` in `rust/crates/sirio_ui/src/file_view.rs`, which
+  delegates to `sirio_syntax`. The commits also touch `forms/syntax.rs`, `git/rows.rs`
+  and `git/viewer.rs`, none of them vendored.
+- `a2cb531` (`TextInput` `Copy`/`Cut`/`Paste` public): already local. `Copy`, `Cut`,
+  `Paste` and `SelectAll` are `pub use` from `forms` and `forms::text` (see "Hosting a
+  text field (bezel UI off)").
+- `i18n` catalog (`d05b1b7`, `a4bf696`, ...), Dialog/Button/Form a11y, `documents/*`,
+  `git/*`, typewriter, BlockEditor, Retired/Held: out of scope. They are not in the
+  requested areas; a11y could be a follow-up of its own. `crate::i18n`, `documents/`,
+  `primitives/held.rs` and `primitives/retired.rs` are not vendored, and of `git/` only
+  `badges.rs` and `status.rs` are.
 
 ### Keys and hosting hooks (Task 1c)
 
