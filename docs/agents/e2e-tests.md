@@ -373,6 +373,29 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # (rename_session_retired); a rename made before the handshake waits and goes once on ready
 # (rename_session_connecting); a restored chat sends nothing and adopts nothing
 # (rename_session_restored); a summarizer title never reaches the CLI (rename_auto_title_quiet).
+# The permission_* and permission_rules* scenarios (A5) use
+# Scripts/Tests/stubs/permissions/claude, the fixture's `permission` mode (any prompt asks for
+# Bash `rm -rf build`). The stub turns environment variables into the fixture's flags:
+# SIRIO_FIXTURE_PERMISSION_FIELDS (--fixture-permission-fields, a JSON file merged into every
+# can_use_tool), SIRIO_FIXTURE_PERMISSION_RULES (--fixture-permission-rules, what
+# list_permission_rules answers; unset, the fixture refuses it as the 2.1.257 floor does),
+# SIRIO_FIXTURE_RULES_LOG (--fixture-rules-log, one line per request heard),
+# SIRIO_FIXTURE_RULES_GATE (--fixture-rules-gate, holds each rules answer until the file exists)
+# and SIRIO_FIXTURE_RESULT_GATE (--fixture-result-gate, holds the turn's result). They are
+# state-only. The card scenarios read `questionDock` of `surface chat read`: permission_detail
+# (title, description, reason, path and MCP server in order; Always allow stays; digits on),
+# permission_default_no and permission_default_no_reject (start row Reject, digits off, Always
+# allow gone; row 1 allows, row 2 rejects), permission_visible_text (an OSC, a BEL and a bidi
+# override shown as U+XXXX; an ANSI reason stripped) and permission_plain (no fields: the plain
+# card). The Permissions card scenarios read `sessionPanel` and the rules log: permission_rules
+# (every group, tag and note; a bidi rule shown; an unknown behavior skipped; the last good list
+# kept after an unreadable answer), permission_rules_refused (no card, one request even after a
+# turn), permission_rules_closed_panel (no request until the panel opens),
+# permission_rules_coalesced (a held answer, an Always allow and a turn's end make two requests in
+# all), permission_rules_after_always_allow (the card refreshes before the turn ends) and
+# permission_rules_unreadable (a note, no rows). The connection-ready and restore triggers have no
+# E2E. test-ely-chat-ui-e2e.py's `permission` scenario reads questionDock for ACP: the plain card.
+# The live check is `claude_lists_permission_rules` (#[ignore], acp_conformance).
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 

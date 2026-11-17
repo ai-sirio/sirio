@@ -337,6 +337,20 @@ Each item is laid out the same way:
   - The rules card lists `workspaceDirectories` without their `source`, which the probe found
     mislabelled. It ignores the extra `parentSettingsIncluded`.
 
+- **As built.** Beyond the Deviations above:
+  - The card does not repeat a description that equals the command after trimming. Only the reason
+    loses ANSI sequences (`strip_escape_sequences`, which keeps a lone ESC for `visible_text` to
+    show). The hidden set adds U+00AD, U+180E, U+2028 to U+2029, U+2061 to U+2064, U+206A to U+206F,
+    U+FFF9 to U+FFFB and U+E0000 to U+E007F. `surface.chat.read` gains `questionDock`.
+  - The Permissions card exists only with rules control, which is native Claude. A `session` source
+    reads "this session" once. An empty list has no rows. `withheld` is not shown, since only a
+    cloud or self-hosted connection sets it.
+  - The coalescing E2E triggers with an "Always allow" answer and a turn's end, not an unfold,
+    because a card not yet drawn cannot be unfolded. The connection-ready and restore triggers
+    exist and have no E2E.
+  - What "Always allow" does is out of scope (#783): a safetyCheck's only suggestion is `setMode
+    acceptEdits`, and suggestions have a `localSettings` destination.
+
 ### A6 · Reload and connector toggle
 
 - **Wire.** All of these exist at 2.1.257, except where marked.

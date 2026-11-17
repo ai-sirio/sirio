@@ -39,6 +39,43 @@ the browser before anyone answered is accepted for the user. `claude_sends_mcp_e
 `elicitation_url`, `elicitation_withdrawn` and `unhandled_request` in
 `Scripts/Tests/test-chat-session-panel-e2e.sh` cover the app end to end.
 
+**The permission card's detail (A5).** A `can_use_tool` request carries more than the tool and its
+input, and the worker keeps it as a `PermissionDetail` (`permission::detail_for`) on the card.
+Missing fields leave the plain card; ACP, a restored card and a structured question have none.
+- **Caption.** The CLI's `title` when one comes, else "Permission requested". `display_name` is
+  only the tool's name (`Bash`, `Echo`), so it is not shown.
+- **Detail lines,** under the body and inside its capped, scrolling area. In order: the
+  description, `Reason:`, `Path:` and `MCP server: name (source)`. A description that is the
+  command after trimming is not repeated, and the model's Bash description never replaces the
+  command. `blocked_path` comes only for Bash and is the path the command writes, so it reads as
+  "Path".
+- **Reason.** The CLI's `decision_reason` when it has text. Otherwise `decision_reason_type` in
+  plain words (`Matches an ask rule in user settings` from `decision_reason_rule_source`; also
+  `workingDir`, `safetyCheck`, `subcommandResults`, `hook`, `mode` and `classifier`). An unknown
+  type shows no line.
+- **`default_to_no`.** The card starts on its first rejection (`question_dock::start_row`, shared
+  by the card and the control snapshot), so Enter declines, and the digit keys and badges are off,
+  because a digit answers without looking. **`suppress_always_allow_rule`** drops "Always
+  allow". Neither field, nor `title`, reaches a stdio host on 2.1.326 (probe: they come from a
+  desktop host's worded asks behind a server flag, from auto mode's fallbacks, or from an
+  incomplete safety check), so only the fixture and unit tests exercise them.
+  `requires_user_interaction` is parsed and not shown: the two tools that set it are already
+  questions.
+- **Visible text.** `sirio_ui::chat::visible_text` never removes a byte of what the user approves.
+  `visible_text` shows each hidden character as `⟨U+XXXX⟩`: controls (ESC included), bidi
+  controls, zero-width and invisible characters, U+00AD, U+180E, U+2028 to U+2029, U+2061 to
+  U+2064, U+206A to U+206F, U+FFF9 to U+FFFB and the tag block U+E0000 to U+E007F. The body, the
+  title, the caption, the description, the path and the server go through it; a command with an
+  OSC or a bidi override reads as carrying one. Only the reason, which is prose the CLI may colour,
+  also loses its ANSI escape sequences (`strip_escape_sequences`: CSI and OSC; a lone ESC stays,
+  and is shown).
+- **Read and proof.** `surface.chat.read` has `questionDock`: `""`, or the JSON of the open card
+  (`caption`, `body`, `details` as `{label, text}`, `options`, `selected`, `digits`). The
+  `permission_*` scenarios in `Scripts/Tests/test-chat-session-panel-e2e.sh` read it, and the Ely
+  `permission` scenario reads it for ACP, where the card stays the plain one.
+- **Out of scope (#783).** What "Always allow" does is unchanged. A safetyCheck's only suggestion
+  is `setMode acceptEdits`, and suggestions have a `localSettings` destination.
+
 **The session panel** is a column beside a chat's transcript and composer
 (`sirio_ui::chat::session_panel`, about 300 px, docked while the chat is at least
 640 px wide and laid over the transcript's right edge, above the composer, below that;
@@ -48,8 +85,9 @@ starts folded, and which cards are folded does not survive a relaunch. Its cards
 folded by origin, from `get_context_usage` through `sirio_claude::context`; asked once on open
 when no report exists yet), Connectors (the session's MCP servers by origin, with Sign in and
 Reconnect, from `sirio_claude::mcp` and `sirio_chat::McpControl`, whose calls wait for the CLI
-and so run off the GPUI thread), Trace (below) and Change request (the branch's pull or merge
-request through the forge source, sharing the right panel's per-host rate-limit pause, and read
+and so run off the GPUI thread), Permissions (below), Trace (below) and Change request (the
+branch's pull or merge request through the forge source, sharing the right panel's per-host
+rate-limit pause, and read
 only once the card is unfolded and a frame paints the column, so a chat in a background tab asks
 the forge nothing). Opening the column runs a probe, `ChangeRequestSource::has_forge`, to decide
 whether the Change request card is drawn at all; it reads local git config and the credential
@@ -75,6 +113,41 @@ is); geometry, enums and labels only; not `composer`, which is the draft's text)
 transcript rows the list drew, so a reveal reads as the row being between them: a row that is
 the transcript's last cannot reach the top of a list that fills its pane, and unpainted nothing is
 drawn, so the two are equal.
+
+**The Permissions card (A5)** lists the rules the session runs under, as the terminal's
+`/permissions` does, from `list_permission_rules` (`sirio_claude::permissions`). It is read-only
+and is drawn only for native Claude, where the client has rules control (`RulesControl`, a
+detached handle like `McpControl`); an ACP chat has none. It starts folded. The section is absent
+before the first answer, after a refusal and with no rules control.
+- **Rows.** Groups Allow, Ask and Deny, then Directories, each with a count and folded on its own
+  (row keys `permissions/allow`, `permissions/allow/0`, `permissions/directories`, ...; no row has
+  an action). A rule row shows the rule and the CLI's description, tagged with its source in words
+  (`user settings`, `managed settings`, ...), plus ` · read-only` or ` · this session` from its
+  editability; a source of `session` reads just "this session". A `notInEffect` rule says managed
+  settings allow only their own rules. An empty list has no rows, and the summary counts only the
+  rules drawn. Rule and path text go through `visible_text`. Directories show the path only,
+  because the CLI's `source` for a directory is unreliable. `withheld` is not shown: only a cloud
+  or self-hosted connection sets it, never stdio.
+- **Notes.** `managedOnly` adds "Managed settings allow only their own rules." Each skipped
+  settings file is `Skipped <file>: <message>`.
+- **Triggers.** The ask runs only while the panel is open, and the section's state is that of the
+  current client: it is cleared with each new one. The triggers are opening the panel, restoring
+  it open, unfolding the card, a connection becoming ready, a turn's end, and an "Always allow"
+  answer (which adds a rule, so the card reads it at once, not at the turn's end). The connection
+  and restore triggers are not exercised by an E2E.
+- **Coalescing.** One ask is open at a time. A trigger while one runs leaves a single follow-up,
+  however many come, so a held answer plus an "Always allow" and a turn's end make two requests in
+  all. The ask runs in `background_spawn`, never on the GPUI thread, and is bounded at 10 s.
+- **Refusal and error.** A refusal (`is_refusal`, the 2.1.257 floor's `Unsupported control request
+  subtype`) retires the card until the next connection and is never asked again or shown. Any other
+  failure, including a success with no `state.rules`, keeps the last good list and adds
+  `Claude Code's rules could not be read: <error>`; with no list yet, the note stands alone.
+- **Stale answers.** The open ask is a task held by the card. A new connection drops it, so the old
+  connection's answer never lands.
+- **The fixture's default.** With no `--fixture-permission-rules` file the fixture refuses the
+  request as the floor does, so a scenario that wants rules must name a file. Live,
+  `claude_lists_permission_rules` (`sirio_agents/tests/acp_conformance.rs`, `#[ignore]`) checks
+  a real answer on a configured `CLAUDE_CONFIG_DIR` and the floor's refusal.
 
 **The Trace card** shows what the native Claude transport reports of the chat's latest turn, and
 only once the chat has received a `TraceEvent`, which no ACP client ever sends. Folded it is one
