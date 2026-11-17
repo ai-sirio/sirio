@@ -15,6 +15,10 @@
 use std::path::{Path, PathBuf};
 
 use ely_gpui_component::menus::{Hang, layer};
+use ely_gpui_component::{
+    primitives::{Icon as EIcon, IconName},
+    theme::IconSize as EIconSize,
+};
 use gpui::{
     App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
     KeyDownEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel,
@@ -190,11 +194,9 @@ pub struct SidebarTab {
 /// panel's content width, so 298 for the default 300 less the panel's border.
 const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
-/// The one size of the icons under the view switch: expand all, collapse
+/// The one size of the icons under the title: expand all, collapse
 /// all and the `+`.
 const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
-/// Horizontal padding of one Projects/Sessions segment.
-
 pub(crate) const ROW_HEIGHT: f32 = 34.0;
 /// Horizontal padding of a sidebar row and of a section header (Zed's 6px).
 pub(crate) const ROW_PAD_X: f32 = 6.0;
@@ -523,7 +525,7 @@ pub enum SidebarEvent {
     },
     /// Close the open tab with this id.
     CloseTab(usize),
-    /// The user picked a view on the header switch; the host persists it.
+    /// The user picked a view on the title menu; the host persists it.
     ViewChanged(SidebarView),
     /// The close button of a live session. Unlike `CloseTab`, the host asks
     /// before closing a tab whose agent is still working.
@@ -797,10 +799,11 @@ impl Sidebar {
         self.sync_clock(cx);
     }
 
-    /// A click on the header switch: switches, clears the filter (a worktree
+    /// A pick on the title menu: switches, clears the filter (a worktree
     /// filter means nothing to the session list and vice versa) and reports.
     fn choose_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.view == view {
+            self.close_view_menu(cx);
             return;
         }
         self.view = view;
@@ -3621,9 +3624,14 @@ impl Sidebar {
         )
     }
 
-    /// The 40 px header: the title that opens the view menu. Later tasks add
-    /// the Bell and Search to its right side through `header_trailing`.
-    fn render_header(&self, theme: &Theme, view: SidebarView, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The 40 px header: the title that opens the view menu.
+    fn render_header(
+        &self,
+        theme: &Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let view = self.view;
         let entity = cx.entity();
         let menu = self.view_menu.get().map(|_| {
             Self::render_view_menu(&self.view_menu, entity, view, *theme, cx).into_any_element()
@@ -3664,8 +3672,9 @@ impl Sidebar {
                             .flex()
                             .flex_none()
                             .child(
-                                IconElement::new(Icon::ChevronDown, IconSize::Small)
-                                    .text_color(theme.ely.fg_subtle),
+                                EIcon::new(IconName::ChevronDown)
+                                    .size(EIconSize::Sm)
+                                    .color(theme.ely.fg_subtle),
                             ),
                     ),
             )
@@ -3699,8 +3708,9 @@ impl Sidebar {
                             .flex()
                             .flex_none()
                             .child(
-                                IconElement::new(Icon::Check, IconSize::Small)
-                                    .text_color(theme.ely.fg),
+                                EIcon::new(IconName::Check)
+                                    .size(EIconSize::Sm)
+                                    .color(theme.ely.fg),
                             ),
                     )
                 })
@@ -3990,6 +4000,11 @@ impl Render for Sidebar {
         // that reads a `bezel_theme::Theme` does.
         if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
+        }
+        // The header's Ely icons read Ely's theme on every frame; fixtures
+        // that set only Sirio's theme get it installed the same lazy way.
+        if !cx.has_global::<ely_gpui_component::theme::Theme>() {
+            crate::ely::init(cx);
         }
         let rows = self.visible_rows();
         let view = self.view;
@@ -4337,10 +4352,10 @@ impl Render for Sidebar {
             .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
-            .child(self.render_header(&theme, view, cx))
+            .child(self.render_header(&theme, window, cx))
             .when(view == SidebarView::Projects, |this| {
                 // Open and fold the whole list, then the `+`: one row under
-                // the switch, the three drawn at one size. They are icons, so
+                // the title, the three drawn at one size. They are icons, so
                 // the tooltip is the only place the bulk buttons' words
                 // appear.
                 this.child(
@@ -8207,6 +8222,27 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn choosing_the_current_view_closes_the_menu_without_a_change(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-title");
+        assert!(cx.debug_bounds("sidebar-view-menu").is_some());
+        click_control(&mut cx, "sidebar-view-menu-projects");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "the menu closes");
+        assert!(
+            !events.borrow().iter().any(|event| matches!(event, SidebarEvent::ViewChanged(_))),
+            "no ViewChanged for the view already shown"
+        );
+    }
+
+    #[gpui::test]
     async fn the_title_menu_marks_the_current_view(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(crate::ely::init);
@@ -8249,7 +8285,7 @@ mod tests {
             );
             assert!(
                 control.top() >= strip.bottom() && control.bottom() <= filter.top(),
-                "{selector} sits between the view switch and the filter"
+                "{selector} sits between the title and the filter"
             );
         }
         // The glyphs, not their 20px boxes: the `+` was text and the bulk
