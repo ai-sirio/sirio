@@ -4,7 +4,10 @@
 use serde_json::{Value, json};
 use sirio_claude::{CanUseTool, PermissionResult};
 
-use sirio_chat_vocab::{PermissionOption, PermissionQuestion, PermissionTextInput};
+use sirio_chat_vocab::{
+    PermissionDetail, PermissionMcpServer, PermissionOption, PermissionQuestion,
+    PermissionTextInput,
+};
 
 /// An answer, plus the mode change that has to follow it.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,11 +34,74 @@ pub(super) fn options_for(request: &CanUseTool) -> Vec<PermissionOption> {
         ];
     }
     let mut options = vec![option("allow_once", "Allow", "AllowOnce")];
-    if !remembered(request).is_empty() {
+    if !request.suppress_always_allow_rule && !remembered(request).is_empty() {
         options.push(option("allow_always", "Always allow", "AllowAlways"));
     }
     options.push(option("reject_once", "Reject", "RejectOnce"));
     options
+}
+
+/// What the CLI said about this ask, for the card to show. `None` when it
+/// said nothing the card could use.
+pub(super) fn detail_for(request: &CanUseTool) -> Option<PermissionDetail> {
+    let detail = PermissionDetail {
+        title: request.title.clone(),
+        description: request.description.clone(),
+        reason: reason_for(request),
+        path: request.blocked_path.clone(),
+        mcp_server: request
+            .mcp_server
+            .as_ref()
+            .map(|(name, source)| PermissionMcpServer {
+                name: name.clone(),
+                source: source.clone(),
+            }),
+        default_to_no: request.default_to_no,
+    };
+    (detail != PermissionDetail::default()).then_some(detail)
+}
+
+/// Why the CLI asks, as a sentence: its own text when it sent some, else
+/// a plain-words reading of the reason type.
+pub(super) fn reason_for(request: &CanUseTool) -> Option<String> {
+    if let Some(reason) = request
+        .decision_reason
+        .as_deref()
+        .filter(|reason| !reason.trim().is_empty())
+    {
+        return Some(reason.to_string());
+    }
+    let words = match request.decision_reason_type.as_deref()? {
+        "rule" => match request.decision_reason_rule_source.as_deref() {
+            Some(source) => format!("Matches an ask rule in {}", source_words(source)),
+            None => "Matches an ask rule".to_string(),
+        },
+        "workingDir" => "Outside the allowed working directories".to_string(),
+        "safetyCheck" => "A safety check asks first".to_string(),
+        "subcommandResults" => "Part of this command needs approval".to_string(),
+        "hook" => "A hook asked for approval".to_string(),
+        "mode" => "The permission mode asks first".to_string(),
+        "classifier" => "The auto-mode classifier asks first".to_string(),
+        _ => return None,
+    };
+    Some(words)
+}
+
+/// A settings source in plain words. An unknown source is shown as is.
+#[must_use]
+pub fn source_words(source: &str) -> String {
+    match source {
+        "userSettings" => "user settings",
+        "projectSettings" => "project settings",
+        "localSettings" => "local project settings",
+        "flagSettings" => "the --settings flag",
+        "policySettings" => "managed settings",
+        "cliArg" => "a command-line flag",
+        "session" => "this session",
+        "command" => "a command",
+        other => other,
+    }
+    .to_string()
 }
 
 /// What "Always allow" hands back: the CLI's suggestions, less a switch to
@@ -200,6 +266,15 @@ mod tests {
             input,
             permission_suggestions: suggestions,
             decision_reason: None,
+            title: None,
+            description: None,
+            decision_reason_type: None,
+            decision_reason_rule_source: None,
+            blocked_path: None,
+            mcp_server: None,
+            default_to_no: false,
+            suppress_always_allow_rule: false,
+            requires_user_interaction: false,
         }
     }
 

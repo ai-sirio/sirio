@@ -2280,3 +2280,251 @@ fn rename_after_refused_resume_names_the_new_session() {
     let _ = std::fs::remove_file(&control);
     let _ = std::fs::remove_file(&launches);
 }
+
+// ---------------------------------------------------------------------------
+// A5: the CLI's permission detail, and the permission rules.
+// ---------------------------------------------------------------------------
+
+/// A scratch file holding `contents`, for a fixture flag that names a path.
+fn scratch_json(label: &str, contents: &str) -> PathBuf {
+    let n = LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "sirio-a5-{label}-{}-{n}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, contents).expect("a scratch file");
+    path
+}
+
+fn launch_with_flags(mode: &str, flags: Vec<String>) -> (ClaudeClient, sirio_chat::EventStream) {
+    let mut args = vec![FIXTURE.to_string(), mode.to_string()];
+    args.extend(flags);
+    ClaudeClient::launch(
+        ClaudeLaunch::fixture(PathBuf::from("python3"), args),
+        std::env::temp_dir(),
+    )
+    .expect("fixture claude should complete its handshake")
+}
+
+/// The first permission request of a `permission`-mode turn, and the client,
+/// with the fixture merging `fields` into its `can_use_tool`.
+fn permission_request_with(
+    fields: &str,
+) -> (
+    ClaudeClient,
+    sirio_chat::EventStream,
+    u64,
+    String,
+    Vec<sirio_chat::PermissionOption>,
+    Option<sirio_chat::PermissionDetail>,
+) {
+    let path = scratch_json("fields", fields);
+    let (mut client, events) = launch_with_flags(
+        "permission",
+        vec![format!("--fixture-permission-fields={}", path.display())],
+    );
+    client.prompt("delete it").expect("prompt is accepted");
+    loop {
+        if let ChatEvent::PermissionRequest {
+            request_id,
+            title,
+            options,
+            detail,
+            ..
+        } = next_event(&events)
+        {
+            let _ = std::fs::remove_file(&path);
+            return (client, events, request_id, title, options, detail);
+        }
+    }
+}
+
+fn finish_permission_turn(
+    mut client: ClaudeClient,
+    events: &sirio_chat::EventStream,
+    request_id: u64,
+) {
+    client
+        .respond_permission(request_id, "reject_once")
+        .expect("the choice reaches the agent");
+    drain_until_turn_end(events);
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn permission_detail_reaches_the_event() {
+    let (client, events, request_id, title, _, detail) = permission_request_with(
+        r#"{"title":"Run the build","description":"make a file",
+            "decision_reason_type":"rule","decision_reason_rule_source":"userSettings",
+            "blocked_path":"/w/out.txt","mcp_server":{"name":"probe","source":"project"},
+            "default_to_no":true}"#,
+    );
+    let tool = sirio_claude::message::ToolUse {
+        id: "toolu_perm_1".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({"command": "rm -rf build", "description": "Remove build"}),
+    };
+    assert_eq!(title, sirio_claude::tools::describe(&tool).title);
+    assert_eq!(
+        detail,
+        Some(sirio_chat::PermissionDetail {
+            title: Some("Run the build".into()),
+            description: Some("make a file".into()),
+            reason: Some("Matches an ask rule in user settings".into()),
+            path: Some("/w/out.txt".into()),
+            mcp_server: Some(sirio_chat::PermissionMcpServer {
+                name: "probe".into(),
+                source: "project".into(),
+            }),
+            default_to_no: true,
+        })
+    );
+    finish_permission_turn(client, &events, request_id);
+}
+
+#[test]
+fn the_cli_reason_wins_over_its_type() {
+    let (client, events, request_id, _, _, detail) = permission_request_with(
+        r#"{"decision_reason":"Path is outside allowed working directories",
+            "decision_reason_type":"workingDir"}"#,
+    );
+    assert_eq!(
+        detail.and_then(|detail| detail.reason).as_deref(),
+        Some("Path is outside allowed working directories")
+    );
+    finish_permission_turn(client, &events, request_id);
+}
+
+#[test]
+fn suppression_drops_always_allow() {
+    // The mode's own `addRules` suggestion would otherwise earn "Always allow".
+    let (client, events, request_id, _, options, _) =
+        permission_request_with(r#"{"suppress_always_allow_rule":true}"#);
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
+        ["allow_once", "reject_once"]
+    );
+    finish_permission_turn(client, &events, request_id);
+}
+
+#[test]
+fn wrongly_typed_fields_degrade_instead_of_hiding_the_card() {
+    // A field of the wrong JSON type must read as absent. A parse that
+    // refused the whole request would have Sirio deny it unseen.
+    let (client, events, request_id, _, options, detail) = permission_request_with(
+        r#"{"title":5,"default_to_no":"yes","suppress_always_allow_rule":"true",
+            "mcp_server":{"name":"probe"}}"#,
+    );
+    assert_eq!(detail, None);
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
+        ["allow_once", "allow_always", "reject_once"]
+    );
+    finish_permission_turn(client, &events, request_id);
+}
+
+fn rules_client(payload: Option<&str>) -> (ClaudeClient, sirio_chat::EventStream, Option<PathBuf>) {
+    let path = payload.map(|payload| scratch_json("rules", payload));
+    let flags = path
+        .iter()
+        .map(|path| format!("--fixture-permission-rules={}", path.display()))
+        .collect();
+    let (client, events) = launch_with_flags("echo_control", flags);
+    (client, events, path)
+}
+
+#[test]
+fn rules_answer_is_read() {
+    let (mut client, _events, path) = rules_client(Some(
+        r#"{"state":{"rules":[
+              {"behavior":"allow","source":"userSettings","rule":"Bash(echo hi:*)",
+               "description":{"prefix":"Any Bash command starting with ","emphasis":"echo hi"},
+               "editability":"persistent"},
+              {"behavior":"deny","source":"policySettings","rule":"Read(./secret.txt)",
+               "editability":"readonly","notInEffect":true},
+              {"behavior":"ask","source":"userSettings","editability":"persistent"}],
+            "workspaceDirectories":[{"path":"/w/extra","source":"localSettings"}],
+            "originalCwd":"/w","managedOnly":true,"withheld":true,
+            "errors":[{"file":"/w/.claude/settings.json","path":"permissions.allow",
+                       "message":"Expected array, but received string"}]}}"#,
+    ));
+    let rules = client
+        .rules_control()
+        .list()
+        .expect("the fixture answers with rules");
+    assert_eq!(
+        rules,
+        sirio_chat::PermissionRules {
+            rules: vec![
+                sirio_chat::PermissionRule {
+                    behavior: "allow".into(),
+                    source: "userSettings".into(),
+                    rule: "Bash(echo hi:*)".into(),
+                    description: Some("Any Bash command starting with echo hi".into()),
+                    editability: "persistent".into(),
+                    not_in_effect: false,
+                },
+                sirio_chat::PermissionRule {
+                    behavior: "deny".into(),
+                    source: "policySettings".into(),
+                    rule: "Read(./secret.txt)".into(),
+                    description: None,
+                    editability: "readonly".into(),
+                    not_in_effect: true,
+                },
+            ],
+            workspace_directories: vec!["/w/extra".into()],
+            managed_only: true,
+            errors: vec![sirio_chat::SettingsError {
+                file: "/w/.claude/settings.json".into(),
+                path: "permissions.allow".into(),
+                message: "Expected array, but received string".into(),
+            }],
+            withheld: true,
+        }
+    );
+    client.shutdown().expect("clean shutdown");
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
+fn rules_refusal_is_the_clis_own_text() {
+    let (mut client, _events, _) = rules_client(None);
+    let error = client
+        .rules_control()
+        .list()
+        .expect_err("the floor refuses the request");
+    assert_eq!(
+        error,
+        "Unsupported control request subtype: list_permission_rules"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn rules_success_without_state_is_an_error() {
+    let (mut client, _events, path) = rules_client(Some("{}"));
+    let error = client
+        .rules_control()
+        .list()
+        .expect_err("a success with no rules is not a list");
+    assert_eq!(error, "the answer had no rules");
+    // The fixture re-reads the file: a state whose rules are not a list.
+    let path = path.expect("a rules file");
+    std::fs::write(&path, r#"{"state":{"rules":"none","managedOnly":true}}"#).expect("rewrite");
+    let error = client
+        .rules_control()
+        .list()
+        .expect_err("rules that are not a list are not a list");
+    assert_eq!(error, "the answer had no rules");
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(path);
+}

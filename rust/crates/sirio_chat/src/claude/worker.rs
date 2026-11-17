@@ -23,8 +23,8 @@ use sirio_chat_child::{
 };
 use sirio_claude::{
     Catalog, ChatSession, CliMessage, ContextBreakdown, ContextUsageReport, ControlEnvelope,
-    ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer,
-    McpServerStatus, RewindOutcome, TaskOutput, parse_mcp_status,
+    ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer, McpServerStatus,
+    PermissionRules, RewindOutcome, TaskOutput, parse_mcp_status, parse_permission_rules,
 };
 
 use super::ClaudeLaunch;
@@ -93,6 +93,11 @@ pub(super) enum Command {
     /// Ask the CLI for its connectors' state.
     McpStatus {
         reply: mpsc::SyncSender<Result<Vec<McpServer>, String>>,
+    },
+    /// Ask the CLI for its live permission rules. The reply carries the CLI's
+    /// own refusal text when it refuses.
+    PermissionRules {
+        reply: mpsc::SyncSender<Result<PermissionRules, String>>,
     },
     /// Ask the CLI to connect a server again.
     McpReconnect {
@@ -702,6 +707,10 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut pending_context_refresh: Option<String> = None;
     let mut pending_mcp_status: HashMap<String, mpsc::SyncSender<Result<Vec<McpServer>, String>>> =
         HashMap::new();
+    let mut pending_permission_rules: HashMap<
+        String,
+        mpsc::SyncSender<Result<PermissionRules, String>>,
+    > = HashMap::new();
     let mut pending_mcp_reconnects: HashMap<String, mpsc::SyncSender<Result<(), String>>> =
         HashMap::new();
     let mut pending_mcp_auths: HashMap<String, mpsc::SyncSender<Result<McpAuthStart, String>>> =
@@ -1048,7 +1057,18 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 let _ = reply.send(answer);
                             }
                             if let Some(reply) =
-                                pending_mcp_reconnects.remove(&envelope.request_id)
+                                pending_permission_rules.remove(&envelope.request_id)
+                            {
+                                let no_rules = || "the answer had no rules".to_string();
+                                let _ = reply.send(match (&envelope.payload, &envelope.error) {
+                                    (Some(payload), _) => {
+                                        parse_permission_rules(payload).ok_or_else(no_rules)
+                                    }
+                                    (None, Some(error)) => Err(error.clone()),
+                                    (None, None) => Err(no_rules()),
+                                });
+                            }
+                            if let Some(reply) = pending_mcp_reconnects.remove(&envelope.request_id)
                             {
                                 let _ = reply.send(match &envelope.error {
                                     None => Ok(()),
@@ -1240,6 +1260,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     .title,
                                     options,
                                     question,
+                                    detail: permission::detail_for(&request),
                                 })
                                 .await;
                             open_permissions += 1;
@@ -1650,6 +1671,19 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the connector status request".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::PermissionRules { reply }) => {
+                        let id = next_request_id();
+                        pending_permission_rules.insert(id.clone(), reply);
+                        if write_line(&mut stdin, &ControlRequest::list_permission_rules(&id))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the permission rules request".into(),
                             );
                         }
                     }

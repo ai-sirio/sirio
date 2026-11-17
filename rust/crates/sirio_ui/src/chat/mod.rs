@@ -14678,6 +14678,7 @@ two"
                         description: None,
                     }],
                     question: None,
+                    detail: None,
                 },
                 cx,
             );
@@ -14787,6 +14788,7 @@ two"
                         description: None,
                     }],
                     question: None,
+                    detail: None,
                 },
                 cx,
             );
@@ -16115,6 +16117,7 @@ two"
                             prefill: None,
                         }),
                     }),
+                    detail: None,
                 },
                 cx,
             );
@@ -16130,6 +16133,7 @@ two"
                         description: None,
                     }],
                     question: None,
+                    detail: None,
                 },
                 cx,
             );

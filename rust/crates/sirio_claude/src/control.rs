@@ -134,6 +134,13 @@ impl ControlRequest {
         Self::envelope(request_id, json!({"subtype": "mcp_status"}))
     }
 
+    /// The session's live permission rules and workspace directories. The
+    /// floor CLI refuses it as an unsupported subtype.
+    #[must_use]
+    pub fn list_permission_rules(request_id: &str) -> Value {
+        Self::envelope(request_id, json!({"subtype": "list_permission_rules"}))
+    }
+
     /// Asks the CLI to connect a server again.
     #[must_use]
     pub fn mcp_reconnect(request_id: &str, server: &str) -> Value {
@@ -369,6 +376,26 @@ pub struct CanUseTool {
     pub permission_suggestions: Vec<Value>,
     /// Why the CLI escalated, when it says. May carry ANSI escapes.
     pub decision_reason: Option<String>,
+    /// The title a host-worded ask carries, when it does.
+    pub title: Option<String>,
+    /// What the tool is about to do, in the CLI's words.
+    pub description: Option<String>,
+    /// Why the CLI asks, as a type (`rule`, `workingDir`, ...).
+    pub decision_reason_type: Option<String>,
+    /// For a `rule` reason, the settings source that holds the rule.
+    pub decision_reason_rule_source: Option<String>,
+    /// The path a Bash command writes (the CLI's `blocked_path`), not a
+    /// blocked location.
+    pub blocked_path: Option<String>,
+    /// The connector this tool belongs to: name and source, only when both
+    /// are strings.
+    pub mcp_server: Option<(String, String)>,
+    /// The CLI would rather the answer be no.
+    pub default_to_no: bool,
+    /// The CLI asks that no "always allow" rule be offered.
+    pub suppress_always_allow_rule: bool,
+    /// The CLI says only a person may answer. Carried, not shown.
+    pub requires_user_interaction: bool,
 }
 
 impl CanUseTool {
@@ -400,8 +427,32 @@ impl CanUseTool {
                 .get("decision_reason")
                 .and_then(|reason| reason.as_str())
                 .map(str::to_string),
+            title: text(request, "title"),
+            description: text(request, "description"),
+            decision_reason_type: text(request, "decision_reason_type"),
+            decision_reason_rule_source: text(request, "decision_reason_rule_source"),
+            blocked_path: text(request, "blocked_path"),
+            mcp_server: request.get("mcp_server").and_then(|server| {
+                Some((
+                    server.get("name")?.as_str()?.to_string(),
+                    server.get("source")?.as_str()?.to_string(),
+                ))
+            }),
+            default_to_no: flag(request, "default_to_no"),
+            suppress_always_allow_rule: flag(request, "suppress_always_allow_rule"),
+            requires_user_interaction: flag(request, "requires_user_interaction"),
         })
     }
+}
+
+/// A string field, or absent when it is missing or of another type.
+fn text(request: &Value, key: &str) -> Option<String> {
+    request.get(key)?.as_str().map(str::to_string)
+}
+
+/// A boolean field, false when it is missing or of another type.
+fn flag(request: &Value, key: &str) -> bool {
+    request.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// The answer to a [`CanUseTool`].

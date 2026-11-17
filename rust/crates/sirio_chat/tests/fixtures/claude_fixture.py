@@ -117,6 +117,24 @@ HELD_RENAMES = []
 HELD_RENAMES_LOCK = threading.Lock()
 # True from the first held rename until the release thread has answered them all.
 RENAMES_DRAINING = False
+# `list_permission_rules`, in all four control loops. Without
+# `--fixture-permission-rules=<path>` the fixture refuses it as the 2.1.257 floor
+# does; with it, the file's JSON object is the success payload, re-read on each
+# request. `--fixture-rules-log=<path>` gets one `{"t": <monotonic seconds>}`
+# line per request received; `--fixture-rules-gate=<path>` holds every answer,
+# in order, until the file exists (as `--fixture-rename-gate` does).
+# `--fixture-permission-fields=<path>` is a JSON object merged into every
+# `can_use_tool`, re-read on each use; `--fixture-result-gate=<path>` holds the
+# `result` that ends a `permission`-mode turn until the file exists.
+PERMISSION_RULES_PATH = flag_value("fixture-permission-rules")
+RULES_LOG_PATH = flag_value("fixture-rules-log")
+RULES_GATE_PATH = flag_value("fixture-rules-gate")
+PERMISSION_FIELDS_PATH = flag_value("fixture-permission-fields")
+RESULT_GATE_PATH = flag_value("fixture-result-gate")
+HELD_RULES = []
+HELD_RULES_LOCK = threading.Lock()
+# True from the first held rules request until the release thread has answered them all.
+RULES_DRAINING = False
 # Set by `init_line`: from then on the CLI's current session is SESSION_ID.
 INIT_PRINTED = False
 
@@ -330,6 +348,65 @@ def assistant_tool_use(tool_use_id, tool_name, tool_input, parent=None):
     })
 
 
+def permission_fields():
+    """The extra `can_use_tool` fields the launch asked for, read on each use."""
+    if not PERMISSION_FIELDS_PATH:
+        return {}
+    try:
+        with open(PERMISSION_FIELDS_PATH, encoding="utf-8") as fields:
+            data = json.load(fields)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def answer_permission_rules(request_id):
+    """One `list_permission_rules` request, any control loop."""
+    global RULES_DRAINING
+    if RULES_LOG_PATH:
+        with open(RULES_LOG_PATH, "a", encoding="utf-8") as log:
+            log.write(json.dumps({"t": time.monotonic()}) + "\n")
+    if RULES_GATE_PATH:
+        # Held in order, while later requests are still read: a request that
+        # arrives during the drain queues behind the rest.
+        with HELD_RULES_LOCK:
+            if RULES_DRAINING or not os.path.exists(RULES_GATE_PATH):
+                HELD_RULES.append(request_id)
+                if not RULES_DRAINING:
+                    RULES_DRAINING = True
+                    threading.Thread(target=release_held_rules, daemon=True).start()
+                return
+    answer_permission_rules_now(request_id)
+
+
+def release_held_rules():
+    global RULES_DRAINING
+    while True:
+        # Checked before each answer: a gate removed mid-drain holds the rest.
+        while not os.path.exists(RULES_GATE_PATH):
+            time.sleep(0.05)
+        with HELD_RULES_LOCK:
+            if not HELD_RULES:
+                RULES_DRAINING = False
+                return
+            request_id = HELD_RULES.pop(0)
+        answer_permission_rules_now(request_id)
+
+
+def answer_permission_rules_now(request_id):
+    if not PERMISSION_RULES_PATH:
+        control_error(request_id,
+                      "Unsupported control request subtype: list_permission_rules")
+        return
+    try:
+        with open(PERMISSION_RULES_PATH, encoding="utf-8") as rules:
+            payload = json.load(rules)
+    except (OSError, ValueError):
+        control_error(request_id, "fixture: unreadable rules file")
+        return
+    control_response(request_id, payload)
+
+
 def ask_permission(cli_request_id, tool_name, tool_use_id, tool_input, suggestions=None,
                    agent_id=None, parent=None):
     """`agent_id` makes it a subagent's request, as the real CLI does; `parent`
@@ -344,6 +421,7 @@ def ask_permission(cli_request_id, tool_name, tool_use_id, tool_input, suggestio
     }
     if agent_id is not None:
         request["agent_id"] = agent_id
+    request.update(permission_fields())
     send({
         "type": "control_request",
         "request_id": cli_request_id,
@@ -375,7 +453,16 @@ def finish_permission(cli_request_id, answer_message, end_turn=True):
         "uuid": "perm-result-uuid",
     })
     if end_turn:
-        result()
+        if MODE == "permission" and RESULT_GATE_PATH:
+            threading.Thread(target=result_when_gated, daemon=True).start()
+        else:
+            result()
+
+
+def result_when_gated():
+    while not os.path.exists(RESULT_GATE_PATH):
+        time.sleep(0.02)
+    result()
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +608,7 @@ def trace_ask(cli_request_id, tool_name, tool_use_id, tool_input, agent_id=None)
                                            "rules": [{"toolName": tool_name}]}]}
     if agent_id is not None:
         request["agent_id"] = agent_id
+    request.update(permission_fields())
     send({"type": "control_request", "request_id": cli_request_id, "request": request})
 
 
@@ -944,6 +1032,8 @@ def trace_main():
                     "percentage": 24, "model": TRACE_MODEL, "categories": []})
             elif subtype == "mcp_status":
                 control_response(request_id, {"mcpServers": []})
+            elif subtype == "list_permission_rules":
+                answer_permission_rules(request_id)
             elif subtype == "set_permission_mode":
                 control_response(request_id, {"mode": request.get("mode")})
             else:
@@ -1342,6 +1432,8 @@ def state_main():
                     "percentage": 24, "model": TRACE_MODEL, "categories": []})
             elif subtype == "mcp_status":
                 control_response(request_id, {"mcpServers": []})
+            elif subtype == "list_permission_rules":
+                answer_permission_rules(request_id)
             elif subtype == "set_permission_mode":
                 control_response(request_id, {"mode": request.get("mode")})
             else:
@@ -1621,6 +1713,8 @@ def bg_main():
                                      daemon=True).start()
                 else:
                     control_response(request_id, {})
+            elif subtype == "list_permission_rules":
+                answer_permission_rules(request_id)
             else:
                 control_response(request_id, {})
         elif kind == "user":
@@ -1909,6 +2003,8 @@ def main():
                 })
             elif subtype == "rename_session":
                 answer_rename(request_id, request)
+            elif subtype == "list_permission_rules":
+                answer_permission_rules(request_id)
             elif subtype == "rewind_files":
                 if MODE == "no_rewind":
                     send({
