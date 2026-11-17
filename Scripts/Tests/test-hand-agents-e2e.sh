@@ -2021,7 +2021,7 @@ case_opencode_unknown_version_writes_no_plugin() {
 }
 
 case_closed_tab_ref_is_not_inherited() {
-  local old_pane codex got key log_from new_log
+  local old_pane codex got key log_from new_log refs_from ref_lines
   # Pane ids are reused after a relaunch: the first free id is one past the largest a persisted
   # layout names, whatever earlier cases opened and closed. The first part proves that rows an
   # older build left with one reference under two keys are dropped at startup, and that a
@@ -2055,6 +2055,7 @@ con.commit()' "$W/s.sqlite"
   # A row no close removed (a crash, an older build) under the key the next tab takes: the
   # fresh tab drops it as it is made, before anything could resume it.
   relaunch_app
+  refs_from="$(wc -c < "$W/app.log")"
   # Written through the control socket, so the app's mirror of the rows holds it, as it holds
   # every row it loaded at startup (a crash's, an older build's): a fresh tab looks there, and
   # deletes nothing in the database when the mirror has no row for its key. A row another
@@ -2081,6 +2082,16 @@ con.commit()' "$W/s.sqlite"
   new_log="$(tail -c +"$(( log_from + 1 ))" "$W/app.log")"
   grep -qF "[sirio] $codex: session ref not written: its pane was closed" <<<"$new_log" || fail "the app log has no '[sirio] $codex: session ref not written: its pane was closed' after a ref write for the closed pane"
   echo "OK: a ref written for $codex after its close was refused and logged"
+  # A debug build logs the thread of every ref statement. The UI thread is the process's main
+  # thread: none of this start's (the stale row's and the codex ref's saves, the fresh tab's and
+  # the close's deletes) may have run there.
+  ref_lines="$(tail -c +"$(( refs_from + 1 ))" "$W/app.log" | grep -F '[session] session ref ' | grep -F ' ran on thread ' || true)"
+  [ -n "$ref_lines" ] || fail "not a debug build, or no ref write logged"
+  [ "$(grep -cF "[session] session ref delete $codex ran on thread " <<<"$ref_lines")" -ge 2 ] || fail "the fresh tab's and the close's deletes of $codex were not both logged: $ref_lines"
+  if grep -qE ' ran on thread main$' <<<"$ref_lines"; then
+    fail "a session ref statement ran on the UI thread: $(grep -E ' ran on thread main$' <<<"$ref_lines")"
+  fi
+  echo "OK: no session ref statement of this start ran on the UI thread ($(wc -l <<<"$ref_lines") logged)"
 }
 
 case_no_service_degrades() {

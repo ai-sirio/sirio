@@ -2375,12 +2375,15 @@ impl AppControlHandler {
     /// Whether it wrote: `false` only when a close ended the pane's session in this run.
     fn record_session_ref(&self, pane: &str, reference: &str) -> bool {
         if let Some(store) = &self.session_store {
-            // The store mirrors `session_refs` and updates it under its database lock. It
+            // The store mirrors `session_refs` and updates it under the ref lock. It
             // refuses a key a close ended in this run: the write is the dead pane's.
             if !store.save_session_ref(pane, reference) {
                 eprintln!("[sirio] {pane}: session ref not written: its pane was closed");
                 return false;
             }
+            // A hook or `sirioctl session-ref` that returns has its row in the database, as
+            // before the writes were queued. This runs on a control connection's thread.
+            store.wait_for_ref_writes();
         } else if let Ok(mut references) = self.session_refs.lock() {
             references.insert(pane.to_string(), reference.to_string());
         }
