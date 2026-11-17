@@ -472,7 +472,7 @@ impl ProposalTab {
                 match result {
                     Ok(diff) => tab.apply_diff(Arc::new(diff), cx),
                     Err(error) => {
-                        tab.diff_failure = Some(format!("Sirio could not compute the diff: {error}"));
+                        tab.diff_failure = Some(format!("Sirio could not compute the diff: {error}. You can still Reject or Accept it."));
                     }
                 }
                 cx.notify();
