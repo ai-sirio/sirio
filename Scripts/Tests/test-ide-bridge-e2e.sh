@@ -145,9 +145,11 @@ set -eEuo pipefail
 #                    comment while Edit shows no diff, and (Ruling 27) a New-side comment on the
 #                    diff of the edited text
 #   composer_typing_keeps_line
-#                    the same composer, then a real click into its text box and real keys
-#                    (xdotool): the draft grows to the typed length and in_view is still true (a
-#                    keystroke re-splices the diff's list; the view must not jump to the top)
+#                    the same composer, then real keys (xdotool) with no click into its text box
+#                    (opening it focused it): the draft grows to the typed length and in_view is still true (a
+#                    keystroke re-splices the diff's list; the view must not jump to the top);
+#                    a proposal that arrives while the keys go into the composer joins the strip
+#                    and the tab typed in stays shown (ruling 72)
 #   comments_on_withdraw
 #                    two comments and an open draft, then Claude's close_tab: TAB_CLOSED, the
 #                    openDiff gets -32000, one delivery, and the clipboard holds the two comments
@@ -2393,13 +2395,28 @@ case_composer_typing_keeps_line() {
   [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID"
   geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
   read -r width height <<<"$geometry"
-  # A click into the composer's text box (measured on ide-composer-typing.png: 68% across, 31%
-  # down), then keys, as a user writes a comment.
-  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 68 / 100))" "$((height * 31 / 100))" click 1
+  # Opening the composer focused its text box (the gutter's `+` and the verb open it the same way), so
+  # keys go in with no click, as a user writes a comment right after the `+`. The pointer is over the
+  # window, which with no window manager is what routes keys to it.
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 50 / 100))" "$((height * 60 / 100))"
   sleep 0.3
-  [ "$(tabs_field active)" = "$active" ] || fail "$CASE: the click made another tab the active one; the layout under test is gone"
+  [ "$(tabs_field active)" = "$active" ] || fail "$CASE: the layout under test is gone (another tab is active)"
   DISPLAY="$DISPLAY_TARGET" xdotool type --delay 60 "typed"
   expect_proposal cm7 composer "{'side': 'old', 'line': 150, 'in_view': True, 'draft_len': 5}"
+  # The keyboard is inside Secondary, in the composer: a proposal that arrives now joins the strip and
+  # the tab being typed in stays shown (ruling 72).
+  local shown
+  shown="$(tab_pos '✻ cm7.txt')"
+  [ "$shown" != 0 ] || fail "$CASE: no tab titled ✻ cm7.txt"
+  expect_state "the tab with the composer is the one Secondary shows" 'd["secondary_shown"]' "$shown"
+  printf 'x\n' >"$WT/cm8.txt"
+  open_diff cm8 "$WT/cm8.txt" 'y\n'
+  expect_proposal cm8 ready True
+  expect_tab '✻ cm8.txt' >/dev/null
+  sleep 0.5
+  expect_state "the new proposal joined the strip: the typed-in tab is still shown" 'd["secondary_shown"]' "$shown"
+  expect_proposal cm7 composer "{'side': 'old', 'line': 150, 'in_view': True, 'draft_len': 5}"
+  act cm8 reject
   act cm7 reject
   expect_no_proposals
   end_app_client

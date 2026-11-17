@@ -10,7 +10,7 @@ use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::editor::CodeEditor;
 use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use gpui::{
-    AnyElement, AnyView, App, Context, Entity, EventEmitter, FontWeight, IntoElement, Render,
+    AnyElement, AnyView, App, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, Render,
     SharedString, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
 };
 use sirio_git::{FileDiff, diff_proposal};
@@ -685,7 +685,10 @@ impl ProposalTab {
         };
         let label = side_phrase(side, (anchor.first(), anchor.last()));
         match &self.composer {
-            Some(open) => open.view.update(cx, |view, cx| view.set_label(label, cx)),
+            Some(open) => open.view.update(cx, |view, cx| {
+                view.set_label(label, cx);
+                view.request_focus(cx);
+            }),
             None => {
                 let owner = cx.entity().downgrade();
                 let view = cx.new(|_| ComposerView::new(label, owner));
@@ -944,11 +947,19 @@ struct ComposerView {
     /// Bumped when the card's height may have changed, so the list measures it again.
     revision: u64,
     owner: WeakEntity<ProposalTab>,
+    /// The composer was just opened (or pointed at another line): its input takes the keyboard
+    /// on the next draw, which has the window a focus needs.
+    focus_pending: bool,
 }
 
 impl ComposerView {
     fn new(label: String, owner: WeakEntity<ProposalTab>) -> Self {
-        Self { label, input: None, revision: 0, owner }
+        Self { label, input: None, revision: 0, owner, focus_pending: true }
+    }
+
+    fn request_focus(&mut self, cx: &mut Context<Self>) {
+        self.focus_pending = true;
+        cx.notify();
     }
 
     fn set_label(&mut self, label: String, cx: &mut Context<Self>) {
@@ -994,6 +1005,9 @@ impl Render for ComposerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let input = self.ensure_input(window, cx);
+        if std::mem::take(&mut self.focus_pending) {
+            window.focus(&input.focus_handle(cx), cx);
+        }
         let can_add = !self.text(cx).trim().is_empty();
         let (cancel_owner, add_owner) = (self.owner.clone(), self.owner.clone());
         card("proposal-composer", &theme)
