@@ -678,6 +678,8 @@ pub struct Sidebar {
     /// Whether the Search button has shown the filter field.
     filter_shown: bool,
     filter_focus_subscription: Option<gpui::Subscription>,
+    /// Whether the filter held focus when it was last drawn: how a blur is seen.
+    filter_was_focused: bool,
     tree_cursor: usize,
     pill_cursor: Option<usize>,
     tree_focus: FocusHandle,
@@ -825,13 +827,16 @@ impl Sidebar {
 
     /// A pick on the title menu: switches, clears the filter (a worktree
     /// filter means nothing to the session list and vice versa) and reports.
-    fn choose_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+    fn choose_view(&mut self, view: SidebarView, window: &mut Window, cx: &mut Context<Self>) {
         if self.view == view {
             self.close_view_menu(cx);
             return;
         }
         self.view = view;
         self.armed_delete = None;
+        if self.filter_focus.is_focused(window) {
+            self.hide_filter(window, cx);
+        }
         self.filter.clear();
         self.filter_shown = false;
         self.view_menu.close();
@@ -1067,6 +1072,7 @@ impl Sidebar {
             filter_focus: cx.focus_handle().tab_stop(true),
             filter_shown: false,
             filter_focus_subscription: None,
+            filter_was_focused: false,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
@@ -1175,6 +1181,7 @@ impl Sidebar {
             filter_focus: cx.focus_handle().tab_stop(true),
             filter_shown: false,
             filter_focus_subscription: None,
+            filter_was_focused: false,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
@@ -3933,8 +3940,8 @@ impl Sidebar {
                 .w_full()
                 .gap(px(8.0))
                 .text_size(theme.typography.ui_size)
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |sidebar, cx| sidebar.choose_view(view, cx))
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |sidebar, cx| sidebar.choose_view(view, window, cx))
                 })
                 .child(menu_label(label))
                 .when(view == current, |row| {
@@ -4290,6 +4297,14 @@ impl Render for Sidebar {
         }
         let tree_focus = self.tree_focus.clone();
         let filter_is_focused = filter_focus.is_focused(window);
+        // An empty filter that loses focus has nothing to show; one holding
+        // text stays. Focus is not moved: the user went elsewhere. (gpui's
+        // blur event is not used: a handle focused before its field is drawn
+        // has no focus path yet, so its blur is never reported.)
+        if self.filter_was_focused && !filter_is_focused && self.filter.is_empty() {
+            self.filter_shown = false;
+        }
+        self.filter_was_focused = filter_is_focused;
         // Sidebar text fields (filter, worktree prompt) share one blink:
         // window focus is unique, so at most one caret is ever visible.
         let prompt_focus_focused = self
@@ -8048,6 +8063,17 @@ mod tests {
         (window, cx)
     }
 
+    /// Moves focus off the filter the way the shell does after a row click.
+    fn focus_list(window: &gpui::WindowHandle<Sidebar>, cx: &mut VisualTestContext) {
+        window
+            .update(cx, |sidebar, window, cx| {
+                sidebar.tree_focus.focus(window, cx);
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     async fn search_shows_and_focuses_the_filter(cx: &mut gpui::TestAppContext) {
         let (window, mut cx) = filter_fixture_window(cx);
@@ -8079,15 +8105,24 @@ mod tests {
 
     #[gpui::test]
     async fn the_filter_stays_while_it_holds_text(cx: &mut gpui::TestAppContext) {
-        let (_window, mut cx) = filter_fixture_window(cx);
+        let (window, mut cx) = filter_fixture_window(cx);
         click_control(&mut cx, "sidebar-search");
         cx.simulate_input("t");
         cx.run_until_parked();
-        click_control(&mut cx, "sidebar-row-7");
+        focus_list(&window, &mut cx);
         assert!(
             cx.debug_bounds("filter-field").is_some(),
             "text keeps the field drawn after focus leaves"
         );
+    }
+
+    #[gpui::test]
+    async fn an_empty_filter_hides_when_focus_leaves(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some());
+        focus_list(&window, &mut cx);
+        assert!(cx.debug_bounds("filter-field").is_none(), "nothing typed, so it goes");
     }
 
     #[gpui::test]
@@ -8100,6 +8135,20 @@ mod tests {
         cx.executor().advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
         assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "");
+        assert!(cx.debug_bounds("filter-field").is_none());
+
+        // Switching back while the filter holds focus must not strand it.
+        window
+            .update(&mut cx, |s, window, cx| {
+                s.show_filter(window, cx);
+                s.choose_view(SidebarView::Projects, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "focus is not left on nothing");
         assert!(cx.debug_bounds("filter-field").is_none());
     }
 
@@ -8608,7 +8657,25 @@ mod tests {
         let filter_probe = cx.debug_bounds("filter-field").expect("the filter field");
         assert!(strip.right() <= filter_probe.right(), "the title stays inside the sidebar");
         let filter = cx.debug_bounds("filter-field").expect("the filter field");
-        for selector in ["sidebar-collapse-all", "sidebar-expand-all", "add-project"] {
+        let header = cx.debug_bounds("sidebar-header").expect("the header");
+        for selector in ["sidebar-bell", "sidebar-search"] {
+            let control = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"));
+            assert!(
+                control.left() >= header.left() && control.right() <= header.right(),
+                "{selector} stays whole inside the header"
+            );
+            assert!(
+                control.top() >= header.top() && control.bottom() <= header.bottom(),
+                "{selector} sits in the header row"
+            );
+        }
+        for selector in [
+            "sidebar-collapse-all",
+            "sidebar-expand-all",
+            "add-project",
+        ] {
             let control = cx
                 .debug_bounds(selector)
                 .unwrap_or_else(|| panic!("{selector} is drawn"));
