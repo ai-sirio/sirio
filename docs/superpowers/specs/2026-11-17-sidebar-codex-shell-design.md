@@ -97,8 +97,9 @@ placeholder). **(my call)**
   popover. Empty state: "Nothing needs you". The existing tests of the
   attention dot move from the segment to the Bell.
 - **Right: Search**, a ghost `IconButton`. It toggles the existing filter field
-  under the header: hidden → shown and focused; shown and empty → hidden, focus
-  to the list; shown with text → stays, focused. `Esc` clears and hides it.
+  under the header: hidden → shown and focused; shown, empty and focused →
+  hidden, focus to the list; otherwise (holding text, or not focused) → stays,
+  focused. `Esc` clears and hides it.
   It never hides on blur (decided while building: a field that vanishes when
   focus leaves shifts the list under a click and strands focus that a dialog
   restores to it). Choosing a view from the title menu focuses the list. Matching (`row_matches`) and the "folded projects open
