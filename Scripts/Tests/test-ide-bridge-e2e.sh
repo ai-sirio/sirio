@@ -207,6 +207,11 @@ set -eEuo pipefail
 #                    (ruling 88) `pane.split` (all four directions) on the active Proposal tab changes
 #                    nothing: the same panes and tabs, the proposal intact; Accept then closes only the
 #                    proposal, and every terminal session is still alive
+#   remove_prompt_stable_rows
+#                    the sidebar's own "Remove worktree?" prompt (`act ask_remove_worktree`, answered with a
+#                    real click) for b-asked, with a-new added in front of it while the prompt is up: b-asked
+#                    is the one removed (a-new and c-next are intact on disk and in git), not the worktree
+#                    that the prompt's row position names by then
 #   captures         the tab in Unified and Split (`surface.changes.view`)
 #   no_decision_without_user
 #                    with an openDiff pending, switching the bridge off, the client dropping its
@@ -3260,6 +3265,66 @@ case_proposal_split_refused() {
   end_app_client
 }
 
+# Clicks "Remove" in the window's in-window prompt (the sidebar's "Remove worktree?"), the first of its
+# two stacked buttons, centred (measured on ide-remove-prompt.png, 1470x833: x 735, y 430).
+answer_prompt() { # remove
+  local window geometry width height
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID to answer the prompt in"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 50 / 100))" "$((height * 516 / 1000))" click 1
+}
+
+# The sidebar's own "Remove worktree?" prompt names the worktree before it asks (B-1): rows that move
+# while it is up cannot make the answer act on another worktree. a-new is added in front of b-asked
+# under the question, so b-asked's row moves down a place and the position the prompt was opened at
+# now names a-new.
+case_remove_prompt_stable_rows() {
+  local dir="$RUN_DIR/rowdir2" name tries=0
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  for name in b-asked c-next; do
+    git -C "$WT" worktree add -q -b "b1-$name" "$dir/$name"
+  done
+  order() {
+    "$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+print(",".join(r["path"][len(sys.argv[1]) + 1:] for r in json.load(sys.stdin) if r["path"].startswith(sys.argv[1] + "/")))' "$dir"
+  }
+  while [ "$(order)" != "b-asked,c-next" ] && [ "$tries" -lt 40 ]; do
+    tries=$((tries + 1))
+    ctl select-workspace --workspace "$WT_ID" >/dev/null
+    sleep 0.5
+  done
+  [ "$(order)" = "b-asked,c-next" ] || fail "$CASE: the sidebar lists '$(order)', not b-asked,c-next"
+  act_alone ask_remove_worktree "$dir/b-asked"
+  expect_state "the sidebar's prompt is up" 'd["prompt_up"]' True
+  capture ide-remove-prompt
+  # a-new appears in front of b-asked behind the prompt: rescan until it is listed.
+  git -C "$WT" worktree add -q -b "b1-a-new" "$dir/a-new"
+  tries=0
+  while [ "$(order)" != "a-new,b-asked,c-next" ] && [ "$tries" -lt 40 ]; do
+    tries=$((tries + 1))
+    ctl select-workspace --workspace "$WT_ID" >/dev/null
+    sleep 0.5
+  done
+  [ "$(order)" = "a-new,b-asked,c-next" ] || fail "$CASE: the rows did not move (listing: $(order))"
+  echo "OK: b-asked moved down a place under the prompt (listing: $(order))"
+  expect_state "the prompt is still up" 'd["prompt_up"]' True
+  answer_prompt remove
+  expect_state "the prompt is closed" 'd["prompt_up"]' False
+  tries=0
+  while [ -d "$dir/b-asked" ] && [ "$tries" -lt 150 ]; do tries=$((tries + 1)); sleep 0.2; done
+  [ ! -d "$dir/b-asked" ] || fail "$CASE: the worktree the prompt was about is still on disk"
+  [ -d "$dir/a-new" ] || fail "$CASE: a-new was removed in b-asked's place"
+  [ -d "$dir/c-next" ] || fail "$CASE: c-next was removed"
+  git -C "$WT" worktree list --porcelain | grep -Fxq "worktree $dir/a-new" || fail "$CASE: git lost a-new"
+  git -C "$WT" worktree list --porcelain | grep -Fxq "worktree $dir/c-next" || fail "$CASE: git lost c-next"
+  echo "OK: only b-asked was removed; a-new and c-next are intact on disk and in git"
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+}
+
 case_proposal_captures() {
   proposal_client
   printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cap.txt"
@@ -3428,6 +3493,7 @@ run_proposal_cases() {
   case_run dirty_warning case_dirty_warning
   case_run disk_changed_warning case_disk_changed_warning
   case_run proposal_split_refused case_proposal_split_refused
+  case_run remove_prompt_stable_rows case_remove_prompt_stable_rows
   case_run captures case_proposal_captures
   case_run no_decision_without_user case_no_decision_without_user
   case_run worktree_close_guarded case_worktree_close_guarded

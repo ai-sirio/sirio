@@ -609,25 +609,29 @@ impl SirioWorkspace {
     /// none, the removal goes on at once. This is the one entry the removal passes through.
     pub(crate) fn ide_request_worktree_removal(
         &mut self,
-        row_id: usize,
         remote: Option<sirio_git::UpstreamBranch>,
         worktree: &Path,
         cx: &mut Context<Self>,
     ) {
         let views = self.proposal_views_of_worktree(worktree);
         if views.is_empty() {
-            self.ide_continue_worktree_removal(row_id, remote, cx);
+            self.ide_continue_worktree_removal(remote, worktree, cx);
             return;
         }
         self.ide_ask(views, Then::RemoveWorktree { path: worktree.to_path_buf(), remote }, cx);
     }
 
+    /// The removal goes on for the worktree at `worktree`, whose row is looked up now: a position
+    /// read earlier may name another worktree by then.
     fn ide_continue_worktree_removal(
         &mut self,
-        row_id: usize,
         remote: Option<sirio_git::UpstreamBranch>,
+        worktree: &Path,
         cx: &mut Context<Self>,
     ) {
+        let Some(row_id) = self.sidebar.read(cx).worktree_row_for(worktree) else {
+            return;
+        };
         self.sidebar.update(cx, |sidebar, cx| sidebar.remove_worktree_row(row_id, remote, cx));
     }
 
@@ -722,9 +726,7 @@ impl SirioWorkspace {
                 self.request_close_ids(ids, window, cx);
             }
             Then::RemoveWorktree { path, remote } => {
-                if let Some(row_id) = self.sidebar.read(cx).worktree_row_for(&path) {
-                    self.ide_continue_worktree_removal(row_id, remote, cx);
-                }
+                self.ide_continue_worktree_removal(remote, &path, cx);
             }
             Then::RemoveProject(id) => {
                 self.remove_project(&id, cx);
@@ -925,6 +927,12 @@ impl SirioWorkspace {
                 self.tab_menu_tab = None;
                 return Ok(Vec::new());
             }
+            // The sidebar's own "Remove worktree?" prompt for the worktree at `text`, left up.
+            "ask_remove_worktree" => {
+                let path = PathBuf::from(text.ok_or_else(|| "ask_remove_worktree needs text=<worktree path>".to_owned())?);
+                let asked = self.sidebar.update(cx, |sidebar, cx| sidebar.ask_remove_worktree(&path, window, cx));
+                return if asked { Ok(Vec::new()) } else { Err("no worktree row has that path".to_owned()) };
+            }
             _ => {}
         }
         let tab_name = tab_name.ok_or_else(|| format!("{action} needs a tab_name"))?;
@@ -966,15 +974,11 @@ impl SirioWorkspace {
             // What the sidebar's confirmed "Remove worktree?" does, through the same entry.
             "close_worktree" => {
                 let path = PathBuf::from(&worktree);
-                let row_id = self
-                    .sidebar
+                self.sidebar
                     .read(cx)
                     .worktree_row_for(&path)
                     .ok_or_else(|| "the proposal's worktree has no sidebar row".to_owned())?;
-                self.handle_sidebar_event(
-                    &SidebarEvent::WorktreeRemovalRequested { row_id, remote: None, path },
-                    cx,
-                );
+                self.handle_sidebar_event(&SidebarEvent::WorktreeRemovalRequested { remote: None, path }, cx);
             }
             // What the sidebar's confirmed "Remove project from Sirio?" does.
             "remove_project" => {

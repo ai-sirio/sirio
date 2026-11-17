@@ -3552,12 +3552,13 @@ impl ControlHandler for AppControlHandler {
                 let action = match request.params.get("action").map(String::as_str) {
                     Some(
                         action @ ("accept" | "reject" | "edit" | "show_diff" | "close" | "confirm_reject"
-                        | "cancel" | "close_worktree" | "remove_project" | "close_others"),
+                        | "cancel" | "close_worktree" | "remove_project" | "close_others"
+                        | "ask_remove_worktree"),
                     ) => action.to_string(),
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.ide.act requires action=accept|reject|edit|show_diff|close|confirm_reject|cancel|close_worktree|remove_project|close_others",
+                            "surface.ide.act requires action=accept|reject|edit|show_diff|close|confirm_reject|cancel|close_worktree|remove_project|close_others|ask_remove_worktree",
                         );
                     }
                 };
@@ -12397,8 +12398,8 @@ impl SirioWorkspace {
                 self.refresh_closed_sessions(cx);
             }
             // The sidebar's confirmed removal: asks first when Claude waits on a change in it.
-            SidebarEvent::WorktreeRemovalRequested { row_id, remote, path } => {
-                self.ide_request_worktree_removal(*row_id, remote.clone(), path, cx);
+            SidebarEvent::WorktreeRemovalRequested { remote, path } => {
+                self.ide_request_worktree_removal(remote.clone(), path, cx);
             }
             SidebarEvent::CloseTab(id) => self.close_tab_by_id(*id, None, cx),
             SidebarEvent::OpenProjectSettings(id) => {

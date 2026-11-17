@@ -546,9 +546,10 @@ pub enum SidebarEvent {
     },
     /// The user confirmed "Remove worktree?" and the host has taken over the removal
     /// (`Sidebar::set_host_continues_removal`): it may still ask something, and then calls
-    /// `Sidebar::remove_worktree_row(row_id, remote, ..)`, which runs git off the UI thread.
+    /// `Sidebar::remove_worktree_row(row_id, remote, ..)` (the row found again by `path`, never
+    /// by a position that may have moved), which runs git off the UI thread. `path` was read
+    /// before the question was asked.
     WorktreeRemovalRequested {
-        row_id: usize,
         remote: Option<UpstreamBranch>,
         path: PathBuf,
     },
@@ -2254,6 +2255,17 @@ impl Sidebar {
         self.host_continues_removal = on;
     }
 
+    /// Debug entry point of `surface.ide.act ask_remove_worktree`: the "Remove worktree?" prompt
+    /// a context-menu pick or the hover-x opens, for the worktree at `path`, left up for the
+    /// caller to answer. `false` when no worktree row has that path.
+    pub fn ask_remove_worktree(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(row_id) = self.worktree_row_for(path) else {
+            return false;
+        };
+        self.request_remove_worktree(row_id, None, window, cx);
+        true
+    }
+
     /// The row id of the worktree at `path`, for a host that continues a removal itself.
     pub fn worktree_row_for(&self, path: &Path) -> Option<usize> {
         self.rows
@@ -3367,12 +3379,14 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(branch) = self
+        // The worktree is named now, before the question: rows can move while it is up (a catalog
+        // refresh, a `workspace.create`), so the answer acts on this path, never on `row_id`.
+        let Some((branch, path)) = self
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
             .filter(|_| !self.is_main_checkout(row_id))
-            .map(|row| row.title.clone())
+            .and_then(|row| row.path.clone().map(|path| (row.title.clone(), path)))
         else {
             return;
         };
@@ -3396,16 +3410,15 @@ impl Sidebar {
         cx.spawn_in(window, async move |sidebar, cx| {
             if receiver.await.unwrap_or(1) == 0 {
                 let _ = sidebar.update(cx, |sidebar, cx| {
-                    let path = sidebar
-                        .rows
-                        .iter()
-                        .find(|row| row.id == row_id)
-                        .and_then(|row| row.path.clone());
-                    match path {
-                        Some(path) if sidebar.host_continues_removal => {
-                            cx.emit(SidebarEvent::WorktreeRemovalRequested { row_id, remote, path });
-                        }
-                        _ => sidebar.remove_worktree_row(row_id, remote, cx),
+                    // Gone while the question was up (removed behind the app's back): nothing
+                    // is removed.
+                    let Some(row_id) = sidebar.worktree_row_for(&path) else {
+                        return;
+                    };
+                    if sidebar.host_continues_removal {
+                        cx.emit(SidebarEvent::WorktreeRemovalRequested { remote, path });
+                    } else {
+                        sidebar.remove_worktree_row(row_id, remote, cx);
                     }
                 });
             }
