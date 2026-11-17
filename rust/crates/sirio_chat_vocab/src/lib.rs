@@ -376,6 +376,34 @@ impl CliState {
     }
 }
 
+/// What the CLI said about a permission ask, beyond the tool's title.
+/// Every part is optional: an older CLI says none of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PermissionDetail {
+    /// The CLI's own title for the ask.
+    pub title: Option<String>,
+    /// What the tool is about to do, in the CLI's words.
+    pub description: Option<String>,
+    /// Why the CLI asks, as a sentence.
+    pub reason: Option<String>,
+    /// The path a Bash command writes (the CLI's `blocked_path`), not a
+    /// blocked location.
+    pub path: Option<String>,
+    /// The connector the tool belongs to.
+    pub mcp_server: Option<PermissionMcpServer>,
+    /// The CLI would rather the answer be no.
+    pub default_to_no: bool,
+}
+
+/// A connector named by a permission ask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionMcpServer {
+    /// The server's name.
+    pub name: String,
+    /// Where it is configured (`project`, `user`, ...). An open set.
+    pub source: String,
+}
+
 /// Typed events emitted by one ACP session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatEvent {
@@ -475,6 +503,9 @@ pub enum ChatEvent {
         options: Vec<PermissionOption>,
         /// A structured question carried by the tool input, when present.
         question: Option<PermissionQuestion>,
+        /// What the agent said about this ask beyond the title, when it
+        /// said anything. Native Claude only; ACP sends `None`.
+        detail: Option<PermissionDetail>,
     },
     /// An MCP server asked the user for input through the agent. Answered
     /// with the transport's `respond_elicitation`; native Claude only.

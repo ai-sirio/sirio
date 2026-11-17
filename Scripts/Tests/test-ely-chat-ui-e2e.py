@@ -403,6 +403,8 @@ class Instance:
             # The composer band's record (layout, geometry, overflow, mode icon); it is its own key
             # because "composer" above is the draft's text.
             "composerRow": composer_row_record(result),
+            # The question dock as painted (A5): "" when no question is open, else its JSON.
+            "questionDock": result.get("questionDock") or "",
         }
 
     def until(self, what: str, predicate, timeout: float = 40, quiet: bool = False) -> dict:
@@ -585,6 +587,24 @@ def permission(run: Run) -> None:
     chat.send("write the nonce")
     state = chat.until("a permission request is pending", lambda s: pending(s) is not None)
     request_id = pending(state)["id"]
+    # A5: the dock as painted. ACP says nothing beyond the title, so the card is the plain one.
+    dock = json.loads(state.get("questionDock") or "null")
+    if not isinstance(dock, dict):
+        raise Failure("permission: the open card has no questionDock read")
+    plain = (
+        dock.get("caption") == "Permission requested"
+        and dock.get("details") == []
+        and dock.get("digits") is True
+        and dock.get("selected") == 0
+    )
+    if not plain:
+        raise Failure(
+            "permission: the ACP card is not the plain one "
+            f"(caption plain: {dock.get('caption') == 'Permission requested'}, "
+            f"details empty: {dock.get('details') == []}, digits on: {dock.get('digits') is True}, "
+            f"first row selected: {dock.get('selected') == 0})"
+        )
+    run.log("OK permission: the ACP card is the plain one: no details, digits on")
     chat.frame("permission-pending")
     wrong = chat.answer("999999", "allow")
     if wrong.get("ok"):

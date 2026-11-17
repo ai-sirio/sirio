@@ -78,6 +78,19 @@ pub fn python3() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// The git the helpers run with: the one on `ISOLATED_PATH`, by absolute path.
+fn git() -> Option<PathBuf> {
+    ISOLATED_PATH
+        .split(':')
+        .map(|dir| Path::new(dir).join("git"))
+        .find(|path| path.is_file())
+}
+
+/// Whether `git` is available, for tests that give the work directory project settings.
+pub fn git_available() -> bool {
+    git().is_some()
+}
+
 /// A scratch directory under the system temp dir, outside `$HOME` and outside any git
 /// repository (the CLI would otherwise run git against the user's live worktree). Removed on
 /// drop, except while panicking, when it is kept and its path printed.
@@ -184,33 +197,38 @@ fn isolate(command: &mut Command, home: &Path, root: &Path) {
 /// helper (a daemon it left behind) belongs to this run alone. Linux only, where `/proc`
 /// shows environments. Copied from `program_status_live.rs`, with `kill(1)` for `libc::kill`.
 pub fn kill_holders_of(home: &Path) {
-    let needle = format!("HOME={}", home.display());
     for _ in 0..2 {
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|n| n.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
-                continue;
-            };
-            if environ
-                .split(|b| *b == 0)
-                .any(|var| var == needle.as_bytes())
-            {
-                let _ = Command::new("/usr/bin/kill")
-                    .args(["-9", &pid.to_string()])
-                    .status();
-            }
+        for pid in holder_pids(home) {
+            let _ = Command::new("/usr/bin/kill")
+                .args(["-9", &pid.to_string()])
+                .status();
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// How many processes name `home` as their HOME, without killing them. It
+/// reads /proc, so it is Linux only, like `kill_holders_of`.
+pub fn holders_of(home: &Path) -> usize {
+    holder_pids(home).len()
+}
+
+fn holder_pids(home: &Path) -> Vec<u32> {
+    let needle = format!("HOME={}", home.display());
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let environ = std::fs::read(entry.path().join("environ")).ok()?;
+            environ
+                .split(|b| *b == 0)
+                .any(|var| var == needle.as_bytes())
+                .then_some(pid)
+        })
+        .collect()
 }
 
 fn free_port() -> u16 {
@@ -297,22 +315,44 @@ impl Session {
     /// Launches `claude` for a new chat session under `root` (a private HOME and work
     /// directory) with the eliciting MCP server and the fake model API.
     pub fn start(claude: &Path, python: &Path, root: &Path) -> Self {
-        Self::launch(claude, python, root, FAKE_API, true)
+        Self::launch(claude, python, root, FAKE_API, true, None, None)
     }
 
     /// Launches `claude` for a new chat session under `root` against the fake API of the
     /// session-state test (`fake_state_api.py`), with no MCP server.
     pub fn start_state(claude: &Path, python: &Path, root: &Path) -> Self {
-        Self::launch(claude, python, root, STATE_API, false)
+        Self::launch(claude, python, root, STATE_API, false, None, None)
     }
 
     /// Launches `claude` for a new chat session under `root` against the fake API of the
     /// background-task test (`fake_tasks_api.py`), with no MCP server.
     pub fn start_tasks(claude: &Path, python: &Path, root: &Path) -> Self {
-        Self::launch(claude, python, root, TASKS_API, false)
+        Self::launch(claude, python, root, TASKS_API, false, None, None)
     }
 
-    fn launch(claude: &Path, python: &Path, root: &Path, api_script: &str, with_mcp: bool) -> Self {
+    /// Launches `claude` against the session-state fake API with `user` as the config dir's
+    /// `settings.json` and, when given, `project` as `work/.claude/settings.json` (after a
+    /// `git init` in `work/`, so the CLI finds that repository's settings and no other).
+    /// The caller checks `git_available` first.
+    pub fn start_with_settings(
+        claude: &Path,
+        python: &Path,
+        root: &Path,
+        user: &Value,
+        project: Option<&Value>,
+    ) -> Self {
+        Self::launch(claude, python, root, STATE_API, false, Some(user), project)
+    }
+
+    fn launch(
+        claude: &Path,
+        python: &Path,
+        root: &Path,
+        api_script: &str,
+        with_mcp: bool,
+        user_settings: Option<&Value>,
+        project_settings: Option<&Value>,
+    ) -> Self {
         let _ = std::fs::remove_dir_all(root);
         let home = root.join("home");
         let work = root.join("work");
@@ -350,7 +390,22 @@ impl Session {
         );
         std::fs::write(home.join(".claude.json"), &global).unwrap();
         std::fs::write(config_dir.join(".claude.json"), &global).unwrap();
-        std::fs::write(config_dir.join("settings.json"), "{}").unwrap();
+        let user_text = user_settings.map_or_else(|| "{}".to_string(), Value::to_string);
+        std::fs::write(config_dir.join("settings.json"), user_text).unwrap();
+        if let Some(project) = project_settings {
+            let init = Command::new(git().expect("the caller checked git_available"))
+                .args(["init", "-q"])
+                .current_dir(&work)
+                .env_clear()
+                .env("PATH", ISOLATED_PATH)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &home)
+                .status()
+                .expect("git init runs");
+            assert!(init.success(), "git init failed in the work directory");
+            std::fs::create_dir_all(work.join(".claude")).unwrap();
+            std::fs::write(work.join(".claude/settings.json"), project.to_string()).unwrap();
+        }
 
         let mcp_log = root.join("mcp.log");
         let mcp = serde_json::json!({"mcpServers": {"elic": {
@@ -402,6 +457,11 @@ impl Session {
     /// The session uuid this CLI was started with (`--session-id`).
     pub fn session_id(&self) -> &str {
         &self.cli.session_id
+    }
+
+    /// The CLI's private HOME.
+    pub fn home(&self) -> PathBuf {
+        self.cli.home.clone()
     }
 
     /// The CLI's `CLAUDE_CONFIG_DIR`.

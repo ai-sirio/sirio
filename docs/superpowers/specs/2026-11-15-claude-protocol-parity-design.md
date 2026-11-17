@@ -311,6 +311,45 @@ Each item is laid out the same way:
   - A fixture `can_use_tool` that carries the fields. The E2E checks the card's text and options,
     then the rules card.
   - Live: `list_permission_rules` answers on a configured `CLAUDE_CONFIG_DIR`.
+- **Deviations, accepted on 2026-11-17 (t2s, by the recommended-option rule).** The live probe
+  (`.superpowers/probe-a5/FINDINGS.md`, 2.1.326 over stdio) changes four points above:
+  - **Caption.** `display_name` always comes, but it is only the tool's name (`Bash`, or `Echo`
+    for `mcp__probe__echo`), so the card does not show it. The caption is the CLI's `title` when
+    one comes, else today's "Permission requested".
+  - **Path.** `blocked_path` comes only for Bash. It is the path the command writes, even inside
+    the working directory, and never comes for a Read or Write outside it. The card shows it as
+    "Path", not as a blocked path.
+  - **Reason.** `decision_reason` is absent when an `ask` rule matches and for some compound
+    commands. Only `decision_reason_type` comes then, plus `decision_reason_rule_source` for a
+    rule. The reason line says what the type means instead, for example "Matches an ask rule in
+    user settings".
+  - **Three fields proven by the fixture only.** `title`, `default_to_no` and
+    `suppress_always_allow_rule` never reach a stdio host on 2.1.326. They come from a desktop
+    host's worded asks behind a server flag, from auto mode's classifier fallbacks, or from an
+    incomplete safety check. Sirio honours them when they come; the live test cannot reach them.
+
+  Also decided:
+  - `requires_user_interaction` is carried and not shown, because the two tools that set it,
+    AskUserQuestion and ExitPlanMode, are already questions.
+  - The model writes Bash's `description`. It sits under the command and never replaces it.
+  - Both cards render invisible, bidi and control characters visibly. The CLI keeps them in a
+    rule "by design".
+  - The rules card lists `workspaceDirectories` without their `source`, which the probe found
+    mislabelled. It ignores the extra `parentSettingsIncluded`.
+
+- **As built.** Beyond the Deviations above:
+  - The card does not repeat a description that equals the command after trimming. Only the reason
+    loses ANSI sequences (`strip_escape_sequences`, which keeps a lone ESC for `visible_text` to
+    show). The hidden set adds U+00AD, U+180E, U+2028 to U+2029, U+2061 to U+2064, U+206A to U+206F,
+    U+FFF9 to U+FFFB and U+E0000 to U+E007F. `surface.chat.read` gains `questionDock`.
+  - The Permissions card exists only with rules control, which is native Claude. A `session` source
+    reads "this session" once. An empty list has no rows. `withheld` is not shown, since only a
+    cloud or self-hosted connection sets it.
+  - The coalescing E2E triggers with an "Always allow" answer and a turn's end, not an unfold,
+    because a card not yet drawn cannot be unfolded. The connection-ready and restore triggers
+    exist and have no E2E.
+  - What "Always allow" does is out of scope (#783): a safetyCheck's only suggestion is `setMode
+    acceptEdits`, and suggestions have a `localSettings` destination.
 
 ### A6 · Reload and connector toggle
 

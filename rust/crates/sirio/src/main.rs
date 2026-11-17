@@ -24915,6 +24915,8 @@ impl SirioWorkspace {
             // The session's background tasks as a JSON array (see `ChatControlSnapshot`).
             ("backgroundTasks".to_string(), snapshot.background_tasks),
             ("agentTitle".to_string(), snapshot.agent_title),
+            // The question dock as painted: "" or JSON (see `ChatControlSnapshot`).
+            ("questionDock".to_string(), snapshot.question_dock),
             (
                 "taskOutputRetired".to_string(),
                 snapshot.task_output_retired.to_string(),

@@ -195,6 +195,32 @@ set -euo pipefail
 #   rename_session_restored   a restored chat sends nothing and adopts nothing: the CLI's title for the session
 #                      differs, the tab keeps Sirio's, agentTitle is empty and no request is heard
 #   rename_auto_title_quiet   the summarizer's title reaches the tab and never the CLI
+# The permission_* scenarios (A5) use Scripts/Tests/stubs/permissions/claude, the fixture's `permission` mode with
+# the extra can_use_tool fields a scenario writes to SIRIO_FIXTURE_PERMISSION_FIELDS. They read `questionDock`
+# of `surface.chat.read` (the dock as painted) and are state-only. What each must catch, written before the code:
+# a field the card drops; a digit that answers a card the CLI would rather refuse; Enter or a start row that lands
+# on Allow; hidden characters hidden from the user (or an ANSI code left in a reason); a plain ask that changed.
+#   permission_detail  title, description, reason, blocked path and MCP server reach the card in order, Always allow
+#                      stays offered, digits stay on, row 1 is selected; allowing runs the tool
+#   permission_default_no  default_to_no with suppress_always_allow_rule: two options, the start row is Reject,
+#                      digits are off, the caption is the plain one; the control verb's row 1 (Allow) runs the tool
+#   permission_default_no_reject  the same card, row 2 (Reject) denies it
+#   permission_visible_text  a command with an OSC, a BEL and a bidi override shows each as <U+XXXX>, and an ANSI
+#                      reason is stripped (only the reason)
+#   permission_plain   no extra fields: no details, the plain caption, digits on, row 1 selected
+# The permission_rules* scenarios read the Permissions card of the session panel. Each has its own rules file
+# ($RUN_DIR/<name>-rules.json) and request log ($RUN_DIR/<name>-rules.jsonl, one line per list_permission_rules
+# the fixture heard). What each must catch, written before the code: a card that asks with the panel closed; a
+# refusal that is asked again or shown; a burst of triggers that sends more than one follow-up; Always allow that
+# leaves the card stale until the turn ends; a success with no state shown as an empty list.
+#   permission_rules  every group, row key, label, detail, tag and note, the section note, a bidi rule and a
+#                      bidi source shown as <U+202E>, an unknown behavior skipped and not counted, and the
+#                      last good list kept after an unreadable answer
+#   permission_rules_refused   the floor refuses: no card, one request, and still one after a turn
+#   permission_rules_closed_panel   no request with the panel closed through a turn; one when it opens, before unfolding
+#   permission_rules_coalesced   Always allow and a turn's end during a held answer make one follow-up: two requests in all
+#   permission_rules_after_always_allow   Always allow refreshes the card while the turn's result is still held
+#   permission_rules_unreadable   a success with no rules is a note on the card, with no rows
 # The elicitation scenarios use Scripts/Tests/stubs/elicitation/claude, the fixture's elicitation mode.
 # The composer_keys scenario (this script's own; test-ely-chat-ui-e2e.py has one of the same name)
 # uses the default stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every
@@ -279,7 +305,10 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   background_ended_dropped background_tail_card background_tail_tab background_stop_click
   background_lane_stop
   rename_session rename_session_failed rename_session_retired rename_session_connecting
-  rename_session_restored rename_auto_title_quiet)
+  rename_session_restored rename_auto_title_quiet
+  permission_detail permission_default_no permission_default_no_reject permission_visible_text permission_plain
+  permission_rules permission_rules_refused permission_rules_closed_panel permission_rules_coalesced
+  permission_rules_after_always_allow permission_rules_unreadable)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -553,14 +582,14 @@ done
 # (session_state_background), background-tasks (the background_* scenarios) or rename (the rename_* scenarios). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
-use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation|session-state|background-tasks|rename
+use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation|session-state|background-tasks|rename|permissions
   SIRIO_E2E_CLAUDE_STUB=$1
   local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
   APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
   resolved=$(PATH="$APP_PATH" command -v claude || true)
   [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
 }
-for stub in session-panel session-panel-bypass trace file-links elicitation session-state background-tasks rename; do
+for stub in session-panel session-panel-bypass trace file-links elicitation session-state background-tasks rename permissions; do
   use_stub "$stub"
   echo "OK: claude resolves to the $stub shim"
 done
@@ -617,6 +646,8 @@ def state(surface):
     chat["backgroundTasks"] = json.loads(chat.get("backgroundTasks") or "[]")
     # The title Sirio asked Claude Code for (A4): "" until a manual rename, then {title, state[, error]}.
     chat["agentTitle"] = json.loads(chat["agentTitle"]) if chat.get("agentTitle") else ""
+    # The question dock as painted (A5): "" when no question is open, else {caption, body, details, options, selected, digits}.
+    chat["questionDock"] = json.loads(chat["questionDock"]) if chat.get("questionDock") else ""
     chat["first"] = int(chat.get("firstVisibleEntry") or 0)
     chat["last"] = int(chat.get("lastVisibleEntry") or 0)
     return panel, chat
@@ -1088,6 +1119,11 @@ capture() { # name
 #   SIRIO_FIXTURE_TITLE_STORE, SIRIO_FIXTURE_RENAME_ERROR, SIRIO_FIXTURE_HANDSHAKE_GATE, SIRIO_FIXTURE_RENAME_GATE
 #                  the rename stub's CLI title file, the error it answers every rename with, the file that holds its
 #                  handshake and the file that holds every rename's answer (rename_*)
+#   SIRIO_FIXTURE_PERMISSION_FIELDS, SIRIO_FIXTURE_PERMISSION_RULES, SIRIO_FIXTURE_RULES_LOG, SIRIO_FIXTURE_RULES_GATE,
+#                  SIRIO_FIXTURE_RESULT_GATE  the permissions stub's files, each handed to the fixture as its
+#                  --fixture-permission-fields / -permission-rules / -rules-log / -rules-gate / -result-gate flag:
+#                  the JSON merged into every can_use_tool, the rules the CLI lists, the log of rules requests,
+#                  the file that holds the rules answers and the file that holds the turn's result (permission_*)
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
 #                  every control request to (composer_keys reads them)
@@ -1122,6 +1158,9 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_TITLE_STORE=${SIRIO_FIXTURE_TITLE_STORE:-}" "SIRIO_FIXTURE_RENAME_ERROR=${SIRIO_FIXTURE_RENAME_ERROR:-}"
     "SIRIO_FIXTURE_HANDSHAKE_GATE=${SIRIO_FIXTURE_HANDSHAKE_GATE:-}"
     "SIRIO_FIXTURE_RENAME_GATE=${SIRIO_FIXTURE_RENAME_GATE:-}"
+    "SIRIO_FIXTURE_PERMISSION_FIELDS=${SIRIO_FIXTURE_PERMISSION_FIELDS:-}" "SIRIO_FIXTURE_PERMISSION_RULES=${SIRIO_FIXTURE_PERMISSION_RULES:-}"
+    "SIRIO_FIXTURE_RULES_LOG=${SIRIO_FIXTURE_RULES_LOG:-}" "SIRIO_FIXTURE_RULES_GATE=${SIRIO_FIXTURE_RULES_GATE:-}"
+    "SIRIO_FIXTURE_RESULT_GATE=${SIRIO_FIXTURE_RESULT_GATE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -3930,6 +3969,266 @@ scenario_rename_auto_title_quiet() {
   stop_app
 }
 
+# ---- the permission_* scenarios (A5) ---------------------------------------------------
+# A fresh Sirio on the permissions stub with a Claude chat open and connected. FIELDS (optional) is the JSON
+# the fixture merges into every can_use_tool; written to a file in the run's scratch directory.
+permissions_chat() { # name [fields-json]
+  use_stub permissions
+  if [ -n "${2:-}" ]; then
+    printf '%s' "$2" >"$RUN_DIR/$1-fields.json"
+    SIRIO_FIXTURE_PERMISSION_FIELDS="$RUN_DIR/$1-fields.json"
+  fi
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  wait_panel "the chat is connected" 'c["status"] in ("idle", "completed")' 30
+}
+
+# Acts on the pending permission card through the debug-only `surface.chat.elicitation`, as a digit key or a
+# click would. With several cards pending it takes the first, the one the dock shows (`question_view`). The
+# dock ignores a row for half a second after a question appears, and the verb says so: that refusal is tried
+# again, any other is a failure, reported as the kind of refusal only (one refusal names the request id, so
+# the reply itself is never printed).
+dock_rpc() { # description, then the verb's params after requestId
+  local desc=$1 id out="" _
+  shift
+  id=$(find_panel "a permission card is pending" 'next((r["id"] for r in c["transcript"] if r.get("kind") == "permission" and r.get("status") == "pending"), "")' 30)
+  for _ in $(seq 1 25); do
+    if out=$(E2E rpc surface.chat.elicitation surfaceId="$SURFACE" requestId="$id" "$@" 2>&1); then
+      echo "OK: $desc"
+      return 0
+    fi
+    case "$out" in *"not armed"*) sleep 0.2 ;; *) break ;; esac
+  done
+  local why
+  case "$out" in
+    *"not the open question"*) why="the card is not the open question" ;;
+    *"rows, not row"*) why="no such row" ;;
+    *"no free-text row"*) why="no free-text row" ;;
+    *"not armed"*) why="still not armed" ;;
+    *) why="another error" ;;
+  esac
+  fail "$desc was refused: $why"
+}
+
+# The card's command, as every permission_* scenario's fixture asks for it.
+PERMISSION_COMMAND='rm -rf build'
+
+scenario_permission_detail() {
+  permissions_chat permission_detail '{"title":"Run the build","description":"make a file","decision_reason_type":"rule","decision_reason_rule_source":"userSettings","blocked_path":"/w/out.txt","mcp_server":{"name":"probe","source":"project"}}'
+  send_prompt build
+  wait_panel "the card shows the CLI's detail, in order" 'c["questionDock"] != "" and c["questionDock"]["caption"] == "Run the build" and c["questionDock"]["body"] == "'"$PERMISSION_COMMAND"'" and c["questionDock"]["details"] == [{"label": None, "text": "make a file"}, {"label": "Reason", "text": "Matches an ask rule in user settings"}, {"label": "Path", "text": "/w/out.txt"}, {"label": "MCP server", "text": "probe (project)"}]' 30
+  capture permission-detail
+  check_panel "Always allow is still offered, row 1 is selected and digits are on" '"allow_always" in [o["id"] for o in c["questionDock"]["options"]] and c["questionDock"]["selected"] == 0 and c["questionDock"]["digits"] is True'
+  answer_permission allow_once
+  wait_panel "the turn completed and the tool ran" 'c["status"] == "completed" and [r["status"] for r in c["transcript"] if r.get("kind") == "tool"] == ["Completed"]' 30
+  check_panel "the dock closed" 'c["questionDock"] == ""'
+  echo "OK: permission_detail: title, description, reason, path and MCP server reached the card"
+  stop_app
+}
+
+scenario_permission_default_no() {
+  # The description repeats the command the body shows, and the CLI gave no reason: no detail line.
+  permissions_chat permission_default_no '{"default_to_no":true,"suppress_always_allow_rule":true,"description":"'"$PERMISSION_COMMAND"'"}'
+  send_prompt build
+  wait_panel "the card is the plain one, offers only Allow and Reject and repeats nothing" 'c["questionDock"] != "" and c["questionDock"]["body"] == "'"$PERMISSION_COMMAND"'" and [o["id"] for o in c["questionDock"]["options"]] == ["allow_once", "reject_once"] and c["questionDock"]["caption"] == "Permission requested" and c["questionDock"]["details"] == []' 30
+  check_panel "the card starts on Reject and has no digits" 'c["questionDock"]["selected"] == 1 and c["questionDock"]["digits"] is False'
+  dock_rpc "row 1 (Allow) chosen" row=1
+  wait_panel "the turn completed and the tool ran" 'c["status"] == "completed" and [r["status"] for r in c["transcript"] if r.get("kind") == "tool"] == ["Completed"]' 30
+  echo "OK: permission_default_no: the card started on Reject, with digits off, and Allow ran the tool"
+  stop_app
+}
+
+scenario_permission_default_no_reject() {
+  permissions_chat permission_default_no_reject '{"default_to_no":true,"suppress_always_allow_rule":true}'
+  send_prompt build
+  wait_panel "the card starts on Reject" 'c["questionDock"] != "" and c["questionDock"]["selected"] == 1 and c["questionDock"]["digits"] is False' 30
+  dock_rpc "row 2 (Reject) chosen" row=2
+  wait_panel "the turn completed and the tool was denied" 'c["status"] == "completed" and [r["status"] for r in c["transcript"] if r.get("kind") == "tool"] == ["Failed"]' 30
+  echo "OK: permission_default_no_reject: Reject denied the tool"
+  stop_app
+}
+
+scenario_permission_visible_text() {
+  local fields
+  fields=$(python3 -c 'import json; print(json.dumps({"input": {"command": "printf ok\x1b]0;x\x07 \u202eevil", "description": "x"}, "decision_reason": "risky\x1b[31m red"}))')
+  permissions_chat permission_visible_text "$fields"
+  send_prompt build
+  wait_panel "the body shows each hidden character as its code point" 'c["questionDock"] != "" and c["questionDock"]["body"] == "printf ok⟨U+001B⟩]0;x⟨U+0007⟩ ⟨U+202E⟩evil"' 30
+  check_panel "the reason lost its ANSI code and nothing else" '[d["text"] for d in c["questionDock"]["details"] if d["label"] == "Reason"] == ["risky red"]'
+  answer_permission reject_once
+  wait_panel "the turn completed" 'c["status"] == "completed"' 30
+  echo "OK: permission_visible_text: hidden characters are shown, an ANSI reason is stripped"
+  stop_app
+}
+
+scenario_permission_plain() {
+  permissions_chat permission_plain
+  send_prompt build
+  wait_panel "the card is today's plain card" 'c["questionDock"] != "" and c["questionDock"]["details"] == [] and c["questionDock"]["caption"] == "Permission requested" and c["questionDock"]["digits"] is True and c["questionDock"]["selected"] == 0' 30
+  answer_permission allow_once
+  wait_panel "the turn completed" 'c["status"] == "completed"' 30
+  echo "OK: permission_plain: no fields, no details, the plain caption"
+  stop_app
+}
+
+# ---- the permission_rules* scenarios (A5): the Permissions card ----------------------------
+# Chat on the permissions stub with its own rules file and request log. RULES is the JSON the CLI answers
+# with (omitted: the fixture refuses, as the 2.1.257 floor does); the panel is left closed.
+rules_chat() { # name [rules-json]
+  SIRIO_FIXTURE_RULES_LOG="$RUN_DIR/$1-rules.jsonl"
+  if [ -n "${2:-}" ]; then
+    printf '%s' "$2" >"$RUN_DIR/$1-rules.json"
+    SIRIO_FIXTURE_PERMISSION_RULES="$RUN_DIR/$1-rules.json"
+  fi
+  RULES_NAME=$1
+  permissions_chat "$1"
+}
+rules_lines() { # how many requests the fixture has heard
+  if [ -f "$RUN_DIR/$RULES_NAME-rules.jsonl" ]; then wc -l <"$RUN_DIR/$RULES_NAME-rules.jsonl" | tr -d ' '; else echo 0; fi
+}
+wait_rules_lines() { # description count [seconds]
+  local _ got=""
+  for _ in $(seq 1 $(( ${3:-30} * 4 ))); do
+    got=$(rules_lines)
+    [ "$got" = "$2" ] && { echo "OK: $1"; return 0; }
+    sleep 0.25
+  done
+  fail "$1 (the log has $got lines, wanted $2)"
+}
+check_rules_lines() { # description count: settled, after a pause that a stray request would show in
+  sleep 1.5
+  [ "$(rules_lines)" = "$2" ] || fail "$1 (the log has $(rules_lines) lines, wanted $2)"
+  echo "OK: $1"
+}
+# One turn: a prompt, its permission card allowed once, the turn done.
+rules_turn() {
+  send_prompt build
+  answer_permission allow_once
+  wait_panel "the turn completed" 'c["status"] == "completed"' 30
+}
+
+scenario_permission_rules() {
+  local rules
+  rules='{"state":{"rules":[
+    {"behavior":"allow","source":"userSettings","rule":"Bash(echo hi:*)","description":{"prefix":"Any Bash command starting with ","emphasis":"echo hi"},"editability":"persistent"},
+    {"behavior":"ask","source":"projectSettings","rule":"Bash(git push:*)","editability":"persistent"},
+    {"behavior":"deny","source":"policySettings","rule":"Read(./secret.txt)","editability":"readonly"},
+    {"behavior":"allow","source":"localSettings","rule":"Edit(./notes)","editability":"readonly","notInEffect":true},
+    {"behavior":"allow","source":"userSettings","rule":"Bash(echo \u202eevil:*)","editability":"persistent"},
+    {"behavior":"allow","source":"mcpMount","rule":"mcp__probe","editability":"persistent"},
+    {"behavior":"allow","source":"odd\u202esrc","rule":"Bash(odd)","editability":"persistent"},
+    {"behavior":"other","source":"userSettings","rule":"Bash(unknown)","editability":"persistent"}],
+    "workspaceDirectories":[{"path":"/w/extra","source":"localSettings"}],
+    "managedOnly":true,
+    "errors":[{"file":"/p/.claude/settings.json","path":"permissions.allow","message":"Expected array, but received string"}]}}'
+  rules_chat permission_rules "$rules"
+  panel_ctl open >/dev/null
+  wait_panel "the Permissions card is drawn" "S('permissions') is not None" 30
+  ensure_unfolded permissions
+  capture permission-rules
+  wait_panel "the card is in the order of the cards, after Connectors" '[s["key"] for s in p["sections"]].index("permissions") == [s["key"] for s in p["sections"]].index("connectors") + 1' 5
+  check_panel "seven rules are counted, the unknown behavior is not" 'S("permissions")["summary"] == "7 rules"'
+  check_panel "the section note is the managed line, then the skipped file" 'S("permissions")["note"] == "Managed settings allow only their own rules.\nSkipped /p/.claude/settings.json: Expected array, but received string"'
+  local want='[("permissions/allow", 0, "Allow", "5", "", "", None),
+    ("permissions/allow/0", 1, "Bash(echo hi:*)", "Any Bash command starting with echo hi", "user settings", "", None),
+    ("permissions/allow/1", 1, "Edit(./notes)", "", "local project settings · read-only", "Not in effect: managed settings allow only their own rules", None),
+    ("permissions/allow/2", 1, "Bash(echo ⟨U+202E⟩evil:*)", "", "user settings", "", None),
+    ("permissions/allow/3", 1, "mcp__probe", "", "an MCP server", "", None),
+    ("permissions/allow/4", 1, "Bash(odd)", "", "odd⟨U+202E⟩src", "", None),
+    ("permissions/ask", 0, "Ask", "1", "", "", None),
+    ("permissions/ask/0", 1, "Bash(git push:*)", "", "project settings", "", None),
+    ("permissions/deny", 0, "Deny", "1", "", "", None),
+    ("permissions/deny/0", 1, "Read(./secret.txt)", "", "managed settings · read-only", "", None),
+    ("permissions/directories", 0, "Directories", "1", "", "", None),
+    ("permissions/directories/0", 1, "/w/extra", "", "", "", None)]'
+  check_panel "every row has its key, depth, label, detail, tag and note, and none has an action" '[(r["key"], r["depth"], r["label"], r["detail"], r["tag"], r["note"], r["action"]) for r in rows("permissions")] == '"$want"
+  # The CLI now answers with no rules: the last good list stays, with the reason under the title.
+  printf '%s' '{}' >"$RUN_DIR/permission_rules-rules.json"
+  panel_ctl toggle permissions >/dev/null
+  wait_panel "the card is folded" 'S("permissions")["expanded"] is False' 10
+  panel_ctl toggle permissions >/dev/null
+  wait_panel "the unreadable answer is a note and the rows stay" 'S("permissions")["expanded"] is True and S("permissions")["note"].endswith("Claude Code\x27s rules could not be read: the answer had no rules") and len(rows("permissions")) == 12' 30
+  check_panel "the summary still counts the last good list" 'S("permissions")["summary"] == "7 rules"'
+  echo "OK: permission_rules: the card lists the CLI's rules by behavior, with sources, notes and hidden characters shown, and keeps them after an unreadable answer"
+  stop_app
+}
+
+scenario_permission_rules_refused() {
+  rules_chat permission_rules_refused
+  panel_ctl open >/dev/null
+  wait_rules_lines "the card asked once" 1
+  check_rules_lines "the refusal was the only request" 1
+  check_panel "a refusal leaves no card" 'S("permissions") is None'
+  rules_turn
+  check_rules_lines "a turn after a refusal asks nothing: the card is retired" 1
+  check_panel "still no card" 'S("permissions") is None'
+  echo "OK: permission_rules_refused: a refusal hid the card for the connection and nothing asked again"
+  stop_app
+}
+
+scenario_permission_rules_closed_panel() {
+  rules_chat permission_rules_closed_panel '{"state":{"rules":[{"behavior":"allow","source":"userSettings","rule":"Bash(ls:*)","editability":"persistent"}]}}'
+  rules_turn
+  check_rules_lines "a turn with the panel closed asks nothing" 0
+  check_panel "no card" 'S("permissions") is None'
+  panel_ctl open >/dev/null
+  wait_rules_lines "opening the panel asks once" 1
+  wait_panel "the card shows before it is unfolded" 'S("permissions") is not None and S("permissions")["expanded"] is False and S("permissions")["summary"] == "1 rule"' 30
+  check_rules_lines "nothing else asked" 1
+  panel_ctl toggle permissions >/dev/null
+  wait_panel "the card is unfolded" 'S("permissions")["expanded"] is True' 10
+  wait_rules_lines "unfolding the card asks once more" 2
+  echo "OK: permission_rules_closed_panel: the card asks only while the panel is open"
+  stop_app
+}
+
+scenario_permission_rules_coalesced() {
+  SIRIO_FIXTURE_RULES_GATE="$RUN_DIR/permission_rules_coalesced-gate"
+  rules_chat permission_rules_coalesced '{"state":{"rules":[{"behavior":"allow","source":"userSettings","rule":"Bash(ls:*)","editability":"persistent"}]}}'
+  panel_ctl open >/dev/null
+  wait_rules_lines "the first ask is held by the CLI" 1
+  # The card is not drawn before its first answer, so it cannot be unfolded yet: Always allow and the turn's end
+  # are the two triggers.
+  send_prompt build
+  answer_permission allow_always
+  wait_panel "the turn completed" 'c["status"] == "completed"' 30
+  check_rules_lines "Always allow and a turn's end sent nothing while one ask was open" 1
+  touch "$SIRIO_FIXTURE_RULES_GATE"
+  wait_panel "the held answer drew the card" 'S("permissions") is not None and S("permissions")["summary"] == "1 rule"' 30
+  wait_rules_lines "the triggers made one follow-up, not two" 2
+  check_rules_lines "and no more" 2
+  echo "OK: permission_rules_coalesced: triggers during an ask made a single follow-up"
+  stop_app
+}
+
+scenario_permission_rules_after_always_allow() {
+  SIRIO_FIXTURE_RESULT_GATE="$RUN_DIR/permission_rules_after_always_allow-gate"
+  local one='{"state":{"rules":[{"behavior":"allow","source":"userSettings","rule":"Bash(ls:*)","editability":"persistent"}]}}'
+  rules_chat permission_rules_after_always_allow "$one"
+  panel_ctl open >/dev/null
+  wait_panel "the card shows one rule" 'S("permissions") is not None and S("permissions")["summary"] == "1 rule"' 30
+  wait_rules_lines "one ask so far" 1
+  printf '%s' '{"state":{"rules":[{"behavior":"allow","source":"userSettings","rule":"Bash(ls:*)","editability":"persistent"},{"behavior":"allow","source":"localSettings","rule":"Bash(rm -rf build)","editability":"persistent"}]}}' >"$RUN_DIR/permission_rules_after_always_allow-rules.json"
+  send_prompt build
+  answer_permission allow_always
+  wait_rules_lines "Always allow asked again" 2
+  wait_panel "the card shows the added rule while the turn's result is still held" 'S("permissions")["summary"] == "2 rules" and c["status"] != "completed"' 30
+  touch "$SIRIO_FIXTURE_RESULT_GATE"
+  wait_panel "the turn completed" 'c["status"] == "completed"' 30
+  wait_rules_lines "the turn's end asked once more" 3
+  echo "OK: permission_rules_after_always_allow: the answer, not the turn's end, refreshed the card"
+  stop_app
+}
+
+scenario_permission_rules_unreadable() {
+  rules_chat permission_rules_unreadable '{}'
+  panel_ctl open >/dev/null
+  wait_panel "the card is there with the reason and no rows" 'S("permissions") is not None and S("permissions")["note"] == "Claude Code\x27s rules could not be read: the answer had no rules" and S("permissions")["rows"] == []' 30
+  echo "OK: permission_rules_unreadable: a success with no rules is a note, not an empty list"
+  stop_app
+}
+
 ran=0
 for name in "${SCENARIOS[@]}"; do
   echo "== scenario $name"
@@ -3944,6 +4243,11 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_RENAME_ERROR=""
   SIRIO_FIXTURE_HANDSHAKE_GATE=""
   SIRIO_FIXTURE_RENAME_GATE=""
+  SIRIO_FIXTURE_PERMISSION_FIELDS=""
+  SIRIO_FIXTURE_PERMISSION_RULES=""
+  SIRIO_FIXTURE_RULES_LOG=""
+  SIRIO_FIXTURE_RULES_GATE=""
+  SIRIO_FIXTURE_RESULT_GATE=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))

@@ -14,7 +14,7 @@ mod chat;
 mod claude;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
-pub use claude::{ClaudeClient, ClaudeLaunch, McpControl, TaskControl};
+pub use claude::{ClaudeClient, ClaudeLaunch, McpControl, RulesControl, TaskControl, source_words};
 pub use sirio_acp::AgentCommand;
 pub use sirio_chat_vocab::*;
 
@@ -368,6 +368,16 @@ impl ChatClient {
         }
     }
 
+    /// The permission-rules call as a handle that can leave the GPUI thread.
+    /// ACP agents have none.
+    #[must_use]
+    pub fn rules_control(&self) -> Option<RulesControl> {
+        match self {
+            Self::Claude(client) => Some(client.rules_control()),
+            Self::Acp(_) => None,
+        }
+    }
+
     /// The background-task calls as a handle that can leave the GPUI thread.
     /// ACP agents have none.
     #[must_use]
@@ -408,5 +418,6 @@ impl ChatClient {
 /// `sirio_claude`.
 pub use sirio_claude::{
     ContextBreakdown, ContextOrigins, FastMode, McpAuthStart, McpOrigin, McpServer, McpState,
-    OriginNode, Standing, THINKING_DISPLAYS, TaskOutput, is_refusal,
+    OriginNode, PermissionRule, PermissionRules, SettingsError, Standing, THINKING_DISPLAYS,
+    TaskOutput, is_refusal,
 };

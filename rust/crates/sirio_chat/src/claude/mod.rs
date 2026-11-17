@@ -23,7 +23,11 @@ use sirio_chat_child::{
     ChildHandle, PERMISSION_TIMEOUT, PROMPT_TIMEOUT, SHUTDOWN_TIMEOUT, detach_worker,
     terminate_and_reap_blocking,
 };
-use sirio_claude::{ContextBreakdown, McpAuthStart, McpServer, RewindOutcome, TaskOutput};
+use sirio_claude::{
+    ContextBreakdown, McpAuthStart, McpServer, PermissionRules, RewindOutcome, TaskOutput,
+};
+
+pub use permission::source_words;
 
 use sirio_chat_vocab::{ChatError, EventStream, ModeCatalog, ModelCatalog, TimeoutOperation};
 
@@ -512,12 +516,53 @@ impl ClaudeClient {
         }
     }
 
+    /// A handle that asks for the permission rules from another thread.
+    #[must_use]
+    pub fn rules_control(&self) -> RulesControl {
+        RulesControl {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+
     /// A handle that makes the three connector calls from another thread.
     /// The client itself is not `Clone`, and the calls block.
     #[must_use]
     pub fn mcp_control(&self) -> McpControl {
         McpControl {
             command_tx: self.command_tx.clone(),
+        }
+    }
+}
+
+/// The permission-rules call of one session, detached from the client like
+/// [`McpControl`]. Blocking, so none belongs on a UI thread.
+#[derive(Clone)]
+pub struct RulesControl {
+    command_tx: async_channel::Sender<worker::Command>,
+}
+
+impl std::fmt::Debug for RulesControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RulesControl").finish_non_exhaustive()
+    }
+}
+
+impl RulesControl {
+    /// Asks the CLI for its live permission rules. Blocking, bounded at
+    /// 10 s. A refusal carries the CLI's own text, unchanged.
+    pub fn list(&self) -> Result<PermissionRules, String> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::PermissionRules { reply: reply_tx })
+            .map_err(|_| "the Claude worker is not running".to_string())?;
+        match reply_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("Claude Code did not answer in 10 s".to_string())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("the Claude worker is not running".to_string())
+            }
         }
     }
 }

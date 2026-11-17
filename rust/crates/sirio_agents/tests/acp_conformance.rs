@@ -1626,7 +1626,25 @@ fn ask_session(
             return line["response"].clone();
         }
     }
-    panic!("no answer to {id}; saw {seen:#?}");
+    let brief: Vec<String> = seen
+        .iter()
+        .map(|line| {
+            format!(
+                "{}/{}/{}",
+                line["type"].as_str().unwrap_or("?"),
+                line["subtype"]
+                    .as_str()
+                    .or(line["response"]["subtype"].as_str())
+                    .or(line["request"]["subtype"].as_str())
+                    .unwrap_or("-"),
+                line["response"]["request_id"]
+                    .as_str()
+                    .or(line["request_id"].as_str())
+                    .unwrap_or("-"),
+            )
+        })
+        .collect();
+    panic!("no answer to {id}; saw {brief:#?}");
 }
 
 /// Proves the real Claude Code accepts Sirio's `rename_session` (`ControlRequest::rename_session`,
@@ -1793,5 +1811,166 @@ fn claude_takes_a_host_rename() {
         init["session_id"],
         uuid.as_str(),
         "--resume {TITLE:?} resumed another session: {init}"
+    );
+}
+
+// Failure list for `claude_lists_permission_rules`, written before the test. It fails when, under
+// Sirio's own `initialize` and `list_permission_rules`, sent before any turn:
+// - the verb is refused (an error answer) on 2.1.325 or later;
+// - the success answer does not parse with `parse_permission_rules`;
+// - a rule of the user settings is missing from the answer: the allow, the deny or the ask rule,
+//   each with source `userSettings` and editability `persistent`;
+// - the project allow rule is missing, source `projectSettings`, editability `persistent` (the
+//   project file was not read; `work/` is its own git repository, as a cwd inside another one
+//   reads that repository's settings instead, FINDINGS Surprise 1);
+// - the CLI does not exit on stdin EOF, or a process of the run outlives it.
+//
+// Below 2.1.325 only 2.1.257 was probed (FINDINGS Q1): it refuses with `Unsupported control
+// request subtype: list_permission_rules`. There either a parsing success or a refusal passes,
+// and the test says which one it saw.
+
+/// Proves the real Claude Code answers Sirio's `list_permission_rules` (`ControlRequest::
+/// list_permission_rules`, read by `parse_permission_rules`) on a configured config dir: the
+/// user rules (allow, deny, ask) and the project rule come back, labelled by source.
+///
+/// It uses the fake API of the session-state test, no credential and nothing beyond 127.0.0.1,
+/// but launches a real CLI, so it is `#[ignore]`d and stays off CI. TMPDIR must be on disk
+/// outside the home directory:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance claude_lists_permission_rules -- --ignored --nocapture
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, without
+/// `python3` and without `git`.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_lists_permission_rules() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    if !claude_live::git_available() {
+        eprintln!("SKIP: git is not available");
+        return;
+    }
+    let scratch = claude_live::Scratch::new("permission-rules", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version: {version_text:?}");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+    let answers = version >= sirio_claude::ClaudeVersion::new(2, 1, 325);
+    eprintln!("claude reports {version_text}");
+
+    let user = serde_json::json!({"permissions": {
+        "allow": ["Bash(echo hi:*)"],
+        "deny": ["Bash(rm -rf /:*)"],
+        "ask": ["Bash(git push:*)"],
+    }});
+    let project = serde_json::json!({"permissions": {"allow": ["Bash(ls:*)"]}});
+    let mut session = claude_live::Session::start_with_settings(
+        &claude,
+        &python,
+        &scratch.root.join("rules"),
+        &user,
+        Some(&project),
+    );
+    let mut seen = Vec::new();
+
+    let init = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::initialize("pr-init"),
+    );
+    assert_eq!(
+        init["subtype"], "success",
+        "initialize answered success: false"
+    );
+
+    let answer = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::list_permission_rules("pr-1"),
+    );
+    // Kept with the scratch root after a panic, to see which rule was missing.
+    std::fs::write(scratch.root.join("list-answer.json"), answer.to_string()).unwrap();
+    let succeeded = answer["subtype"] == "success";
+    let parsed = if succeeded {
+        sirio_claude::parse_permission_rules(&answer["response"])
+    } else {
+        None
+    };
+    if answers {
+        assert!(succeeded, "the list answered success: {succeeded}");
+        let rules = parsed
+            .as_ref()
+            .expect("the success answer parses with parse_permission_rules");
+        let listed = |behavior: &str, source: &str, rule: &str| {
+            rules.rules.iter().any(|row| {
+                row.behavior == behavior
+                    && row.source == source
+                    && row.rule == rule
+                    && row.editability == "persistent"
+            })
+        };
+        let user_allow = listed("allow", "userSettings", "Bash(echo hi:*)");
+        let user_deny = listed("deny", "userSettings", "Bash(rm -rf /:*)");
+        let user_ask = listed("ask", "userSettings", "Bash(git push:*)");
+        let project_allow = listed("allow", "projectSettings", "Bash(ls:*)");
+        assert!(user_allow, "the user allow rule is listed: {user_allow}");
+        assert!(user_deny, "the user deny rule is listed: {user_deny}");
+        assert!(user_ask, "the user ask rule is listed: {user_ask}");
+        assert!(
+            project_allow,
+            "the project allow rule is listed: {project_allow}"
+        );
+        eprintln!("the CLI answered the list with every configured rule");
+    } else {
+        let refused = !succeeded
+            && answer["error"]
+                .as_str()
+                .is_some_and(sirio_claude::is_refusal);
+        assert!(
+            parsed.is_some() || refused,
+            "the answer is a parsing success or a refusal: false (succeeded: {succeeded})"
+        );
+        eprintln!(
+            "below 2.1.325 the CLI answered: {}",
+            if refused {
+                "a refusal"
+            } else {
+                "a success that parses"
+            }
+        );
+    }
+
+    let exit = session.close_cli();
+    assert!(
+        exit.is_some_and(|status| status.success()),
+        "the CLI exited successfully on stdin EOF: false (exit code {:?}, None when killed after 20 s)",
+        exit.map(|status| status.code())
+    );
+    // Nothing of the run may outlive the CLI: poll for up to 2 s, then count.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut left = claude_live::holders_of(&session.home());
+    while left > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        left = claude_live::holders_of(&session.home());
+    }
+    assert!(
+        left == 0,
+        "no process of the run outlives the CLI: false ({left} left)"
     );
 }

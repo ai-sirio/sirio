@@ -886,6 +886,7 @@ fn run_connection(
                             title,
                             options,
                             question,
+                            detail: None,
                         })
                         .await;
                     // Everything past this point waits on a human, and the ACP
