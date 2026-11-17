@@ -67,7 +67,7 @@ pub const BROWSER_NOT_SUPPORTED: &[&str] = &[
 
 /// Served by debug builds only. A release build leaves these out of
 /// `system.capabilities`, and answers them with "unknown method".
-const DEBUG_METHODS: [&str; 49] = [
+const DEBUG_METHODS: [&str; 50] = [
     "surface.chat.panel",
     "surface.chat.effort",
     "surface.chat.elicitation",
@@ -117,6 +117,7 @@ const DEBUG_METHODS: [&str; 49] = [
     "surface.attention.act",
     "surface.ide.state",
     "surface.ide.switch",
+    "surface.ide.act",
 ];
 
 /// The methods the app serves: the release list, plus `DEBUG_METHODS` when
@@ -264,11 +265,11 @@ mod tests {
     }
 
     /// `surface.ide.state` reads the IDE bridge's port, lockfile and connections;
-    /// `surface.ide.switch` turns the bridge on and off. Only a debug build serves them; a
-    /// release build neither lists nor answers them.
+    /// `surface.ide.switch` turns the bridge on and off; `surface.ide.act` presses a proposal's
+    /// buttons. Only a debug build serves them; a release build neither lists nor answers them.
     #[test]
     fn ide_bridge_verbs_are_served_by_debug_builds_only() {
-        for method in ["surface.ide.state", "surface.ide.switch"] {
+        for method in ["surface.ide.state", "surface.ide.switch", "surface.ide.act"] {
             assert!(served_methods(true).contains(&method), "{method}");
             assert!(!served_methods(false).contains(&method), "{method}");
         }

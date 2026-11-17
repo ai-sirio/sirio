@@ -326,19 +326,42 @@ impl ProposalTab {
             || self.proposal.len() as u64 > MAX_FILE_BYTES
     }
 
-    fn can_edit(&self) -> bool {
+    /// Whether Edit is available: a refused or over-cap proposal can only be answered.
+    pub fn can_edit(&self) -> bool {
         self.refusal.is_none() && !self.too_large_inputs()
     }
 
-    fn too_large_message() -> String {
+    /// Whether the body is the editor (Edit mode) rather than the diff.
+    pub fn is_editing(&self) -> bool {
+        self.mode == Mode::Edit
+    }
+
+    /// Whether the body says why the proposal cannot be drawn (refused, or over the cap).
+    pub fn is_refused(&self) -> bool {
+        self.diff_failure.is_some() && self.mode == Mode::Diff
+    }
+
+    /// Whether the bar warns that the file has unsaved edits in an editor tab.
+    pub fn is_dirty_in_editor(&self) -> bool {
+        self.dirty_in_editor
+    }
+
+    /// The text of a proposal too large to draw (also the one an over-cap original gets).
+    pub fn too_large_message() -> String {
         "This change is too large to draw (the limit is 1 MiB for the file and for the proposal). \
          You can still Reject or Accept it."
             .to_owned()
     }
 
+    /// The Changes surface that draws the diff, once there is one (the app's debug verbs reach
+    /// its view mode through it).
+    pub fn changes(&self) -> Option<Entity<ChangesTab>> {
+        self.changes.clone()
+    }
+
     /// Whether Accept would send bytes the body does not show yet: a diff is being computed.
     /// Edit mode (the user sees their own text) and a body with no diff to wait for are live.
-    fn accept_live(&self) -> bool {
+    pub fn accept_live(&self) -> bool {
         self.mode == Mode::Edit || self.diff_failure.is_some() || !self.diff_pending
     }
 
@@ -467,14 +490,16 @@ impl ProposalTab {
     }
 
     /// Puts `text` in the editor and shows it (the debug verb's and the tests' entry).
-    pub fn set_edit_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// `false` when Edit is unavailable (the tab is refused or over the cap): nothing changed.
+    pub fn set_edit_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.can_edit() {
-            return;
+            return false;
         }
         let code = self.ensure_code(window, cx);
         code.update(cx, |code, cx| code.set_text(text.replace("\r\n", "\n"), cx));
         self.mode = Mode::Edit;
         cx.notify();
+        true
     }
 
     fn ensure_code(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<CodeEditor> {
@@ -626,6 +651,17 @@ impl ProposalTab {
         changes.update(cx, |changes, cx| changes.set_annotations(annotations, views, cx));
     }
 
+    /// Added and deleted lines of the diff on show, once computed.
+    pub fn diff_counts(&self) -> Option<(usize, usize)> {
+        self.diff_stats
+    }
+
+    /// Whether the bar names the owner terminal that proposes the change.
+    pub fn has_owner_title(&self) -> bool {
+        self.owner_title.is_some()
+    }
+
+    /// The bar's line: who proposes, and the diff's counts once known.
     fn bar_text(&self) -> String {
         let who = match &self.owner_title {
             Some(title) => format!("Claude · {title} proposes a change"),

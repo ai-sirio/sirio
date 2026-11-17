@@ -10,12 +10,17 @@ echoes `mcp`, then sends `initialize`, `notifications/initialized` and
 
 Commands arrive as lines on a FIFO:
   call <method> <json>    a JSON-RPC request; waits for its response (10 s)
+  send <method> <json>    a JSON-RPC request; does not wait (an openDiff waits for the user, so
+                          the next command must not be held up by it); its response is logged
+                          when it comes, whatever the answer
   notify <method> <json>  a JSON-RPC notification
   token <value>           close, then connect again with this token
   close                   close the connection (the client stays up)
   quit                    close and exit
 
-Every frame in and out, and every connection event, is one JSON line in the transcript:
+Every frame in and out, and every connection event, is one JSON line in the transcript, each with
+`t` (time.monotonic()). A response keeps the `id` of its request, so a case can read what any
+request was answered with, or that it never was:
   {"dir": "out"|"in", "frame": <the JSON-RPC message>}
   {"event": "connected", "subprotocol": "mcp"}
   {"event": "refused", "status": 401}
@@ -255,7 +260,7 @@ def main():
                 if connection:
                     connection.close()
                 connection = connect(port, rest.strip(), transcript)
-            elif verb in ("call", "notify"):
+            elif verb in ("call", "notify", "send"):
                 method, _, payload = rest.partition(" ")
                 params = json.loads(payload) if payload.strip() else {}
                 if connection is None:
@@ -263,6 +268,9 @@ def main():
                 elif verb == "call":
                     next_id += 1
                     connection.call(f"call-{next_id}", method, params)
+                elif verb == "send":
+                    next_id += 1
+                    connection.send_json({"jsonrpc": "2.0", "id": f"call-{next_id}", "method": method, "params": params})
                 else:
                     connection.send_json({"jsonrpc": "2.0", "method": method, "params": params})
             elif verb == "close":

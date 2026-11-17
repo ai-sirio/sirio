@@ -43,6 +43,7 @@ use sirio_ui::chat::Chat;
 use sirio_ui::file_view::FileView;
 
 mod diagnostics;
+pub(crate) mod proposals;
 
 use crate::session::{ProjectCatalog, SessionStore};
 use crate::{SirioWorkspace, TabContent, paths_name_the_same_document};
@@ -542,8 +543,8 @@ impl IdeBridge {
     }
 
     /// One event from the bridge's threads. A `getDiagnostics` is answered by the workspace
-    /// (`ide_answer_diagnostics`), which reads the drawers; the `openDiff` requests are answered
-    /// by a later task, and until it lands an `openDiff` waits for its connection to close.
+    /// (`ide_answer_diagnostics`), which reads the drawers; `openDiff` and its withdrawal are the
+    /// workspace's too (`proposals`), never this table's, so they are ignored here.
     pub(crate) fn on_event(&mut self, event: BridgeEvent) {
         match event {
             BridgeEvent::Connected { conn, pid } => {
@@ -564,6 +565,15 @@ impl IdeBridge {
             | BridgeEvent::OpenDiff { .. }
             | BridgeEvent::DiffWithdrawn { .. } => {}
         }
+    }
+
+    /// The owner pane and worktree of `conn`, `None` when it is unknown (gone). The pane is
+    /// `None` for a connection with no owner; the worktree is then the cwd's, when known.
+    pub(crate) fn owner_of(&self, conn: ConnId) -> Option<(Option<usize>, Option<PathBuf>)> {
+        let connection = self.connections.get(&conn)?;
+        let owner = connection.owner.as_ref().map(|owner| owner.pane_id);
+        let worktree = owner.and(connection.worktree.clone());
+        Some((owner, worktree))
     }
 
     /// The running listener, to send a notification through.
@@ -668,7 +678,7 @@ impl IdeBridge {
     /// `surface.ide.state`: what the bridge holds, with no token, no selection and no text of a
     /// proposal; a path appears only as a worktree root. `live` is every terminal Sirio holds: an
     /// owner whose pane is not among them is shown as none, as it is for every action.
-    pub(crate) fn state_json(&self, live: &[LivePane]) -> String {
+    pub(crate) fn state_json(&self, live: &[LivePane], proposals: Value, confirmation: Value) -> String {
         let mut connections: Vec<(&ConnId, &Connection)> = self.connections.iter().collect();
         connections.sort_by_key(|(conn, _)| conn.0);
         let connections: Vec<Value> = connections
@@ -695,8 +705,8 @@ impl IdeBridge {
             "port": self.running.as_ref().map(|running| running.port),
             "lockfile": self.running.as_ref().map(|running| running.lock.name.as_str()),
             "connections": connections,
-            "proposals": [],
-            "confirmation": null,
+            "proposals": proposals,
+            "confirmation": confirmation,
             "toasts": self.toasts,
             "hook_resolutions": self.hook_resolutions,
             "last_delivery": null,

@@ -647,6 +647,7 @@ pub fn persisted_kind(kind: TabKind) -> &'static str {
         TabKind::ChangeRequest => "change_request",
         TabKind::CiLog => "ci_log",
         TabKind::Trace => "trace",
+        TabKind::Proposal => "proposal",
     }
 }
 
@@ -664,6 +665,7 @@ pub fn kind_from_persisted(kind: &str) -> Option<TabKind> {
         "change_request" => TabKind::ChangeRequest,
         "ci_log" => TabKind::CiLog,
         "trace" => TabKind::Trace,
+        "proposal" => TabKind::Proposal,
         _ => return None,
     };
     Some(kind)
@@ -1767,9 +1769,12 @@ fn tabs_for_worktree(
     for record in records {
         // One list with the writer: every kind `persisted_kind` can spell is
         // loaded, and only a spelling this build does not know is skipped.
-        // A Trace tab is spelled but never written; a record that names one
+        // A Trace or Proposal tab is spelled but never written; a record that names one
         // is skipped without a word, as nothing in it can be restored.
-        if kind_from_persisted(&record.kind) == Some(TabKind::Trace) {
+        if matches!(
+            kind_from_persisted(&record.kind),
+            Some(TabKind::Trace | TabKind::Proposal)
+        ) {
             continue;
         }
         if kind_from_persisted(&record.kind).is_none() {
@@ -4033,6 +4038,7 @@ mod tests {
             TabKind::ChangeRequest,
             TabKind::CiLog,
             TabKind::Trace,
+            TabKind::Proposal,
         ];
         for kind in &all {
             match kind {
@@ -4044,7 +4050,8 @@ mod tests {
                 | TabKind::ProjectSettings
                 | TabKind::ChangeRequest
                 | TabKind::CiLog
-                | TabKind::Trace => {}
+                | TabKind::Trace
+                | TabKind::Proposal => {}
             }
         }
         all

@@ -108,6 +108,61 @@ set -eEuo pipefail
 #                    the same, with the same hook_resolutions guard, with its cwd outside every
 #                    worktree: the answer holds the files of every worktree of the sidebar (both
 #                    seeded ones, a.py of each); the state shows it ownerless with no worktree
+#   accept           (openDiff) a client sends openDiff for p.txt: a tab titled "✻ p.txt" opens in
+#                    Secondary, the active tab is still the Claude terminal, the bar names the
+#                    owner terminal and the counts [1, 1], the worktree is the repository's; nothing is answered
+#                    until `surface.ide.act accept`, which answers FILE_SAVED and the proposal; the
+#                    file on disk is untouched
+#   edit_then_accept a CRLF file: `act edit text="edited\n"`, `act show_diff`, `act accept` answers
+#                    exactly `edited\r\n`
+#   edit_keys        `act edit`, then real xdotool keys typed into the Edit body (guarded the way
+#                    selection_while_terminal_active is: the click must not change the active tab);
+#                    Accept answers text holding the typed characters
+#   reject           `act reject` answers DIFF_REJECTED and the tab name
+#   close_confirm    `act close` asks "Closing rejects Claude's change" (Reject, Cancel); Cancel keeps
+#                    the tab and answers nothing; close again + confirm_reject answers DIFF_REJECTED
+#   close_others_guarded
+#                    Close Others on a file tab of Secondary with the proposal among the others, and
+#                    `surface.tabs.close ... confirm=yes` on the proposal itself, ask before anything
+#                    closes; Cancel keeps every tab; Reject answers, then the others close
+#   close_tab_withdraws
+#                    the client's close_tab answers TAB_CLOSED, the pending openDiff gets -32000 (no
+#                    decision), the tab is gone
+#   close_all        closeAllDiffTabs answers CLOSED_2_DIFF_TABS, both openDiffs get -32000
+#   replace_in_place an openDiff with the tab_name of an open one: the first gets -32000, no second
+#                    tab, Accept answers the second's text
+#   disconnect_closes
+#                    the client closing its socket closes the tab with the toast "Claude closed its
+#                    proposed change" and sends no decision
+#   new_file         a path that does not exist yet opens, all added ("+2 -0"); Sirio creates nothing
+#   fifo_path        a FIFO as old_file_path opens a tab saying why, with no Edit (act edit fails);
+#                    Reject still answers
+#   too_large        a file over 1 MiB: the refusal body, act edit fails, Accept answers FILE_SAVED
+#                    with Claude's text
+#   dirty_warning    the file is open in an editor tab; once its proposal is open, typing into it
+#                    (`surface.editor.type`) makes the state's dirty true and the bar warn
+#   captures         the tab in Unified and Split (`surface.changes.view`)
+#   no_decision_without_user
+#                    with an openDiff pending, switching the bridge off, the client dropping its
+#                    socket, and the app quitting each send no FILE_SAVED, DIFF_REJECTED or
+#                    TAB_CLOSED for that request id (read from the client's transcript)
+#   worktree_close_guarded
+#                    two Claudes wait on a worktree (one in its pane, one outside every Sirio
+#                    shell): `workspace.close` over the socket fails; closing the worktree asks
+#                    first and ends no session; Cancel keeps the worktree and both connections;
+#                    Reject answers DIFF_REJECTED (read by the outside client), then the sessions
+#                    end
+#   parked_worktree  relaunched with the mounted-worktree cap seeded at 2 in the isolated database
+#                    (appearance_seed --limit-mounted 2) and a stale file left in the scratch
+#                    directory (which the launch sweeps; the directory is 0700): a proposal for a
+#                    worktree that is not on screen has no tab, state on_screen false, and the toast
+#                    "Claude proposes a change in <name>"; selecting the worktree brings the tab; it
+#                    survives that worktree's eviction; Accept answers
+#
+# `surface.ide.act` (debug builds only) presses what a user presses: accept, reject, edit (with
+# `text`, which errors when Edit is unavailable), show_diff, close, confirm_reject, cancel,
+# close_others (`text` is the kept tab's position) and close_worktree.
+#
 #
 # Three debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
 # for every launch: SIRIO_DEBUG_IDE_START_DELAY_MS=600 holds each listener start in flight
@@ -129,11 +184,14 @@ set -eEuo pipefail
 # `system.ping` route probe sirioctl sends by itself, and only before `panel.*` calls (the proxy
 # forwards it and leaves it out of the log). Rerunning the script reproduces it.
 #
-# Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--out-dir DIR]
+# Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--proposals-only] [--out-dir DIR]
 #
 #   --xvfb        start a private Xvfb on a free display between :90 and :99
 #   --display :N  use an Xvfb this user started (never your own $DISPLAY)
 #   --state-only  take no window captures; the window still draws
+#   --proposals-only
+#                 run only the openDiff cases (development; it prints a different last line and
+#                 is not the evidence of a run)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -144,6 +202,7 @@ SEED="$TARGET_DIR/debug/examples/appearance_seed"
 CLIENT="$ROOT/Scripts/Tests/ide_client.py"
 
 STATE_ONLY=0
+PROPOSALS_ONLY=0
 START_XVFB=0
 DISPLAY_TARGET=""
 OUT_DIR=""
@@ -152,6 +211,7 @@ while [ $# -gt 0 ]; do
     --xvfb) START_XVFB=1; shift ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --state-only) STATE_ONLY=1; shift ;;
+    --proposals-only) PROPOSALS_ONLY=1; shift ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -1717,11 +1777,674 @@ assert_only_the_fake_server() {
   echo "OK: $fake fake language server process(es) and no other language server under the app"
 }
 
+# ---------------------------------------------------------------- proposals (openDiff)
+
+# Cases of Claude's `openDiff` (spec 2026-11-15 4.7, 4.8, 10.4, 10.8). Each starts its own client
+# in an application terminal tab, so the active tab is a Primary terminal and a proposal opens
+# beside it in Secondary. The client sends an openDiff with `send` (it does not wait: the call
+# stays unanswered until the user decides), and the cases read the answer, or its absence, from
+# the transcript by request id.
+
+# The path of the worktree on branch $1, empty when there is none.
+branch_worktree() { # branch
+  "$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == sys.argv[1]]
+print(paths[0] if paths else "")' "$1"
+}
+# The path of the worktree on branch $1, made when it does not exist yet.
+ensure_worktree() { # branch
+  local path
+  path="$(branch_worktree "$1")"
+  if [ -z "$path" ]; then
+    ctl new-workspace --project "$(project_id "$WT")" --branch "$1" >/dev/null
+    path="$(branch_worktree "$1")"
+  fi
+  [ -n "$path" ] || fail "$CASE: no worktree on branch $1"
+  printf '%s' "$path"
+}
+
+# A Claude in a new application terminal of the selected worktree, connected.
+proposal_client() {
+  start_app_client
+  wait_client "connected" 'r.get("event") == "connected"' 1
+}
+# openDiff NAME PATH CONTENTS: CONTENTS has printf-style escapes (\n, \r). The old file is PATH
+# unless a fourth argument names another.
+open_diff() { # tab_name path contents [old_path]
+  local line
+  line="$(python3 -I -c '
+import json, sys
+name, path, contents = sys.argv[1:4]
+old = sys.argv[4] if len(sys.argv) > 4 else path
+print(json.dumps({"name": "openDiff", "arguments": {"old_file_path": old, "new_file_path": path,
+    "new_file_contents": contents.encode().decode("unicode_escape"), "tab_name": name}}))' "$@")"
+  client_do "send tools/call $line"
+}
+# The JSON-RPC id of the last openDiff the client sent for tab_name $1.
+req_id() { # tab_name
+  python3 -I - "$CLIENT_LOG" "$1" <<'PY'
+import json, sys
+found = ""
+for line in open(sys.argv[1], encoding="utf-8"):
+    r = json.loads(line)
+    f = r.get("frame", {})
+    if r.get("dir") == "out" and f.get("method") == "tools/call" and f["params"].get("name") == "openDiff" \
+            and f["params"]["arguments"].get("tab_name") == sys.argv[2]:
+        found = f["id"]
+print(found)
+PY
+}
+# The answer to request $1 as JSON: {"texts": [...]} for a result, {"error": code} for an error,
+# nothing while it is unanswered.
+response_json() { # call-N
+  python3 -I - "$CLIENT_LOG" "$1" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    r = json.loads(line)
+    f = r.get("frame", {})
+    if r.get("dir") == "in" and f.get("id") == sys.argv[2]:
+        if "error" in f:
+            print(json.dumps({"error": f["error"]["code"]}))
+        else:
+            print(json.dumps({"texts": [c["text"] for c in f["result"]["content"]]}))
+PY
+}
+wait_response() { # call-N: prints the answer as JSON
+  local tries=0 got=""
+  while [ "$tries" -lt 100 ]; do
+    got="$(response_json "$1")"
+    [ -z "$got" ] || { printf '%s' "$got"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  fail "$CASE: no answer to $1 (last frames: $(tail -n 3 "$CLIENT_LOG" | cut -c1-300))"
+}
+# The answer to $1 satisfies a Python expression over `d` ({"texts": [...]} or {"error": code}).
+assert_response() { # call-N expr description
+  local got
+  got="$(wait_response "$1")"
+  printf '%s' "$got" | python3 -I -c 'import json, sys; d = json.load(sys.stdin); sys.exit(0 if eval(sys.argv[1]) else 1)' "$2" \
+    || fail "$CASE: $3: the answer to $1 is $got"
+  echo "OK: $3 ($got)"
+}
+# Request $1 has not been answered at all (no FILE_SAVED, DIFF_REJECTED, TAB_CLOSED, nor an error).
+assert_unanswered() { # call-N description
+  local got
+  got="$(response_json "$1")"
+  [ -z "$got" ] || fail "$CASE: $2: $1 was answered: $got"
+  echo "OK: $2 ($1 has no answer)"
+}
+# No decision was ever sent for request $1, whatever else was (an error carries none).
+assert_no_decision() { # call-N description
+  local got
+  got="$(response_json "$1")"
+  case "$got" in *FILE_SAVED*|*DIFF_REJECTED*|*TAB_CLOSED*) fail "$CASE: $2: $1 got a decision: $got" ;; esac
+  echo "OK: $2 ($1: ${got:-no answer})"
+}
+act() { # tab_name action [text]
+  sockcall surface.ide.act "tab_name=$1" "action=$2" ${3+"text=$3"} >/dev/null
+}
+act_alone() { sockcall surface.ide.act "action=$1" ${2+"text=$2"} >/dev/null; }
+pexpr() { printf '[p for p in d["proposals"] if p["tab_name"] == "%s"][0]["%s"]' "$1" "$2"; }
+expect_proposal() { # tab_name field want
+  expect_state "proposal $1: $2" "$(pexpr "$1" "$2")" "$3"
+}
+expect_no_proposals() { expect_state "no proposal is open" 'len(d["proposals"])' 0; }
+# The 1-based position of the first tab titled $1, 0 when none.
+tab_pos() { # title
+  "$CTL" surface tabs read --json | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)[0]
+print(next((int(k[4:]) for k, v in d.items() if k.startswith("tab.") and v.split("|", 2)[2] == sys.argv[1]), 0))' "$1"
+}
+expect_tab() { # title: waits for the tab, prints its position
+  local tries=0 pos=0
+  while [ "$tries" -lt 100 ]; do
+    pos="$(tab_pos "$1")"
+    [ "$pos" != 0 ] && { printf '%s' "$pos"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$CASE: no tab titled $1 (tabs: $("$CTL" surface tabs read --json | cut -c1-500))"
+}
+expect_no_tab() { # title
+  local tries=0
+  while [ "$tries" -lt 100 ]; do
+    [ "$(tab_pos "$1")" = 0 ] && return 0
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$CASE: the tab titled $1 is still there"
+}
+tab_count() { tabs_field count; }
+toast_count() { # text
+  state_expr 'len([t for t in d["toasts"] if t == "'"$1"'"])'
+}
+# The file's bytes are as they were: Sirio never writes a file Claude proposed a change to.
+assert_file_is() { # path printf-text
+  python3 -I -c '
+import sys
+want = sys.argv[2].encode().decode("unicode_escape").encode()
+sys.exit(0 if open(sys.argv[1], "rb").read() == want else 1)' "$1" "$2" || fail "$CASE: $1 was changed by Sirio"
+}
+
+case_proposal_accept() {
+  proposal_client
+  printf 'one\ntwo\nthree\n' >"$WT/p.txt"
+  local active pos kinds positions
+  active="$(tabs_field active)"
+  open_diff accept-1 "$WT/p.txt" 'one\nTWO\nthree\n'
+  expect_proposal accept-1 on_screen True
+  expect_proposal accept-1 ready True
+  pos="$(expect_tab '✻ p.txt')"
+  echo "OK: the tab is titled ✻ p.txt (position $pos)"
+  kinds="$(sockcall surface.layout.read | jq_py 'd["secondaryKinds"]')"
+  positions="$(sockcall surface.layout.read | jq_py 'd["secondaryPositions"]')"
+  case ",$kinds," in *,proposal,*) ;; *) fail "$CASE: secondaryKinds is $kinds" ;; esac
+  case ",$positions," in *",$pos,"*) ;; *) fail "$CASE: the tab $pos is not in Secondary ($positions)" ;; esac
+  echo "OK: the proposal is a Secondary tab ($kinds at $positions)"
+  [ "$(tabs_field active)" = "$active" ] || fail "$CASE: opening the proposal moved the active tab from $active to $(tabs_field active)"
+  echo "OK: focus stays on the Claude terminal (active tab $active)"
+  expect_proposal accept-1 worktree "$WT"
+  expect_proposal accept-1 owner_named True
+  expect_proposal accept-1 counts "[1, 1]"
+  expect_proposal accept-1 dirty False
+  expect_proposal accept-1 refusal False
+  [ "$(sockcall surface.layout.read | jq_py 'd["secondaryVisible"]')" = true ] || fail "$CASE: Secondary is not revealed"
+  capture ide-proposal-bar
+  assert_unanswered "$(req_id accept-1)" "nothing answers before the user does"
+  act accept-1 accept
+  assert_response "$(req_id accept-1)" 'd["texts"] == ["FILE_SAVED", "one\nTWO\nthree\n"]' "Accept answers FILE_SAVED and the proposal"
+  expect_no_proposals
+  expect_no_tab '✻ p.txt'
+  assert_file_is "$WT/p.txt" 'one\ntwo\nthree\n'
+  echo "OK: the file on disk is untouched: Claude writes it"
+  end_app_client
+}
+
+case_proposal_edit_then_accept() {
+  proposal_client
+  printf 'a\r\nb\r\n' >"$WT/crlf.txt"
+  open_diff edit-1 "$WT/crlf.txt" 'a\r\nB\r\n'
+  expect_proposal edit-1 ready True
+  expect_tab '✻ crlf.txt' >/dev/null
+  act edit-1 edit $'edited\n'
+  expect_proposal edit-1 editing True
+  capture ide-proposal-edit
+  act edit-1 show_diff
+  expect_proposal edit-1 editing False
+  expect_proposal edit-1 ready True
+  act edit-1 accept
+  assert_response "$(req_id edit-1)" 'd["texts"] == ["FILE_SAVED", "edited\r\n"]' "Accept sends the edited text in the file's CRLF"
+  expect_no_proposals
+  end_app_client
+}
+
+# Edit, with real keys: the typed characters reach the editor the user is looking at.
+case_proposal_edit_keys() {
+  proposal_client
+  printf 'one\ntwo\nthree\n' >"$WT/keys.txt"
+  local active window geometry width height
+  active="$(tabs_field active)"
+  open_diff keys-1 "$WT/keys.txt" 'one\ntwo\nthree\n'
+  expect_proposal keys-1 ready True
+  act keys-1 edit
+  expect_proposal keys-1 editing True
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$CASE: no window for pid $APP_PID"
+  geometry="$(DISPLAY="$DISPLAY_TARGET" xdotool getwindowgeometry "$window" | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\)/\1 \2/p')"
+  read -r width height <<<"$geometry"
+  capture ide-proposal-edit-keys
+  # In the middle of the Secondary half, on the editor's first lines (measured on
+  # ide-proposal-edit-keys.png), then the End key so the characters land after `one`.
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$((width * 70 / 100))" "$((height * 20 / 100))" click 1
+  sleep 0.3
+  DISPLAY="$DISPLAY_TARGET" xdotool key ctrl+Home
+  DISPLAY="$DISPLAY_TARGET" xdotool type --delay 60 "KEYS"
+  [ "$(tabs_field active)" = "$active" ] || fail "$CASE: the click made another tab the active one; the layout under test is gone"
+  sleep 0.5
+  act keys-1 accept
+  assert_response "$(req_id keys-1)" '"KEYS" in d["texts"][1] and d["texts"][0] == "FILE_SAVED"' "the characters typed with real keys are in the answer"
+  end_app_client
+}
+
+case_proposal_reject() {
+  proposal_client
+  printf 'one\n' >"$WT/r.txt"
+  open_diff reject-1 "$WT/r.txt" 'two\n'
+  expect_proposal reject-1 ready True
+  act reject-1 reject
+  assert_response "$(req_id reject-1)" 'd["texts"] == ["DIFF_REJECTED", "reject-1"]' "Reject answers DIFF_REJECTED and the tab name"
+  expect_no_proposals
+  expect_no_tab '✻ r.txt'
+  end_app_client
+}
+
+case_proposal_close_confirm() {
+  proposal_client
+  printf 'one\n' >"$WT/c.txt"
+  open_diff close-1 "$WT/c.txt" 'two\n'
+  expect_proposal close-1 ready True
+  act close-1 close
+  expect_state "closing asks first" 'd["confirmation"]["title"]' "Closing rejects Claude's change"
+  expect_state "with Reject and Cancel" 'd["confirmation"]["buttons"]' "['Reject', 'Cancel']"
+  capture ide-proposal-confirm
+  act_alone cancel
+  expect_state "Cancel closes the question" 'd["confirmation"]' None
+  expect_proposal close-1 on_screen True
+  [ "$(tab_pos '✻ c.txt')" != 0 ] || fail "$CASE: Cancel closed the tab"
+  assert_unanswered "$(req_id close-1)" "Cancel answers nothing"
+  act close-1 close
+  expect_state "closing asks again" 'd["confirmation"]["title"]' "Closing rejects Claude's change"
+  act_alone confirm_reject
+  assert_response "$(req_id close-1)" 'd["texts"] == ["DIFF_REJECTED", "close-1"]' "Reject in the confirmation answers DIFF_REJECTED"
+  expect_no_proposals
+  expect_no_tab '✻ c.txt'
+  end_app_client
+}
+
+# Close Others on a file tab of Secondary, with the proposal among the others (Close Others
+# closes the others of the kept tab's half): the question comes before anything closes, and
+# Cancel keeps every tab.
+case_close_others_guarded() {
+  proposal_client
+  local keep before
+  printf 'one\n' >"$WT/o.txt"
+  printf 'f1\n' >"$WT/f1.txt"
+  printf 'f2\n' >"$WT/f2.txt"
+  ctl surface editor open --path "$WT/f1.txt" >/dev/null
+  keep="$(expect_tab 'f1.txt')"
+  ctl surface editor open --path "$WT/f2.txt" >/dev/null
+  expect_tab 'f2.txt' >/dev/null
+  open_diff others-1 "$WT/o.txt" 'two\n'
+  expect_proposal others-1 ready True
+  before="$(tab_count)"
+  act_alone close_others "$keep"
+  expect_state "Close Others asks first" 'd["confirmation"]["then"]' close_tabs
+  [ "$(tab_count)" = "$before" ] || fail "$CASE: tabs closed before the answer: $before then $(tab_count)"
+  act_alone cancel
+  sleep 1
+  [ "$(tab_count)" = "$before" ] || fail "$CASE: Cancel closed tabs: $before then $(tab_count)"
+  expect_proposal others-1 on_screen True
+  assert_unanswered "$(req_id others-1)" "Cancel answers nothing"
+  echo "OK: Cancel keeps all $before tabs and the proposal"
+  # Closing a single tab through the verb, confirm=yes included, asks too.
+  sockcall surface.tabs.close "index=$(tab_pos '✻ o.txt')" confirm=yes >/dev/null
+  expect_state "closing it through the verb asks first" 'd["confirmation"]["then"]' close_tabs
+  act_alone cancel
+  expect_proposal others-1 on_screen True
+  act_alone close_others "$keep"
+  act_alone confirm_reject
+  assert_response "$(req_id others-1)" 'd["texts"] == ["DIFF_REJECTED", "others-1"]' "Reject answers, then the original close goes on"
+  expect_no_proposals
+  expect_no_tab 'f2.txt'
+  [ "$(tab_count)" -lt "$before" ] || fail "$CASE: after Reject the other tabs did not close ($before then $(tab_count))"
+  echo "OK: the other tabs closed after Reject ($before then $(tab_count))"
+  # Close Others closed the Claude terminal too, so its client is gone: nothing to quit.
+  close_tabs_of_kind file
+  close_tabs_of_kind terminal
+}
+
+# Closing the proposal's worktree asks before any session ends; the release verb refuses. Two
+# Claudes wait on the worktree: one in a pane of it (its connection ends with the sessions, so it
+# proves that nothing ended while asking), and one outside every Sirio shell (it outlives the
+# close, so its transcript shows the answer Reject sent).
+case_worktree_close_guarded() {
+  local third third_id in_log in_fifo
+  third="$(ensure_worktree ide-third)"
+  third_id="$(worktree_id "$third")"
+  ctl select-workspace --workspace "$third_id" >/dev/null
+  printf 'x\ny\n' >"$third/w.txt"
+  printf 'u\nv\n' >"$third/w2.txt"
+  proposal_client
+  open_diff wt-1 "$third/w.txt" 'x\nY\n'
+  expect_proposal wt-1 ready True
+  in_log="$CLIENT_LOG"
+  in_fifo="$CLIENT_FIFO"
+  start_outside_client "$third"
+  wait_client "the outside client connected" 'r.get("event") == "connected"' 1
+  open_diff wt-2 "$third/w2.txt" 'u\nV\n'
+  expect_proposal wt-2 ready True
+  expect_proposal wt-2 worktree "$third"
+  expect_state "two Claudes are connected" 'len(d["connections"])' 2
+  if "$CTL" close-workspace --workspace "$third_id" >"$RUN_DIR/close.out" 2>&1; then
+    fail "$CASE: workspace.close succeeded with a proposal open: $(cat "$RUN_DIR/close.out")"
+  fi
+  grep -q 'Claude has a proposed change open in this worktree' "$RUN_DIR/close.out" \
+    || fail "$CASE: workspace.close failed for another reason: $(cat "$RUN_DIR/close.out")"
+  echo "OK: workspace.close refuses: $(head -n 1 "$RUN_DIR/close.out")"
+  expect_state "the refusal closed nothing" 'len(d["connections"])' 2
+  act wt-1 close_worktree
+  expect_state "closing the worktree asks first" 'd["confirmation"]["then"]' worktree_removed
+  expect_state "about both proposals" 'sorted(d["confirmation"]["proposals"])' "['wt-1', 'wt-2']"
+  sleep 1
+  expect_state "no session ended while asking" 'len(d["connections"])' 2
+  act_alone cancel
+  sleep 1
+  expect_state "Cancel keeps both clients connected" 'len(d["connections"])' 2
+  expect_state "and both proposals" 'len(d["proposals"])' 2
+  assert_unanswered "$(req_id wt-2)" "Cancel answers nothing"
+  [ "$("$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+print([r["mounted"] for r in json.load(sys.stdin) if r["id"] == sys.argv[1]][0])' "$third_id")" = true ] \
+    || fail "$CASE: Cancel unmounted the worktree"
+  echo "OK: Cancel keeps the worktree mounted and the clients connected"
+  act wt-1 close_worktree
+  act_alone confirm_reject
+  assert_response "$(req_id wt-2)" 'd["texts"] == ["DIFF_REJECTED", "wt-2"]' "Reject answers DIFF_REJECTED before the worktree closes"
+  expect_state "the pane's Claude went with its sessions, the outside one stayed" 'len(d["connections"])' 1
+  expect_no_proposals
+  end_outside_client
+  CLIENT_LOG="$in_log" CLIENT_FIFO="$in_fifo"
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+}
+
+case_close_tab_withdraws() {
+  proposal_client
+  printf 'one\n' >"$WT/w1.txt"
+  open_diff withdraw-1 "$WT/w1.txt" 'two\n'
+  expect_proposal withdraw-1 ready True
+  client_do 'call tools/call {"name":"close_tab","arguments":{"tab_name":"withdraw-1"}}'
+  wait_client "close_tab answered" 'r.get("dir") == "in" and r.get("frame", {}).get("result", {}).get("content", [{}])[0].get("text") == "TAB_CLOSED"' 1
+  assert_response "$(req_id withdraw-1)" 'd == {"error": -32000}' "the withdrawn openDiff gets -32000, no decision"
+  expect_no_proposals
+  expect_no_tab '✻ w1.txt'
+  end_app_client
+}
+
+case_close_all() {
+  proposal_client
+  printf 'one\n' >"$WT/ca1.txt"
+  printf 'one\n' >"$WT/ca2.txt"
+  open_diff all-1 "$WT/ca1.txt" 'two\n'
+  open_diff all-2 "$WT/ca2.txt" 'two\n'
+  expect_state "two proposals" 'len(d["proposals"])' 2
+  client_do 'call tools/call {"name":"closeAllDiffTabs","arguments":{}}'
+  wait_client "closeAllDiffTabs answered" 'r.get("dir") == "in" and r.get("frame", {}).get("result", {}).get("content", [{}])[0].get("text") == "CLOSED_2_DIFF_TABS"' 1
+  assert_response "$(req_id all-1)" 'd == {"error": -32000}' "the first gets -32000"
+  assert_response "$(req_id all-2)" 'd == {"error": -32000}' "the second gets -32000"
+  expect_no_proposals
+  expect_no_tab '✻ ca1.txt'
+  expect_no_tab '✻ ca2.txt'
+  end_app_client
+}
+
+case_replace_in_place() {
+  proposal_client
+  printf 'one\n' >"$WT/rp.txt"
+  open_diff same-1 "$WT/rp.txt" 'two\n'
+  expect_proposal same-1 ready True
+  local tabs
+  tabs="$(tab_count)"
+  open_diff same-1 "$WT/rp.txt" 'three\n'
+  # The first request is superseded: the server answers it with an error.
+  local first
+  first="$(python3 -I - "$CLIENT_LOG" <<'PY'
+import json, sys
+ids = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    r = json.loads(line)
+    f = r.get("frame", {})
+    if r.get("dir") == "out" and f.get("method") == "tools/call" and f["params"].get("name") == "openDiff":
+        ids.append(f["id"])
+print(ids[-2])
+PY
+)"
+  assert_response "$first" 'd == {"error": -32000}' "the replaced openDiff gets -32000, no decision"
+  sleep 1
+  [ "$(tab_count)" = "$tabs" ] || fail "$CASE: the replacement made another tab ($tabs then $(tab_count))"
+  expect_state "still one proposal" 'len(d["proposals"])' 1
+  expect_proposal same-1 ready True
+  act same-1 accept
+  assert_response "$(req_id same-1)" 'd["texts"] == ["FILE_SAVED", "three\n"]' "the replacement is what Accept answers"
+  expect_no_proposals
+  end_app_client
+}
+
+case_disconnect_closes() {
+  proposal_client
+  printf 'one\n' >"$WT/d.txt"
+  local before
+  before="$(toast_count 'Claude closed its proposed change')"
+  open_diff gone-1 "$WT/d.txt" 'two\n'
+  expect_proposal gone-1 ready True
+  client_do close
+  wait_client "the connection closed" 'r.get("event") == "closed"' 1
+  expect_no_proposals
+  expect_no_tab '✻ d.txt'
+  expect_state "the toast says Claude closed it" 'len([t for t in d["toasts"] if t == "Claude closed its proposed change"])' "$((before + 1))"
+  assert_no_decision "$(req_id gone-1)" "a closed connection is answered nothing"
+  end_app_client
+}
+
+case_new_file() {
+  proposal_client
+  rm -f "$WT/brand-new.txt"
+  open_diff new-1 "$WT/brand-new.txt" 'first\nsecond\n'
+  expect_proposal new-1 ready True
+  expect_proposal new-1 refusal False
+  expect_proposal new-1 counts "[2, 0]"
+  act new-1 reject
+  assert_response "$(req_id new-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  [ ! -e "$WT/brand-new.txt" ] || fail "$CASE: Sirio created the file"
+  end_app_client
+}
+
+case_fifo_path() {
+  proposal_client
+  rm -f "$WT/fifo.txt"
+  mkfifo "$WT/fifo.txt"
+  open_diff fifo-1 "$WT/fifo.txt" 'text\n'
+  expect_proposal fifo-1 refusal True
+  expect_tab '✻ fifo.txt' >/dev/null
+  capture ide-proposal-fifo
+  if sockcall surface.ide.act tab_name=fifo-1 action=edit "text=x" >/dev/null 2>&1; then
+    fail "$CASE: act edit answered ok on a refused proposal"
+  fi
+  echo "OK: Edit is not available on a refused proposal (act edit fails)"
+  act fifo-1 reject
+  assert_response "$(req_id fifo-1)" 'd["texts"][0] == "DIFF_REJECTED"' "a refused proposal can still be rejected"
+  rm -f "$WT/fifo.txt"
+  end_app_client
+}
+
+case_too_large() {
+  proposal_client
+  python3 -I -c 'import sys; open(sys.argv[1], "w").write("x" * 1100000 + "\n")' "$WT/big.txt"
+  open_diff big-1 "$WT/big.txt" 'small\n'
+  expect_proposal big-1 refusal True
+  expect_tab '✻ big.txt' >/dev/null
+  capture ide-proposal-too-large
+  if sockcall surface.ide.act tab_name=big-1 action=edit "text=x" >/dev/null 2>&1; then
+    fail "$CASE: act edit answered ok on an over-cap proposal"
+  fi
+  act big-1 accept
+  assert_response "$(req_id big-1)" 'd["texts"] == ["FILE_SAVED", "small\n"]' "Accept sends Claude's text unchanged"
+  rm -f "$WT/big.txt"
+  end_app_client
+}
+
+# The bar warns while the file has unsaved edits in an editor tab, and follows them live.
+case_dirty_warning() {
+  proposal_client
+  printf 'one\ntwo\n' >"$WT/dirty.txt"
+  ctl surface editor open --path "$WT/dirty.txt" >/dev/null
+  local file_pos
+  file_pos="$(expect_tab 'dirty.txt')"
+  open_diff dirty-1 "$WT/dirty.txt" 'one\nTWO\n'
+  expect_proposal dirty-1 ready True
+  expect_proposal dirty-1 dirty False
+  ctl surface tabs select "$file_pos" >/dev/null
+  sockcall surface.editor.type text=typed >/dev/null
+  expect_proposal dirty-1 dirty True
+  ctl surface tabs select "$(tab_pos '✻ dirty.txt')" >/dev/null
+  capture ide-proposal-dirty
+  act dirty-1 reject
+  assert_response "$(req_id dirty-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  expect_no_proposals
+  ctl surface tabs select "$(tab_pos 'dirty.txt')" >/dev/null
+  close_tabs_of_kind file
+  end_app_client
+}
+
+case_proposal_captures() {
+  proposal_client
+  printf 'alpha\nbeta\ngamma\ndelta\n' >"$WT/cap.txt"
+  open_diff cap-1 "$WT/cap.txt" 'alpha\nBETA\ngamma\nDELTA\nepsilon\n'
+  expect_proposal cap-1 ready True
+  ctl surface tabs select "$(expect_tab '✻ cap.txt')" >/dev/null
+  sockcall surface.changes.view mode=unified >/dev/null
+  capture ide-proposal-unified
+  sockcall surface.changes.view mode=split >/dev/null
+  capture ide-proposal-split
+  sockcall surface.changes.view mode=unified >/dev/null
+  act cap-1 reject
+  assert_response "$(req_id cap-1)" 'd["texts"][0] == "DIFF_REJECTED"' "rejected"
+  end_app_client
+}
+
+# With three openDiffs pending, each answered a different way by something other than the
+# user, no decision is ever sent: switching the bridge off, quitting, and the client dropping
+# its socket.
+case_no_decision_without_user() {
+  local req
+  printf 'one\n' >"$WT/nd.txt"
+  # The switch goes off.
+  proposal_client
+  open_diff nd-1 "$WT/nd.txt" 'two\n'
+  expect_proposal nd-1 ready True
+  req="$(req_id nd-1)"
+  sockcall surface.ide.switch on=false >/dev/null
+  wait_client "the connection closed" 'r.get("event") == "closed"' 1
+  expect_no_proposals
+  expect_no_tab '✻ nd.txt'
+  assert_no_decision "$req" "switching off sends no decision"
+  sockcall surface.ide.switch on=true >/dev/null
+  wait_lockfile >/dev/null
+  end_app_client
+  # The client drops its socket.
+  proposal_client
+  open_diff nd-2 "$WT/nd.txt" 'two\n'
+  expect_proposal nd-2 ready True
+  req="$(req_id nd-2)"
+  client_do close
+  wait_client "the connection closed" 'r.get("event") == "closed"' 1
+  expect_no_proposals
+  assert_no_decision "$req" "a dropped socket is answered no decision"
+  end_app_client
+  # Sirio quits.
+  proposal_client
+  open_diff nd-3 "$WT/nd.txt" 'two\n'
+  expect_proposal nd-3 ready True
+  req="$(req_id nd-3)"
+  app_quit
+  wait_client "the connection closed" 'r.get("event") == "closed"' 1
+  assert_no_decision "$req" "quitting sends no decision"
+  app_start
+  select_repo
+  WT_ID="$(worktree_id "$WT")"
+  wait_lockfile >/dev/null
+  client_do quit
+}
+
+# A proposal for a worktree that is not on screen is held without a tab, announced by a toast,
+# comes back with its worktree, and survives that worktree's eviction. Run on a relaunch with the
+# mounted-worktree cap seeded at 2 in the isolated database. A = ide-second, B = the repository
+# (where Claude runs), C = ide-third; the eviction takes the first idle non-selected worktree in
+# catalog order, which is B once A, B and C are mounted.
+case_parked_worktree() {
+  mkdir -p -m 700 "$RUN_DIR/ide-proposals"
+  printf 'left behind by a crash' >"$RUN_DIR/ide-proposals/stale-proposal-file"
+  app_quit
+  "$SEED" --database "$SIRIO_DB" --appearance dark --limit-mounted 2
+  app_start
+  select_repo
+  WT_ID="$(worktree_id "$WT")"
+  [ ! -e "$RUN_DIR/ide-proposals/stale-proposal-file" ] || fail "$CASE: the scratch directory was not swept at launch"
+  [ "$(stat -c %a "$RUN_DIR/ide-proposals")" = 700 ] || fail "$CASE: the scratch directory is not private"
+  echo "OK: the scratch directory was swept at launch and is private"
+  wait_lockfile >/dev/null
+  local a c a_id c_id
+  a="$(ensure_worktree ide-second)"
+  c="$(ensure_worktree ide-third)"
+  a_id="$(worktree_id "$a")"
+  c_id="$(worktree_id "$c")"
+  mounted() { # worktree id
+    "$CTL" list-workspaces --json | python3 -I -c '
+import json, sys
+print([r["mounted"] for r in json.load(sys.stdin) if r["id"] == sys.argv[1]][0])' "$1"
+  }
+  printf 'b\n' >"$WT/parked.txt"
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  proposal_client
+  ctl select-workspace --workspace "$a_id" >/dev/null
+  open_diff parked-1 "$WT/parked.txt" 'B\n'
+  expect_proposal parked-1 on_screen False
+  expect_state "the toast names the worktree" '"Claude proposes a change in main" in d["toasts"]' True
+  [ "$(tab_pos '✻ parked.txt')" = 0 ] || fail "$CASE: a proposal for a worktree that is not on screen has a tab"
+  echo "OK: held without a tab, announced by a toast"
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  expect_proposal parked-1 on_screen True
+  expect_tab '✻ parked.txt' >/dev/null
+  echo "OK: selecting the worktree brings its tab"
+  ctl select-workspace --workspace "$a_id" >/dev/null
+  ctl select-workspace --workspace "$c_id" >/dev/null
+  expect_state "B was evicted" 'len(d["proposals"])' 1
+  [ "$(mounted "$WT_ID")" = false ] || fail "$CASE: B is still mounted, so no eviction happened and the case proves nothing"
+  echo "OK: B was evicted (mounted $(mounted "$WT_ID"))"
+  expect_proposal parked-1 on_screen False
+  ctl select-workspace --workspace "$WT_ID" >/dev/null
+  expect_proposal parked-1 on_screen True
+  expect_tab '✻ parked.txt' >/dev/null
+  echo "OK: the proposal outlived its worktree's eviction"
+  act parked-1 accept
+  assert_response "$(req_id parked-1)" 'd["texts"] == ["FILE_SAVED", "B\n"]' "Accept answers after the eviction"
+  expect_no_proposals
+  client_do quit
+  close_tabs_of_kind terminal
+  # The closing check wants the fake language server of this launch running: open its file.
+  [ -f "$WT/a.py" ] || write_diag_file "$WT/a.py"
+  ctl surface editor open --path "$WT/a.py" >/dev/null
+  expect_problems 0/1/0
+}
+
+run_proposal_cases() {
+  case_run accept case_proposal_accept
+  case_run edit_then_accept case_proposal_edit_then_accept
+  case_run edit_keys case_proposal_edit_keys
+  case_run reject case_proposal_reject
+  case_run close_confirm case_proposal_close_confirm
+  case_run close_others_guarded case_close_others_guarded
+  case_run close_tab_withdraws case_close_tab_withdraws
+  case_run close_all case_close_all
+  case_run replace_in_place case_replace_in_place
+  case_run disconnect_closes case_disconnect_closes
+  case_run new_file case_new_file
+  case_run fifo_path case_fifo_path
+  case_run too_large case_too_large
+  case_run dirty_warning case_dirty_warning
+  case_run captures case_proposal_captures
+  case_run no_decision_without_user case_no_decision_without_user
+  case_run worktree_close_guarded case_worktree_close_guarded
+  case_run parked_worktree case_parked_worktree
+}
+
 app_start
 select_repo
 WT_ID="$(worktree_id "$WT")"
 [ -n "$WT_ID" ] || fail "sirioctl does not list the worktree $WT"
 echo "OK: the repository is the selected workspace ($WT_ID)"
+
+if [ "$PROPOSALS_ONLY" -eq 1 ]; then
+  wait_lockfile >/dev/null
+  ensure_worktree ide-second >/dev/null
+  ensure_worktree ide-third >/dev/null
+  run_proposal_cases
+  stop_hosts
+  echo "IDE BRIDGE PROPOSALS ONLY ($CASES_PASSED cases, state-only $STATE_ONLY)"
+  exit 0
+fi
 
 case_run lockfile_and_env case_lockfile_and_env
 case_run token_refused case_token_refused
@@ -1748,6 +2471,7 @@ case_run diagnostics_outside_worktree case_diagnostics_outside_worktree
 case_run diagnostics_workspace case_diagnostics_workspace
 case_run diagnostics_ownerless_cwd case_diagnostics_ownerless_cwd
 case_run diagnostics_ownerless_elsewhere case_diagnostics_ownerless_elsewhere
+run_proposal_cases
 assert_only_the_fake_server
 
 stop_hosts

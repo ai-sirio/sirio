@@ -2935,7 +2935,8 @@ impl Sidebar {
                             TabKind::Editor
                             | TabKind::Diff
                             | TabKind::Browser
-                            | TabKind::ProjectSettings => Icon::File,
+                            | TabKind::ProjectSettings
+                            | TabKind::Proposal => Icon::File,
                             TabKind::ChangeRequest => Icon::PullRequest,
                             TabKind::AgentChat => Icon::MessageSquare,
                             TabKind::Trace => Icon::Clock,
