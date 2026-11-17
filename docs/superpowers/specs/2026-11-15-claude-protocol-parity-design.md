@@ -229,6 +229,42 @@ Each item is laid out the same way:
   - A non-`local_agent` task stops being "launch only" in the Trace. Its lane stays open until a
     terminal `task_updated` or `task_notification`, as an agent's does. Update `claude-chat.md`,
     which describes the current rule.
+- **Deviation, accepted by Enzo on 2026-11-17 (through t2s): a background shell lives beside the
+  Trace's turns, not in a lane.** The line above, "Its lane stays open until a terminal
+  `task_updated` or `task_notification`", is not built. Instead:
+  - Sirio keeps a per-chat registry of background tasks, tied to the session:
+    - `background_tasks_changed` (REPLACE) says which tasks are live;
+    - `task_started` with `is_backgrounded` links a task to its tool call;
+    - the terminal `task_updated` or `task_notification` gives the outcome.
+
+    The registry empties when the connection is lost or restarted. An ended task drops out at the
+    next prompt.
+  - Stop and the tail are drawn from that registry:
+    - the composer's background-tasks popover;
+    - a "Background" group on the Trace card;
+    - a Stop on each background agent's lane;
+    - a strip under the Trace tab.
+
+  The Trace keeps drawing a background shell as its launch, as it does today.
+
+  **Why.** The CLI says `idle` as soon as a background shell starts (A2's probe, Q10), so the turn
+  that launched it ends at once. Keeping a shell's lane open past its turn would break six things
+  the Trace relies on:
+  1. only agents survive a turn's end (`surviving_spans`, `end_turn_scope`);
+  2. main-thread work ends with the turn (`end_main_thread_work`);
+  3. an ending span sweeps its children (`end_span`);
+  4. a closed turn sweeps its open spans;
+  5. the 20-turn cap evicts old turns;
+  6. the view sizes its time axis on a turn's own extent (`shape` / `extent`).
+
+  A registry gives the same Stop and tail without touching any of these.
+
+  **Cost.** A shell has no timeline bar of its own. The proof checks that the registry entry ends,
+  not that a lane ends.
+- **Not declared: `perTaskStopAffordance`.** Without it, an interrupt still kills running
+  background agents, as it does today. With it, an interrupt would spare them, and the Trace and the
+  chat's status would then need to keep a surviving agent right after Stop. That is a follow-up,
+  tracked in its own issue.
 - **Degrade.** `get_task_output` refused → no tail. Stop still works.
 - **Proof.**
   - A fixture mode with a background shell task that writes, then stops on `stop_task`. The E2E
