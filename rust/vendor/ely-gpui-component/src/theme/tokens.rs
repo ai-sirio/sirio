@@ -179,6 +179,11 @@ impl Theme {
         px(1.0)
     }
 
+    /// A border's width, which does not scale: `border_1`.
+    pub fn hairline(&self) -> Pixels {
+        px(1.0)
+    }
+
     pub fn caret_width(&self) -> Rems {
         px_to_rems(1.5)
     }

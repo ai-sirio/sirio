@@ -46,7 +46,7 @@ pub(crate) struct Marker {
     pub generation: u64,
 }
 
-/// The slide over `values` with `selected` chosen; no marker until that item is measured.
+/// The slide over `values` with `selected` chosen; no marker until it is measured, or if it is not there.
 pub(crate) fn slide(
     id: impl Into<ElementId>,
     values: &[SharedString],
@@ -54,14 +54,15 @@ pub(crate) fn slide(
     window: &mut Window,
     cx: &mut App,
 ) -> (Entity<Slide>, Option<Marker>) {
-    let chosen = values
-        .iter()
-        .position(|value| value == selected)
-        .unwrap_or_else(|| panic!("no item {selected} to slide to"));
-    let state = window.use_keyed_state(id, cx, |_, _| Slide::default());
+    let id = id.into();
+    let state = window.use_keyed_state(id.clone(), cx, |_, _| Slide::default());
     if state.read(cx).spans.len() != values.len() {
         state.update(cx, |slide, _| slide.spans = vec![None; values.len()]);
     }
+    let Some(chosen) = values.iter().position(|value| value == selected) else {
+        log::error!("slide {id:?}: no item {selected} among {values:?}; nothing marked");
+        return (state, None);
+    };
     if state.read(cx).last.as_ref() != Some(selected) {
         state.update(cx, |slide, _| {
             let previous = slide

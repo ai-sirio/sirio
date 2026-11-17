@@ -1,10 +1,12 @@
 mod collapse;
+mod narrow;
 mod scroll;
 mod scroll_aids;
 mod stack;
 mod surface;
 
 pub use collapse::{Accordion, AccordionItem, Collapsible};
+pub(crate) use narrow::{measure_width, text_width};
 pub use scroll::{ScrollArea, Scrollbar, on_axis};
 pub(crate) use scroll::{bring_into_view, reveal_when_focused};
 pub use scroll_aids::{ScrollShadow, ScrollToTop, StickyHeader};

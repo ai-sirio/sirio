@@ -94,6 +94,12 @@ impl EntityInputHandler for TextInput {
         if self.disabled {
             return;
         }
+        log::debug!(
+            "text input {:?}: compose {range_utf16:?} selecting {selected_utf16:?} marked {:?} selection {:?}",
+            cx.entity_id(),
+            self.marked,
+            self.selection
+        );
         let range = range_utf16
             .map(|range| self.range_from_utf16(&range))
             .or(self.marked.clone())
@@ -114,25 +120,19 @@ impl EntityInputHandler for TextInput {
             None => range.start + text.len()..range.start + text.len(),
         };
         self.reversed = false;
-        cx.notify();
+        self.restart_blink(cx);
     }
 
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
+        _: Bounds<Pixels>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
-        let line_height = self.layout.as_ref()?.line_height;
-        let start = self.position_for(self.display_offset(range.start))?;
-        let end = self.position_for(self.display_offset(range.end))?;
-        let origin = bounds.origin - self.scroll;
-        Some(Bounds::from_corners(
-            origin + start,
-            origin + gpui::point(end.x, end.y + line_height),
-        ))
+        let (start, end) = (self.bounds_for(range.start)?, self.bounds_for(range.end)?);
+        Some(Bounds::from_corners(start.origin, end.bottom_left()))
     }
 
     fn character_index_for_point(

@@ -1,13 +1,25 @@
 # Ely integration (chat and editor)
 
-Upstream: https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components
-(formerly https://github.com/ZacharyZhang-NY/Ely-GPUI-Components; the
-repository moved and its history was rewritten.)
+Upstream: https://github.com/ELY-Open-Source/Ely-GPUI-Components
+The history was rewritten before the move to that repository: `e17e31a6` became
+`e3957f78` on upstream's `main` (same author date and tree). In the moved
+repository `e3957f78` and `7f7a715d` are ancestors of its HEAD, `2d827752`, and
+`e17e31a6` survives under the tag `pre-coauthor-strip`. The 2026-11 sync
+compared against the git.zacharyzhang.com copy of the same history
+(`e3957f78..7f7a715d`), https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.
+The GitHub repository https://github.com/ZacharyZhang-NY/Ely-GPUI-Components is
+a stale mirror: its `main` stops at 2026-10-09.
 Revision: `e17e31a6890c09ebcfa8b61133d7bc7c625edf69`
-Upstream `main` no longer contains this revision: `e17e31a6` is not an
+`e17e31a6` equals `e3957f78` on upstream's rewritten `main`: same author date
+(2026-09-30T00:29:08-04:00) and identical tree (checked 2026-11-16).
+`2d827752` (2026-11-15) is split into crates under `crates/` and uses
+`gpui-pre =0.3.12` where Sirio is on `bezel-gpui =0.3.8`. Of the 259 commits
+after `7f7a715d`, those touching the ported files are refactors, accessibility
+and API changes; none is a newer caret, IME or tabs behaviour fix.
+Upstream `main` no longer has this revision's hash: `e17e31a6` is not an
 ancestor of `origin/main` in the upstream clone's existing refs (checked
-2026-10-17 without fetching). Vendored sources therefore come from this
-revision, not from upstream `main`.
+2026-10-17 without fetching). The vendored sources are this revision's content,
+which the rewritten `main` carries as `e3957f78`.
 Package: `ely-gpui-component` 0.1.0, Rust 1.95, MIT OR Apache-2.0.
 The upstream MIT and Apache license texts accompany these sources.
 
@@ -364,8 +376,10 @@ Every deviation from upstream is listed above, with the file it changes.
 Vendored from the same revision for Sirio's change-request surfaces and its
 Changes view (`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` §4):
 
-- `src/navigation/tabs.rs` — verbatim. `navigation/mod.rs` is local and
-  declares only this module; the rest of upstream's `navigation/` is excluded.
+- `src/navigation/tabs.rs` — upstream main plus one local line (the `compact`
+  condition at `tabs.rs:140`); see "Ports from upstream main (2026-11 sync)"
+  below. `navigation/mod.rs` is local and declares only this module; the rest of
+  upstream's `navigation/` is excluded.
 - `src/git/badges.rs` — verbatim except one import: `GitStatus` comes from
   `super::status` instead of `crate::lists`.
 - `src/git/status.rs` — upstream's `GitStatus` and its `impl`, verbatim from
@@ -375,7 +389,8 @@ Changes view (`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.m
 
 Caveats a host must respect:
 
-- `Tabs` panics when `selected` names no tab's `value`. Build `selected`
+- `Tabs` marks no tab when `selected` names no tab's `value`, and `slide` logs
+  an error on every render (`src/motion/slide.rs`, `73a8bf2`). Build `selected`
   from the same list passed as tabs.
 - `Tabs`' arrow keys act only while its strip holds focus, and a click on a
   tab does not give it focus (`prevent_default` on mouse-down). This build
@@ -573,6 +588,135 @@ applied as upstream wrote it or was rewritten against the vendored code.
   `styles`, which here calls `syntax::colors` where upstream's `main` calls
   `line_colors`. Nothing else in `line.rs` changed.
   Skipped: none; the commit touches no unvendored file.
+
+### Ports from upstream main (2026-11 sync)
+
+Fixes of the text field gained on upstream `main` (`7f7a715d`) after
+`e3957f78`, one entry each, with whether it applied as upstream wrote it.
+
+- `33df23c` "caret whole device pixels": `src/primitives/caret.rs` (new) is
+  verbatim, with its inline test `a_caret_keeps_one_device_width_wherever_it_stands`.
+  `src/primitives/mod.rs` takes two lines, `mod caret;` and
+  `pub(crate) use caret::{caret_bar, caret_width};`, and nothing else of
+  upstream's `mod.rs`, which would pull in `held`, `retired` and
+  `focus::{CONTEXT, lent}`.
+- `src/forms/text/element.rs`: three-way merged (base `e3957f78`, theirs
+  `main`), with one conflict at the caret in `prepaint`. The merge also took
+  `e2d880f`'s shaping-error logging (`shape_text` errors are logged, not
+  `expect`ed) and `6d95b24`'s "an unfocused one-line field shows its start".
+  The conflict is resolved to upstream's
+  `caret_at.filter(..).map(|at| caret_bar(bounds.origin + at - scroll, caret_width, line_height, window.scale_factor()))`,
+  and Sirio's update closure is kept with its wheel line written for the
+  `Option`: `input.wheeled = input.wheeled.filter(|at| Some(*at) == caret_at);`
+  (hand-resolved).
+- `2a18e9d` and `152d881`: the `src/forms/text/ime.rs` hunks, verbatim
+  (`patch -p1` of each commit's diff of that file). `ime.rs` was not taken
+  whole from `main`, which carries `self.edits` from BlockEditor `d24984c`,
+  not vendored.
+- Tab strip (the Tabs port): `src/navigation/tabs.rs` and `src/layout/narrow.rs`
+  (new) are verbatim from `main` as ported, plus the one local line recorded below in
+  `tabs.rs`. They carry the
+  `tabs.rs` hunks of `9977785`, `919f26f`, `4580e3b`, `6d95b24`, `cb5e35f`,
+  `e56a343`, `3a68d1b` and `7d704d9`: the strip scrolls sideways and keeps the
+  chosen tab in view when it is too narrow for every label, and a long label is
+  cut to fit. `src/layout/mod.rs` takes two lines, `mod narrow;` and
+  `pub(crate) use narrow::{measure_width, text_width};`. `src/theme/tokens.rs`
+  is merged: it gains `Theme::hairline` (`px(1.0)`) with no conflict. That
+  hunk comes from `cb5e35f`, which also touched `narrow.rs` after `6d95b24`.
+  The port adds no public API Sirio calls and no inline test.
+  Skipped from `6d95b24`: its other files, namely the narrow `ScrollArea`
+  (`layout/scroll.rs` keeps Sirio's hover change), the property rows, the
+  segments, and the status items in the vendored `src/shell/bars.rs` (items
+  that shrink and end in an ellipsis).
+  Also not taken, vendored files the listed commits touch: `919f26f`'s
+  `navigation/breadcrumb.rs`; `4580e3b`'s `buttons/button.rs`,
+  `buttons/icon_button.rs`, `overlays/dialog.rs` (its IME Enter change, which
+  Sirio's local Enter handling above covers), `forms/text/actions.rs`
+  (accessibility only: `Role::TextInput`, `aria_label` and `aria_value`) and
+  `shell/bars.rs`; `cb5e35f`'s `shell/bars.rs`; and the
+  tests of `9977785`, `919f26f`, `e56a343`, `3a68d1b` and `7d704d9` under
+  `navigation/tests*`, which is not vendored.
+- `73a8bf2`: `src/motion/slide.rs` verbatim (a slide whose `selected` is not
+  among its values logs and returns no marker instead of panicking). It
+  completes `919f26f`'s stale-place handling for `Tabs`, whose `render` calls
+  `slide` with `selected` unconditionally. Skipped, not vendored:
+  `buttons/segmented.rs`, `buttons/tests.rs` and `tasks/panics.md`.
+- Local change on top of that `tabs.rs`: `src/navigation/tabs.rs:140`,
+  `compact` (icons only, no notes, empty tooltips) additionally requires
+  `tabs.iter().any(|tab| !tab.label.is_empty())`. Upstream goes compact for any
+  strip whose tabs all have icons; a strip with icons and no label at all (Sirio's
+  change-request filter, `right_panel/change_requests.rs`, labels empty by
+  design) has nothing to drop, so at the panel's 220 px floor it lost its
+  To-review count and got an empty compact tooltip per tab. It now never goes
+  compact: it keeps its notes (the To-review count), gets no empty compact
+  tooltips and scrolls like any other strip. A sync must keep the condition.
+- Skipped, not vendored: `collab/remote.rs`, `terminal/paint.rs` and
+  `tasks/github.md` (`33df23c`); `forms/tests/stale.rs`, `forms/tests/mod.rs`,
+  `forms/date/cron.rs`, `forms/unit.rs` and `tasks/panics.md` (`e2d880f`).
+- Skipped, not taken (vendored files whose hunks of these commits were left
+  out; the port documents them and does not apply them):
+  - `e2d880f`'s `select()` hunk in `src/forms/text/mod.rs`: `select` keeps its
+    `assert!` on an out-of-range selection, where upstream logs and ignores it.
+    The assert stays because every Sirio caller of the text input passes an
+    in-range selection: `0..0`, `0..len` or `0..end` with the length read just
+    before the call, or a fixed range that the tests of `ely_ui.rs` pick inside
+    their text.
+  - `e2d880f`'s part in `src/forms/files.rs`: its `file_name` is reached only
+    through `FileInput`'s render, and no Sirio code names `FileInput` or
+    `DropZone`.
+  - `6d95b24`'s part in `src/layout/scroll.rs`: that file keeps Sirio's local
+    hover change (see its entry under "Local source changes").
+  - The tests of `2a18e9d` and `152d881`: they live in `forms/tests/`, which is
+    not vendored.
+  - `tasks/github.md` and `tasks/reviews.md` (`2a18e9d`, `152d881`): not
+    vendored; the upstream `tasks/` notes sit outside `src/`.
+
+Not ported (2026-11 sync):
+
+- `38deadd`, `e21336f` (focus returns past overlays dropped without Close): skip.
+  The code runs only in the `on_focus_lost` of a root `FocusScope`
+  (`primitives/focus.rs`), and no Sirio code or vendored overlay builds one. Sirio
+  restores focus itself (`restore_focus_pending`, `rust/crates/sirio/src/main.rs`).
+- `a9b30c7` (K02), `029632b` (F6) (Tab and Shift-Tab under the `ElyFocus` context,
+  and F6): skip. The vendored `primitives/focus.rs` has no `ElyFocus` context or key
+  bindings, and `init_chat` registers no Tab binding (`src/lib.rs`, "Local source
+  changes").
+- `d4fdb69`, `5a53c08` (submenu hover intent, flip left, panel occlusion): skip.
+  `MenuItem::submenu` has no caller in `rust/crates`, and the vendored `menus/panel.rs`
+  (LOCAL-CHANGES, `menus/{model,draw,panel}.rs`) already occludes and stays in the
+  window. `menus/aim.rs` is not vendored.
+- `3c35daa`, `a1718b6`, `1b8d678`, `ed75621` (`Menu::buttons` rows, and the mark that
+  holds its item): skip. Sirio uses no button rows, `ed75621` depends on their code,
+  and no Sirio menu changes its items while it is open.
+- `2c62b4f`, `64293a8`, `2ce3368` (manual `ContextMenu`, `ContextMenu` styles sizing
+  its host): skip. The manual mode is new API with no Sirio caller, and `64293a8` is a
+  doc line. `2ce3368` adds `impl Styled for ContextMenu` over a stored `base: Div`.
+  Without that impl no caller can style a `ContextMenu`; none of Sirio's three
+  (`rust/crates/sirio_ui/src/changes.rs:2105`,
+  `rust/crates/sirio_ui/src/right_panel/prompts.rs:507`,
+  `rust/crates/sirio_ui/src/right_panel/change_requests.rs:1164`) does, and an
+  unstyled `ContextMenu` renders exactly as before.
+- `ca6d2e2` (a floating option list occludes the wheel): skip. The only Sirio caller
+  of `Select` is the merge method (`rust/crates/sirio_ui/src/change_request_tab/merge.rs:271`),
+  whose 2 or 3 rows never scroll. The commit's one-line change to `forms/options.rs`
+  is not taken.
+- `617a8d6`, `b29d66c`, `9fb607b`, `cd61653` (code editor fixes): already ported, see
+  "Ports from upstream `main` (Task 1b)".
+- `4a8f940` (two code editor comments): skip. Comments only, in `editor/line.rs` and
+  `editor/measure.rs`.
+- `c771248`, `5caf5aa` (code colours per language): skip. Sirio colours its code through
+  the editor's highlighter hook (`set_highlighter`, `rust/crates/sirio_ui/src/file_view/code_surface.rs`),
+  whose spans come from `code_spans` in `rust/crates/sirio_ui/src/file_view.rs`, which
+  delegates to `sirio_syntax`. The commits also touch `forms/syntax.rs`, `git/rows.rs`
+  and `git/viewer.rs`, none of them vendored.
+- `a2cb531` (`TextInput` `Copy`/`Cut`/`Paste` public): already local. `Copy`, `Cut`,
+  `Paste` and `SelectAll` are `pub use` from `forms` and `forms::text` (see "Hosting a
+  text field (bezel UI off)").
+- `i18n` catalog (`d05b1b7`, `a4bf696`, ...), Dialog/Button/Form a11y, `documents/*`,
+  `git/*`, typewriter, BlockEditor, Retired/Held: out of scope. They are not in the
+  requested areas; a11y could be a follow-up of its own. `crate::i18n`, `documents/`,
+  `primitives/held.rs` and `primitives/retired.rs` are not vendored, and of `git/` only
+  `badges.rs` and `status.rs` are.
 
 ### Keys and hosting hooks (Task 1c)
 

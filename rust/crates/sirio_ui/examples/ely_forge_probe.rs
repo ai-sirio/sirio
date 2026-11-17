@@ -12,7 +12,7 @@
 //! stdout: `probe tab: <value>` for every `on_change`.
 //! Env: `ELY_PROBE_APPEARANCE` (`light`, otherwise dark), `ELY_PROBE_UI_SIZE`.
 //!
-//! `Tabs` panics if `selected` names no tab: `selected` here only ever holds
+//! A `selected` that names no tab marks none: `selected` here only ever holds
 //! a value taken from `TABS`, and every strip carries all of `TABS`.
 use ely_gpui_component::{
     forms::Choice,
