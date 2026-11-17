@@ -67,10 +67,12 @@ pub const BROWSER_NOT_SUPPORTED: &[&str] = &[
 
 /// Served by debug builds only. A release build leaves these out of
 /// `system.capabilities`, and answers them with "unknown method".
-const DEBUG_METHODS: [&str; 44] = [
+const DEBUG_METHODS: [&str; 46] = [
     "surface.chat.panel",
     "surface.chat.effort",
     "surface.chat.elicitation",
+    "surface.chat.stopTask",
+    "surface.chat.paintTail",
     "surface.change_request.act",
     "surface.open_list.open",
     "surface.changes.confirm",
