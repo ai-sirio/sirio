@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 
 use ely_gpui_component::menus::{Hang, layer};
 use ely_gpui_component::{
+    buttons::IconButton as EIconButton,
+    data_display::{DotBadge, Tone},
     primitives::{Icon as EIcon, IconName},
-    theme::IconSize as EIconSize,
+    theme::{ControlSize as EControlSize, IconSize as EIconSize},
 };
 use gpui::{
     App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
@@ -35,7 +37,7 @@ use sirio_theme::{AgentBrandColor, Theme, Typography};
 use crate::caret;
 use crate::loading;
 use crate::popup::{
-    HANG_GAP, Popup, hang_below, leaving, menu_card, menu_label, menu_row, reap_popup,
+    HANG_GAP, Popup, hang_below, hang_below_end, leaving, menu_card, menu_label, menu_row, reap_popup,
 };
 use crate::project_forms::{
     CloneForm, CloneFormEvent, CloneJob, CloneJobEvent, CreateForm, CreateFormEvent, CreateJob,
@@ -693,6 +695,11 @@ pub struct Sidebar {
     add_project_menu: Popup<()>,
     /// The title's Projects / Sessions menu.
     view_menu: Popup<()>,
+    /// The header bell's list of sessions that want the user.
+    bell_menu: Popup<()>,
+    /// When the bell opened (Unix ms): its entries' ages are read at this
+    /// instant, so the list does not tick while it is open.
+    bell_opened_at_ms: i64,
     /// The resolved launch source per adapter id, pushed by the host beside
     /// the tab bar's copy, so the worktree menu's New Chat offers exactly
     /// the agents the + menu does.
@@ -1056,6 +1063,8 @@ impl Sidebar {
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
             view_menu: Popup::default(),
+            bell_menu: Popup::default(),
+            bell_opened_at_ms: 0,
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -1160,6 +1169,8 @@ impl Sidebar {
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
             view_menu: Popup::default(),
+            bell_menu: Popup::default(),
+            bell_opened_at_ms: 0,
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -1919,9 +1930,27 @@ impl Sidebar {
     fn toggle_view_menu(&mut self, cx: &mut Context<Self>) {
         if !self.view_menu.take_press_was_open() {
             self.view_menu.open(());
+            self.bell_menu.close();
         }
         self.close_context_menu(cx);
         cx.notify();
+    }
+
+    fn toggle_bell_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.bell_menu.take_press_was_open() {
+            self.bell_opened_at_ms = sessions::unix_now_ms();
+            self.bell_menu.open(());
+            self.view_menu.close();
+        }
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn close_bell_menu(&mut self, cx: &mut Context<Self>) {
+        if self.bell_menu.begin_close() {
+            reap_popup(cx, |sidebar| &mut sidebar.bell_menu);
+            cx.notify();
+        }
     }
 
     fn close_view_menu(&mut self, cx: &mut Context<Self>) {
@@ -3679,7 +3708,159 @@ impl Sidebar {
                     ),
             )
             .when_some(menu, |this, menu| this.child(menu))
+            .child(div().flex_1())
+            .child(self.render_bell(theme, cx))
             .into_any_element()
+    }
+
+    /// The bell: a ghost icon button wearing a dot for the most severe thing
+    /// that wants the user, and the list of those sessions under it.
+    fn render_bell(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let open = sessions::session_list(&self.rows, &[], "").open;
+        let entries = sessions::bell_entries(&open);
+        let signal = entries.first().map(|(reason, _)| *reason);
+        let button = EIconButton::new("sidebar-bell-button", IconName::Bell)
+            .size(EControlSize::Sm)
+            .tooltip("Notifications")
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_bell_menu(cx)));
+        let dot = signal.map(|reason| {
+            let (tone, selector) = match reason {
+                sessions::BellReason::Error => (Tone::Danger, "sidebar-bell-dot-error"),
+                sessions::BellReason::NeedsInput => {
+                    (Tone::Warning, "sidebar-bell-dot-needs-input")
+                }
+                sessions::BellReason::Unread => (Tone::Info, "sidebar-bell-dot-unread"),
+            };
+            div()
+                .debug_selector(|| selector.to_owned())
+                .absolute()
+                .top(px(2.0))
+                .right(px(2.0))
+                .child(DotBadge::new().tone(tone))
+        });
+        let menu = self.bell_menu.get().map(|_| {
+            let rows = entries
+                .iter()
+                .map(|(reason, row)| (*reason, (*row).clone()))
+                .collect::<Vec<_>>();
+            Self::render_bell_menu(
+                &self.bell_menu,
+                cx.entity(),
+                rows,
+                self.bell_opened_at_ms,
+                *theme,
+                cx,
+            )
+            .into_any_element()
+        });
+        div()
+            .id("sidebar-bell")
+            .debug_selector(|| "sidebar-bell".to_owned())
+            .relative()
+            .flex_none()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.bell_menu.note_trigger_press()),
+            )
+            .child(button)
+            .when_some(dot, |this, dot| this.child(dot))
+            .when_some(menu, |this, menu| this.child(menu))
+            .into_any_element()
+    }
+
+    fn render_bell_menu(
+        popup: &Popup<()>,
+        entity: gpui::Entity<Self>,
+        entries: Vec<(sessions::BellReason, sessions::SessionRow)>,
+        opened_at_ms: i64,
+        theme: Theme,
+        cx: &App,
+    ) -> impl IntoElement {
+        let outside = entity.clone();
+        let mut card = menu_card("sidebar-bell-menu", cx)
+            .debug_selector(|| "sidebar-bell-menu".to_owned())
+            .w(px(280.0))
+            .text_size(theme.typography.ui_size)
+            .on_mouse_down_out(move |_, _, cx| {
+                outside.update(cx, |sidebar, cx| sidebar.close_bell_menu(cx));
+            });
+        if entries.is_empty() {
+            card = card.child(
+                div()
+                    .debug_selector(|| "sidebar-bell-empty".to_owned())
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .text_color(theme.ely.fg_muted)
+                    .child("Nothing needs you"),
+            );
+        }
+        for (index, (reason, row)) in entries.into_iter().enumerate() {
+            let selector = format!("sidebar-bell-entry-{index}");
+            let event_row = row.clone();
+            let click_entity = entity.clone();
+            let reason_color = match reason {
+                sessions::BellReason::Error => theme.ely.danger,
+                sessions::BellReason::NeedsInput => theme.ely.warning,
+                sessions::BellReason::Unread => theme.ely.info,
+            };
+            let place = format!("{} \u{b7} {}", row.project, row.branch);
+            let age = row.at.map(|at| sessions::relative_time(opened_at_ms, at));
+            card = card.child(
+                menu_row(gpui::SharedString::from(selector.clone()), false, false, cx)
+                    .debug_selector(move || selector.clone())
+                    .w_full()
+                    .h_auto()
+                    .py(px(5.0))
+                    .flex_col()
+                    .items_start()
+                    .gap(px(1.0))
+                    .on_click(move |_, _, cx| {
+                        let target = event_row.target.clone();
+                        click_entity.update(cx, |sidebar, cx| {
+                            sidebar.close_bell_menu(cx);
+                            cx.emit(match target {
+                                SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
+                                SessionTarget::Parked { path, index } => {
+                                    SidebarEvent::SelectParkedTab { path, index }
+                                }
+                                SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id),
+                            });
+                        })
+                    })
+                    .child(menu_label(row.title.clone()).flex_none().w_full())
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .gap(px(6.0))
+                            .text_size(theme.typography.scaled(11.0))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(reason_color)
+                                    .child(reason.label()),
+                            )
+                            .child(
+                                menu_label(place).text_color(theme.ely.fg_subtle),
+                            )
+                            .when_some(age, |this, age| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(theme.ely.fg_subtle)
+                                        .child(age),
+                                )
+                            }),
+                    ),
+            );
+        }
+        hang_below_end(
+            "sidebar-bell-menu-layer",
+            HANG_GAP,
+            card,
+            popup.closing_since(),
+            cx,
+        )
     }
 
     fn render_view_menu(
@@ -4020,10 +4201,6 @@ impl Render for Sidebar {
         let first_card_probe = self.probe.first_card.get();
         let section_probe = self.probe.section.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
-        // Drawn nowhere until Task 2 gives it to the Bell.
-        let _badge = (view == SidebarView::Projects)
-            .then(|| sessions::attention(&sessions::session_list(&self.rows, &[], "").open))
-            .flatten();
         let sticky_section = self.sticky_section(&rows);
         // Read off `self` here: the closure that draws the sticky header
         // runs inside the element builder, where `self` is already borrowed.
@@ -4328,6 +4505,9 @@ impl Render for Sidebar {
                         closed = true;
                     } else if sidebar.view_menu.is_open() {
                         sidebar.close_view_menu(cx);
+                        closed = true;
+                    } else if sidebar.bell_menu.is_open() {
+                        sidebar.close_bell_menu(cx);
                         closed = true;
                     } else if sidebar.has_open_project_surface() {
                         sidebar.close_project_surface(cx);
@@ -8487,54 +8667,84 @@ mod tests {
         assert!(matches!(events.borrow().last(), Some(SidebarEvent::CloseSessionTab(1))));
     }
 
+    fn bell_fixture(status: Option<ActivityStatus>, cx: &mut Context<Sidebar>) -> Sidebar {
+        let mut sidebar = tests_support::sidebar_with_one_project(cx);
+        sidebar.set_worktree_tabs(
+            1,
+            vec![SidebarTab {
+                tab: SidebarTabRef::Open(7),
+                title: "Needs you".into(),
+                selected: false,
+                kind: TabKind::AgentChat,
+                agent: AgentMark::for_agent_id("pi"),
+                persistence_id: "tab-7".into(),
+                status,
+                last_event_at: Some(1_000),
+                unread: false,
+            }],
+            cx,
+        );
+        sidebar
+    }
+
     #[gpui::test]
-    #[ignore = "moved to the Bell, Task 2"]
-    async fn the_sessions_segment_carries_the_attention_badge_in_the_projects_view(
-        cx: &mut TestAppContext,
-    ) {
+    async fn the_bell_carries_the_attention_dot_in_both_views(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        cx.update(crate::ely::init);
+        let window =
+            cx.add_window(|_window, cx| bell_fixture(Some(ActivityStatus::NeedsInput), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        assert!(cx.debug_bounds("sidebar-sessions-badge-error").is_none());
-        assert!(cx.debug_bounds("sidebar-sessions-badge-needs-input").is_none());
-
-        let asking = |status| SidebarTab {
-            tab: SidebarTabRef::Open(3),
-            title: "Asks".into(),
-            selected: false,
-            kind: TabKind::AgentChat,
-            agent: AgentMark::for_agent_id("pi"),
-            persistence_id: "tab-3".into(),
-            status: Some(status),
-            last_event_at: Some(1),
-            unread: false,
-        };
-        window
-            .update(&mut cx, |sidebar, _window, cx| {
-                sidebar.set_worktree_tabs(2, vec![asking(ActivityStatus::NeedsInput)], cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("sidebar-sessions-badge-needs-input").is_some());
-
-        window
-            .update(&mut cx, |sidebar, _window, cx| {
-                sidebar.set_worktree_tabs(2, vec![asking(ActivityStatus::Error)], cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("sidebar-sessions-badge-error").is_some(), "error outranks");
-        assert!(cx.debug_bounds("sidebar-sessions-badge-needs-input").is_none());
-
+        assert!(cx.debug_bounds("sidebar-bell").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_some());
         window
             .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
             .unwrap();
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-sessions-badge-error").is_none(),
-            "no badge while the list itself is shown"
-        );
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_some());
+
+        window
+            .update(&mut cx, |sidebar, _window, cx| {
+                sidebar.set_worktree_tabs(1, Vec::new(), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
+    }
+
+    #[gpui::test]
+    async fn choosing_a_bell_entry_selects_that_session_and_closes_the_menu(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window =
+            cx.add_window(|_window, cx| bell_fixture(Some(ActivityStatus::NeedsInput), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-bell");
+        assert!(cx.debug_bounds("sidebar-bell-menu").is_some());
+        click_control(&mut cx, "sidebar-bell-entry-0");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(matches!(events.borrow().last(), Some(SidebarEvent::SelectTab(7))));
+        assert!(cx.debug_bounds("sidebar-bell-menu").is_none(), "the menu closes");
+    }
+
+    #[gpui::test]
+    async fn the_empty_bell_says_nothing_needs_you(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| bell_fixture(Some(ActivityStatus::Done), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
+        click_control(&mut cx, "sidebar-bell");
+        assert!(cx.debug_bounds("sidebar-bell-empty").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-entry-0").is_none());
     }
 
     #[gpui::test]
