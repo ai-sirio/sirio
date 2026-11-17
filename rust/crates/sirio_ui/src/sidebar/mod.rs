@@ -675,6 +675,8 @@ pub struct Sidebar {
     project_worktree_defaults: std::collections::HashMap<String, (Option<String>, Option<String>)>,
     filter: String,
     filter_focus: FocusHandle,
+    /// Whether the Search button has shown the filter field.
+    filter_shown: bool,
     filter_focus_subscription: Option<gpui::Subscription>,
     tree_cursor: usize,
     pill_cursor: Option<usize>,
@@ -761,10 +763,10 @@ pub struct Sidebar {
     clock: Option<gpui::Task<()>>,
 }
 
-/// What choosing a session emits, whichever list it was chosen from.
 /// Space kept between the bell's card and the window's bottom edge.
 const BELL_MENU_MARGIN: Pixels = px(8.0);
 
+/// What choosing a session emits, whichever list it was chosen from.
 pub(super) fn session_event(target: SessionTarget) -> SidebarEvent {
     match target {
         SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
@@ -831,6 +833,7 @@ impl Sidebar {
         self.view = view;
         self.armed_delete = None;
         self.filter.clear();
+        self.filter_shown = false;
         self.view_menu.close();
         if view == SidebarView::Sessions {
             self.set_clock(sessions::unix_now_ms(), cx);
@@ -1062,6 +1065,7 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            filter_shown: false,
             filter_focus_subscription: None,
             tree_cursor: 0,
             pill_cursor: None,
@@ -1169,6 +1173,7 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            filter_shown: false,
             filter_focus_subscription: None,
             tree_cursor: 0,
             pill_cursor: None,
@@ -2296,15 +2301,34 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Shows the filter field and puts the caret in it.
+    fn show_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_shown = true;
+        self.filter_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Clears the filter, hides its field and hands focus to the list.
+    fn hide_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.clear();
+        self.filter_shown = false;
+        self.tree_focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn on_filter_key(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.field_blink.wake();
         self.armed_delete = None;
         let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.hide_filter(window, cx);
+            return;
+        }
         if key == "backspace" || key == "delete" {
             self.filter.pop();
         } else if let Some(character) = event.keystroke.key_char.as_deref()
@@ -3723,6 +3747,18 @@ impl Sidebar {
             .when_some(menu, |this, menu| this.child(menu))
             .child(div().flex_1())
             .child(self.render_bell(theme, window.viewport_size().height, cx))
+            .child(
+                div()
+                    .id("sidebar-search")
+                    .debug_selector(|| "sidebar-search".to_owned())
+                    .flex_none()
+                    .child(
+                        EIconButton::new("sidebar-search-button", IconName::Search)
+                            .size(EControlSize::Sm)
+                            .tooltip("Search")
+                            .on_click(cx.listener(|this, _, window, cx| this.show_filter(window, cx))),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -4154,7 +4190,11 @@ impl Sidebar {
 
 impl Focusable for Sidebar {
     fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.filter_focus.clone()
+        if self.filter_shown {
+            self.filter_focus.clone()
+        } else {
+            self.tree_focus.clone()
+        }
     }
 }
 
@@ -4266,6 +4306,7 @@ impl Render for Sidebar {
         let field_caret_visible = field_focused && self.field_blink.visible();
         let filter_text = self.filter.clone();
         let filter_is_empty = filter_text.is_empty();
+        let show_filter = self.filter_shown || !filter_is_empty;
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
         let context_menu = self.context_menu.get().map(|_| {
@@ -4621,7 +4662,7 @@ impl Render for Sidebar {
                         ),
                 )
             })
-            .child(
+            .when(show_filter, |this| this.child(
                 div()
                     .id("filter-field")
                     .debug_selector(|| "filter-field".to_string())
@@ -4719,7 +4760,7 @@ impl Render for Sidebar {
                                 )
                             }),
                     ),
-            )
+            ))
             .when(view == SidebarView::Projects, |this| this.child(
                 div()
                     .id("sidebar-tree")
@@ -6309,6 +6350,9 @@ mod tests {
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
+        // The shortened window below must still hold the 150px card inside
+        // its margin; the filter's height above the row is what makes it.
+        click_control(&mut cx, "sidebar-search");
 
         // A window that ends 1px past the row's bottom-right corner, so the
         // click that opens the menu lands 2px from the window's corner. The
@@ -7993,6 +8037,96 @@ mod tests {
         );
     }
 
+    fn filter_fixture_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::WindowHandle<Sidebar>, VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        (window, cx)
+    }
+
+    #[gpui::test]
+    async fn search_shows_and_focuses_the_filter(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        assert!(cx.debug_bounds("filter-field").is_none(), "hidden until asked");
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some());
+        let focused = window
+            .update(&mut cx, |sidebar, window, _| sidebar.filter_focus.is_focused(window))
+            .unwrap();
+        assert!(focused, "the filter takes focus");
+    }
+
+    #[gpui::test]
+    async fn escape_clears_and_hides_the_filter(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "ma");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "");
+        assert!(cx.debug_bounds("filter-field").is_none(), "the field is gone");
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "focus goes to the list");
+    }
+
+    #[gpui::test]
+    async fn the_filter_stays_while_it_holds_text(cx: &mut gpui::TestAppContext) {
+        let (_window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("t");
+        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-row-7");
+        assert!(
+            cx.debug_bounds("filter-field").is_some(),
+            "text keeps the field drawn after focus leaves"
+        );
+    }
+
+    #[gpui::test]
+    async fn switching_view_clears_and_hides_the_filter(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        choose_from_title_menu(&mut cx, "sessions");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "");
+        assert!(cx.debug_bounds("filter-field").is_none());
+    }
+
+    #[gpui::test]
+    async fn with_the_filter_hidden_the_sidebar_hands_out_the_list_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        let (before, tree, filter) = window
+            .update(&mut cx, |s, _, cx| {
+                (
+                    Focusable::focus_handle(s, cx),
+                    s.tree_focus.clone(),
+                    s.filter_focus.clone(),
+                )
+            })
+            .unwrap();
+        assert_eq!(before, tree);
+        window
+            .update(&mut cx, |s, window, cx| s.show_filter(window, cx))
+            .unwrap();
+        let after = window
+            .update(&mut cx, |s, _, cx| Focusable::focus_handle(s, cx))
+            .unwrap();
+        assert_eq!(after, filter);
+    }
+
     /// F-SID-02: typing in the Filter field narrows the drawn rows to the
     /// matching project, and clearing the filter restores every row.
     #[gpui::test]
@@ -8002,7 +8136,8 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        // Focus the filter field the way a user does: click it.
+        // Show the filter the way a user does: click Search.
+        click_control(&mut cx, "sidebar-search");
         let filter = cx
             .debug_bounds("filter-field")
             .expect("the Filter field is drawn");
@@ -8468,6 +8603,7 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
+        click_control(&mut cx, "sidebar-search");
         let strip = cx.debug_bounds("sidebar-title").expect("the title");
         let filter_probe = cx.debug_bounds("filter-field").expect("the filter field");
         assert!(strip.right() <= filter_probe.right(), "the title stays inside the sidebar");
@@ -9053,9 +9189,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("closed-session-confirm-0").is_some(), "delete is armed");
 
-        let filter = cx.debug_bounds("filter-field").expect("filter field");
-        cx.simulate_click(filter.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-search");
         assert!(
             cx.debug_bounds("closed-session-confirm-0").is_none(),
             "filter focus disarms"
