@@ -744,7 +744,35 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # so a select and a tab change sent one after the other land in one send window (the case
 # fails if the pair took longer); every selection case waits past that window.
 # Run it with `env -u WAYLAND_DISPLAY` from a Wayland session.
+# Flags: --xvfb or --display :N picks the display (never your own $DISPLAY), --state-only takes no
+# captures, --out-dir DIR keeps transcript.log, app.log, client-*.jsonl, socket.jsonl, the lockfile
+# (token redacted) and the PID-matched captures, --proposals-only runs only the openDiff cases (a
+# development shortcut: it prints "IDE BRIDGE PROPOSALS ONLY", not the evidence of a run) and --live.
+# Run it with the load under 4, TMPDIR on disk under ~/.cache/st, Zig 0.15.2 first on PATH.
 Scripts/Tests/test-ide-bridge-e2e.sh --xvfb   # -> prints "IDE BRIDGE E2E OK (<n> cases, state-only <0|1>)"
+
+# The live mode of the same script, by hand only (each run spends two real Claude turns against a
+# local fake model API, so it is never part of a gate and never runs without the flag): the real
+# `claude` in an application terminal tab of the isolated debug Sirio, against
+# rust/crates/sirio_term_session/tests/live/fake_messages.py ("run edit"), in Claude's default
+# permission mode so each Edit asks and calls openDiff. Two cases. live_accept: the pane shows
+# "Opened changes in Sirio" (a debug build says "Sirio (debug)"), the state names the pane as the
+# connection's owner, the tab "✻ probe.txt" opens, `surface.ide.act accept` makes Claude write the
+# file (checked on disk: alpha becomes beta) and the turn ends. live_reject_with_comment: "run edit"
+# again; one comment on Old line 1 is committed through `surface.ide.comment`, then Reject: the
+# CLIPBOARD (owned with a sentinel first, read from outside the app) is exactly
+# `@probe.txt#L1 keep beta here`, `deliveries` went up by one, the pane shows Claude's rejection
+# ("ejected update to probe.txt": 2.1.325 printed "User rejected update", 2.1.326 prints "Rejected update")
+# and the file is unchanged. The CLI is $SIRIO_LIVE_CLAUDE, else the newest real
+# install under ~/.local/share/mise/installs/claude/<version>/claude; the ~/.local/bin wrapper (it
+# runs `mise use -g`) and any `#!` file that mentions mise abort the run, as in
+# program_status_live.rs. A missing CLI prints "SKIP: claude not found ..." and exits 0. Beyond the
+# run's private HOME, database, socket, host root and Xvfb, Claude's configuration is seeded under
+# the private HOME and its environment is built from nothing with a fake key and a dead proxy, the
+# run aborts before anything starts when the private HOME is the real home or inside the real
+# ~/.claude, and the cleanup kills every process still holding the private HOME. The artifact adds
+# claude-version.txt (`claude --version` and the binary's path), fake.log and live-pane-*.txt.
+Scripts/Tests/test-ide-bridge-e2e.sh --xvfb --live   # -> prints "IDE BRIDGE LIVE OK (claude <version>, 2 cases)", or "SKIP: ..."
 
 # How Sirio launches the built-in `jdtls` around Lombok (spec
 # docs/superpowers/specs/2026-10-26-jdtls-lombok-design.md) in a real, isolated debug Sirio on

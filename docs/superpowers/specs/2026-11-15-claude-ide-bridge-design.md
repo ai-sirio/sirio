@@ -516,6 +516,60 @@ it names; the live probe (§8.1) adds its findings here before any product code.
     process listening on `*:<port>`. Windows binds with neither the option nor the probe (there the
     option lets a socket take a port in active use). The gap between the probe and the bind is a
     race that is accepted.
+16. **The proposal's diff is of the text Accept sends** (refines §4.7; Ruling 23). The tab diffs the
+    file on disk against the proposal with the file's line endings restored, which is what Accept
+    answers, so what the user sees is what Claude writes and a CR-stripped, line-ending-only change
+    shows no phantom rows.
+17. **Which line ending Accept restores** (refines §4.7's "original line endings"; Ruling 25). The
+    reference is the original, or the proposal exactly as Claude sent it when the original is
+    missing. The text is normalised to LF first, then written CRLF for a CRLF-majority reference.
+    The choice is the pure `text_to_send(original, proposal, edited)`, so Edit followed by no
+    keystroke sends the same bytes as no Edit.
+18. **Accept is inert until the diff shows** (refines §4.7's buttons; Ruling 26). While the body does
+    not yet show the diff of the text Accept would send (the first load, after a replace, after
+    Show diff until it lands) Accept is drawn disabled and pressing it does nothing. Reject stays
+    live: the user never accepts bytes they were not shown.
+19. **No proposed-side comments after an edit** (refines §4.8; Ruling 27). Once the edited text
+    differs from the proposal, the proposed side's `+` is hidden; comments already written stay.
+    Reject discards the edit, so a new comment's line number would name a line Claude never
+    received.
+20. **A file with no line ending carries no convention** (refines item 17; Ruling 29). An original
+    that is empty or one line without a newline gives no majority, so the reference falls back to
+    the proposal, as for a missing original.
+21. **Controls on a Proposal row** (refines §4.7; Ruling 28). A Proposal tab's row hides the dead
+    "Open file" control; a missing original shows as added, not modified; the Edit-mode body id is
+    `proposal-editor`, so the E2E tells "Edit offered" from "editing"; the raw size is checked
+    before `text_to_send` is computed on the main thread.
+22. **A per-file `getDiagnostics` for a file no server reported answers `[]`** (refines §4.6 and
+    item 5; Ruling 48). The store's knowledge is all Sirio has, and an error would make Claude skip
+    its after snapshot (§10.13 item 3) for every edit to a file not open in Sirio, which is most
+    edits. The risk is a server that first analyses the file only after the edit, right after launch:
+    Claude then blames its edit for an error that was already there. Item 5's error stays for the
+    deadline.
+23. **Where a proposal opens when the user is typing in Secondary** (supersedes Ruling 67, refines
+    §4.7's "becomes the active Secondary tab"; Ruling 72). The test is the window's keyboard focus,
+    not the active tab: when it is inside Secondary's pane (any of its tabs) the proposal joins the
+    strip and Secondary keeps its shown tab, so the editor being typed in is never unmounted;
+    anywhere else it becomes Secondary's shown tab. The terminal already says "Opened changes in
+    Sirio". The cost is one click to see a proposal opened while the user types in Secondary.
+24. **Committed comments are delivered on every ending, drafts never** (refines §4.7's "comments
+    being written" and §4.8; Rulings 75 and 76). "Comments being written" is read as the committed
+    ones. Every way a proposal ends (Reject from the bar or the confirmation, Accept, `close_tab`,
+    `closeAllDiffTabs`, a replace, a disconnect) copies its committed comments to the clipboard with
+    the toast of §4.8; Accept still answers `FILE_SAVED` only, and a replace delivers like a
+    withdraw (the same `-32000`, item 4). A draft is dropped everywhere. One `closeAllDiffTabs` is
+    one bridge event carrying every withdrawn id, one joined copy and one toast, with no UI time
+    window. The cost is a toast after an Accept that had comments.
+25. **The clipboard is the only delivery** (overrides §4.8's typing into the terminal and §8.3's
+    "lands the comment in Claude's prompt"; Ruling 4, the gate of item 12). The probe found that a
+    paste collapses to `[Pasted text]` past 3 lines or about 800 characters (§10.13 item 5), and
+    the backslash and Enter route sends Enter keys, against "never with Enter", and was never tried
+    through Sirio. Enzo had decided that if either half is unreliable the clipboard ships alone. The
+    cost is that the user pastes once by hand. The live test therefore asserts the clipboard.
+26. **Restart Claude after more than a few seconds without Sirio** (§4.9's open question, answered
+    by §10.13 item 6; Ruling 6). Claude retries for about 15 to 25 s after a loss and then stays
+    disconnected, and `/ide` does not bring it back. The docs and the release notes say: if Sirio
+    was closed for more than a few seconds, restart Claude in that terminal.
 
 ### §10.13 Probe findings (2026-11-15)
 
