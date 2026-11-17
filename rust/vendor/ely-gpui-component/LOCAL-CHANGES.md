@@ -599,7 +599,8 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   whole from `main`, which carries `self.edits` from BlockEditor `d24984c`,
   not vendored.
 - Tab strip (the Tabs port): `src/navigation/tabs.rs` and `src/layout/narrow.rs`
-  (new) are verbatim from `main`, with no local line in either. They carry the
+  (new) are verbatim from `main` as ported, plus the one local line recorded below in
+  `tabs.rs`. They carry the
   `tabs.rs` hunks of `9977785`, `919f26f`, `4580e3b`, `6d95b24`, `cb5e35f`,
   `e56a343`, `3a68d1b` and `7d704d9`: the strip scrolls sideways and keeps the
   chosen tab in view when it is too narrow for every label, and a long label is
@@ -617,15 +618,20 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   Enter handling) and `shell/bars.rs`; `cb5e35f`'s `shell/bars.rs`; and the
   tests of `9977785`, `919f26f`, `e56a343`, `3a68d1b` and `7d704d9` under
   `navigation/tests*`, which is not vendored.
-- Local change on top of that verbatim `tabs.rs`: `src/navigation/tabs.rs:140`,
+- `73a8bf2`: `src/motion/slide.rs` verbatim (a slide whose `selected` is not
+  among its values logs and returns no marker instead of panicking). It
+  completes `919f26f`'s stale-place handling for `Tabs`, whose `render` calls
+  `slide` with `selected` unconditionally. Skipped: its `buttons/segmented.rs`
+  (not vendored) and `buttons/tests.rs`.
+- Local change on top of that `tabs.rs`: `src/navigation/tabs.rs:140`,
   `compact` (icons only, no notes, empty tooltips) additionally requires
   `tabs.iter().any(|tab| !tab.label.is_empty())`. Upstream goes compact for any
   strip whose tabs all have icons; a strip with icons and no label at all (Sirio's
   change-request filter, `right_panel/change_requests.rs`, labels empty by
   design) has nothing to drop, so at the panel's 220 px floor it lost its
-  To-review count and got an empty tooltip and aria label per tab. It now never
-  goes compact, keeps its notes and scrolls like any other strip. A sync must
-  keep the condition.
+  To-review count and got an empty compact tooltip per tab. It now never goes
+  compact: it keeps its notes (the To-review count), gets no empty compact
+  tooltips and scrolls like any other strip. A sync must keep the condition.
 - Skipped, not vendored: `collab/remote.rs` and `terminal/paint.rs`.
 - Skipped, not taken (vendored files whose hunks of these commits were left
   out; the port documents them and does not apply them):
