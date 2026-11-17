@@ -570,6 +570,66 @@ it names; the live probe (§8.1) adds its findings here before any product code.
     by §10.13 item 6; Ruling 6). Claude retries for about 15 to 25 s after a loss and then stays
     disconnected, and `/ide` does not bring it back. The docs and the release notes say: if Sirio
     was closed for more than a few seconds, restart Claude in that terminal.
+27. **`file://` URIs are the raw path, never percent-encoded** (refines §4.3 and §4.6; Ruling 14).
+    Outbound, Sirio writes `file://` followed by the native path exactly as the OS spells it, and a
+    per-file `getDiagnostics` answer echoes the request's `uri` string byte for byte; inbound, it
+    strips `file://` (and the `/` before a Windows drive letter) and decodes nothing. Claude builds
+    and compares its URIs the same way (prefix and raw path, no encoding on either side, read from
+    its binary), so encoding here would make a path with a space, `#`, `%` or a non-ASCII character
+    fail its comparison (`path_mismatch`, no baseline). The `url` crate is not a dependency. The
+    cost is that an encoded URI from another client is taken literally.
+28. **The scratch directory is swept at launch** (refines §4.7's temporary files; Ruling 55).
+    `<database directory>/ide-proposals`, where the diff's private temporary files go, is emptied
+    before the bridge starts (no symlink followed, recreated 0700), so a crash between writing a
+    scratch file and removing it leaves nothing behind. The cost is none: it holds only scratch.
+29. **The database and its directory are owner-only** (refines §10.11; Ruling 85). The token stays
+    in the settings table (item 11), so the file it sits in is as private as the lockfile: on unix
+    `AppDatabase::open` creates the state directory 0700, makes an existing one 0700 (a sticky
+    directory is left alone), and makes the database and its `-wal` and `-shm` 0600. The cost is
+    that a state directory that was group- or world-readable is not any more, which is what it
+    holds anyway. The E2E makes both world-readable before the launch and checks the modes after.
+30. **Shutdown waits for connection threads for at most 500 ms** (refines §4.1's "no connection
+    outlives the switch" and §10.10; Ruling 86). `Bridge::shutdown` drops the listener first, then
+    waits for the connection threads up to a deadline of 500 ms in all and leaves any thread still
+    running (a read stuck on a stalled mount, a Windows send) to end on its own; from the moment
+    `shutdown` returns such a thread tells the app nothing. Quit and switch-off run it on the UI
+    thread, so they can no longer freeze on one connection. The cost is that a thread outliving the
+    deadline holds its socket a little longer; the port is already free.
+31. **A proposal warns when its file changed on disk** (refines §4.7's dirty warning; Ruling 87).
+    When the file's editor view saves, or reports that the disk moved, while a proposal for it is
+    open, the bytes on disk are compared with the proposal's opening snapshot (the signal alone
+    decides nothing: `GitDiffStale` also fires on focus) and, when they differ, the bar warns "The
+    file changed on disk since Claude proposed this change: the diff shows it as it was", for good
+    (until the proposal ends); where the unsaved-edits warning also applies, that one wins. The
+    diff, the comments and Accept stay as they are: nobody has probed whether Claude writes the
+    text verbatim over a file that changed after `openDiff` or applies its edit again (its
+    `staleRecovered` path), so no recomputed diff would be truthful in both cases. The cost is a
+    stale diff, now labelled; a later probe can decide whether to recompute.
+32. **A Proposal tab is never split** (refines §4.7; Ruling 88). `split_terminal_at_with_placement`
+    returns before it starts a shell when the tab is a Proposal: Accept, Reject or Claude's
+    `closeAllDiffTabs` closes the whole tab, so a terminal beside the proposal would end its
+    session unasked. The refusal is the silent no-op an impossible split already is. A Trace tab
+    has the same gap on `main` and is left alone.
+33. **A connection is known from its handshake** (refines §4.2's "before `ide_connected`, requests
+    are served as for an ownerless connection"; Ruling 89). `sirio_ide` reports a connection when
+    its WebSocket handshake completes (`BridgeEvent::Opened`), before and whether or not it sends
+    `ide_connected`; the app holds it with no pid and no owner (the state shows `pid: null`), and
+    its `openDiff` opens an ownerless proposal in the file's worktree instead of vanishing. Its
+    disconnect closes the proposal like any other. The cost is a connection row for a client that
+    never announces itself, which cannot be resolved to a pane.
+34. **Where a proposal opens is read from the tabs' own focus** (refines item 23; Ruling 72's
+    second half). No element wraps Secondary to track the focus: a wrapper focuses itself on every
+    press nothing below it handles (the bar's text, a disabled button, a loading body), which kept
+    the keyboard in Secondary after Accept or Reject and left a hidden Secondary reading as
+    focused. The file, changes and proposal views expose the focus handles their keys go through,
+    and a proposal's arrival asks the window whether one of them holds the focus. A tab whose views
+    track none (a browser, a loading file) reads as not focused, so a proposal opened then is
+    shown. Opening a proposal's comment composer focuses its input.
+35. **The sidebar's "Remove worktree?" acts on the path it named** (refines §4.7's confirmation;
+    seat B's review). The prompt reads the worktree's path before it asks, finds its row again by
+    that path after the answer and removes nothing when it is gone; the host's continuation takes
+    the path too. A row position read before an await can name another worktree by the time it is
+    used.
 
 ### §10.13 Probe findings (2026-11-15)
 

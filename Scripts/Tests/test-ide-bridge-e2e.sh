@@ -273,7 +273,8 @@ set -eEuo pipefail
 #
 # `surface.ide.act` (debug builds only) presses what a user presses: accept, reject, edit (with
 # `text`, which errors when Edit is unavailable), show_diff, close, confirm_reject, cancel,
-# close_others (`text` is the kept tab's position), close_worktree and remove_project.
+# close_others (`text` is the kept tab's position), close_worktree, remove_project and
+# ask_remove_worktree (`text` is a worktree's path: the sidebar's own "Remove worktree?" prompt, left up).
 # `surface.ide.comment {tab_name, side: old|new, line, end_line?, text, commit?}` (debug builds only)
 # does what a click on the diff's gutter and typing do: it opens the composer at that anchor,
 # sets its text and adds the comment, unless commit=false leaves the text as a draft.
@@ -309,7 +310,7 @@ set -eEuo pipefail
 #                 is not the evidence of a run)
 #   --only a,b    development, implies --proposals-only: run only the named openDiff cases (the
 #                 others are skipped); prints the same different last line
-#   --live        the opt-in live mode, by hand only (spec 8.3), INSTEAD of the 60 cases: the real
+#   --live        the opt-in live mode, by hand only (spec 8.3), INSTEAD of the 65 cases: the real
 #                 `claude` (SIRIO_LIVE_CLAUDE, else the newest real install under
 #                 ~/.local/share/mise/installs/claude/<version>/claude; never the ~/.local/bin
 #                 wrapper, which runs `mise use -g`, and a `#!` file that mentions mise aborts the run,

@@ -119,7 +119,8 @@ everywhere, read or not.
 - [Claude chat](docs/agents/architecture/claude-chat.md) (the native transport, the session panel, Trace): Claude
   Code's stdio protocol is not a published contract, so `sirio_claude` degrades rather than
   rejects.
-- [IDE bridge](docs/agents/architecture/ide-bridge.md) (sirio_ide, the Proposal tab): never answer openDiff without the user; only the lockfile named by the bound port is Sirio's.
+- [IDE bridge](docs/agents/architecture/ide-bridge.md) (`sirio_ide`, the Proposal tab): never answer
+  openDiff without the user; only the lockfile named by the bound port is Sirio's.
 - [Agent activity detection](docs/agents/architecture/activity-detection.md) (`sirio_activity`): four evidence
   layers; who owns a pane (spawn, title or process) decides who may clear its status.
 - [Control socket](docs/agents/architecture/control-socket.md) (`sirio_control`, `sirioctl`):
