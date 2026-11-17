@@ -678,8 +678,6 @@ pub struct Sidebar {
     /// Whether the Search button has shown the filter field.
     filter_shown: bool,
     filter_focus_subscription: Option<gpui::Subscription>,
-    /// Whether the filter held focus when it was last drawn: how a blur is seen.
-    filter_was_focused: bool,
     tree_cursor: usize,
     pill_cursor: Option<usize>,
     tree_focus: FocusHandle,
@@ -834,11 +832,10 @@ impl Sidebar {
         }
         self.view = view;
         self.armed_delete = None;
-        if self.filter_focus.is_focused(window) {
-            self.hide_filter(window, cx);
-        }
         self.filter.clear();
         self.filter_shown = false;
+        // The title menu took focus; the list is the sensible home.
+        self.tree_focus.focus(window, cx);
         self.view_menu.close();
         if view == SidebarView::Sessions {
             self.set_clock(sessions::unix_now_ms(), cx);
@@ -1072,7 +1069,6 @@ impl Sidebar {
             filter_focus: cx.focus_handle().tab_stop(true),
             filter_shown: false,
             filter_focus_subscription: None,
-            filter_was_focused: false,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
@@ -1181,7 +1177,6 @@ impl Sidebar {
             filter_focus: cx.focus_handle().tab_stop(true),
             filter_shown: false,
             filter_focus_subscription: None,
-            filter_was_focused: false,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
@@ -2313,6 +2308,16 @@ impl Sidebar {
         self.filter_shown = true;
         self.filter_focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// The Search button: shows the field; an empty one is hidden again, one
+    /// holding text stays and takes focus.
+    fn toggle_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_shown && self.filter.is_empty() {
+            self.hide_filter(window, cx);
+        } else {
+            self.show_filter(window, cx);
+        }
     }
 
     /// Clears the filter, hides its field and hands focus to the list.
@@ -3763,7 +3768,7 @@ impl Sidebar {
                         EIconButton::new("sidebar-search-button", IconName::Search)
                             .size(EControlSize::Sm)
                             .tooltip("Search")
-                            .on_click(cx.listener(|this, _, window, cx| this.show_filter(window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_filter(window, cx))),
                     ),
             )
             .into_any_element()
@@ -4297,14 +4302,6 @@ impl Render for Sidebar {
         }
         let tree_focus = self.tree_focus.clone();
         let filter_is_focused = filter_focus.is_focused(window);
-        // An empty filter that loses focus has nothing to show; one holding
-        // text stays. Focus is not moved: the user went elsewhere. (gpui's
-        // blur event is not used: a handle focused before its field is drawn
-        // has no focus path yet, so its blur is never reported.)
-        if self.filter_was_focused && !filter_is_focused && self.filter.is_empty() {
-            self.filter_shown = false;
-        }
-        self.filter_was_focused = filter_is_focused;
         // Sidebar text fields (filter, worktree prompt) share one blink:
         // window focus is unique, so at most one caret is ever visible.
         let prompt_focus_focused = self
@@ -8066,10 +8063,7 @@ mod tests {
     /// Moves focus off the filter the way the shell does after a row click.
     fn focus_list(window: &gpui::WindowHandle<Sidebar>, cx: &mut VisualTestContext) {
         window
-            .update(cx, |sidebar, window, cx| {
-                sidebar.tree_focus.focus(window, cx);
-                cx.notify();
-            })
+            .update(cx, |sidebar, window, cx| sidebar.tree_focus.focus(window, cx))
             .unwrap();
         cx.run_until_parked();
     }
@@ -8117,12 +8111,27 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn an_empty_filter_hides_when_focus_leaves(cx: &mut gpui::TestAppContext) {
+    async fn search_hides_an_empty_filter_and_keeps_one_with_text(cx: &mut gpui::TestAppContext) {
         let (window, mut cx) = filter_fixture_window(cx);
         click_control(&mut cx, "sidebar-search");
         assert!(cx.debug_bounds("filter-field").is_some());
-        focus_list(&window, &mut cx);
-        assert!(cx.debug_bounds("filter-field").is_none(), "nothing typed, so it goes");
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_none(), "empty: hidden again");
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "focus goes to the list");
+
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some(), "text keeps it drawn");
+        let (filter_focused, text) = window
+            .update(&mut cx, |s, window, _| (s.filter_focus.is_focused(window), s.filter.clone()))
+            .unwrap();
+        assert!(filter_focused, "and focused");
+        assert_eq!(text, "ma");
     }
 
     #[gpui::test]
@@ -8136,20 +8145,10 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "");
         assert!(cx.debug_bounds("filter-field").is_none());
-
-        // Switching back while the filter holds focus must not strand it.
-        window
-            .update(&mut cx, |s, window, cx| {
-                s.show_filter(window, cx);
-                s.choose_view(SidebarView::Projects, window, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
         let list_focused = window
             .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
             .unwrap();
-        assert!(list_focused, "focus is not left on nothing");
-        assert!(cx.debug_bounds("filter-field").is_none());
+        assert!(list_focused, "the list takes focus after the title menu");
     }
 
     #[gpui::test]
