@@ -1568,7 +1568,7 @@ impl ChangeRequestTab {
 
     fn render_inner_strip(&self, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
         let ci = self.header.value().map(|header| header.summary.ci);
-        // `Tabs` panics when `selected` names no tab: both come from InnerTab::ALL.
+        // A `selected` that names no tab marks none; both come from InnerTab::ALL anyway.
         let choices: Vec<Choice> = InnerTab::ALL
             .into_iter()
             .map(|inner| {
