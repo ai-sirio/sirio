@@ -578,6 +578,7 @@ impl Sidebar {
             .relative()
             .h(px(row_height))
             .w_full()
+            .rounded(px(6.0))
             .px(px(ROW_PAD_X))
             .py(px(ROW_PAD_Y))
             // The card's content lines up with the project's name; its box
@@ -692,6 +693,129 @@ impl Sidebar {
                     .into_any_element(),
             ),
             RowStatusGlyph::None => None,
+        };
+        // A worktree card's trailing seat. The bloom and the hover buttons
+        // share it: under the pointer the buttons stand where the bloom was
+        // (it goes invisible, keeping its box), so they sit at one x on every
+        // card whatever its status, and the seat is the same width on all of
+        // them -- the primary holds an empty place where the cross would be.
+        let (slot_bloom, tail_bloom) = if is_worktree {
+            (status_bloom, None)
+        } else {
+            (None, status_bloom)
+        };
+        let trailing_slot = {
+            let star_entity = entity.clone();
+            let remove_entity = entity.clone();
+            let is_primary = row.is_primary;
+            let star_color = if is_primary { theme.ely.fg } else { theme.ely.fg_subtle };
+            div()
+                .relative()
+                .flex_none()
+                .w(px(TRAILING_SLOT_WIDTH))
+                .self_stretch()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .flex()
+                        .items_center()
+                        .children(slot_bloom),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .id(("sidebar-card-star", row_id))
+                                .debug_selector(move || format!("sidebar-card-star-{row_id}"))
+                                .cursor(gpui::CursorStyle::PointingHand)
+                                .w(px(16.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(theme.radii.chip)
+                                .hover(|style| style.bg(theme.ely.hover))
+                                .invisible()
+                                .group_hover(hover_group.clone(), |style| style.visible())
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    star_entity.update(cx, |sidebar, cx| {
+                                        let Some(target) = sidebar.context_target(row_id) else {
+                                            return;
+                                        };
+                                        let action = if is_primary {
+                                            SidebarContextAction::UnsetPrimary
+                                        } else {
+                                            SidebarContextAction::SetPrimary
+                                        };
+                                        sidebar.dispatch_context_action(target, action, window, cx);
+                                    });
+                                })
+                                // The primary is the filled glyph, the same one the
+                                // rest-state marker uses; a linked worktree is outline.
+                                .child(if is_primary {
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("sidebar-card-star-filled-{row_id}")
+                                        })
+                                        .text_size(theme.typography.scaled(12.0))
+                                        .text_color(star_color)
+                                        .child("★")
+                                        .into_any_element()
+                                } else {
+                                    EIcon::new(IconName::Star)
+                                        .size(EIconSize::Xs)
+                                        .color(star_color)
+                                        .into_any_element()
+                                }),
+                        )
+                        .child(if is_removable_worktree {
+                            div()
+                                .id(("remove-worktree", row_id))
+                                .debug_selector(move || format!("remove-worktree-{row_id}"))
+                                .w(px(16.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(theme.typography.scaled(12.0))
+                                .text_color(theme.ely.fg_subtle)
+                                .rounded(theme.radii.chip)
+                                .hover(|style| style.bg(theme.ely.hover))
+                                .invisible()
+                                .group_hover(hover_group.clone(), |style| style.visible())
+                                .on_click(move |event, window, cx| {
+                                    cx.stop_propagation();
+                                    remove_entity.update(cx, |sidebar, cx| {
+                                        sidebar.open_worktree_close_menu(
+                                            row_id,
+                                            event.position(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                })
+                                .child(
+                                    IconElement::new(Icon::Close, IconSize::XSmall)
+                                        .text_color(theme.ely.fg_subtle),
+                                )
+                                .into_any_element()
+                        } else {
+                            div().w(px(16.0)).flex_none().into_any_element()
+                        }),
+                )
         };
         // Any unread pill makes the whole worktree row read as news: a dot at its
         // leading edge and a heavier title. A project row is already semibold.
@@ -812,75 +936,6 @@ impl Sidebar {
                         }),
                 )
             })
-            .when(is_worktree, |this| {
-                let star_entity = entity.clone();
-                let is_primary = row.is_primary;
-                this.child(
-                    div()
-                        .id(("sidebar-card-star", row_id))
-                        .debug_selector(move || format!("sidebar-card-star-{row_id}"))
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .w(px(16.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.ely.hover))
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            star_entity.update(cx, |sidebar, cx| {
-                                let Some(target) = sidebar.context_target(row_id) else {
-                                    return;
-                                };
-                                let action = if is_primary {
-                                    SidebarContextAction::UnsetPrimary
-                                } else {
-                                    SidebarContextAction::SetPrimary
-                                };
-                                sidebar.dispatch_context_action(target, action, window, cx);
-                            });
-                        })
-                        .child(
-                            EIcon::new(IconName::Star).size(EIconSize::Xs).color(
-                                if is_primary { theme.ely.fg } else { theme.ely.fg_subtle },
-                            ),
-                        ),
-                )
-            })
-            .when(is_removable_worktree, |this| {
-                let remove_entity = entity.clone();
-                this.child(
-                    div()
-                        .id(("remove-worktree", row_id))
-                        .debug_selector(move || format!("remove-worktree-{row_id}"))
-                        .w(px(16.0))
-                        .flex_none()
-                        .text_size(theme.typography.scaled(12.0))
-                        .text_color(theme.ely.fg_subtle)
-                        .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.ely.hover))
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |event, window, cx| {
-                            cx.stop_propagation();
-                            remove_entity.update(cx, |sidebar, cx| {
-                                sidebar.open_worktree_close_menu(
-                                    row_id,
-                                    event.position(),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        })
-                        .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.ely.fg_subtle),
-                        ),
-                )
-            })
             .when_some(tab_id, |this, tab_id| {
                 this.child(
                     div()
@@ -905,16 +960,12 @@ impl Sidebar {
                         ),
                 )
             })
-            // Last, after every hover control on the line. Those controls are
-            // `.invisible()` rather than unmounted, so they hold their 16px
-            // whether or not the pointer is on the row -- but only some rows
-            // have them (a primary checkout cannot be removed, a worktree has
-            // no project settings). Anything placed before them therefore
-            // sits at a different x per row, which is exactly the drift
-            // `running_agent_badges_share_one_trailing_edge_across_worktrees`
-            // exists to catch. Last is the only seat where the bloom lands on
-            // one trailing edge for every row.
-            .when_some(status_bloom, |this, bloom| this.child(bloom));
+            // Last. A collapsed project's bloom lands here; a worktree's rides
+            // in `trailing_slot`, which is the same width on every card, so
+            // the bloom keeps one trailing edge across rows
+            // (`running_agent_badges_share_one_trailing_edge_across_worktrees`).
+            .when_some(tail_bloom, |this, bloom| this.child(bloom))
+            .when(is_worktree, |this| this.child(trailing_slot));
         let content = div()
             .min_w_0()
             .flex_1()
