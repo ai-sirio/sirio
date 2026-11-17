@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.42.0",
-  "notes": "A native Claude chat now shows the tasks Claude runs in the background and\nlets you stop them, and its status follows what Claude itself reports\ninstead of guessing from the turn.\n\n**Background tasks in a native Claude chat**\n\nA background shell, a Monitor or a background agent that Claude starts used\nto show only as a count on the composer's chip. Now you can watch and stop\neach one.\n\n- Click the chip to open a list of the running tasks, each with its\n  description, its kind and a **Stop** button.\n- On the Trace card, a running background agent has **Stop** on its own\n  lane, and the other tasks sit in a Background group with the last line\n  of their output.\n- The Trace tab shows a strip under the tree with each task's state, a\n  **Stop**, and a shell's last 6 lines of output.\n- Output is read only while it is on screen: a hidden chat, a folded card\n  or a closed tab asks Claude for nothing.\n- **Stop** reads *Stopping…* until Claude reports the task ended.\n- Escape closes the list before it would cancel the turn. The narrower\n  composer rows keep the count in ⋯ without the list.\n- A Claude Code that does not share a task's output, as 2.1.257 does not,\n  still lists its tasks and still stops them; their output is just not\n  shown.\n\n**A chat's status follows Claude**\n\nA native Claude chat used to read *Done* as soon as the main turn ended,\neven while a background agent Claude had started was still working. It now\nfollows the state Claude reports for its own session: the sidebar, the\nSessions view and the Trace card read *working* until Claude is idle, and\n*waiting for you* while Claude needs an answer. A turn Claude starts on its\nown, such as a Monitor waking up, does not mark the chat as working.\n\n**Fixes**\n\n- Saving which session each tab resumes no longer happens on the window's\n  thread, so a slow disk cannot stall the interface.",
+  "version": "0.43.0",
+  "notes": "A native Claude chat now shows more of a permission request, and the\nsession panel lists Claude Code's permission rules. Renaming a chat's tab\nnow renames its session in Claude Code too.\n\n**Permission requests say more**\n\nThe permission card of a native Claude chat used to show \"Permission\nrequested\" and the command exactly as Claude Code sent it. It now shows what\nClaude Code says about the request:\n\n- The caption is Claude Code's own title for the request, when it sends one.\n- Under the command come Claude Code's description and the reason it is\n  asking, for example *Matches an ask rule in user settings*. **Path** shows\n  the file a shell command writes to, and **MCP server** shows the server a\n  tool belongs to.\n- Hidden characters in a command can no longer disguise it. A control,\n  zero-width or right-to-left character shows as its code, for example\n  `⟨U+202E⟩`.\n- When Claude Code asks for the answer to default to no, the card starts on\n  **Reject**, and a digit key does not answer it. When Claude Code withholds\n  **Always allow**, the card does not offer it.\n\nACP chats keep the plain card.\n\n**Claude Code's rules in the session panel**\n\nThe session panel of a native Claude chat has a new **Permissions** card. It\nlists the allow, ask and deny rules and the extra directories that Claude\nCode applies to the session, each with the settings file it comes from. The\ncard is read-only. It refreshes when the panel opens, when the chat\nreconnects, after **Always allow** and at the end of each turn. Claude Code\nversions before 2.1.325 cannot list their rules, so the card does not appear\nwith them.\n\n**Renaming a tab renames the Claude session**\n\nRenaming a native Claude chat's tab used to change only Sirio's tab. Claude\nCode now gets the name as well, so `claude agents` lists the session under it\nand `claude --resume \"<name>\"` finds it. This covers the tab bar's inline\neditor and **Set Title**. A title Sirio picks on its own, from the first\nprompt or the summarizer, stays in Sirio. If Claude Code refuses the name,\nthe chat shows *Claude Code kept its earlier name* with the reason. Claude\nCode shortens a name longer than 200 characters.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.42.0/Sirio-0.42.0.dmg",
-      "sha256": "21e881f885262937db7164cf5a7ba38a310e2054639dfe4965e7993287701915",
-      "signature": "0+Bb/5MCE5+xj0c9rQFu5krhSx+aQD/1Irwgel+o53VOs/s5ntPiDlL3DE+O37EQ89E4QNqjl9uW1+LZ95BFDQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.43.0/Sirio-0.43.0.dmg",
+      "sha256": "230b5a571f273cdaf082ea6732bd0a7159c65076602b21b1b0c4654f155af853",
+      "signature": "RtM2NP/DsBA94roqsFcxHA/TVYg7heUkNzcy0sLVKw1FZ5Mkj5qEFGaPY9AUKxOK9eUhiaHPQKdqF03N1nqvAA=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.42.0/Sirio-0.42.0-x86_64.AppImage",
-      "sha256": "928435725139716eb046690bd4b180767f5f4f3247560726fe5e3818e45f4f3c",
-      "signature": "7CiD+uQa8iWtHgoHEZQHYuJWsJRNNrFYVdtAvdxojKjAktVUegOhJX7a9Q50QBGr1ZKgwQGIZFmJmwLB8RFoCQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.43.0/Sirio-0.43.0-x86_64.AppImage",
+      "sha256": "9709f44bdaa5e7252cf93d0c11fa631239095c547fc0cd18fd959aa5260df4e1",
+      "signature": "1rxeZ4NU2rJiz4xlk5nHr5mmrtxwmWer8VtCvrEQcBsLzXsml9yMFMwCeNl8AFvJUkMdZGsUfR/XQkZqjFzVDw=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.42.0/SirioSetup-0.42.0.exe",
-      "sha256": "a95793b9bae5bdf98c3016c4c2f59336de88f0f45ac1603604b255c24974b341",
-      "signature": "Jt21hTHramBCkzBEs4vmRr31ZAMCfgteyUdN8aotjaQRgfc2N3AF0ljHeGP8C2/fRAOl7AMKSgKrhidwB3WgDg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.43.0/SirioSetup-0.43.0.exe",
+      "sha256": "94c242210169c593f3e7de35573a1aa8c2cd311c3a9c4b823251110dbc376753",
+      "signature": "hHm6SYRq1UcRQoDzlLfO8xb7rpB0V0NL14Xh1ZgxXu6betO0Xf8s5cfLLZngoDcK2e1gXf3sYJBDpiNCPaodAw=="
     }
   }
 }
