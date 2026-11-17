@@ -115,6 +115,8 @@ HANDSHAKE_GATE_PATH = flag_value("fixture-handshake-gate")
 RENAME_GATE_PATH = flag_value("fixture-rename-gate")
 HELD_RENAMES = []
 HELD_RENAMES_LOCK = threading.Lock()
+# True from the first held rename until the release thread has answered them all.
+RENAMES_DRAINING = False
 # Set by `init_line`: from then on the CLI's current session is SESSION_ID.
 INIT_PRINTED = False
 
@@ -1663,23 +1665,30 @@ def sanitise_title(title):
 
 
 def answer_rename(request_id, request):
-    if RENAME_GATE_PATH and (HELD_RENAMES or not os.path.exists(RENAME_GATE_PATH)):
+    global RENAMES_DRAINING
+    if RENAME_GATE_PATH:
         # Held: the main loop goes on reading, so a later rename is heard (and
-        # logged) while this one waits. They are answered in the order they came.
+        # logged) while this one waits. They are answered in the order they came:
+        # while the release thread drains, a new rename queues behind the rest.
         with HELD_RENAMES_LOCK:
-            HELD_RENAMES.append((request_id, request))
-            if len(HELD_RENAMES) == 1:
-                threading.Thread(target=release_held_renames, daemon=True).start()
-        return
+            if RENAMES_DRAINING or not os.path.exists(RENAME_GATE_PATH):
+                HELD_RENAMES.append((request_id, request))
+                if not RENAMES_DRAINING:
+                    RENAMES_DRAINING = True
+                    threading.Thread(target=release_held_renames, daemon=True).start()
+                return
     answer_rename_now(request_id, request)
 
 
 def release_held_renames():
+    global RENAMES_DRAINING
     while not os.path.exists(RENAME_GATE_PATH):
         time.sleep(0.05)
     while True:
         with HELD_RENAMES_LOCK:
             if not HELD_RENAMES:
+                # Every held rename is answered; the next one goes straight out.
+                RENAMES_DRAINING = False
                 return
             request_id, request = HELD_RENAMES.pop(0)
         answer_rename_now(request_id, request)
