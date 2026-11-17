@@ -945,7 +945,16 @@ impl Sidebar {
         rows
     }
 
+    /// Whether the list is folded away with no query reaching into it. Its
+    /// keys then act on nothing the user can see, so they do nothing.
+    fn list_hidden(&self) -> bool {
+        self.list_folded && self.filter.is_empty()
+    }
+
     fn session_step(&mut self, down: bool, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let count = self.session_walk().len();
         if count == 0 {
             return;
@@ -959,6 +968,9 @@ impl Sidebar {
     }
 
     fn activate_session_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let Some(row) = self.session_walk().into_iter().nth(self.session_cursor) else {
             return;
         };
@@ -2470,6 +2482,9 @@ impl Sidebar {
     }
 
     fn tree_step(&mut self, direction: tree_keys::Direction, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let rows = self.visible_rows();
         self.pill_cursor = None;
         if rows.is_empty() {
@@ -2483,6 +2498,9 @@ impl Sidebar {
     }
 
     fn pill_step(&mut self, direction: tree_keys::Direction, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let rows = self.visible_rows();
         let Some(row) = rows.get(self.tree_cursor) else {
             self.pill_cursor = None;
@@ -4878,6 +4896,8 @@ impl Render for Sidebar {
                             .text_color(theme.ely.fg_subtle)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.list_folded = !this.list_folded;
+                                this.pill_cursor = None;
+                                this.armed_delete = None;
                                 cx.notify();
                             }))
                             .child(title)
@@ -4955,7 +4975,7 @@ impl Render for Sidebar {
                     .key_context(tree_keys::KEY_CONTEXT)
                     .track_focus(&tree_focus)
                     .on_key_down(cx.listener(|sidebar, event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.key != "backspace" {
+                        if event.keystroke.key != "backspace" || sidebar.list_hidden() {
                             return;
                         }
                         let Some(pill_index) = sidebar.pill_cursor else {
@@ -8980,31 +9000,72 @@ mod tests {
         assert!(!row_drawn(&mut cx, 1), "the rows are folded away");
         assert!(cx.debug_bounds("sidebar-section-header").is_some(), "the header stays");
         click_control(&mut cx, "sidebar-section-toggle");
-        assert!(cx.debug_bounds("sidebar-tree").is_some(), "the list is back");
+        assert!(row_drawn(&mut cx, 1), "the list is back");
     }
 
-    /// Folding hides the rows, not the element that owns keyboard focus: the
-    /// host and the filter hand focus to the list while it is folded.
+    /// Folding hides the rows, not the element that owns keyboard focus, so
+    /// the host and the filter can still hand focus to it.
     #[gpui::test]
-    async fn a_folded_list_still_owns_keyboard_focus(cx: &mut TestAppContext) {
-        let (window, mut cx) = filter_fixture_window(cx);
+    async fn a_folded_list_keeps_a_drawn_focus_owner(cx: &mut TestAppContext) {
+        let (_window, mut cx) = filter_fixture_window(cx);
         click_control(&mut cx, "sidebar-section-toggle");
         assert!(cx.debug_bounds("sidebar-tree").is_some(), "the folded list keeps its focus owner");
+    }
+
+    /// Keys that reach a folded list act on rows the user cannot see: Right
+    /// then Backspace must not close a tab behind the fold.
+    #[gpui::test]
+    async fn a_folded_list_ignores_the_tree_keys(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
         window
-            .update(&mut cx, |s, window, cx| s.focus_handle(cx).focus(window, cx))
+            .update(&mut cx, |sidebar, window, cx| sidebar.focus_row_with_pills(window, cx))
+            .unwrap();
+        click_control(&mut cx, "sidebar-section-toggle");
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.tree_focus.focus(window, cx))
             .unwrap();
         cx.run_until_parked();
-        let focused = window
-            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
-            .unwrap();
-        assert!(focused, "focus lands on the list");
-        // A key the tree handles still reaches it: the drawn element carries
-        // the focus handle, so focus survives a frame.
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("right");
+        cx.simulate_keystrokes("backspace");
         cx.run_until_parked();
-        let still = window
-            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+        assert!(events.borrow().is_empty(), "no event behind the fold: {:?}", events.borrow());
+        let pill = window.update(&mut cx, |sidebar, _, _| sidebar.pill_cursor).unwrap();
+        assert_eq!(pill, None, "no pill is selected behind the fold");
+    }
+
+    /// The same holds in Sessions: Enter on a folded list opens nothing.
+    #[gpui::test]
+    async fn a_folded_sessions_list_hides_its_cards_and_ignores_enter(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
             .unwrap();
-        assert!(still, "focus is still on the list after a draw");
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        assert!(cx.debug_bounds("session-status-running-0").is_some(), "cards start drawn");
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(cx.debug_bounds("session-status-running-0").is_none(), "the cards are folded away");
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty(), "enter opens nothing: {:?}", events.borrow());
     }
 
     /// A filter query reaches into a folded list, as it opens folded projects.
