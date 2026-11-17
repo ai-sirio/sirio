@@ -31,6 +31,7 @@ pub enum ElicitationAct {
     Cancel,
 }
 
+use super::visible_text::{is_hidden, strip_escape_sequences, visible_text};
 use super::{AnswerOption, AnswerTextInput, Chat, Entry, PlanApproval, TRANSCRIPT_WIDTH};
 
 /// What the dock draws for the open question.
@@ -45,11 +46,24 @@ pub(super) struct QuestionView {
     pub(super) caption: String,
     /// The question itself, whole. Empty when the caption says it all.
     pub(super) body: String,
+    /// What the CLI said about the ask, drawn under the body.
+    pub(super) details: Vec<DockDetail>,
+    /// Whether the digit keys and badges are on. Off for a card the CLI would
+    /// rather have refused: a digit answers without looking.
+    pub(super) digits: bool,
     /// The answers, in the order they are numbered.
     pub(super) rows: Vec<DockRow>,
     /// The field of a form the dock is on; 0 for everything else. Part of
     /// what a question is: the next field is a new question.
     pub(super) step: usize,
+}
+
+/// One line of what the CLI said about a permission ask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DockDetail {
+    /// `Reason`, `Path` or `MCP server`; `None` for the description.
+    pub(super) label: Option<String>,
+    pub(super) text: String,
 }
 
 /// One numbered row of the dock.
@@ -75,22 +89,6 @@ impl DockRow {
             Self::Skip => "Skip".into(),
         }
     }
-}
-
-/// Whether `char` is one a server's text must not carry onto the screen: a
-/// control character, or a bidi control that can reorder what follows it
-/// (a host that reads one way and opens another).
-fn is_hidden(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'
-                | '\u{2066}'..='\u{2069}'
-                | '\u{061C}'
-                | '\u{FEFF}'
-        )
 }
 
 /// Server text with its control and bidi characters removed; line breaks stay.
@@ -293,6 +291,24 @@ fn elicitation_dock(entry: &Entry) -> Option<ElicitationDock> {
     })
 }
 
+/// The row a question starts on. A permission the CLI would rather have
+/// refused starts on its first rejection (Enter then declines); any other
+/// entry starts where `elicitation_start_row` says.
+pub(super) fn start_row(entry: &Entry) -> usize {
+    match entry {
+        Entry::Permission {
+            options,
+            is_question: false,
+            detail: Some(detail),
+            ..
+        } if detail.default_to_no => options
+            .iter()
+            .position(|option| option.is_rejection)
+            .unwrap_or(0),
+        _ => elicitation_start_row(entry),
+    }
+}
+
 /// The row a step starts on: a boolean's default, the choice already
 /// given, otherwise the first.
 pub(super) fn elicitation_start_row(entry: &Entry) -> usize {
@@ -430,15 +446,58 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
             options,
             text_input,
             is_question,
+            detail,
             ..
         } => {
-            let (caption, body) = match (*is_question, prompt.is_empty()) {
+            let (mut caption, body) = match (*is_question, prompt.is_empty()) {
                 (true, false) => (title.clone(), prompt.clone()),
                 // Pi's question repeats its header, so the prompt was
                 // blanked at parse time and the title is the question.
                 (true, true) => ("Question".to_string(), title.clone()),
-                (false, _) => ("Permission requested".to_string(), title.clone()),
+                (false, _) => (
+                    "Permission requested".to_string(),
+                    visible_text(title, true),
+                ),
             };
+            let mut details = Vec::new();
+            let mut digits = true;
+            if let Some(detail) = detail.as_ref().filter(|_| !*is_question) {
+                if let Some(cli_title) = detail.title.as_deref().filter(|t| !t.trim().is_empty()) {
+                    caption = visible_text(cli_title, false);
+                }
+                let mut push = |label: Option<&str>, text: String| {
+                    details.push(DockDetail {
+                        label: label.map(str::to_string),
+                        text,
+                    });
+                };
+                if let Some(description) = detail
+                    .description
+                    .as_deref()
+                    .map(|text| visible_text(text, true))
+                    .filter(|text| !text.trim().is_empty() && text.trim() != body.trim())
+                {
+                    push(None, description);
+                }
+                if let Some(reason) = detail
+                    .reason
+                    .as_deref()
+                    .map(|text| visible_text(&strip_escape_sequences(text), true))
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    push(Some("Reason"), reason);
+                }
+                if let Some(path) = detail.path.as_deref().filter(|p| !p.trim().is_empty()) {
+                    push(Some("Path"), visible_text(path, false));
+                }
+                if let Some(server) = &detail.mcp_server {
+                    push(
+                        Some("MCP server"),
+                        visible_text(&format!("{} ({})", server.name, server.source), false),
+                    );
+                }
+                digits = !detail.default_to_no;
+            }
             let mut rows = options
                 .iter()
                 .cloned()
@@ -455,6 +514,8 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
                 entry_index,
                 caption,
                 body,
+                details,
+                digits,
                 rows,
                 step: 0,
             })
@@ -466,6 +527,8 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
                 entry_index,
                 caption: dock.caption,
                 body: dock.body,
+                details: Vec::new(),
+                digits: true,
                 rows: dock.rows,
                 step: *step,
             })
@@ -478,6 +541,8 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
             entry_index,
             caption: "Plan approval".to_string(),
             body: approval.title.clone(),
+            details: Vec::new(),
+            digits: true,
             rows: approval.options.iter().cloned().map(DockRow::Option).collect(),
             step: 0,
         }),
@@ -525,6 +590,41 @@ pub(super) const DOCK_BODY_MAX_HEIGHT: f32 = 160.0;
 pub(super) const DOCK_ARMING_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl Chat {
+    /// The dock as `surface.chat.read` reports it: `""` when no question is
+    /// open, otherwise the JSON of what the dock paints.
+    pub(super) fn question_dock_json(&self) -> String {
+        let Some(view) = question_view(&self.entries) else {
+            return String::new();
+        };
+        let selected = if self.question_dock.for_request == Some((view.request_id, view.step)) {
+            self.question_dock.selected
+        } else {
+            self.entries.get(view.entry_index).map_or(0, start_row)
+        };
+        serde_json::json!({
+            "caption": view.caption,
+            "body": view.body,
+            "details": view
+                .details
+                .iter()
+                .map(|detail| serde_json::json!({"label": detail.label, "text": detail.text}))
+                .collect::<Vec<_>>(),
+            "options": view
+                .rows
+                .iter()
+                .map(|row| match row {
+                    DockRow::Option(option) => {
+                        serde_json::json!({"id": option.id, "label": option.label})
+                    }
+                    other => serde_json::json!({"id": "", "label": other.label()}),
+                })
+                .collect::<Vec<_>>(),
+            "selected": clamp_selection(selected, view.rows.len()),
+            "digits": view.digits,
+        })
+        .to_string()
+    }
+
     /// Keeps the dock's selection and focus in step with the open question.
     /// A new question starts on row 1 and takes the keyboard — but only
     /// from inside this chat, never from another pane. When the last
@@ -548,7 +648,7 @@ impl Chat {
                 self.question_dock.selected = self
                     .entries
                     .get(view.entry_index)
-                    .map_or(0, elicitation_start_row);
+                    .map_or(0, start_row);
                 let focus_in_chat = dock_or_field_focused
                     || composer.contains_focused(window, cx)
                     || self.transcript_focus.is_focused(window);
@@ -703,6 +803,9 @@ impl Chat {
         let Some(view) = question_view(&self.entries) else {
             return;
         };
+        if !view.digits {
+            return;
+        }
         if let Some(index) = row_for_digit(&event.keystroke.key, view.rows.len()) {
             cx.stop_propagation();
             self.activate_dock_row(index, window, cx);
@@ -763,6 +866,7 @@ impl Chat {
             .rows
             .iter()
             .any(|row| matches!(row, DockRow::Option(_)));
+        let digits = view.digits;
 
         let rows = view
             .rows
@@ -770,7 +874,7 @@ impl Chat {
             .enumerate()
             .map(|(index, row)| {
                 let highlighted = index == selected;
-                let badge = badge_label(index).map(|label| {
+                let badge = badge_label(index).filter(|_| digits).map(|label| {
                     div()
                         .flex_none()
                         .w(px(20.0))
@@ -890,10 +994,27 @@ impl Chat {
             })
             .collect::<Vec<_>>();
 
+        // The details scroll with the body inside the one capped area, so a
+        // long reason cannot push the answers off the pane.
+        let details = view
+            .details
+            .into_iter()
+            .map(|detail| {
+                div()
+                    .debug_selector(|| "question-dock-detail".into())
+                    .mt(px(4.0))
+                    .text_size(typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(selectable_text(match detail.label {
+                        Some(label) => format!("{label}: {}", detail.text),
+                        None => detail.text,
+                    }))
+            })
+            .collect::<Vec<_>>();
         let body = div()
             .w_full()
             .min_w_0()
-            .when(!view.body.is_empty(), |body| {
+            .when(!view.body.is_empty() || !details.is_empty(), |body| {
                 body.child(
                     div()
                         .id(("question-dock-body", request_id as usize))
@@ -902,7 +1023,10 @@ impl Chat {
                         .overflow_y_scroll()
                         .text_size(typography.callout)
                         .text_color(theme.ely.fg)
-                        .child(selectable_text(view.body)),
+                        .when(!view.body.is_empty(), |area| {
+                            area.child(selectable_text(view.body))
+                        })
+                        .children(details),
                 )
             })
             .children(error.map(|error| {
@@ -1416,6 +1540,7 @@ pub(super) fn open_permission(request_id: u64, title: &str, labels: &[&str]) -> 
         expired: false,
         dismissed: false,
         withdrawn: false,
+        detail: None,
     }
 }
 
@@ -1461,6 +1586,7 @@ mod tests {
             expired: false,
             dismissed: false,
             withdrawn: false,
+            detail: None,
         }
     }
 

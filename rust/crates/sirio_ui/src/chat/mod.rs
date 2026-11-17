@@ -63,6 +63,7 @@ mod mode_cycle;
 mod prompt_history;
 pub use prompt_history::PromptRecord;
 mod question_dock;
+mod visible_text;
 mod session_panel;
 mod thought;
 mod tool_calls;
@@ -1028,6 +1029,9 @@ enum Entry {
         dismissed: bool,
         /// The agent took the request back; `expired` is set too.
         withdrawn: bool,
+        /// What the CLI said about the ask beyond its title. `None` for ACP,
+        /// a restored card and a structured question.
+        detail: Option<sirio_chat::PermissionDetail>,
     },
     /// An MCP server's request for input: a form walked one field at a
     /// time, or a link to open. Answered from the question dock, and never
@@ -1149,6 +1153,9 @@ pub struct ChatControlSnapshot {
     /// The title Sirio asked the native Claude session to carry: `""` until a
     /// manual rename, then a JSON object `{title, state[, error]}`.
     pub agent_title: String,
+    /// The question dock as it is painted: `""` when no question is open,
+    /// otherwise the JSON `{caption, body, details, options, selected, digits}`.
+    pub question_dock: String,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -1584,6 +1591,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
                 expired,
                 dismissed,
                 withdrawn: false,
+                detail: None,
             }
         }
         ChatEntry::Plan { entries } => Entry::Plan {
@@ -3528,6 +3536,7 @@ impl Chat {
                 title,
                 options,
                 question,
+                detail,
                 ..
             } => {
                 let answer_options = options
@@ -3599,6 +3608,7 @@ impl Chat {
                         expired: false,
                         dismissed: false,
                         withdrawn: false,
+                        detail: detail.filter(|_| !is_question),
                     });
                 }
             }
@@ -4351,6 +4361,7 @@ impl Chat {
             background_tasks: self.background_tasks_json(),
             task_output_retired: self.background.output_retired(),
             agent_title: self.agent_title_json(),
+            question_dock: self.question_dock_json(),
         }
     }
 
@@ -8786,6 +8797,7 @@ mod tests {
             expired: false,
             dismissed: false,
             withdrawn: false,
+            detail: None,
         }
     }
 
@@ -16191,6 +16203,7 @@ two"
                 expired: false,
                 dismissed: false,
                 withdrawn: false,
+                detail: None,
             });
             cx.notify();
         });
@@ -16238,6 +16251,7 @@ two"
                 expired: false,
                 dismissed: false,
                 withdrawn: false,
+                detail: None,
             });
             cx.notify();
         });
@@ -16324,6 +16338,65 @@ two"
             chat.entries.first(),
             Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
         )));
+    }
+
+    /// A permission the CLI would rather have refused (`default_to_no`) starts
+    /// on its rejection, and a digit key, which answers without looking, picks nothing.
+    #[gpui::test]
+    async fn a_digit_does_not_answer_a_default_to_no_card(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::PermissionRequest {
+                    request_id: 7,
+                    session_id: "s".into(),
+                    title: "rm -rf build".into(),
+                    options: ["allow_once", "reject_once"]
+                        .map(|id| sirio_chat::PermissionOption {
+                            id: id.into(),
+                            name: if id == "allow_once" { "Allow" } else { "Reject" }.into(),
+                            kind: if id == "allow_once" { "AllowOnce" } else { "RejectOnce" }
+                                .into(),
+                            description: None,
+                        })
+                        .to_vec(),
+                    question: None,
+                    detail: Some(sirio_chat::PermissionDetail {
+                        default_to_no: true,
+                        ..Default::default()
+                    }),
+                },
+                cx,
+            );
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("1");
+        cx.run_until_parked();
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                matches!(chat.entries.first(), Some(Entry::Permission { resolved: None, .. })),
+                "a digit answered a default-to-no card"
+            );
+        });
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                matches!(
+                    chat.entries.first(),
+                    Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Reject"
+                ),
+                "Enter did not answer with the rejection"
+            );
+        });
     }
 
     /// A queued question cannot be answered until a frame draws that request.

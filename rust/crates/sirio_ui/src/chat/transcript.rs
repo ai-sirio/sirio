@@ -407,7 +407,8 @@ impl Chat {
                 let header = if title.is_empty() {
                     "Permission requested".to_string()
                 } else {
-                    title
+                    // The command the user approved, hidden characters shown.
+                    super::visible_text::visible_text(&title, true)
                 };
                 let status = if let Some(choice) = resolved {
                     format!("Answered: {choice}")

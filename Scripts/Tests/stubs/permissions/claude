@@ -1,0 +1,38 @@
+#!/bin/sh
+# The `claude` of test-chat-session-panel-e2e.sh's permission_* scenarios: the version probe answers at once
+# (above sirio_claude::MIN_CLAUDE_VERSION, so the chat is native); a call with --input-format (the chat and
+# the usage probe) is the stream-json fixture in its `permission` mode (any prompt asks for Bash `rm -rf build`);
+# any other `-p` call is the summarizer, which prints one fixed title. Every SIRIO_FIXTURE_* variable below that
+# the scenario sets is handed to the fixture as its matching flag; an unset one passes nothing:
+#   SIRIO_FIXTURE_PERMISSION_FIELDS  --fixture-permission-fields  a JSON file merged into every can_use_tool
+#   SIRIO_FIXTURE_PERMISSION_RULES   --fixture-permission-rules   the JSON file list_permission_rules answers from
+#   SIRIO_FIXTURE_RULES_LOG          --fixture-rules-log           one line per list_permission_rules heard
+#   SIRIO_FIXTURE_RULES_GATE         --fixture-rules-gate          holds every rules answer until the file exists
+#   SIRIO_FIXTURE_RESULT_GATE        --fixture-result-gate         holds the turn's result until the file exists
+# Every call is recorded in $SIRIO_STUB_LOG when the run names one.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
+case "$1" in
+  --version|-V|version)
+    echo "9.9.9 (Claude Code)"
+    exit 0 ;;
+esac
+for arg in "$@"; do
+  if [ "$arg" = "--input-format" ]; then
+    exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" permission \
+      ${SIRIO_FIXTURE_PERMISSION_FIELDS:+"--fixture-permission-fields=$SIRIO_FIXTURE_PERMISSION_FIELDS"} \
+      ${SIRIO_FIXTURE_PERMISSION_RULES:+"--fixture-permission-rules=$SIRIO_FIXTURE_PERMISSION_RULES"} \
+      ${SIRIO_FIXTURE_RULES_LOG:+"--fixture-rules-log=$SIRIO_FIXTURE_RULES_LOG"} \
+      ${SIRIO_FIXTURE_RULES_GATE:+"--fixture-rules-gate=$SIRIO_FIXTURE_RULES_GATE"} \
+      ${SIRIO_FIXTURE_RESULT_GATE:+"--fixture-result-gate=$SIRIO_FIXTURE_RESULT_GATE"} \
+      "$@"
+  fi
+done
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then
+    echo "Summarized title"
+    exit 0
+  fi
+done
+echo "unexpected claude call: $*" >&2
+exit 1
