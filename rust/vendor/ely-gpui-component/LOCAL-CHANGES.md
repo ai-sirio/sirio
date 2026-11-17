@@ -611,6 +611,21 @@ Fixes of the text field gained on upstream `main` (`7f7a715d`) after
   (`layout/scroll.rs` keeps Sirio's hover change), the property rows, the
   segments, and the status items in the vendored `src/shell/bars.rs` (items
   that shrink and end in an ellipsis).
+  Also not taken, vendored files the listed commits touch: `919f26f`'s
+  `navigation/breadcrumb.rs`; `4580e3b`'s `buttons/button.rs`,
+  `buttons/icon_button.rs`, `overlays/dialog.rs`, `forms/text/actions.rs` (IME
+  Enter handling) and `shell/bars.rs`; `cb5e35f`'s `shell/bars.rs`; and the
+  tests of `9977785`, `919f26f`, `e56a343`, `3a68d1b` and `7d704d9` under
+  `navigation/tests*`, which is not vendored.
+- Local change on top of that verbatim `tabs.rs`: `src/navigation/tabs.rs:140`,
+  `compact` (icons only, no notes, empty tooltips) additionally requires
+  `tabs.iter().any(|tab| !tab.label.is_empty())`. Upstream goes compact for any
+  strip whose tabs all have icons; a strip with icons and no label at all (Sirio's
+  change-request filter, `right_panel/change_requests.rs`, labels empty by
+  design) has nothing to drop, so at the panel's 220 px floor it lost its
+  To-review count and got an empty tooltip and aria label per tab. It now never
+  goes compact, keeps its notes and scrolls like any other strip. A sync must
+  keep the condition.
 - Skipped, not vendored: `collab/remote.rs` and `terminal/paint.rs`.
 - Skipped, not taken (vendored files whose hunks of these commits were left
   out; the port documents them and does not apply them):
