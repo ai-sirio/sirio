@@ -758,6 +758,15 @@ pub struct Sidebar {
     clock: Option<gpui::Task<()>>,
 }
 
+/// What choosing a session emits, whichever list it was chosen from.
+fn session_event(target: SessionTarget) -> SidebarEvent {
+    match target {
+        SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
+        SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab { path, index },
+        SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id),
+    }
+}
+
 impl Sidebar {
     /// Text for the worktree-location field, which is *not* a label: what it
     /// holds is persisted as the project's worktree base and handed to
@@ -937,11 +946,7 @@ impl Sidebar {
         if self.armed_delete.take().is_some() {
             cx.notify();
         }
-        cx.emit(match row.target {
-            SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
-            SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab { path, index },
-            SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id),
-        });
+        cx.emit(session_event(row.target));
     }
 
     /// Creates the expanded fixture shown by the reference sidebar capture.
@@ -3657,7 +3662,7 @@ impl Sidebar {
     fn render_header(
         &self,
         theme: &Theme,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let view = self.view;
@@ -3709,16 +3714,16 @@ impl Sidebar {
             )
             .when_some(menu, |this, menu| this.child(menu))
             .child(div().flex_1())
-            .child(self.render_bell(theme, cx))
+            .child(self.render_bell(theme, window.viewport_size().height - px(40.0 + 24.0), cx))
             .into_any_element()
     }
 
     /// The bell: a ghost icon button wearing a dot for the most severe thing
     /// that wants the user, and the list of those sessions under it.
-    fn render_bell(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_bell(&self, theme: &Theme, max_menu_height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
         let open = sessions::session_list(&self.rows, &[], "").open;
         let entries = sessions::bell_entries(&open);
-        let signal = entries.first().map(|(reason, _)| *reason);
+        let signal = sessions::bell_signal(&open);
         let button = EIconButton::new("sidebar-bell-button", IconName::Bell)
             .size(EControlSize::Sm)
             .tooltip("Notifications")
@@ -3748,6 +3753,7 @@ impl Sidebar {
                 cx.entity(),
                 rows,
                 self.bell_opened_at_ms,
+                max_menu_height,
                 *theme,
                 cx,
             )
@@ -3773,6 +3779,7 @@ impl Sidebar {
         entity: gpui::Entity<Self>,
         entries: Vec<(sessions::BellReason, sessions::SessionRow)>,
         opened_at_ms: i64,
+        max_height: Pixels,
         theme: Theme,
         cx: &App,
     ) -> impl IntoElement {
@@ -3780,6 +3787,8 @@ impl Sidebar {
         let mut card = menu_card("sidebar-bell-menu", cx)
             .debug_selector(|| "sidebar-bell-menu".to_owned())
             .w(px(280.0))
+            .max_h(max_height)
+            .overflow_y_scroll()
             .text_size(theme.typography.ui_size)
             .on_mouse_down_out(move |_, _, cx| {
                 outside.update(cx, |sidebar, cx| sidebar.close_bell_menu(cx));
@@ -3788,6 +3797,7 @@ impl Sidebar {
             card = card.child(
                 div()
                     .debug_selector(|| "sidebar-bell-empty".to_owned())
+                    .self_start()
                     .px(px(8.0))
                     .py(px(8.0))
                     .text_color(theme.ely.fg_muted)
@@ -3818,13 +3828,7 @@ impl Sidebar {
                         let target = event_row.target.clone();
                         click_entity.update(cx, |sidebar, cx| {
                             sidebar.close_bell_menu(cx);
-                            cx.emit(match target {
-                                SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
-                                SessionTarget::Parked { path, index } => {
-                                    SidebarEvent::SelectParkedTab { path, index }
-                                }
-                                SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id),
-                            });
+                            cx.emit(session_event(target));
                         })
                     })
                     .child(menu_label(row.title.clone()).flex_none().w_full())
@@ -8743,8 +8747,83 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
         click_control(&mut cx, "sidebar-bell");
-        assert!(cx.debug_bounds("sidebar-bell-empty").is_some());
+        let empty = cx.debug_bounds("sidebar-bell-empty").expect("the empty line is drawn");
         assert!(cx.debug_bounds("sidebar-bell-entry-0").is_none());
+        // The line is as wide as its text plus its 8 px padding either side:
+        // a different or missing string would not measure the same.
+        let theme = cx.update(|_, cx| Theme::get(cx).with_sidebar_typography());
+        let shaped = cx.update(|window, _| {
+            let style = window.text_style();
+            let run = style.to_run("Nothing needs you".len());
+            window.text_system().shape_line(
+                "Nothing needs you".into(),
+                theme.typography.ui_size,
+                &[run],
+                None,
+            )
+        });
+        let want = f32::from(shaped.width) + 16.0;
+        assert!(
+            (f32::from(empty.size.width) - want).abs() < 1.5,
+            "width {:?} vs text {want}",
+            empty.size.width
+        );
+    }
+
+    fn bell_tab(id: usize, status: Option<ActivityStatus>, unread: bool) -> SidebarTab {
+        SidebarTab {
+            tab: SidebarTabRef::Open(id),
+            title: format!("Chat {id}"),
+            selected: false,
+            kind: TabKind::AgentChat,
+            agent: AgentMark::for_agent_id("pi"),
+            persistence_id: format!("tab-{id}"),
+            status,
+            last_event_at: Some(1_000),
+            unread,
+        }
+    }
+
+    #[gpui::test]
+    async fn an_error_outranks_a_needs_input_session_on_the_bell(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = tests_support::sidebar_with_one_project(cx);
+            sidebar.set_worktree_tabs(
+                1,
+                vec![
+                    bell_tab(1, Some(ActivityStatus::NeedsInput), false),
+                    bell_tab(2, Some(ActivityStatus::Error), false),
+                ],
+                cx,
+            );
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-dot-error").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
+    }
+
+    #[gpui::test]
+    async fn an_unread_session_alone_gives_the_unread_dot(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = tests_support::sidebar_with_one_project(cx);
+            sidebar.set_worktree_tabs(
+                1,
+                vec![bell_tab(1, Some(ActivityStatus::Done), true)],
+                cx,
+            );
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-dot-unread").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-error").is_none());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
     }
 
     #[gpui::test]
