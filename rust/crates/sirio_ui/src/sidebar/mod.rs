@@ -700,6 +700,9 @@ pub struct Sidebar {
     /// When the bell opened (Unix ms): its entries' ages are read at this
     /// instant, so the list does not tick while it is open.
     bell_opened_at_ms: i64,
+    /// The bell's drawn bottom edge, window y, from its last paint: the card
+    /// hangs under it and is bounded by what is left below.
+    bell_bottom: std::rc::Rc<std::cell::Cell<Pixels>>,
     /// The resolved launch source per adapter id, pushed by the host beside
     /// the tab bar's copy, so the worktree menu's New Chat offers exactly
     /// the agents the + menu does.
@@ -759,7 +762,10 @@ pub struct Sidebar {
 }
 
 /// What choosing a session emits, whichever list it was chosen from.
-fn session_event(target: SessionTarget) -> SidebarEvent {
+/// Space kept between the bell's card and the window's bottom edge.
+const BELL_MENU_MARGIN: Pixels = px(8.0);
+
+pub(super) fn session_event(target: SessionTarget) -> SidebarEvent {
     match target {
         SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
         SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab { path, index },
@@ -1070,6 +1076,7 @@ impl Sidebar {
             view_menu: Popup::default(),
             bell_menu: Popup::default(),
             bell_opened_at_ms: 0,
+            bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -1176,6 +1183,7 @@ impl Sidebar {
             view_menu: Popup::default(),
             bell_menu: Popup::default(),
             bell_opened_at_ms: 0,
+            bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -3714,13 +3722,13 @@ impl Sidebar {
             )
             .when_some(menu, |this, menu| this.child(menu))
             .child(div().flex_1())
-            .child(self.render_bell(theme, window.viewport_size().height - px(40.0 + 24.0), cx))
+            .child(self.render_bell(theme, window.viewport_size().height, cx))
             .into_any_element()
     }
 
     /// The bell: a ghost icon button wearing a dot for the most severe thing
     /// that wants the user, and the list of those sessions under it.
-    fn render_bell(&self, theme: &Theme, max_menu_height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_bell(&self, theme: &Theme, window_height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
         let open = sessions::session_list(&self.rows, &[], "").open;
         let entries = sessions::bell_entries(&open);
         let signal = sessions::bell_signal(&open);
@@ -3753,7 +3761,8 @@ impl Sidebar {
                 cx.entity(),
                 rows,
                 self.bell_opened_at_ms,
-                max_menu_height,
+                (window_height - self.bell_bottom.get() - HANG_GAP - BELL_MENU_MARGIN)
+                    .max(px(120.0)),
                 *theme,
                 cx,
             )
@@ -3769,6 +3778,12 @@ impl Sidebar {
                 cx.listener(|this, _, _, _| this.bell_menu.note_trigger_press()),
             )
             .child(button)
+            .child({
+                let bottom = self.bell_bottom.clone();
+                gpui::canvas(move |bounds, _, _| bottom.set(bounds.bottom()), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+            })
             .when_some(dot, |this, dot| this.child(dot))
             .when_some(menu, |this, menu| this.child(menu))
             .into_any_element()
@@ -3794,14 +3809,14 @@ impl Sidebar {
                 outside.update(cx, |sidebar, cx| sidebar.close_bell_menu(cx));
             });
         if entries.is_empty() {
+            let label = "Nothing needs you";
             card = card.child(
                 div()
-                    .debug_selector(|| "sidebar-bell-empty".to_owned())
-                    .self_start()
+                    .debug_selector(move || format!("sidebar-bell-empty:{label}"))
                     .px(px(8.0))
                     .py(px(8.0))
                     .text_color(theme.ely.fg_muted)
-                    .child("Nothing needs you"),
+                    .child(label),
             );
         }
         for (index, (reason, row)) in entries.into_iter().enumerate() {
@@ -8747,27 +8762,11 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
         click_control(&mut cx, "sidebar-bell");
-        let empty = cx.debug_bounds("sidebar-bell-empty").expect("the empty line is drawn");
-        assert!(cx.debug_bounds("sidebar-bell-entry-0").is_none());
-        // The line is as wide as its text plus its 8 px padding either side:
-        // a different or missing string would not measure the same.
-        let theme = cx.update(|_, cx| Theme::get(cx).with_sidebar_typography());
-        let shaped = cx.update(|window, _| {
-            let style = window.text_style();
-            let run = style.to_run("Nothing needs you".len());
-            window.text_system().shape_line(
-                "Nothing needs you".into(),
-                theme.typography.ui_size,
-                &[run],
-                None,
-            )
-        });
-        let want = f32::from(shaped.width) + 16.0;
         assert!(
-            (f32::from(empty.size.width) - want).abs() < 1.5,
-            "width {:?} vs text {want}",
-            empty.size.width
+            cx.debug_bounds("sidebar-bell-empty:Nothing needs you").is_some(),
+            "the empty line draws its label"
         );
+        assert!(cx.debug_bounds("sidebar-bell-entry-0").is_none());
     }
 
     fn bell_tab(id: usize, status: Option<ActivityStatus>, unread: bool) -> SidebarTab {

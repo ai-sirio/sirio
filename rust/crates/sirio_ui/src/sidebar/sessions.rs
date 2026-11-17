@@ -691,14 +691,7 @@ impl Sidebar {
             .when(!row.selected, |this| this.hover(|style| style.bg(theme.ely.hover)))
             .when(cursor, |this| this.border_1().border_color(theme.sirio.quantity))
             .on_click(move |_, window, cx| {
-                let event = match &select_target {
-                    SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
-                    SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab {
-                        path: path.clone(),
-                        index: *index,
-                    },
-                    SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id.clone()),
-                };
+                let event = session_event(select_target.clone());
                 select_entity.update(cx, |sidebar, cx| {
                     let focus_index = sidebar
                         .session_walk()
