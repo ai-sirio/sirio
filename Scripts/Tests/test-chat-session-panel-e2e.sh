@@ -2094,7 +2094,7 @@ scenario_reload_skills_refused() {
   expect_since "$mark" reload_plugins 1 "one plugin reload"
   [ "$(control_after_first "$mark" reload_plugins reload_skills)" = 1 ] || fail "reload_skills did not follow reload_plugins"
   check_panel "the server rows are unchanged but for the plugin's" \
-    "set(r['key'] for r in rows('connectors') if r['depth'] == 1 and not r['key'].startswith('connectors/plugins/')) == set(['$CODEGRAPH', '$NOTION']) and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
+    "set(r['key'] for r in rows('connectors') if r['depth'] == 1) - set(['$PLUGIN_SERVER', 'connectors/plugins/plugin:pa:\u202ex']) == set(['$CODEGRAPH', '$NOTION']) and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
   sleep 1
   expect_since "$mark" reload_skills 1 "a refused skill reload is not sent again"
   reload_no_toggle "$mark"

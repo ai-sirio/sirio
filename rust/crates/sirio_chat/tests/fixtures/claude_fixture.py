@@ -353,6 +353,8 @@ PLUGIN_READ = False
 CURRENT_COMMANDS = []
 PLUGIN_SERVER = "plugin:pa:m"
 RLO = "\u202e"
+# A plugin-authored name with a bidi override, listed once the plugin applies.
+PLUGIN_RLO_SERVER = "plugin:pa:" + RLO + "x"
 # `--fixture-toggle=unread`: set by an applied toggle, spent by the next `mcp_status`.
 UNREAD_NEXT = [False]
 
@@ -376,7 +378,7 @@ def session_panel_servers():
             servers.append({"name": PLUGIN_SERVER,
                             "status": "connected" if PLUGIN_READ else "pending",
                             "source": "plugin", "scope": "plugin"})
-            servers.append({"name": "plugin:pa:" + RLO + "x",
+            servers.append({"name": PLUGIN_RLO_SERVER,
                             "status": "connected",
                             "source": "plugin", "scope": "plugin"})
             PLUGIN_READ = True
@@ -422,7 +424,7 @@ def answer_toggle(request_id, request):
         control_error(request_id, "mcp_toggle: enabled must be a boolean")
         return
     with PANEL_LOCK:
-        known = ["claude.ai Notion", "codegraph"] + ([PLUGIN_SERVER] if PLUGIN_APPLIED else [])
+        known = ["claude.ai Notion", "codegraph"] + ([PLUGIN_SERVER, PLUGIN_RLO_SERVER] if PLUGIN_APPLIED else [])
         if TOGGLE_KIND == "missing" or name not in known:
             control_error(request_id, f"Server not found: {name}")
             return

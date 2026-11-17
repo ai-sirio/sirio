@@ -106,7 +106,7 @@ Sirio sends `mcp_toggle` only for that click or that action, never on connect, r
 reload, retry or a new session. The switch's state is read only from `mcp_status`: a server reading
 `disabled` is off, so a row's `switch` in the `sessionPanel` JSON is `true`, `false` or, once the
 switches are hidden, `null`, and `switchEnabled` says whether the switch takes a click (`false` while a call
-about the server is open, `null` with no switch); while a toggle is open the row reads `switching…` and shows the state
+about the server is open, bar the sign-in wait, which a switch ends; `null` with no switch); while a toggle is open the row reads `switching…` and shows the state
 asked for, and a second flip of that server fails and sends nothing. A switch to the state the row
 already shows sends nothing. The saved state is Claude Code's: it writes it per folder, in its own
 settings, and a sibling worktree, being another folder, does not share it. For a user or project
