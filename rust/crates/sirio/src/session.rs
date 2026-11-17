@@ -30,11 +30,14 @@
 //! most once per [`DEBOUNCE_INTERVAL`], coalescing a burst of changes into
 //! one transactional write. `flush_now` covers quit: the window-closed hook
 //! calls it so the last action is never lost to the debounce window.
+//! Session-ref writes are not debounced but queued, in call order, for one
+//! writer thread once the mirror is installed; `flush_now` drains that queue
+//! too.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -1871,9 +1874,14 @@ struct SessionInner {
     layout_saves: AtomicUsize,
     /// The control handler's in-memory map of pane refs (`system.identify`,
     /// `session.transcript`), set once at startup by `mirror_session_refs`: every write
-    /// below keeps it and the database the same.
+    /// below updates it at once, under the ref lock, and the database follows through the
+    /// ref queue.
     mirror: Mutex<Option<Arc<Mutex<BTreeMap<String, String>>>>>,
+    /// The queue of ref statements and its counters; its mutex is "the ref lock", taken
+    /// before `ended`, the mirror and the database (see [`SessionStore::record_ref_op`]).
+    refs: Arc<RefQueue>,
     /// The pane keys a close ended in this run (see [`SessionStore::end_session_ref`]).
+    /// Read and changed under the ref lock.
     /// Within one run the pane-id allocator only grows, so it never hands an ended key out
     /// again: a ref reported for it comes from the dead pane. A layout restored with
     /// duplicate ids, when the startup dedup did not run (the host was unavailable at
@@ -1886,7 +1894,152 @@ struct SessionInner {
     /// ([`SessionStore::delete_refs_named_by_several_layouts`]) and handed to the workspace's
     /// pane-id allocator once ([`SessionStore::take_startup_pane_floor`]).
     startup_pane_floor: Mutex<Option<usize>>,
+    /// Held by [`flush_if_due`] from its ref drain to the end of its layout write, so a
+    /// `flush_now` that finds no layout pending has still waited for one the flusher took.
+    flushing: Mutex<()>,
+    /// Whether the database opened; `db` never changes after `open`. Read without its lock.
+    persistent: bool,
     interval: Duration,
+}
+
+/// The writer thread's body. Only this thread pops, from the front, so the database ends in
+/// call order. It takes a strong handle before popping, so the store cannot drop with an op
+/// popped and unwritten, and holds the ref lock only to pop and to count, never while it
+/// waits for or holds the database lock.
+fn ref_writer_loop(queue: &RefQueue, inner: &std::sync::Weak<SessionInner>) {
+    loop {
+        {
+            let mut state = queue
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while state.ops.is_empty() && !state.closed {
+                state = queue
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            if state.closed {
+                return;
+            }
+        }
+        let Some(strong) = inner.upgrade() else {
+            return;
+        };
+        loop {
+            let Some(op) = queue
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .ops
+                .pop_front()
+            else {
+                break;
+            };
+            {
+                let mut db = strong
+                    .db
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    write_ref_op(db.as_mut(), &op, &strong.writes);
+                }));
+            }
+            queue
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .applied += 1;
+            queue.changed.notify_all();
+        }
+        // May be the last handle: Drop runs here, with no lock held.
+        drop(strong);
+    }
+}
+
+/// One session-ref statement waiting for the writer thread.
+enum RefOp {
+    Save { key: String, reference: String },
+    Delete { key: String },
+}
+
+/// The ref queue's state, under the ref lock. `enqueued` counts the ops ever queued and
+/// `applied` those the writer finished (written or failed), so a drain waits for a count,
+/// not for an empty queue: a popped op may not be committed yet. `writer` is set once the
+/// writer thread started; `closed` when the store is dropping.
+#[derive(Default)]
+struct RefQueueState {
+    ops: VecDeque<RefOp>,
+    enqueued: u64,
+    applied: u64,
+    writer: bool,
+    closed: bool,
+}
+
+struct RefQueue {
+    state: Mutex<RefQueueState>,
+    changed: Condvar,
+}
+
+/// Runs one ref statement, the only place that does. Failures are logged, never raised.
+/// `None` is fallback mode: nothing to write. A debug build then logs the thread the
+/// statement ran on (after it, so a failed log line cannot cost the write); the hand-agents
+/// E2E reads it to check no ref statement runs on the UI thread.
+fn write_ref_op(db: Option<&mut AppDatabase>, op: &RefOp, writes: &AtomicUsize) {
+    let Some(db) = db else {
+        return;
+    };
+    let (result, verb, key) = match op {
+        RefOp::Save { key, reference } => (db.save_session_ref(key, reference), "save", key),
+        RefOp::Delete { key } => (db.delete_session_ref(key), "delete", key),
+    };
+    match result {
+        Ok(()) => {
+            writes.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(error) if verb == "save" => {
+            eprintln!("[session] failed to persist session reference: {error}");
+        }
+        Err(error) => {
+            eprintln!("[session] failed to delete session reference: {error}");
+        }
+    }
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[session] session ref {verb} {key} ran on thread {}",
+        std::thread::current().name().unwrap_or("unnamed")
+    );
+    #[cfg(not(debug_assertions))]
+    let _ = (verb, key);
+}
+
+impl Drop for SessionInner {
+    /// The last handle is gone, so no op can be added: writes what the writer has not taken.
+    fn drop(&mut self) {
+        let remaining = {
+            let mut state = self
+                .refs
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closed = true;
+            std::mem::take(&mut state.ops)
+        };
+        let count = remaining.len() as u64;
+        let db = self
+            .db
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for op in &remaining {
+            write_ref_op(db.as_mut(), op, &self.writes);
+        }
+        self.refs
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .applied += count;
+        self.refs.changed.notify_all();
+    }
 }
 
 fn forge_word(forge: sirio_forge::Forge) -> &'static str {
@@ -1929,6 +2082,7 @@ impl SessionStore {
                 None
             }
         };
+        let persistent = db.is_some();
         let store = Self {
             inner: Arc::new(SessionInner {
                 path: path.to_path_buf(),
@@ -1939,12 +2093,38 @@ impl SessionStore {
                 layout_saves: AtomicUsize::new(0),
                 mirror: Mutex::new(None),
                 ended: Mutex::new(HashSet::new()),
+                refs: Arc::new(RefQueue {
+                    state: Mutex::new(RefQueueState::default()),
+                    changed: Condvar::new(),
+                }),
                 startup_pane_floor: Mutex::new(None),
+                flushing: Mutex::new(()),
+                persistent,
                 interval,
             }),
         };
         store.spawn_flusher();
+        store.spawn_ref_writer();
         store
+    }
+
+    /// Starts the thread that applies the queued ref writes, in order. It holds the queue
+    /// and a *weak* reference to the shared state, like the flusher. Without the thread
+    /// (the spawn failed) `writer` stays false and ref writes run on the caller's thread.
+    fn spawn_ref_writer(&self) {
+        let queue = self.inner.refs.clone();
+        let inner = Arc::downgrade(&self.inner);
+        let spawned = std::thread::Builder::new()
+            .name("sirio-session-refs".into())
+            .spawn(move || ref_writer_loop(&queue, &inner));
+        match spawned {
+            Ok(_) => {
+                self.lock_refs().writer = true;
+            }
+            Err(error) => {
+                eprintln!("[session] cannot start the session ref writer ({error}); writing refs inline");
+            }
+        }
     }
 
     fn spawn_flusher(&self) {
@@ -2192,6 +2372,7 @@ impl SessionStore {
         working_directory: &Path,
         edit: impl FnOnce(&mut RestoredSession) -> bool,
     ) -> bool {
+        wait_for_ref_writes(&self.inner);
         let mut db = self
             .inner
             .db
@@ -2241,6 +2422,7 @@ impl SessionStore {
     /// restores (attaches) to its session. `false` when the worktree has no
     /// row yet, and nothing is written.
     pub fn append_terminal_tab(&self, working_directory: &Path, leaf: usize, title: &str) -> bool {
+        wait_for_ref_writes(&self.inner);
         let mut db = self
             .inner
             .db
@@ -2594,6 +2776,7 @@ impl SessionStore {
     /// for the worktree it is about to leave.
     pub fn save_layout_now(&self, layout: &SessionLayout) {
         let _perf = sirio_perf::span("SessionStore.save_layout_now", 0);
+        wait_for_ref_writes(&self.inner);
         let mut db = self
             .inner
             .db
@@ -2695,8 +2878,17 @@ impl SessionStore {
     }
 
     /// Loads pane-to-agent-session associations, or an empty map when the
-    /// database is unavailable.
+    /// database is unavailable. With the mirror installed it is the mirror's copy: the
+    /// database as it was at startup plus every write since, queued ones included.
     pub fn load_session_refs(&self) -> BTreeMap<String, String> {
+        if self.inner.persistent
+            && let Some(map) = self.mirror_map()
+        {
+            return map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+        }
         let db = self
             .inner
             .db
@@ -2724,33 +2916,68 @@ impl SessionStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map);
     }
 
-    /// Runs `change` on the mirrored map, if there is one.
-    fn with_mirror(&self, change: impl FnOnce(&mut BTreeMap<String, String>)) {
-        let mirror = self
-            .inner
+    /// The mirrored map, if one is installed.
+    fn mirror_map(&self) -> Option<Arc<Mutex<BTreeMap<String, String>>>> {
+        self.inner
             .mirror
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(map) = mirror {
-            change(&mut map.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            .clone()
+    }
+
+    /// Takes the ref lock, the first lock of every ref writer (order: the ref lock, `ended`,
+    /// the mirror slot, the map, and on the synchronous path the database; nothing holding
+    /// one of the later locks takes an earlier one).
+    fn lock_refs(&self) -> std::sync::MutexGuard<'_, RefQueueState> {
+        self.inner
+            .refs
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Records one ref write; the caller holds the ref lock. The mirror follows at once. With
+    /// the mirror installed and the writer thread running, the statement is queued for the
+    /// writer and the caller never touches the database lock, so the UI thread does not wait
+    /// behind the flusher's layout transaction. Without them (startup, before the first tab,
+    /// or a failed thread spawn) the statement runs here, as it always did.
+    fn record_ref_op(&self, state: &mut std::sync::MutexGuard<'_, RefQueueState>, op: RefOp) {
+        let mirror = self.mirror_map();
+        if let Some(map) = &mirror {
+            let mut map = map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &op {
+                RefOp::Save { key, reference } => {
+                    map.insert(key.clone(), reference.clone());
+                }
+                RefOp::Delete { key } => {
+                    map.remove(key);
+                }
+            }
         }
+        if mirror.is_some() && state.writer {
+            state.ops.push_back(op);
+            state.enqueued += 1;
+            self.inner.refs.changed.notify_all();
+            return;
+        }
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        write_ref_op(db.as_mut(), &op, &self.inner.writes);
     }
 
     /// Deletes the row under a key a fresh pane is about to take, but only when the mirror
-    /// holds one, so the common tab open writes nothing to the database from the UI thread.
-    /// The mirror holds every row the database had at startup and every write made through
-    /// this store since; a row another connection writes while the app runs is not in it and
-    /// stays (a limit: the E2E seeds such a row through the control socket). With no mirror
-    /// installed yet, the row is deleted.
+    /// holds one, so the common tab open queues nothing. The mirror holds every row the
+    /// database had at startup and every write made through this store since; a row another
+    /// connection writes while the app runs is not in it and stays (a limit: the E2E seeds
+    /// such a row through the control socket). With no mirror installed yet, the row is
+    /// deleted. Once the mirror is installed no ref write runs a statement on the caller's
+    /// thread.
     pub fn delete_fresh_session_ref(&self, session: &str) {
-        let mirror = self
-            .inner
-            .mirror
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(map) = mirror
+        let mut state = self.lock_refs();
+        if let Some(map) = self.mirror_map()
             && !map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2758,13 +2985,19 @@ impl SessionStore {
         {
             return;
         }
-        self.delete_session_ref(session);
+        self.record_ref_op(
+            &mut state,
+            RefOp::Delete {
+                key: session.to_string(),
+            },
+        );
     }
 
     /// Saves a pane's ref, as the control socket reports it (a hook, the OpenCode 1.x plugin,
     /// `sirioctl session-ref`) or as Sirio created it (an OpenCode 2 tab's session),
-    /// immediately: a hook write, not a layout snapshot, so it does not wait for the layout
-    /// debounce window. The mirrored map follows. `false`, with nothing written, when a close
+    /// at once: a hook write, not a layout snapshot, so it does not wait for the layout
+    /// debounce window. The mirrored map changes now and the row follows on the writer
+    /// thread ([`Self::record_ref_op`]). `false`, with nothing written, when a close
     /// ended that pane's session in this run: a report can only come from the dead pane, as
     /// Claude's `SessionEnd` hook lands after the close deleted the row. Sirio's own save runs
     /// only for a tab that still exists (in the active strip or a parked one), under a key the
@@ -2772,15 +3005,10 @@ impl SessionStore {
     /// refused the same way. Only a restore that
     /// hands the key to a pane again lifts the mark ([`Self::lift_ended`]).
     pub fn save_session_ref(&self, session: &str, reference: &str) -> bool {
-        // The mirror changes while the database lock is held, so a save and a delete of one
-        // key from two threads leave the map and the database in the same state. Lock order:
-        // the database, then `ended`, then the mirror; nothing holding the map takes the
-        // database.
-        let mut db = self
-            .inner
-            .db
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Decided in memory under the ref lock: the check of `ended` and the record of the
+        // write are one step, so a save and a delete of one key from two threads reach the
+        // mirror and the database in the same order.
+        let mut state = self.lock_refs();
         if self
             .inner
             .ended
@@ -2790,40 +3018,14 @@ impl SessionStore {
         {
             return false;
         }
-        self.write_session_ref(&mut db, session, reference);
+        self.record_ref_op(
+            &mut state,
+            RefOp::Save {
+                key: session.to_string(),
+                reference: reference.to_string(),
+            },
+        );
         true
-    }
-
-    /// The row and mirror write of a save, under the caller's database lock.
-    fn write_session_ref(
-        &self,
-        db: &mut std::sync::MutexGuard<'_, Option<AppDatabase>>,
-        session: &str,
-        reference: &str,
-    ) {
-        self.with_mirror(|map| {
-            map.insert(session.to_string(), reference.to_string());
-        });
-        let Some(db) = db.as_mut() else {
-            return;
-        };
-        match db.save_session_ref(session, reference) {
-            Ok(()) => {
-                self.inner.writes.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(error) => {
-                eprintln!("[session] failed to persist session reference: {error}");
-            }
-        }
-    }
-
-    /// Lifts a close's mark from `session`. The caller holds the database lock.
-    fn unmark_ended(&self, session: &str) {
-        self.inner
-            .ended
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(session);
     }
 
     /// The first path of each distinct database worktree among `worktrees`, in order. Paths
@@ -2928,15 +3130,16 @@ impl SessionStore {
     /// Lifts a close's mark from each of `sessions` (`pane-N` keys), for a restore that hands
     /// those keys to panes again: a worktree closed in this run and selected again restores its
     /// tabs under the keys the close ended, and the new processes' reports must land. Takes the
-    /// database lock first, like [`Self::save_session_ref`].
+    /// ref lock first, like [`Self::save_session_ref`].
     pub fn lift_ended(&self, sessions: impl IntoIterator<Item = String>) {
-        let _db = self
+        let _state = self.lock_refs();
+        let mut ended = self
             .inner
-            .db
+            .ended
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for session in sessions {
-            self.unmark_ended(&session);
+            ended.remove(&session);
         }
     }
 
@@ -2944,53 +3147,38 @@ impl SessionStore {
     /// reused, so a ref left behind would resume another pane's session. It frees a key
     /// without handing it out, so it leaves a close's mark in place.
     pub fn delete_session_ref(&self, session: &str) {
-        // Under the database lock, like `save_session_ref`.
-        let mut db = self
-            .inner
-            .db
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.delete_session_ref_locked(&mut db, session);
+        let mut state = self.lock_refs();
+        self.record_ref_op(
+            &mut state,
+            RefOp::Delete {
+                key: session.to_string(),
+            },
+        );
     }
 
     /// For a close that ends the pane's session: marks `session` ended, so
     /// [`Self::save_session_ref`] refuses the dead pane's late writes, then deletes
     /// the row and the mirror's entry as [`Self::delete_session_ref`] does.
     pub fn end_session_ref(&self, session: &str) {
-        // Same lock order as `save_session_ref`: the database, then `ended`, then the mirror.
-        let mut db = self
-            .inner
-            .db
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.lock_refs();
         self.inner
             .ended
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session.to_string());
-        self.delete_session_ref_locked(&mut db, session);
+        self.record_ref_op(
+            &mut state,
+            RefOp::Delete {
+                key: session.to_string(),
+            },
+        );
     }
 
-    /// The row and mirror delete, under the caller's database lock.
-    fn delete_session_ref_locked(
-        &self,
-        db: &mut std::sync::MutexGuard<'_, Option<AppDatabase>>,
-        session: &str,
-    ) {
-        self.with_mirror(|map| {
-            map.remove(session);
-        });
-        let Some(db) = db.as_mut() else {
-            return;
-        };
-        match db.delete_session_ref(session) {
-            Ok(()) => {
-                self.inner.writes.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(error) => {
-                eprintln!("[session] failed to delete session reference: {error}");
-            }
-        }
+    /// Returns once every ref write recorded before the call is in the database (or failed);
+    /// see the free [`wait_for_ref_writes`]. The control handler calls it after a reported
+    /// ref, so the hook or `sirioctl session-ref` that returns has its row on disk.
+    pub fn wait_for_ref_writes(&self) {
+        wait_for_ref_writes(&self.inner);
     }
 
     /// Archives a closed chat (see `AppDatabase::archive_tab`).
@@ -3247,7 +3435,9 @@ impl SessionStore {
 
     /// Flushes the pending layout immediately (synchronously), ignoring the
     /// debounce window. Called on window close so quitting never loses the
-    /// last change.
+    /// last change. Through [`flush_if_due`] it also drains the session-ref
+    /// queue, layout or no layout pending, and waits for a layout the flusher
+    /// is writing, so a quit never exits with a ref or a layout write in flight.
     pub fn flush_now(&self) {
         let _perf = sirio_perf::span("SessionStore.flush_now", 0);
         *self
@@ -3269,12 +3459,46 @@ impl SessionStore {
     }
 }
 
+/// Returns once every ref write recorded before the call is in the database (or failed). It
+/// waits for the count of applied writes to reach the count queued at the call, never for an
+/// empty queue: the writer pops an op before its statement commits. A layout write calls it
+/// first, so a layout never reaches the disk ahead of a ref write recorded before it, the
+/// order the synchronous writes gave: a layout naming a fresh or moved pane must not land
+/// before the delete of that key's stale row. Never call it while holding the database lock
+/// or the ref lock: the writer needs the first, and the wait itself takes the second.
+fn wait_for_ref_writes(inner: &SessionInner) {
+    let mut state = inner
+        .refs
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let target = state.enqueued;
+    while state.applied < target && !state.closed {
+        state = inner
+            .refs
+            .changed
+            .wait(state)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
 /// One debounce-checked flush: writes the pending layout when one exists and
 /// the interval has elapsed since the last flush. Never panics; database
 /// errors are logged and the pending snapshot is dropped (the next change
 /// retries).
 fn flush_if_due(inner: &SessionInner) {
-    let (due, layout) = {
+    // One flush at a time, from the drain to the end of the write: `flush_now` waits here for
+    // a layout the flusher thread has taken, instead of finding `pending` empty and returning
+    // while that write is still in flight.
+    let _flushing = inner
+        .flushing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The ref queue drains first, every time (it is `flush_now`'s drain too), and before the
+    // layout is taken, so a taken layout does not wait for it. The count is checked again
+    // under `pending`, so the layout never lands ahead of a ref write recorded before it.
+    let layout = loop {
+        wait_for_ref_writes(inner);
         let mut pending = inner
             .pending
             .lock()
@@ -3283,19 +3507,24 @@ fn flush_if_due(inner: &SessionInner) {
             .next_flush
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.is_none() || Instant::now() < *next_flush {
+            return;
+        }
+        let refs = inner
+            .refs
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if refs.applied < refs.enqueued && !refs.closed {
+            continue;
+        }
+        drop(refs);
+        *next_flush = Instant::now() + inner.interval;
         let Some(layout) = pending.take() else {
             return;
         };
-        if Instant::now() < *next_flush {
-            *pending = Some(layout);
-            return;
-        }
-        *next_flush = Instant::now() + inner.interval;
-        (true, layout)
+        break layout;
     };
-    if !due {
-        return;
-    }
     let mut db = inner
         .db
         .lock()
@@ -5585,5 +5814,119 @@ mod tests {
             app_support_root_for(&fallback),
             PathBuf::from("/home/alice/.local/state/Sirio")
         );
+    }
+
+    /// The session-ref rows as a second connection reads them: what the next start loads,
+    /// whatever the store's own lock and mirror hold.
+    fn refs_on_disk(db_path: &Path) -> BTreeMap<String, String> {
+        AppDatabase::open(db_path)
+            .expect("open a second connection")
+            .session_refs()
+            .expect("read the session refs")
+    }
+
+    /// A store with the mirror installed, as the app installs it at startup.
+    fn store_with_mirror(db_path: &Path) -> (SessionStore, Arc<Mutex<BTreeMap<String, String>>>) {
+        let store = SessionStore::open(db_path);
+        let mirror = Arc::new(Mutex::new(store.load_session_refs()));
+        store.mirror_session_refs(mirror.clone());
+        (store, mirror)
+    }
+
+    /// Fails if a ref write waits for the database lock (the UI thread then stalls behind the
+    /// flusher's layout transaction), if the closed-key refusal waits for the database, if a
+    /// read does not see a write the moment it is made (a restore right after a delete would
+    /// resume the deleted row), or if the database does not end in call order (a delete applied
+    /// after the later save of its key drops that save; a save applied after a later delete
+    /// brings a dropped row back).
+    #[test]
+    fn ref_writes_behind_a_held_database_return_at_once_and_land_in_call_order() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("ref-order");
+        let (store, _mirror) = store_with_mirror(&db_path);
+        // As the flusher holds it for a whole layout transaction.
+        let held = store
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (done, returned) = std::sync::mpsc::channel();
+        let writer = store.clone();
+        std::thread::spawn(move || {
+            writer.save_session_ref("pane-2", "another-pane");
+            writer.save_session_ref("pane-1", "closed-conversation");
+            writer.delete_session_ref("pane-1");
+            writer.save_session_ref("pane-1", "new-conversation");
+            writer.save_session_ref("pane-3", "ended-conversation");
+            writer.end_session_ref("pane-3");
+            let late_hook_written = writer.save_session_ref("pane-3", "late-hook-write");
+            // Read on this thread too: a read that went to the database would wait as well.
+            let _ = done.send((late_hook_written, writer.load_session_refs()));
+        });
+        let (late_hook_written, read) = returned
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a ref write or read waited for the database lock");
+        assert!(
+            !late_hook_written,
+            "a write under a key a close ended was not refused"
+        );
+        let expected = BTreeMap::from([
+            ("pane-1".to_string(), "new-conversation".to_string()),
+            ("pane-2".to_string(), "another-pane".to_string()),
+        ]);
+        assert_eq!(read, expected, "a read missed a write made before it");
+        drop(held);
+        store.flush_now();
+        assert_eq!(
+            refs_on_disk(&db_path),
+            expected,
+            "the database did not end in call order"
+        );
+    }
+
+    /// Fails if `flush_now` (quit, a new tab) returns before every ref write made before it is
+    /// in the database: a clean quit would then exit with the write still queued and lose it.
+    /// The writer is kept off the database for a second, as a slow layout transaction keeps it,
+    /// so a flush that does not wait for it, or waits only for the queue to empty, returns while
+    /// the row is not there yet.
+    #[test]
+    fn flush_now_returns_once_every_earlier_ref_write_is_in_the_database() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("ref-drain");
+        let (store, _mirror) = store_with_mirror(&db_path);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = store.clone();
+        let hold = std::thread::spawn(move || {
+            let _held = holder
+                .inner
+                .db
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = held_tx.send(());
+            std::thread::sleep(Duration::from_secs(1));
+        });
+        held_rx.recv().expect("the holder took the database lock");
+        assert!(store.save_session_ref("pane-1", "kept-across-quit"));
+        // The writer takes the write off the queue and then waits for the database: the queue
+        // is empty while the row is not written, so a flush that waits for an empty queue
+        // returns too early as well.
+        assert!(
+            wait_until(Duration::from_secs(10), || store
+                .inner
+                .refs
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .ops
+                .is_empty()),
+            "the writer never took the write off the queue"
+        );
+        store.flush_now();
+        assert_eq!(
+            refs_on_disk(&db_path).get("pane-1").map(String::as_str),
+            Some("kept-across-quit"),
+            "flush_now returned before a queued ref write reached the database"
+        );
+        hold.join().expect("the holder thread");
     }
 }
