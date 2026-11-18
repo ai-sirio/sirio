@@ -14,10 +14,10 @@ use gpui::{
     transparent_black,
 };
 use sirio_chat::{
-    AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, EffortOption,
-    FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption, SessionNotice,
-    THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
-    TraceEvent,
+    AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ChatError, ContextUsage,
+    EffortOption, FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
+    SessionNotice, THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff,
+    ToolCallLocationInfo, TraceEvent,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -6373,8 +6373,17 @@ impl Chat {
                     let _ = this.update(cx, |chat, cx| chat.event_source_closed(cx));
                 }
                 Err(error) => {
-                    let (message, kind) =
-                        classify_connection_error(format!("could not launch ACP agent: {error:#}"));
+                    // The text the CLI could not start with (A7) is shown with no prefix
+                    // and is never run through `classify_connection_error`, since the CLI's own
+                    // errors could contain "requires authentication".
+                    let (message, kind) = match error.downcast_ref::<ChatError>() {
+                        Some(ChatError::Startup(text)) => {
+                            (visible_text::visible_text(text, true), ErrorKind::Connection)
+                        }
+                        _ => classify_connection_error(format!(
+                            "could not launch ACP agent: {error:#}"
+                        )),
+                    };
                     let _ = this.update(cx, |chat, cx| {
                         chat.connecting = false;
                         chat.client = None;

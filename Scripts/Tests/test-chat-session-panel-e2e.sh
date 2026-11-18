@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# The CLI the native chat starts is given CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1 by Sirio itself. A run started
-# from inside a chat would inherit it, and a scenario that checks the opt-in could not go red.
+# The CLI the native chat starts is given CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1 by Sirio itself. This unset is
+# belt and braces: launch() starts Sirio with `env -i` and an allowlist, so the variable cannot reach the CLI
+# from here anyway, and only Sirio's own launch can give it (that is what startup_opt_in proves).
 unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 
 # End-to-end test of the chat's session panel (spec
@@ -89,6 +90,12 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      "\n\nDetails:" and a bidi override shows the override as text, and the informational
 #                      levels are info, info, info-warning
 #   notice_midstream   a reply cut by an error is not glued to the answer that follows
+#   startup_*          (SIRIO_FIXTURE_STARTUP) the chat's error row is the CLI's own start-up text, with no ACP in it:
+#     startup_config_invalid  the sentence, the file and its backup, and the override shown as text
+#     startup_opt_in     a reason the CLI reports only when Sirio's launch sets CLAUDE_CODE_STARTUP_FAILURE_RESULTS
+#                        (the script unsets it, so this proves the launch does)
+#     startup_unknown_reason  `Claude Code could not start (some_future_reason).`
+#     startup_no_result  no result before the exit: the exit code and the stderr tail
 #
 # The trace scenarios (spec 2026-10-21-chat-trace-waterfall-design.md §8) use another stub,
 # Scripts/Tests/stubs/trace/claude, the same fixture in its trace mode: the first word of
@@ -367,7 +374,8 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   permission_detail permission_default_no permission_default_no_reject permission_visible_text permission_plain
   permission_rules permission_rules_refused permission_rules_closed_panel permission_rules_coalesced
   permission_rules_after_always_allow permission_rules_unreadable
-  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream)
+  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream
+  startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -4911,6 +4919,54 @@ scenario_notice_midstream() {
   notice_turns "the turn ends" 1
   check_panel "the cut reply and the answer after it are two paragraphs" '[r for r in c["transcript"] if r["kind"] == "assistant"][-1]["text"] == "partial-before-error\n\nok"'
   echo "OK: notice_midstream: the answer is not glued to the cut reply"
+  stop_app
+}
+
+# ---- the startup_* scenarios (A7) ------------------------------------------------------
+# A fresh Sirio on the notices stub whose CLI cannot start; waits for the chat's error row, not a connection.
+startup_chat() { # name kind
+  SIRIO_FIXTURE_STARTUP="$2"
+  use_stub notices
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  wait_panel "the chat shows an error row" "any(r['kind'] == 'error' for r in c['transcript'])" 30
+}
+# The text of the last error row.
+STARTUP_TEXT="[r for r in c['transcript'] if r['kind'] == 'error'][-1].get('text', '')"
+
+scenario_startup_config_invalid() {
+  startup_chat startup_config_invalid config_invalid
+  check_panel "the row starts with the config sentence" "$STARTUP_TEXT.startswith('Claude Code could not start: a configuration file is not valid JSON.')"
+  check_panel "the row names the file and its backup" "'File: /fixture/config/.claude.json' in $STARTUP_TEXT and 'Backup: /fixture/config/backups/.claude.json.bak' in $STARTUP_TEXT"
+  check_panel "the override is shown as text" "'bidi \u27e8U+202E\u27e9here' in $STARTUP_TEXT"
+  # Guard: cannot go red alone, since the startswith above already excludes the ACP launch text.
+  check_panel "Guard: the row does not mention ACP" "'ACP' not in $STARTUP_TEXT"
+  echo "OK: startup_config_invalid: the chat says why Claude Code could not start"
+  stop_app
+}
+
+scenario_startup_opt_in() {
+  startup_chat startup_opt_in cwd_unavailable
+  check_panel "the row is the reason's sentence" "$STARTUP_TEXT.startswith('Claude Code could not start: this folder no longer exists or cannot be read.')"
+  check_panel "the CLI's errors line follows the sentence" "$STARTUP_TEXT.endswith('\n\nThe current directory no longer exists (it was deleted or moved).')"
+  echo "OK: startup_opt_in: Sirio's launch asks the CLI for its start-up result"
+  stop_app
+}
+
+scenario_startup_unknown_reason() {
+  startup_chat startup_unknown_reason future_reason
+  check_panel "the row names the reason it does not know" "$STARTUP_TEXT.startswith('Claude Code could not start (some_future_reason).')"
+  check_panel "the CLI's errors line follows the sentence" "$STARTUP_TEXT.endswith('\n\nA reason this build does not know.')"
+  echo "OK: startup_unknown_reason: an unknown reason is named as it came"
+  stop_app
+}
+
+scenario_startup_no_result() {
+  startup_chat startup_no_result no_result
+  check_panel "the row says the CLI exited first" "$STARTUP_TEXT.startswith('Claude Code exited before it started (agent exited with code 1)')"
+  check_panel "the row holds the stderr tail" "'fixture: last line' in $STARTUP_TEXT"
+  echo "OK: startup_no_result: the exit and the stderr tail are shown"
   stop_app
 }
 

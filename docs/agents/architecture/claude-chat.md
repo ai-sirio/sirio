@@ -370,6 +370,100 @@ because the rows are the liveness signal.
 own session and process group, so killing the CLI's group does not reach it, and the registry's
 clear does not end it: after a reconnect Sirio neither shows it nor stops it.
 
+**Errors and notices (A7): what each frame becomes.** Five CLI frames are new to the chat: the
+`system/api_retry`, `system/notification`, `system/model_refusal_fallback`,
+`system/model_refusal_no_fallback` and `system/informational` subtypes. The floor already sends
+the first three. All of them ride the existing `SessionNotice` queue; there is no new `ChatEvent`.
+
+- `system/api_retry` sets the status line to `Retrying {attempt} of {max_retries} in {seconds} s:
+  {cause}`. Seconds are `retry_delay_ms` over 1000, rounded up, at least 1. The cause is `no
+  response` when `no_response` is an object, then by `error`: `overloaded`, `server error` or
+  `rate limited`; any other error reads `error {status}`, or `connection lost` with no status. The
+  CLI sends the frame before any content and never for a stream that already began.
+- `system/notification {key, text, priority, color?, timeout_ms?}` sets the status line to the
+  CLI's `text`.
+- `system/model_refusal_fallback` and `system/model_refusal_no_fallback` become an `info` row with
+  the frame's `content`, as it is. The CLI's own sentence already names both models, so Sirio
+  builds none.
+- `system/informational` becomes an `info` row, or an `info-warning` row at level `warning`.
+  An empty `content` adds nothing.
+
+An `info` or `info-warning` row is a notice like the rate limit's, but it is stored (`"info"`,
+`"info-warning"`) and restored; the rate limit's `Warning` is still never persisted. All CLI text
+goes through `visible_text`: `text` of a notification as one line, every `content` and the startup
+text with newlines kept. Rows and the status line are plain text, never markdown.
+
+**The status line.** One line above the composer, selectable text. It shows a retry, or the best
+live notification. A notification is kept for `timeout_ms`, or 10 s without it. The order is
+`immediate`, `high`, `medium`, `low`, newest first among equals; an unknown or missing priority
+counts as `medium`. A notification with the key of one already held replaces it and restarts its
+timer. The tone is the frame's `color` when that is `error` or `warning`, else plain.
+`surface.chat.read` has it as `statusLine`: `""` when nothing shows, else `{source, text, tone,
+held}` (`key` and `priority` too for a notification); `held` counts live notifications, the one
+shown included.
+
+A retry line clears on content (text, thought, a tool call started, updated or completed, a plan),
+turn end, an interrupt (`cancel_turn`), a `TransportError`, a `Timeout`, the event source closing
+(`event_source_closed`), a new connection (`start_connection`, through `clear_all`) and its own
+safety expiry. A notification clears only on its own timer, or on `start_connection`, so it can
+outlive the turn (the CLI sends `stop-hook-error` just before the `result`). Clearing is per
+source, since one drain can hold both. Each timer removes only its own entry, matched by a
+sequence number from a counter that never resets in the chat's life, so an old timer never clears
+a newer line.
+
+**An answer the CLI did not stream is drawn.** This is the spec's A7 deviation "A stream that
+fails midway". When a stream breaks midway, the CLI asks again without streaming and sends the
+answer as one `assistant` message with no stream events. Sirio draws text from stream events, so
+that answer used to be invisible. An `assistant` line now draws its text unless one of these
+holds: the line has no id at all; the message's id was streamed; the line is synthetic (the
+exhaustion's sentence); a text delta arrived outside any open message (the fixture's
+`state_text`, which repeats its text in the `assistant` line); a message with no id is open. When
+the last row that turn was a chunk, the text starts with `"\n\n"`, so it is not glued to the cut
+reply.
+
+Known limit: the notice queue is drained on any signal, so a notice can be applied before chunks
+queued ahead of it. A `Retrying` can then be cleared at once. An `Info` row can land above the end
+of the text it follows; the tail of the refused text then opens a row below the `Info` row, and an
+unstreamed answer joins that tail without a `"\n\n"`. The CLI sends a refusal notice after its
+stream ends, which keeps this rare.
+
+**Why Claude Code could not start.** A CLI that fails before the session writes an error `result`
+as its first stdout line, in place of the `initialize` answer, with `startup_failure_reason` and
+`errors`. Sirio reads it during the handshake, because it comes there and nowhere later (every one
+seen live was stdout line 0; a result after the `initialize` answer is out of scope). The launch
+fails with `ChatError::Startup(text)`. The text is built from these parts, joined by a blank line:
+the reason's sentence, the `errors` lines, and, for `invalid_config_file`, `File: {path}` with
+`Backup: {path}` on the next line when there is a backup. An unknown reason reads
+`Claude Code could not start ({reason}).` and then the CLI's lines. A result with no reason but
+with errors, on an attempt that is not retried, reads `Claude Code could not start.` and its
+errors. With no result, or a reasonless result with no errors and no config file, the text is
+`Claude Code exited before it started` followed by the exit code and the stderr tail. These two
+parts (`child_exit_report`, `stderr_tail_report`) are the ones a death mid-session also shows, after
+its own `the Claude agent stopped` opening. The launch error branch in `sirio_ui::chat` shows
+`visible_text(text, true)` as the row, with no prefix, kind `Connection` (not
+`classify_connection_error`, since the CLI's lines could say "requires authentication") and still
+retryable. Every other launch error keeps `could not launch ACP agent: …`.
+
+A reason is final on any attempt. A resume that fails with no reason (a session the CLI does not
+know) still retries without the resume, as before. A refused resume no longer leaves a turn behind:
+the fresh session has no "ended" footer.
+
+**The variable.** Without `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` the CLI writes a result only for
+`org_config_required_unavailable`, `org_config_refused` and `config_file_invalid`; every other
+reason ends with stderr and exit 1. So `LaunchLine::chat().env` sets it, and `worker.rs` applies
+that env to the CLI process the native chat starts. It is not set in Sirio's own environment, in a
+settings file, in `LaunchLine::usage_probe()` or in an ACP launch. The CLI's own children (tools,
+hooks, MCP servers) inherit it, as they inherit the other two variables in that list. The floor
+(2.1.257) ignores it and writes no result with a startup reason (it still writes the reasonless
+error result for an unknown `--resume`, which the resume retry rests on). Sirio never reads or
+writes `.claude.json`.
+
+**Proof and limits.** E2E: the `notice_*` and `startup_*` scenarios in `docs/agents/e2e-tests.md`.
+Live (`#[ignore]`, `acp_conformance.rs`): `claude_reports_why_it_could_not_start` and
+`claude_reports_api_retries_and_unstreamed_answers`, last run against CLI 2.1.327.
+`session_writes_lost` (sent only on ENOSPC or EDQUOT, as the CLI exits) is not shown; issue #793
+keeps it.
+
 **A session's name (A4).** A manual rename of a tab (the tab bar's inline editor, the Set Title
 modal, or the debug-only `surface.tabs.rename`) reaches every native Claude chat of the tab through
 `apply_manual_tab_title`, and the chat asks the CLI to carry it:
