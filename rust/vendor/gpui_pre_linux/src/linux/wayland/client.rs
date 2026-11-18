@@ -475,6 +475,11 @@ where
     Window: Clone,
 {
     fn handle_leave(&mut self) -> Option<(Window, PlatformInput)> {
+        if self.pending_drop && self.window.is_none() {
+            // The compositor ends a drag with a `Leave` after the `Drop`; the dropped files
+            // are still being read, and that read must still deliver them.
+            return None;
+        }
         self.invalidate_uri_read();
         let window = self.window.clone()?;
         let data_offer = self.data_offer.clone()?;
@@ -3408,7 +3413,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_then_leave_discards_pending_drag_uri_read() {
+    fn drop_then_leave_delivers_the_drop_when_the_read_resolves() {
         let mut drag = drag_state();
         let data_offer = FakeDataOffer::new("A");
         let generation = drag.begin_uri_read(Point::default());
@@ -3421,8 +3426,8 @@ mod tests {
             &mut entered_windows,
         );
 
-        assert!(entered_windows.is_empty());
-        assert!(!data_offer.finished.get());
+        assert_eq!(entered_windows, ["window A"]);
+        assert!(data_offer.finished.get());
         assert!(data_offer.destroyed.get());
         assert!(drag.data_offer.is_none());
         assert!(drag.window.is_none());
@@ -3610,11 +3615,40 @@ mod tests {
     }
 
     #[test]
-    fn a_leave_before_resolution_forgets_the_pending_drop() {
+    fn a_leave_after_a_pending_drop_keeps_it_for_the_resolving_read() {
+        let mut drag = drag_state();
+        let data_offer = FakeDataOffer::new("A");
+        let entry = point(px(6.0), px(6.0));
+        let generation = drag.begin_uri_read(entry);
+        assert!(drag.handle_motion(point(px(90.0), px(80.0))).is_none());
+        assert!(drag.handle_drop().is_none());
+
+        // The compositor ends the drag with a Leave after the drop.
+        assert!(drag.handle_leave().is_none());
+        let delivered = file_drop_events(complete_drag_uri_read_entering_at(
+            &mut drag,
+            generation,
+            data_offer.clone(),
+            "window A",
+            entry,
+        ));
+
+        assert_eq!(
+            delivered,
+            [
+                ("window A", "entered", Some(entry)),
+                ("window A", "submit", Some(point(px(90.0), px(80.0)))),
+            ]
+        );
+        assert!(data_offer.finished.get());
+        assert!(data_offer.destroyed.get());
+    }
+
+    #[test]
+    fn a_leave_without_a_drop_still_cancels_the_read() {
         let mut drag = drag_state();
         let data_offer = FakeDataOffer::new("A");
         let generation = drag.begin_uri_read(Point::default());
-        assert!(drag.handle_drop().is_none());
 
         assert!(drag.handle_leave().is_none());
         let delivered = file_drop_events(complete_drag_uri_read(
@@ -3627,6 +3661,42 @@ mod tests {
         assert!(delivered.is_empty());
         assert!(!data_offer.finished.get());
         assert!(data_offer.destroyed.get());
+        assert!(drag.window.is_none());
+    }
+
+    #[test]
+    fn a_failed_read_with_a_pending_drop_leaves_nothing_for_the_next_drag() {
+        let mut drag = drag_state();
+        let data_offer = FakeDataOffer::new("A");
+        let generation = drag.begin_uri_read(Point::default());
+        assert!(drag.handle_drop().is_none());
+
+        drag.abandon_uri_read(generation, data_offer.clone());
+        assert!(data_offer.destroyed.get());
+        assert!(!data_offer.finished.get());
+
+        // A Leave now must cancel like any other: no drop is left waiting, so a late result
+        // of the abandoned read delivers nothing.
+        assert!(drag.handle_leave().is_none());
+        let late = file_drop_events(complete_drag_uri_read(
+            &mut drag,
+            generation,
+            FakeDataOffer::new("late"),
+            "window A",
+        ));
+        assert!(late.is_empty());
+
+        // And the next drag starts clean.
+        let data_offer_b = FakeDataOffer::new("B");
+        let generation_b = drag.begin_uri_read(Point::default());
+        let next = file_drop_events(complete_drag_uri_read(
+            &mut drag,
+            generation_b,
+            data_offer_b.clone(),
+            "window B",
+        ));
+        assert_eq!(next, [("window B", "entered", Some(Point::default()))]);
+        assert!(!data_offer_b.finished.get());
     }
 
     #[test]
