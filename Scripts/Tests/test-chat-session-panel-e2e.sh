@@ -3158,6 +3158,19 @@ left = rects["left"]
 print(*[round(v) for v in left])' || fail "the sidebar's rect is not drawn"
 }
 
+# A click at the centre of a part of the sidebar the debug `shellRects` report (sidebarTitle,
+# sidebarSection, ...), moved by DX DY window pixels. The part must be drawn.
+click_sidebar_part() { # key [dx dy]
+  local xy
+  xy=$(reply surface layout read | python3 -c 'import json, sys
+rect = json.loads(json.load(sys.stdin)[0]["shellRects"]).get(sys.argv[1])
+if rect is None:
+    sys.exit(1)
+print(round(rect[0] + rect[2] / 2 + int(sys.argv[2])), round(rect[1] + rect[3] / 2 + int(sys.argv[3])))' "$1" "${2:-0}" "${3:-0}") \
+    || fail "the sidebar draws no $1 to click"
+  click_at_window "$xy"
+}
+
 scenario_composer_resize() {
   launch composer_resize
   ctl project add "$PRIMARY" >/dev/null
@@ -3616,19 +3629,24 @@ scenario_unread_parked_chat() {
     capture unread_parked_chat-unread
     if window_clicks; then
       echo "step: the Sessions view draws the same mark on the session's card"
-      # The two segments under the sidebar's top edge, at fixed window pixels like the chevron.
-      click_at_window "207 65"
+      # The title's menu: a click on the title opens it, and its two rows hang under it (6 px gap,
+      # 4 px padding, rows of 30 px: Projects first, Sessions second). The socket reports the
+      # title's rect (shellRects sidebarTitle), so the clicks follow the layout.
+      click_sidebar_part sidebarTitle
+      sleep 1
+      click_sidebar_part sidebarTitle 0 $(( 14 + 6 + 4 + 30 + 15 ))
       capture unread-sessions-view
-      click_at_window "90 65"
+      click_sidebar_part sidebarTitle
+      sleep 1
+      click_sidebar_part sidebarTitle 0 $(( 14 + 6 + 4 + 15 ))
       echo "step: a folded project keeps the mark as a badge on its header"
-      # The project header's disclosure chevron: the socket reports no position for it (the
-      # sidebar is a fixed-width column, so it is at the same window pixel in every window
-      # size). A click that misses it leaves the header open, which the read below fails on.
-      click_at_window "263 171"
+      # The project row is the first one under the section header; a click on it folds the
+      # project. A click that misses leaves the header open, which the read below fails on.
+      click_sidebar_part sidebarSection
       wait_project "the click folded the project" expanded false 10
       wait_project "the folded header's badge counts the unread chat" unreadCount 1 10
       capture unread-collapsed-project
-      click_at_window "263 171"
+      click_sidebar_part sidebarSection
       wait_project "the second click opened the project again" expanded true 10
       wait_project "the open header counts nothing again" unreadCount 0 10
     fi

@@ -553,6 +553,30 @@ Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 # <case>-2.json ...) and PID-matched captures in frames/.
 Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 
+# The sidebar in Codex's shell (spec 2026-11-17-sidebar-codex-shell-design.md
+# §3, §6) in a real, isolated Sirio under a private Xvfb, driven by real X
+# clicks, wheel turns and keys at the rects the app reports (`shellRects`'
+# sidebar keys) and read over the control socket (`surface attention read`'s
+# `sidebar` object: listFocused, filterShown, hoverCardRow, bell). Steps: the
+# header, New Chat row, section header, project row (31) and card (53) drawn at
+# their heights; the project row folds and unfolds; its + and three dots, and
+# the section header's expand all / collapse all, show only under the pointer
+# (frames compared); the title menu switches to Sessions and back; the hover card
+# opens beside the sidebar after 500 ms and closes when the pointer leaves, and a
+# Primary shows a filled star where a plain card shows its star and cross; a
+# session left unread (a codex stub reports running then done in the other
+# worktree) lights the bell, whose menu selects that session's tab; Search shows
+# the filter and Esc hides it; a click on a card focuses the list and a click on
+# the centre pane takes the focus away; a second project of 22 worktrees makes
+# the list overflow, and the scrollbar is up after a wheel turn and faded 2 s
+# later. --display :N is a private Xvfb of at least 1600x1000 with Mesa's
+# lavapipe; --appearance light|dark (run both); --state-only runs with no
+# display and checks only that the sidebar read is reported; --out-dir DIR (must
+# be empty) keeps transcript.log, app.log, measurements.tsv (case, key, expected,
+# drawn, ok), reads/, attention-*.json and PID-matched captures in
+# frames/<what>-<appearance>.png.
+Scripts/Tests/test-sidebar-shell-e2e.sh   # -> prints "SIDEBAR SHELL E2E OK (dark|light|state only)"
+
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME
