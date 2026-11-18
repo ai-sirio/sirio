@@ -738,9 +738,15 @@ Each item is laid out the same way:
   - **Not persisted.** As today: a restored chat shows the `Agent` row, and the card's content is
     gone.
   - **What the key changes upstream.** With the key on, the CLI asks the API for a foreground
-    subagent's thinking with `display: "updates"` instead of `"omitted"`. That reaches every real
-    session; the fake API cannot show its effect on a real response. The PR's Merge Danger says
-    so.
+    subagent's thinking with `display: "updates"` instead of `"omitted"` (the floor drops the
+    field, as it does for the main agent). Nothing else in the requests moves: the foreground
+    control (run `q1b`) and the key (run `q3`) send the same four requests, with the same model,
+    the same 19 tools and the same `adaptive` thinking, and the main agent gets the same `Agent`
+    tool_result. So the model is asked for the same thinking, and only what comes back changes.
+    The API docs say billing does not depend on `display` ("What you're billed for is the same
+    regardless of the `display` setting; only what you see changes"), and that `"omitted"` buys
+    latency, not cost. A foreground subagent may answer a little slower. The fake API cannot show
+    a real response, so the cost line rests on the docs. The PR's Merge Danger says so.
 
 ### A11 · MCP Apps widgets
 
