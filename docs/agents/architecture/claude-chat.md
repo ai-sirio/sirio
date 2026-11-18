@@ -490,10 +490,11 @@ answer as one `assistant` message with no stream events. Sirio draws text from s
 that answer used to be invisible. An `assistant` line now draws its text unless one of these
 holds: the line has no id at all; the line belongs to a subagent (its `parent_tool_use_id` is set:
 it draws nothing, and only its tool calls are remembered); the message's id was streamed; the line
-is synthetic (the exhaustion's sentence); a text delta arrived outside any open message (the
-fixture's `state_text`, which repeats its text in the `assistant` line); a message with no id is
-open. When the last row that turn was a chunk, the text starts with `"\n\n"`, so it is not glued
-to the cut reply.
+is synthetic (the exhaustion's sentence; a top-level synthetic line that carries
+`local_command_run` is a command's output instead, drawn as its own row: see A9 below); a text
+delta arrived outside any open message (the fixture's `state_text`, which repeats its text in the
+`assistant` line); a message with no id is open. When the last row that turn was a chunk, the text
+starts with `"\n\n"`, so it is not glued to the cut reply.
 
 Known limit: the notice queue is drained on any signal, so a notice can be applied before chunks
 queued ahead of it. A `Retrying` can then be cleared at once. An `Info` row can land above the end
@@ -547,6 +548,135 @@ TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- 
 
 `session_writes_lost` (sent only on ENOSPC or EDQUOT, as the CLI exits) is not shown; issue #793
 keeps it.
+
+**Usage and limits (A9).** Three things: the rate-limit notice, a local command's output and the
+`/usage` card. Wire facts come from the A9 probe (`.superpowers/probe-a9/FINDINGS.md`) and the
+spec's A9 Deviations block in `docs/superpowers/specs/2026-11-15-claude-protocol-parity-design.md`.
+
+**The rate-limit notice.** The CLI sends `rate_limit_event` only to a claude.ai subscriber or a
+gateway sign-in (never to an API-key session), after the answer and before `result`, and only when
+the state changes. `RateLimitPush::parse` (`sirio_claude::message`) reads `status`, `rateLimitType`
+(the window), `resetsAt` (epoch seconds), `limitScope`, and the fill: the top-level `utilization`
+(a 0-1 fraction) or else the named window's entry under `unifiedWindows`. The fill goes through
+`sirio_claude::whole_percent`: `(value + 1e-9).floor()`, clamped to 0-100, so `0.57` reads 57. An
+empty token counts as absent. The fold (`claude/events.rs`, `CliMessage::RateLimit`) makes a
+`SessionNotice::RateLimited` for every status except `allowed` and an empty one. The dedup key is
+`(status, window, scope)`: a repeat adds no line, a change of any of the three does, and an
+`allowed` push clears the key, so the same warning is shown again after the plan had room. Known
+limit: a warning on a second window leaves the event's top level unchanged (the second window shows
+only under `unifiedWindows`), so it has the same key and adds no line.
+
+`sirio_ui::chat::limit_notice` writes the sentence. A part with no value is left out.
+
+- `allowed_warning`: `Approaching the {window} usage limit: {n}% used, resets at {time}.` The
+  percent is capped at 99, since a warning is not a refusal. It never says "reached".
+- `rejected`: `{Window} usage limit reached ({scope}), resets at {time}.`
+- Any other status: `{Window} usage limit: {status}, resets at {time}.`
+- With no window, the window word goes: `Approaching the usage limit`, `Usage limit reached`,
+  `Usage limit: {status}`.
+- Window words: `five_hour` 5-hour, `seven_day` and `seven_day_overage_included` weekly,
+  `seven_day_opus` weekly Opus, `seven_day_sonnet` weekly Sonnet, `overage` extra; at the start of
+  a sentence the first letter is upper case. An unknown token shows as sent.
+- Scope words: `service` your individual spend limit, `group_pool` your team's pooled budget,
+  `channel` your channel's monthly spend limit; any other value shows as sent.
+- The time (`reset_time`) is local: `%H:%M` when the reset is today, `%a %H:%M` one to six days
+  later, `%-d %b %H:%M` for any other date, past ones included.
+
+Every CLI token goes through `visible_text`. The row is a `Warning` notice, so it is never
+persisted, as before. The CLI's own refusal sentence in a failed `result` is still one assistant
+row, unchanged.
+
+**A local command's output.** `/usage` and `/context` are answered by the CLI itself, with no model
+call. From 2.1.301 the answer is a top-level synthetic `assistant` line (`model: "<synthetic>"`)
+that carries `local_command_run: {command, args}`, then a `result` with `num_turns: 0` and
+`local_command`. The fold draws a synthetic line only when it is top level and carries the marker;
+it then pushes `SessionNotice::LocalCommandOutput {command, text, report}` and the next chunk opens
+a new row. The rules:
+
+- Empty text and no `usage_report` draw nothing. A report with no text is still an answer.
+- A model's answer that carries the marker, a subagent's line, and a marker of the wrong type are
+  left to the ordinary rules; a wrong type costs the field, never the line.
+- A failed `result` that repeats the text just drawn adds no second chunk. The remembered text ends
+  with its turn, so the same words as a later turn's failure are drawn.
+- The floor (2.1.257) sends no marker, so its `/usage` draws nothing, as before; the turn still
+  ends and no spinner stays.
+
+`Entry::CommandOutput {command, text, report}` is plain text, never markdown. The command and the
+text go through `visible_text` (the text keeps its newlines) when the row is made. It is never
+persisted (the persistence mapping returns `None`): it states the account as it is now. A copy
+takes `/{command}` and the text, or `Usage` and the card's lines when there is a card. The text is
+drawn in the code font under the command's name, each line unwrapped; a long one scrolls sideways.
+`surface.chat.read` has the row as `kind: command-output` with `command` and `text`, and `card` and
+`headline` when a card is drawn.
+
+**The usage card.** `UsageReport::parse` (`sirio_claude::usage`) reads `usage_report` field by
+field, so a field the CLI changed costs that part and not the card. It is `None` unless the report
+is an object that has `session` or `rate_limits`; the row then falls back to the text. `rate_limits`
+or `limits` absent, null or of a wrong type reads as unavailable; `limits: []` reads as none
+reported. A row that is not an object is dropped, and a field of a wrong type is absent, never zero.
+`usage_card.rs` builds the card once as lines, and the drawing, the copy and the read row all come
+from them. A part with no value is left out, and a row with no part at all is dropped:
+
+- `This chat: $1.50 · API 1m 5s · total 1h 2m · 10 lines added, 2 removed`, then one line per
+  model: `{model}: 1k in · 3k out · 50k cache read · 700 cache write`.
+- The plan's rows under one heading per group, in the order the groups first appear (`Session`,
+  `Weekly`, any other group as sent). A heading shows only over rows that were drawn. A row reads
+  `{name} · {p}% · resets at {time} · warning`, the last part only for `warning` and `critical`.
+  The name is the scope's `display_name`, else `Current session` (`session`), `All models`
+  (`weekly_all`), or the `kind` as sent. The percent uses `whole_percent`. The reset uses the same
+  time format as the notice.
+- `Plan limits: unavailable` or `Plan limits: none reported`; the second also stands for rows that
+  all held nothing to draw.
+- `Extra usage: off`; `Extra usage: $12.34 of $50.00 this month` (amounts are minor units; USD
+  reads `$`, another code reads `12.34 EUR`, none reads the bare number); `... this month` with the
+  used amount only; `Extra usage: on` when no used amount is known.
+
+The bar sits between the name and the rest, only for a row with a percent. Its colour follows
+`severity`: `warning` the warning colour, `critical` the danger colour, anything else the accent.
+The first active row's name is bold; `headline` in the read row is that name, `""` with none. Every
+string the CLI sent goes through `visible_text` once, in `usage_card.rs`.
+
+**Proof.** E2E (`docs/agents/e2e-tests.md`, A9): `limit_notice`, `usage_text`, `usage_floor`,
+`usage_card` and `usage_unavailable`. Three live tests in `acp_conformance.rs`, all `#[ignore]`,
+in both nextest skip lists. Run one CLI at a time, from `rust/`:
+
+```sh
+TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- \
+  --ignored --nocapture --test-threads=1 claude_answers_usage_locally
+```
+
+- `claude_answers_usage_locally` (needs 2.1.301): against `fake_limits_api.py`, `/usage` gives the
+  marker and a `result` with `num_turns: 0` and `local_command: usage`, and the API logs no
+  request; a following `say hi` logs one, so "none" is not a logger that never writes.
+- `claude_reports_rate_limits_through_a_gateway` (needs 2.1.327): the same fake API sends
+  `anthropic-ratelimit-unified-*` headers. A warning on the five-hour window reads 92 percent
+  with the written reset, and an overage refusal carries `limitScope: group_pool` and an error
+  `result`. The CLI emits the event only under subscriber or gateway auth, so the token is an
+  unsigned JWT with `aud: claude-gateway`, built at run time. It lives only in the CLI's
+  environment and the test's `TMPDIR`, and is never printed or written. Before any CLI that
+  carries it starts, `ANTHROPIC_BASE_URL` is read from the finished command and must be
+  `http://127.0.0.1:<port>`, checked as a host, not a prefix (`http://127.0.0.1:1@example.com/`
+  is refused). `the_gateway_base_url_guard_checks_the_host` covers that check and starts no CLI.
+- `claude_usage_report_on_account` is run by hand by Enzo; never CI, never an agent. It is the
+  only test that touches a real account. It SKIPs unless `SIRIO_LIVE_CLAUDE_ACCOUNT=1`:
+
+  ```sh
+  SIRIO_LIVE_CLAUDE_ACCOUNT=1 TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents \
+    --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_usage_report_on_account
+  ```
+
+  It runs the user's own `claude` in a fresh directory under `TMPDIR`, with the usage probe's
+  launch line (no session file, no setting sources), sends only `/usage` (no model call), and
+  checks shape only: the marker, `num_turns` 0 and, when a `usage_report` came, that it parses and
+  every limit row has a kind, group and severity. A fresh `/usage` holds no model usage, so the
+  four token keys of a `model_usage` entry are checked only when the session already has one; the
+  test normally checks 0 models and does not prove those keys. It prints one value-free line:
+  `usage_report: present|absent, limits: rows|unavailable, rows checked: N, models checked: M`.
+
+Fixture only, no live proof: every `usage_report` case (its shape comes from the CLI binary and
+the SDK's `sdk.d.ts`, since the plan's rows come from a fixed Anthropic URL a fake API cannot
+reach), the floor's `/usage` with no marker, `/context`'s wire shape and a failing local command
+whose `result` repeats the text. `overageEnabled` is not read.
 
 **A session's name (A4).** A manual rename of a tab (the tab bar's inline editor, the Set Title
 modal, or the debug-only `surface.tabs.rename`) reaches every native Claude chat of the tab through
