@@ -7488,7 +7488,7 @@ version = "0.45.0"
 
 [[package]]
 name = "sirio_ide"
-version = "0.43.0"
+version = "0.45.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
