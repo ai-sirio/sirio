@@ -104,7 +104,7 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      active row's name
 #   usage_unavailable  (SIRIO_FIXTURE_USAGE) a malformed report (`rate_limits` null or a number, `limits` empty or a
 #                      string) reads as unavailable or none reported, a row with no `percent` shows no `%`, and a
-#                      row's missing parts leave no stray `·` and an empty row no line
+#                      row's missing parts leave no stray `·`, an empty row no line and a group of such rows no heading
 #   startup_*          (SIRIO_FIXTURE_STARTUP) the chat's error row is the CLI's own start-up text, with no ACP in it:
 #     startup_config_invalid  the sentence, the file and its backup, and the override shown as text
 #     startup_opt_in     a reason the CLI reports only when Sirio's launch sets CLAUDE_CODE_STARTUP_FAILURE_RESULTS
@@ -5419,7 +5419,7 @@ PY
   stop_app
 }
 
-# A malformed report never crashes and never reads 0% (A9 review focus 4): six answers, each its own row.
+# A malformed report never crashes and never reads 0% (A9 review focus 4): seven answers, each its own row.
 scenario_usage_unavailable() {
   SIRIO_FIXTURE_USAGE="$RUN_DIR/usage_unavailable-usage.json"
   usage_options '{}'
@@ -5431,14 +5431,15 @@ scenario_usage_unavailable() {
     '{"rate_limits": {"limits": "x"}}' \
     '{"rate_limits": 7}' \
     '{"rate_limits": {"limits": [{"kind": "session", "group": "session", "severity": "normal", "is_active": true}]}}' \
-    '{"rate_limits": {"limits": [{"kind": 3, "percent": 50}, {}]}}'; do
+    '{"rate_limits": {"limits": [{"kind": 3, "percent": 50}, {}]}}' \
+    '{"rate_limits": {"limits": [{"group": "weekly"}]}}'; do
     n=$((n + 1))
     usage_options "{\"report\": $report}"
     send_prompt "/usage"
     notice_turns "the /usage turn $n ends" "$n"
   done
   check_panel "each malformed report reads as unavailable or none reported, and a row with no percent shows no %" \
-    "[r['card'] for r in c['transcript'] if r['kind'] == 'command-output'] == ['Plan limits: unavailable', 'Plan limits: none reported', 'Plan limits: unavailable', 'Plan limits: unavailable', 'Session\nCurrent session', '50%']"
+    "[r['card'] for r in c['transcript'] if r['kind'] == 'command-output'] == ['Plan limits: unavailable', 'Plan limits: none reported', 'Plan limits: unavailable', 'Plan limits: unavailable', 'Session\nCurrent session', '50%', 'Plan limits: none reported']"
   echo "OK: usage_unavailable: a malformed report is unavailable, never 0%"
   stop_app
 }

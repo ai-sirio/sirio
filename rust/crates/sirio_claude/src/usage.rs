@@ -542,12 +542,16 @@ mod usage_report_tests {
 
         // A surface that is not an object, or has no string name, gives no name.
         let report = UsageReport::parse(&json!({"rate_limits": {"limits": [
-            {"scope": {"surface": 4}},
-            {"scope": {"surface": {"display_name": 4}}}
+            {"kind": "k1", "percent": 10, "scope": {"surface": 4}},
+            {"kind": "k2", "percent": 20, "scope": {"surface": {"display_name": 4}}}
         ]}}))
         .expect("a report");
         let names: Vec<Option<&str>> = rows(&report).iter().map(|row| row.scope_name.as_deref()).collect();
         assert_eq!(names, [None, None]);
+        // The siblings of the unreadable scope still read.
+        let siblings: Vec<(&str, Option<f64>)> =
+            rows(&report).iter().map(|row| (row.kind.as_str(), row.percent)).collect();
+        assert_eq!(siblings, [("k1", Some(10.0)), ("k2", Some(20.0))]);
 
         // `session` that is not an object leaves no totals.
         let report = UsageReport::parse(&json!({"session": 5, "rate_limits": null})).expect("a report");
