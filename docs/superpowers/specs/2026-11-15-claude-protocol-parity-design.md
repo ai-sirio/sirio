@@ -546,10 +546,13 @@ Each item is laid out the same way:
   - **Disabled is per row, with no per-hook switch.** `disabled: true` comes from any effective
     `disableAllHooks` (user, project or local), safe mode (`--safe-mode`,
     `CLAUDE_CODE_SAFE_MODE`), bare mode (`--bare`, `CLAUDE_CODE_SIMPLE`) and, for rows that are
-    not plugins', the organization's plugin-only lock (runs `run-q3-*`). The card adds one note
-    from `policy` and the modes: all hooks disabled, only managed hooks run (the others are then
-    not listed at all), only plugin hooks run, the organization's settings could not be read, safe
-    mode or bare mode with the CLI's own `exitHint`.
+    not plugins', the organization's plugin-only lock (runs `run-q3-*`). Session hooks and the
+    organization's own hooks are never marked. The card adds one note from `policy` and the modes,
+    and each line points at the rows marked disabled rather than claiming every hook is off:
+    `disableAllHooks` set, only the organization's hooks run (hooks from settings files are then
+    not listed; a plugin's stay, marked: run `run-q3-mflag-only`), only plugin hooks run, the
+    organization's settings could not be read, safe mode or bare mode with the CLI's own
+    `exitHint`.
   - **`errors`** names a settings file the CLI skipped (bad JSON, or a schema error elsewhere in
     the file), as `{file, path, message}` with an absolute `file`; a bad entry inside a hooks
     block is dropped silently and gives none (runs `run-q4-*`). Each error is a note on the card.
