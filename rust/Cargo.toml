@@ -134,7 +134,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # bails out silently (no `finish()`/`destroy()`, no error, no event delivered to the app) when
 # the async `Enter` pipe-read that resolves the dragged paths has not yet completed -- which a
 # provider slower than ~150ms reliably triggers, discarding a real XDND drop with no trace. See
-# rust/vendor/README.md and docs/linux-rewrite/tasks/P133-gpui-xdnd-slow-provider-race.md.
+# rust/vendor/README.md.
 #
 # `[patch.crates-io]` because gpui/gpui_platform resolve `gpui-pre-linux` from crates.io. The
 # published `gpui-pre-platform` takes `gpui-pre-linux` as an ordinary registry dependency, so this
@@ -143,7 +143,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 gpui-pre-linux = { path = "vendor/gpui_linux" }
 # Local override for Windows translucency: upstream `gpui_windows`'s no-DirectComposition path
 # (the one Sirio forces via GPUI_DISABLE_DIRECT_COMPOSITION so the WebView2 child HWND paints,
-# ADR 0002) creates a flip-model HWND swap chain, which the DWM composes as opaque, so
+# ADR 0003, Context) creates a flip-model HWND swap chain, which the DWM composes as opaque, so
 # `WindowBackgroundAppearance::Blurred` could never show anything behind the window. The vendored
 # copy presents through a bitblt swap chain instead, and keeps additive alpha blending; see
 # rust/vendor/README.md.

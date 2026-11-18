@@ -48,8 +48,8 @@ set -euo pipefail
 # with the two accessibility flags turned on there (under env -i they are off: no
 # desktop setting reaches the run), and stage ui notes whether this app holds a
 # connection on it (a note, not a check). The duplicate-id guard (the ping after
-# each error capture) means something only while bezel's accessibility adapter is
-# active: stage ui asserts the read's a11yActive (bezel's Window::is_a11y_active)
+# each error capture) means something only while the engine's (gpui-pre) accessibility adapter is
+# active: stage ui asserts the read's a11yActive (gpui-pre's Window::is_a11y_active)
 # before the error captures. Whether the adapter opened its own connection on the
 # private AT-SPI bus is a note, not a check; docs/testing/update-card.md records
 # the runs. Chain and ui note whether a started sirio-host detached (a session
@@ -575,7 +575,7 @@ for _ in $(seq 1 50); do curl -fsS -o /dev/null --max-time 1 "$MANIFEST_URL" 2>/
 curl -fsS -o /dev/null --max-time 1 "$MANIFEST_URL" || fail "the manifest server never came up"
 
 # ---- the session bus and the AT-SPI bus ----------------------------------
-# bezel's accessibility tree (through accesskit_unix) reaches AT-SPI over the
+# gpui-pre's accessibility tree (through accesskit_unix) reaches AT-SPI over the
 # session bus, and its duplicate-node panic only exists where that adapter is
 # active. A display-backed run therefore gets a private session bus and a private
 # AT-SPI bus (at-spi-bus-launcher), and never the user's: a run has no path to
