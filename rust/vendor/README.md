@@ -29,17 +29,17 @@ paths.
 | `ely-palette/`, `ely-gpui-component/` | as above | Ely sources | workspace members |
 
 macOS builds on the upstream `gpui-pre-macos` / `gpui-pre-apple` 0.3.12, unpatched, so there is no
-`gpui_macos/` here. The coordinator accepted that for this step, with one open item: against
-bezel's `gpui-apple` 0.3.8 the Metal destination-alpha blend changed (`One` became
+`gpui_macos/` here. That is a project decision with one open item: against bezel's
+`bezel-gpui-apple` 0.3.8 the Metal destination-alpha blend changed (`One` became
 `OneMinusSourceAlpha` on two of the three pipelines), the same change `gpui_windows/` undoes on
 Windows. A blend factor applies to every draw, and Sirio requests `Blurred` on macOS
 (`rust/crates/sirio/src/shell_chrome.rs`), so framebuffer alpha reaches the screen: the blurred
-window's look may differ. That is a hand check on a Mac owed before release (it is listed in the
-PR's Merge Danger), not something verified here. If a Mac shows a regression, the follow-up is to
-vendor `gpui-pre-apple` (and `gpui-pre-macos` if it must change) the way `gpui_windows/` is
-vendored and restore the blend. Two other differences do not touch Sirio: there is no
-backdrop-blur pass, and the shadow shader lost the `inset == 2` mode. A search of `rust/crates`,
-`vendor/ely-gpui-component` and `vendor/ely-palette` finds no use of either.
+window's look may differ. Checking it by hand on a Mac is owed before release; it has not been
+verified. If a Mac shows a regression, the follow-up is to vendor `gpui-pre-apple` (and
+`gpui-pre-macos` if it must change) the way `gpui_windows/` is vendored and restore the blend. Two
+other differences do not touch Sirio: there is no backdrop-blur pass, and the shadow shader lost
+the `inset == 2` mode. A search of `rust/crates`, `vendor/ely-gpui-component` and
+`vendor/ely-palette` finds no use of either.
 
 `gpui_platform` is not patched. `gpui-pre-platform` takes `gpui-pre-linux` and `gpui-pre-windows`
 as ordinary registry dependencies, so one `[patch.crates-io]` entry per backend substitutes the
@@ -51,16 +51,20 @@ Every `[patch.crates-io]` package here follows the same recipe, and re-vendoring
 repeating it:
 
 - **Compare against the published crate, not against history.** Sirio's changes are whatever
-  differs from the released `.crate`. A patched package is never fetched by a build, so download it:
-  `curl -LO https://static.crates.io/crates/<name>/<name>-<version>.crate`, untar it into an empty
-  directory, and `diff -r` it against `rust/vendor/<dir>`. Read the manifest diff too: it holds real
-  Sirio changes (`gpui_windows`'s `sirio_perf` path dependency, the `gpui-pre =0.3.12` repointing of
-  `bezel_theme` and `bezel_markdown`, `bezel_theme`'s only change). `Cargo.lock` is ours; `.cargo-ok`,
-  `Cargo.toml.orig` and `.cargo_vcs_info.json` in the unpacked crate are packaging noise. The branch history that vendored the gpui crates did start
-  each with a pristine commit (`06bc49ac6` for `gpui-pre-linux`, `70cb0ad06` for `gpui-pre-windows`,
-  under `gpui_pre_linux` / `gpui_pre_windows`, the old directory names), but a squash merge to
-  `main` erases such commits, so do not rely on one. `bezel_markdown` never had a pristine commit:
-  its first commit already contained a fix.
+  differs from the released `.crate`. A patched package is never fetched by a build, so download
+  and unpack it into an empty directory, then diff the unpacked subdirectory against the vendored
+  one:
+  `curl -sL https://static.crates.io/crates/<name>/<name>-<version>.crate | tar xz -C <empty dir>`,
+  then `diff -r <empty dir>/<name>-<version> rust/vendor/<dir>`. Read the manifest diff too: it
+  holds real Sirio changes (`gpui_windows`'s `sirio_perf` path dependency, the `gpui-pre =0.3.12`
+  repointing of `bezel_theme` and `bezel_markdown`, which is `bezel_theme`'s only change). The
+  vendored `Cargo.lock` is Sirio's own standalone lock and differs from any published one;
+  `Cargo.toml.orig` and `.cargo_vcs_info.json` (and a `Cargo.lock`, if the crate ships one) in the
+  unpacked crate are packaging noise. The branch history that vendored the gpui crates did start
+  each with a pristine commit (`06bc49ac6` for `gpui-pre-linux`, `70cb0ad06` for
+  `gpui-pre-windows`, under `gpui_pre_linux` / `gpui_pre_windows`, the old directory names), but a
+  squash merge to `main` erases such commits, so do not rely on one. `bezel_markdown` never had a
+  pristine commit: its first commit already contained a fix.
 - **A normalized manifest.** `[package] name` stays the published package name so it matches
   what `[patch.crates-io]` targets, and `[lib] name` stays the import name consumers already use;
   `publish = false`. Whatever the released manifest expresses as `.workspace = true` (zed's root
@@ -218,7 +222,8 @@ unrelated to the engine.
 
 Note that `src/lib.rs` (the crate docs, around line 22) still says `gpui_platform::application`
 installs the HTTP client an image at an `http` URL needs. That is stale: gpui-pre's platform
-installs none. Only that comment is left as released, on purpose (the source changes below are the other edits);
+installs none. Only that comment is left as released, on purpose (the source changes below are
+the other edits);
 `sirio_ui::app_platform::application` is what installs it.
 
 `vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with four changes. The first:
