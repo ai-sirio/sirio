@@ -2958,6 +2958,11 @@ impl Chat {
                     kind: NoticeKind::Warning,
                 }
             }
+            // The CLI's own retry, notification and refusal lines have no
+            // surface yet.
+            SessionNotice::Retrying { .. }
+            | SessionNotice::Notification { .. }
+            | SessionNotice::CliNotice { .. } => return,
         };
         self.push_entry(entry);
     }

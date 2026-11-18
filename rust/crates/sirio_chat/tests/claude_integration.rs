@@ -1057,6 +1057,245 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
     assert!(client.take_notices().is_empty());
 }
 
+// The rules are wrong if any of these goes red:
+// - a streamed reply or the fixture's `state_text` prints twice;
+// - the exhaustion sentence prints twice;
+// - the re-asked answer is dropped, with or without `message_stop`;
+// - a subagent's text is drawn;
+// - a frame with a wrongly typed field loses the whole line, or yields a
+//   notice built from garbage;
+// - an empty `informational` is drawn;
+// - a `no_response: null` reads as "no response".
+
+/// What one `cli_notices` turn produced, in the order it arrived: the notices
+/// at the point their signal was read, and the reply text.
+#[derive(Debug, PartialEq)]
+enum Seen {
+    Chunk(String),
+    Notices(Vec<SessionNotice>),
+}
+
+fn cli_notices_turn(
+    client: &mut ClaudeClient,
+    events: &sirio_chat::EventStream,
+    prompt: &str,
+) -> Vec<Seen> {
+    client.prompt(prompt).expect("prompt is accepted");
+    let mut seen = Vec::new();
+    loop {
+        match next_event(events) {
+            ChatEvent::AgentMessageChunk(text) => seen.push(Seen::Chunk(text)),
+            ChatEvent::OtherSessionUpdate { kind } if kind == "SessionNotice" => {
+                seen.push(Seen::Notices(client.take_notices()));
+            }
+            ChatEvent::TurnEnded { .. } => return seen,
+            _ => {}
+        }
+    }
+}
+
+fn notices_of(seen: &[Seen]) -> Vec<SessionNotice> {
+    seen.iter()
+        .filter_map(|item| match item {
+            Seen::Notices(notices) => Some(notices.clone()),
+            Seen::Chunk(_) => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn reply_of(seen: &[Seen]) -> String {
+    seen.iter()
+        .filter_map(|item| match item {
+            Seen::Chunk(text) => Some(text.as_str()),
+            Seen::Notices(_) => None,
+        })
+        .collect()
+}
+
+fn retrying(
+    attempt: u32,
+    delay: u64,
+    status: Option<u16>,
+    error: &str,
+    no_response: bool,
+) -> SessionNotice {
+    SessionNotice::Retrying {
+        attempt,
+        max_retries: 10,
+        retry_delay_ms: delay,
+        error: Some(error.into()),
+        error_status: status,
+        no_response,
+    }
+}
+
+#[test]
+fn the_cli_notices_reach_the_client_in_order() {
+    let (mut client, events) = launch("cli_notices");
+    let mut notices = |prompt: &str| notices_of(&cli_notices_turn(&mut client, &events, prompt));
+
+    assert_eq!(
+        notices("retry twice"),
+        vec![
+            retrying(1, 617, Some(529), "overloaded", false),
+            retrying(2, 1101, Some(529), "overloaded", false),
+        ]
+    );
+    // The last frame has a string `attempt`: it yields nothing, and the
+    // lines before it are not lost with it. A `null` status stays `None`,
+    // and a `null` `no_response` is not "no response": only an object is.
+    assert_eq!(
+        notices("retry kinds"),
+        vec![
+            retrying(1, 617, Some(500), "server_error", false),
+            retrying(2, 617, Some(429), "rate_limit", false),
+            retrying(3, 617, None, "unknown", false),
+            retrying(4, 617, None, "unknown", true),
+            // The status is a string: only that field is lost.
+            retrying(5, 617, None, "server_error", false),
+        ]
+    );
+    // `timeout_ms` is a string: the notification stays, without a timeout.
+    assert_eq!(
+        notices("notify typed"),
+        vec![SessionNotice::Notification {
+            key: "typed".into(),
+            text: "Typed badly".into(),
+            priority: Some("low".into()),
+            color: None,
+            timeout_ms: None,
+        }]
+    );
+    let got = notices("notify");
+    let expected: [(&str, &str, &str, Option<&str>); 4] = [
+        (
+            "stop-hook-error",
+            "Stop hook error occurred \u{b7} ctrl+o to see",
+            "immediate",
+            None,
+        ),
+        (
+            "auto-mode-gate-plan-exit-fallback",
+            "Plan mode exit fell back",
+            "high",
+            Some("warning"),
+        ),
+        (
+            "lsp-server-start-failed:demo",
+            "LSP server demo failed to start",
+            "low",
+            None,
+        ),
+        (
+            "lsp-server-start-failed:demo",
+            "LSP server demo failed again",
+            "low",
+            None,
+        ),
+    ];
+    assert_eq!(got.len(), expected.len(), "one notice per notification");
+    for (notice, (key, text, priority, color)) in got.iter().zip(expected) {
+        assert_eq!(
+            notice,
+            &SessionNotice::Notification {
+                key: key.into(),
+                text: text.into(),
+                priority: Some(priority.into()),
+                color: color.map(Into::into),
+                timeout_ms: Some(120_000),
+            }
+        );
+    }
+
+    let got = notices("refuse");
+    assert_eq!(got.len(), 1);
+    assert!(matches!(
+        &got[0],
+        SessionNotice::CliNotice { text, warning: false }
+            if text.starts_with("Opus 5.5's safeguards")
+    ));
+
+    let got = notices("refuse fallback");
+    assert_eq!(got.len(), 1);
+    let override_mark = char::from_u32(0x202E).unwrap();
+    assert!(matches!(
+        &got[0],
+        SessionNotice::CliNotice { text, warning: false }
+            if text.contains("\n\nDetails:") && text.contains(override_mark)
+    ));
+
+    let got = notices("refuse none");
+    assert_eq!(got.len(), 1);
+    assert!(matches!(
+        &got[0],
+        SessionNotice::CliNotice { warning: false, .. }
+    ));
+
+    // The fourth frame has an empty `content` and yields nothing.
+    let got = notices("inform levels");
+    let lines: Vec<(&str, bool)> = got
+        .iter()
+        .map(|notice| match notice {
+            SessionNotice::CliNotice { text, warning } => (text.as_str(), *warning),
+            _ => panic!("every notice here is a CliNotice"),
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("Started in the background: demo", false),
+            ("Try /compact", false),
+            (
+                "A hook gave no usable answer, so it didn't check this action.",
+                true
+            ),
+        ]
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn an_answer_no_stream_carried_is_drawn_once() {
+    let (mut client, events) = launch("cli_notices");
+    let exhaustion = "API Error: Repeated 529 Overloaded errors.";
+    let cases: [(&str, &str); 15] = [
+        // First of a fresh launch: nothing to run on from.
+        ("unstreamed", "ok"),
+        ("midstream", "partial-before-error\n\nok"),
+        ("midstream drop", "partial-before-error\n\nok"),
+        ("retry out", exhaustion),
+        // The error result of the turn before left no separator behind.
+        ("unstreamed", "ok"),
+        ("subagent text", "ok"),
+        ("retry twice", "ok"),
+        ("retry kinds", "ok"),
+        ("notify", "ok"),
+        ("notify short", "ok"),
+        ("notify short again", "ok"),
+        ("refuse fallback", "refused-partialok"),
+        ("refuse none", "refused-partial"),
+        ("inform levels", "ok"),
+        ("anything else", "ok"),
+    ];
+    for (prompt, expected) in cases {
+        let seen = cli_notices_turn(&mut client, &events, prompt);
+        assert_eq!(
+            reply_of(&seen),
+            expected,
+            "the reply text of one turn, drawn once"
+        );
+    }
+    // Both halves were streamed, so no separator is added, and the notice
+    // sits between them.
+    let seen = cli_notices_turn(&mut client, &events, "refuse");
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0], Seen::Chunk("refused-partial".into()));
+    assert!(matches!(&seen[1], Seen::Notices(notices) if notices.len() == 1));
+    assert_eq!(seen[2], Seen::Chunk("ok".into()));
+    client.shutdown().expect("clean shutdown");
+}
+
 /// Everything the stream carries up to and including the first re-read signal
 /// named `kind`, or `None` when none arrives inside `budget`.
 fn events_through_signal(

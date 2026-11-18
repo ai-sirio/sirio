@@ -648,4 +648,33 @@ pub enum SessionNotice {
         /// When that window resets, in unix seconds.
         resets_at: Option<i64>,
     },
+    /// The CLI is retrying a failed API request.
+    Retrying {
+        attempt: u32,
+        max_retries: u32,
+        /// How long it waits before the next try; 0 when it did not say.
+        retry_delay_ms: u64,
+        /// The CLI's word for the failure, e.g. `overloaded`.
+        error: Option<String>,
+        /// The HTTP status; `None` when the connection was lost.
+        error_status: Option<u16>,
+        /// The request got no response at all.
+        no_response: bool,
+    },
+    /// A transient message the CLI raised, held until its own timer ends.
+    Notification {
+        /// What it is about; a later one with the same key replaces it.
+        key: String,
+        text: String,
+        priority: Option<String>,
+        color: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    /// A sentence the CLI wrote for the reader: a refusal, or an
+    /// informational line.
+    CliNotice {
+        text: String,
+        /// The `informational` level was `warning`.
+        warning: bool,
+    },
 }

@@ -2014,6 +2014,155 @@ def wait_for_handshake_gate():
         time.sleep(0.05)
 
 
+# ---------------------------------------------------------------------------
+# `cli_notices`: the frames the CLI sends when a request is retried, when it
+# raises a notification, refuses, or says something informational, and an
+# `assistant` answer it sent with no stream before it. The prompt text picks the
+# turn (see `cli_notices_turn`); each ends with a `result`. Line shapes copy the
+# live probe of the real CLI. `--fixture-retry-gate=<path>` holds `retry twice`
+# after both `api_retry` frames, before its reply, until `<path>` exists; that turn runs on its own
+# thread, so control requests are still answered meanwhile.
+# ---------------------------------------------------------------------------
+
+RETRY_GATE_PATH = flag_value("fixture-retry-gate")
+
+
+def cli_system(subtype, **fields):
+    line = {"type": "system", "subtype": subtype, "session_id": SESSION_ID,
+            "uuid": trace_uuid()}
+    line.update(fields)
+    send(line)
+
+
+def cli_retry(attempt, delay_ms, status, error, **extra):
+    cli_system("api_retry", attempt=attempt, max_retries=10, retry_delay_ms=delay_ms,
+               error_status=status, error=error, **extra)
+
+
+def cli_streamed(body, message_id):
+    """A reply with its stream: the start, the text, the block's end, the
+    complete `assistant` line, then the message's end."""
+    message_start(message_id)
+    text(body)
+    trace_stream({"type": "content_block_stop", "index": 0})
+    trace_assistant(message_id, {"type": "text", "text": body})
+    message_end()
+
+
+def cli_notify(key, body, priority, timeout_ms, color=None):
+    fields = {"key": key, "text": body, "priority": priority, "timeout_ms": timeout_ms}
+    if color is not None:
+        fields["color"] = color
+    cli_system("notification", **fields)
+
+
+def cli_inform(content, level):
+    cli_system("informational", content=content, level=level)
+
+
+def cli_notices_turn(prompt):
+    requesting()
+    if prompt == "retry twice":
+        cli_retry(1, 617, 529, "overloaded")
+        cli_retry(2, 1101, 529, "overloaded")
+        if RETRY_GATE_PATH:
+            while not os.path.exists(RETRY_GATE_PATH):
+                time.sleep(0.02)
+        cli_streamed("ok", "msg_rt")
+    elif prompt == "retry kinds":
+        cli_retry(1, 617, 500, "server_error")
+        cli_retry(2, 617, 429, "rate_limit")
+        cli_retry(3, 617, None, "unknown", no_response=None)
+        cli_retry(4, 617, None, "unknown", no_response={"waited_ms": 2500, "retry_wait_ms": 0})
+        # A wrongly typed optional field costs only itself, never the line.
+        cli_retry(5, 617, "x", "server_error")
+        # A wrongly typed required field drops the notice.
+        cli_retry("five", 617, 500, "server_error")
+        cli_streamed("ok", "msg_rk")
+    elif prompt == "retry out":
+        sentence = "API Error: Repeated 529 Overloaded errors."
+        cli_retry(1, 617, 529, "overloaded")
+        cli_retry(2, 1101, 529, "overloaded")
+        send({"type": "assistant",
+              "message": {"id": trace_uuid(), "type": "message", "role": "assistant",
+                          "model": "<synthetic>", "content": [{"type": "text", "text": sentence}],
+                          "stop_reason": "stop_sequence"},
+              "error": "server_error", "parent_tool_use_id": None,
+              "session_id": SESSION_ID, "uuid": trace_uuid()})
+        send({"type": "result", "subtype": "success", "is_error": True, "result": sentence,
+              "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+        return
+    elif prompt == "notify":
+        cli_streamed("ok", "msg_n")
+        cli_notify("stop-hook-error", "Stop hook error occurred \u00b7 ctrl+o to see",
+                   "immediate", 120000)
+        cli_notify("auto-mode-gate-plan-exit-fallback", "Plan mode exit fell back",
+                   "high", 120000, color="warning")
+        cli_notify("lsp-server-start-failed:demo", "LSP server demo failed to start",
+                   "low", 120000)
+        cli_notify("lsp-server-start-failed:demo", "LSP server demo failed again",
+                   "low", 120000)
+    elif prompt == "notify short":
+        cli_streamed("ok", "msg_ns")
+        cli_notify("short", "Compaction failed", "immediate", 8000, color="error")
+    elif prompt == "notify typed":
+        cli_streamed("ok", "msg_nt")
+        cli_system("notification", key="typed", text="Typed badly", priority="low",
+                   timeout_ms="x")
+    elif prompt == "unstreamed":
+        trace_assistant("msg_u", {"type": "text", "text": "ok"})
+    elif prompt == "notify short again":
+        cli_streamed("ok", "msg_nsa")
+        cli_notify("short", "Compaction failed again", "immediate", 15000, color="error")
+    elif prompt == "refuse":
+        cli_streamed("refused-partial", "msg_r")
+        cli_inform("Opus 5.5's safeguards stopped the response above \u00b7 "
+                   "continuing once with that noted", "notice")
+        send({"type": "user",
+              "message": {"role": "user", "content": [
+                  {"type": "text",
+                   "text": "Your response above was stopped by a safety classifier."}]},
+              "isSynthetic": True, "refused_message_id": "msg_r",
+              "parent_tool_use_id": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+        cli_streamed("ok", "msg_r2")
+    elif prompt == "refuse fallback":
+        cli_streamed("refused-partial", "msg_rf")
+        cli_system("model_refusal_fallback", trigger="refusal", direction="retry",
+                   scope="session", original_model="claude-opus-5",
+                   fallback_model="claude-opus-4-8", request_id=None,
+                   content="Opus 5's safeguards flagged this message. Switched to Opus 4.8."
+                           "\n\nDetails: `[cyber]` \N{RIGHT-TO-LEFT OVERRIDE}evil")
+        cli_streamed("ok", "msg_rf2")
+    elif prompt == "refuse none":
+        cli_streamed("refused-partial", "msg_rn")
+        cli_system("model_refusal_no_fallback", original_model="claude-opus-5-5",
+                   request_id=None, content="Opus 5.5's safeguards stopped this response.")
+    elif prompt == "inform levels":
+        cli_inform("Started in the background: demo", "info")
+        cli_inform("Try /compact", "suggestion")
+        cli_inform("A hook gave no usable answer, so it didn't check this action.", "warning")
+        cli_inform("", "notice")
+        cli_streamed("ok", "msg_il")
+    elif prompt == "subagent text":
+        trace_assistant(trace_uuid(), {"type": "text", "text": "subagent words"},
+                        parent="toolu_x", agent_id="agent_x")
+        cli_streamed("ok", "msg_sa")
+    elif prompt in ("midstream", "midstream drop"):
+        message_start("msg_m")
+        text("partial-before-error")
+        trace_stream({"type": "content_block_stop", "index": 0})
+        if prompt == "midstream":
+            trace_stream({"type": "message_stop"})
+        trace_assistant("msg_1", {"type": "text", "text": "ok"})
+    else:
+        cli_streamed("ok", "msg_any")
+    result()
+
+
+def cli_notices_prompt(message):
+    return trace_prompt_text(message).strip()
+
+
 def main():
     if LAUNCH_LOG_PATH:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
@@ -2358,6 +2507,16 @@ def main():
                 tool_input = {"plan": "1. Read\n2. Write"}
                 assistant_tool_use("toolu_plan_1", "ExitPlanMode", tool_input)
                 ask_permission("cli-plan-1", "ExitPlanMode", "toolu_plan_1", tool_input)
+                continue
+            if MODE == "cli_notices":
+                if not INIT_PRINTED:
+                    init_line()
+                prompt = cli_notices_prompt(message)
+                if RETRY_GATE_PATH and prompt == "retry twice":
+                    threading.Thread(target=cli_notices_turn, args=(prompt,),
+                                     daemon=True).start()
+                else:
+                    cli_notices_turn(prompt)
                 continue
             if MODE == "notices":
                 init_line()
