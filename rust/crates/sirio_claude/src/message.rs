@@ -390,7 +390,9 @@ impl RateLimitPush {
                 .as_f64()
                 .map(to_percent)
         };
-        let rate_limit_type = string(info, "rateLimitType");
+        // An empty token is as good as none: the sentence leaves the part out.
+        let non_empty = |key: &str| string(info, key).filter(|text| !text.is_empty());
+        let rate_limit_type = non_empty("rateLimitType");
         let used = info
             .get("utilization")
             .and_then(serde_json::Value::as_f64)
@@ -404,7 +406,7 @@ impl RateLimitPush {
             five_hour: window("five_hour"),
             seven_day: window("seven_day"),
             used_percent: used,
-            limit_scope: string(info, "limitScope"),
+            limit_scope: non_empty("limitScope"),
         })
     }
 }
@@ -988,6 +990,9 @@ mod tests {
         let neither = read(r#"{"status":"rejected","rateLimitType":"overage","limitScope":"group_pool"}"#);
         assert_eq!(neither.used_percent, None);
         assert_eq!(neither.limit_scope.as_deref(), Some("group_pool"));
+        let blank = read(r#"{"status":"rejected","rateLimitType":"","limitScope":""}"#);
+        assert_eq!(blank.rate_limit_type, None);
+        assert_eq!(blank.limit_scope, None);
         let mistyped = read(r#"{"status":"allowed_warning","utilization":"high"}"#);
         assert_eq!(mistyped.used_percent, None);
         assert_eq!(mistyped.status.as_deref(), Some("allowed_warning"));

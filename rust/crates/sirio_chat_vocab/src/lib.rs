@@ -643,11 +643,12 @@ pub enum SessionNotice {
         /// The CLI's own sentence, already written for a reader.
         summary: String,
     },
-    /// The plan stopped allowing turns.
+    /// The plan is near a limit or past it: a warning, a refusal or any other
+    /// status the CLI reports except `allowed`.
     RateLimited {
-        /// The CLI's own word for the refusal.
+        /// The CLI's own word for the state (`allowed_warning`, `rejected`, ...).
         status: String,
-        /// Which window ran out, when it named one.
+        /// Which window the status is about, when the CLI named one.
         window: Option<String>,
         /// When that window resets, in unix seconds.
         resets_at: Option<i64>,

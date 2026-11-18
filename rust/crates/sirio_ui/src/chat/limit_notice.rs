@@ -90,7 +90,8 @@ where
                 None => "Approaching the usage limit".to_string(),
             };
             if let Some(percent) = used_percent {
-                text.push_str(&format!(": {percent}% used"));
+                // A warning is not a refusal: it never reads 100%.
+                text.push_str(&format!(": {}% used", percent.min(99)));
             }
             text
         }
@@ -174,6 +175,10 @@ mod tests {
                 None,
                 None
             ),
+            "Approaching the 5-hour usage limit: 99% used."
+        );
+        assert_eq!(
+            sentence("allowed_warning", Some("five_hour"), Some(100), None, None),
             "Approaching the 5-hour usage limit: 99% used."
         );
         assert_eq!(

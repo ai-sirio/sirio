@@ -7,9 +7,10 @@
 use serde_json::Value;
 
 /// A percent as the whole number a reader sees: `value` is already on the
-/// 0–100 scale, rounded down, so a warning never reads 100%. The epsilon
-/// keeps IEEE products whole: `0.57 * 100.0` is `56.99999999999999` and must
-/// read 57. Anything outside 0–100 (and NaN) is clamped into it.
+/// 0–100 scale, rounded down. The epsilon keeps IEEE products whole:
+/// `0.57 * 100.0` is `56.99999999999999` and must read 57. A value outside
+/// 0–100 is clamped into it, so 100% is possible here; NaN reads 0. A
+/// warning's own sentence caps itself under 100.
 #[must_use]
 pub fn whole_percent(value: f64) -> u8 {
     // Truncation is the point: the value is clamped to 0..=100 first.

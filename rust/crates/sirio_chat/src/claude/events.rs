@@ -1166,12 +1166,13 @@ mod tests {
                    "utilization": 0.92, "resetsAt": 1789990800})
         };
         let mut fold = Fold::new();
-        let mut announced = |fold: &mut Fold, info: serde_json::Value| {
+        let announced = |fold: &mut Fold, info: serde_json::Value| {
             fold.apply(parse(push(info)));
             fold.take_notices().len()
         };
         assert_eq!(announced(&mut fold, warning()), 1);
-        // The same warning, with or without the per-window detail.
+        // Guard: holds before the change. The same warning, with or without
+        // the per-window detail, adds nothing.
         let mut detailed = warning();
         detailed["unifiedWindows"] = json!({"five_hour": {"utilization": 0.92}});
         assert_eq!(announced(&mut fold, detailed), 0);
@@ -1190,7 +1191,8 @@ mod tests {
         let mut weekly = rejected;
         weekly["rateLimitType"] = json!("seven_day");
         assert_eq!(announced(&mut fold, weekly), 1);
-        // The plan having room clears the memory: the warning is news again.
+        // Guard: holds before the change. The plan having room clears the
+        // memory: the warning is news again.
         let mut allowed = warning();
         allowed["status"] = json!("allowed");
         assert_eq!(announced(&mut fold, allowed), 0);
