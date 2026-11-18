@@ -15,9 +15,11 @@ set -eEuo pipefail
 #    2  a click on the project row folds it (its cards leave the list), another
 #       unfolds it; the row and the section header are captured with the pointer on
 #       them and off, and the crops of their right ends are asserted to change.
-#       That the project row's + and three dots and the header's expand all /
-#       collapse all show only under the pointer is judged by eye in frames/
-#       (a pixel difference cannot tell the buttons from the row's hover wash)
+#       The hover-only controls are also judged by pixels, each cropped at its
+#       own rect (the app reports them: sidebarSectionAdd, sidebarSectionMenu,
+#       sidebarHeaderExpandAll, sidebarHeaderCollapseAll): more than one
+#       colour under the pointer, exactly one (uniform) at rest. frames/ keep
+#       the by-eye record
 #    3  the title menu switches to Sessions (the Projects rows are not drawn) and
 #       back, by real clicks on the menu's rows
 #    4  the pointer on a card: after 500 ms the hover card is open beside the
@@ -26,7 +28,9 @@ set -eEuo pipefail
 #       agree, the star's rect lies inside the card. The main worktree is the
 #       Primary (the served `primary` flag is read): a hover shows its filled star
 #       only, a plain card its outline star and its cross (judged by eye in
-#       frames/). A click on the Primary's star unsets it (the flag goes true then
+#       frames/; the star's and the cross's own rects, sidebarCardStar and
+#       sidebarCardRemove, hold more than one colour under the pointer and one at
+#       rest). A click on the Primary's star unsets it (the flag goes true then
 #       false, and the same card's star crop differs); a second click restores it
 #    5  one session made unread (a codex stub reports running then done while the
 #       other worktree is selected): the bell reads "unread"; a click on the bell
@@ -655,6 +659,31 @@ print("%dx%d+%d+%d" % (round(w) + 2 * g, round(h) + 2 * g, max(0, round(x) - g),
 rect_of() { # key: "x y w h" window pixels of a rect
   get "(R['$1'].x, R['$1'].y, R['$1'].w, R['$1'].h)" | tr -d '(),'
 }
+# A control's own rect as an ImageMagick crop, 2 px in from each side so that no neighbouring
+# edge (a row's rule, the card's wash) rounds into it.
+control_crop() { # key
+  python3 -c 'import sys
+x, y, w, h = (float(v) for v in sys.argv[1:5])
+print("%dx%d+%d+%d" % (max(1, round(w) - 4), max(1, round(h) - 4), round(x) + 2, round(y) + 2))' $(rect_of "$1")
+}
+colours_in() { # frame key: how many distinct colours the control's own rect holds in a frame
+  "$IM" "$OUT_DIR/frames/$1-$TAG.png" -crop "$(control_crop "$2")" +repage -format '%k' info: \
+    || fail "could not count the colours of $2 in $1"
+}
+# A hover-only control, judged by its own pixels without eyes: drawn under the pointer (more
+# than one colour: its glyph over the ground) and gone at rest (one colour). The by-eye frames
+# stay beside these rows.
+expect_hover_only() { # case key hover_frame rest_frame
+  local shown rest
+  shown=$(colours_in "$3" "$2")
+  rest=$(colours_in "$4" "$2")
+  if [ "$shown" -gt 1 ] && [ "$rest" -eq 1 ]; then
+    tsv_row "$1" "$2 is drawn under the pointer and uniform at rest" "> 1 in $3, 1 in $4" "$shown in $3, $rest in $4" ok
+  else
+    tsv_row "$1" "$2 is drawn under the pointer and uniform at rest" "> 1 in $3, 1 in $4" "$shown in $3, $rest in $4" FAIL
+    fail "$2 is not hover-only: $shown colours in $3, $rest in $4"
+  fi
+}
 
 # ---- the codex stub's go-files ---------------------------------------------
 stub_go() { # pane what
@@ -733,15 +762,19 @@ park_pointer
 capture section-header-idle
 # The row's right end is where its + and its three dots show, and the header's right end holds
 # add project (always) and expand all / collapse all (under the pointer). A pixel difference
-# cannot tell those buttons from the hover wash the row gets, so the rows below only say that
-# the crop changes under the pointer; that the buttons show is judged by eye in frames/
-# project-row-hover-* and section-header-hover-*.
+# cannot tell those buttons from the hover wash the row gets, so the two rows below only say that
+# the crop changes under the pointer; each button is judged by its own rect further down
+# (expect_hover_only), and by eye in frames/ project-row-hover-* and section-header-hover-*.
 ROW=$(rect_of sidebarSection)
 HEAD=$(rect_of sidebarSectionHeader)
-expect_frames_differ 2 "the project row changes under the pointer (its + and dots are judged by eye in frames/)" project-row-hover project-row-idle \
+expect_frames_differ 2 "the project row changes under the pointer (its + and dots: see expect_hover_only below)" project-row-hover project-row-idle \
   "$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (64, round(h), round(x + w - 64), round(y)))' $ROW)"
-expect_frames_differ 2 "the section header changes under the pointer (its expand all / collapse all are judged by eye in frames/)" section-header-hover section-header-idle \
+expect_frames_differ 2 "the section header changes under the pointer (its expand all / collapse all: see expect_hover_only below)" section-header-hover section-header-idle \
   "$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (90, round(h), round(x + w - 90), round(y)))' $HEAD)"
+expect_hover_only 2 sidebarSectionAdd project-row-hover project-row-idle
+expect_hover_only 2 sidebarSectionMenu project-row-hover project-row-idle
+expect_hover_only 2 sidebarHeaderExpandAll section-header-hover section-header-idle
+expect_hover_only 2 sidebarHeaderCollapseAll section-header-hover section-header-idle
 click_rect sidebarSection
 wait_for 2 "the click folded the project" "P[0]['expanded'] is False and R['sidebarCard'] is None"
 park_pointer
@@ -795,6 +828,10 @@ print("%dx%d+%d+%d" % (24, 24, round(x + w / 2) - 12, round(y + h / 2) - 12))' $
 move_window "$(python3 -c 'import sys; print(round(float(sys.argv[1]) + 40), round(float(sys.argv[2]) + float(sys.argv[4]) + 26))' $CARD)"
 sleep 0.8
 capture card-hover-star-cross
+# The card's star (the main worktree's, the Primary's filled one) and the cross of the card under
+# it, by their own rects: drawn under the pointer, uniform at rest (project-row-idle: no pointer).
+expect_hover_only 4 sidebarCardStar card-hover-primary-star project-row-idle
+expect_hover_only 4 sidebarCardRemove card-hover-star-cross project-row-idle
 # A click on the Primary's star unsets it (the same action as the menu's Unset Primary): the served
 # flag goes true then false, and the same card under the same pointer shows the outline star.
 wait_for 4 "the main worktree is the Primary" "PRIM['repo'] is True and PRIM['other'] is False"

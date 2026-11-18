@@ -561,8 +561,10 @@ Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 # `primary` flag of `project list`). Steps: the header, New Chat row, section
 # header, project row (31) and card (53) drawn at their heights; the project row
 # folds and unfolds; the project row and the section header change under the
-# pointer (their + / three dots and expand all / collapse all are judged by eye
-# in frames/: a pixel diff cannot tell them from the hover wash); the title menu
+# pointer, and each hover-only control (the row's + and three dots, expand all /
+# collapse all, the card's star and cross), cropped at its own rect from the layout
+# read, holds more than one colour under the pointer and exactly one at rest (the
+# frames/ keep the by-eye record); the title menu
 # switches to Sessions and back; the hover card opens beside the sidebar (4 px
 # past its visible right edge) and closes when the pointer leaves; the main
 # worktree is the Primary, a click on its star unsets it (served flag true then
@@ -579,7 +581,7 @@ Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 # reported; --out-dir DIR (must be empty) keeps transcript.log, app.log,
 # measurements.tsv (case, key, expected, drawn, ok), reads/, attention-*.json and
 # PID-matched captures in frames/<what>-<appearance>.png.
-Scripts/Tests/test-sidebar-shell-e2e.sh   # -> prints "SIDEBAR SHELL E2E OK (dark|light|state only)"
+Scripts/Tests/test-sidebar-shell-e2e.sh   # -> prints "SIDEBAR SHELL E2E OK (dark|light|default|state only)"; (default) is the line without --appearance
 
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
