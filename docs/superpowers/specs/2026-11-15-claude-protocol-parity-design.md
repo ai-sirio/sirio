@@ -517,6 +517,58 @@ Each item is laid out the same way:
 - **Proof.**
   - The fixture answers a listing. The E2E reads the card.
   - Live: a settings hook in a private `CLAUDE_CONFIG_DIR`, listed back.
+- **Deviations, from the live probe** (`.superpowers/probe-a8/FINDINGS.md`: 2.1.326 over stdio, with
+  2.1.325, 2.1.327 and the 2.1.257 floor for comparison):
+  - **The answer is richer, and Sirio reads only part of it.** It is
+    `{events, hooks, eventCatalog, policy, safeMode?, bareMode?, errors?}` (run `run-q1`).
+    `events[]` lists only the events that have hooks, in lifecycle order, each with a `summary`.
+    `hooks[]` is flat: every row carries its `event` and `matcher` (`""` when it has none), plus
+    `source`, `sourceLabel`, `pluginName?`, `type` (`command`, `prompt`, `agent`, `http`,
+    `mcp_tool`), `contentLabel`, `displayText`, `commandText`, `disabled?` and a few run options.
+    Sirio reads `events`, `hooks`, `policy`, `safeMode`, `bareMode` and `errors`. It ignores
+    `eventCatalog`, which feeds an add-hook form, since the card is read-only. It never reads a
+    row's `editable`, which holds the hook's raw configuration with its characters unescaped: it
+    is not in the reader's type and never reaches `surface.chat.read`.
+  - **Grouping, label and unfold.** Sirio groups the flat rows by `event`, in the order of
+    `events[]`; a row whose event is missing there still gets its group, after the others. Each
+    row shows `displayText` (which is the `statusMessage` when the hook has one) and its matcher
+    when not empty. Its full `commandText`, under its `contentLabel` (Command, Prompt, URL, MCP
+    tool), unfolds below it and starts closed. The CLI truncates neither, so Sirio cuts the label
+    to one line.
+  - **Text.** The CLI already shows control characters as symbols in `displayText` and
+    `commandText` (`␤`, `␛`, a bidi override as the text `\u{202E}`); `commandText` keeps its real
+    newlines and tabs (run `run-q7`). Sirio still passes every CLI string through `visible_text`,
+    multi-line for `commandText`. No hook text is a link or an action, and none goes into a
+    `sirio_perf` label.
+  - **Source.** A short tag from `source`: User, Project, Local, Startup (`--settings`), Plugin
+    with its `pluginName`, Session, Managed, Built-in. An unknown `source` shows its `sourceLabel`.
+    Plugin rows name the plugin as `<name>@inline` for a `--plugin-dir` plugin (run `run-q2`).
+  - **Disabled is per row, with no per-hook switch.** `disabled: true` comes from any effective
+    `disableAllHooks` (user, project or local), safe mode (`--safe-mode`,
+    `CLAUDE_CODE_SAFE_MODE`), bare mode (`--bare`, `CLAUDE_CODE_SIMPLE`) and, for rows that are
+    not plugins', the organization's plugin-only lock (runs `run-q3-*`). The card adds one note
+    from `policy` and the modes: all hooks disabled, only managed hooks run (the others are then
+    not listed at all), only plugin hooks run, the organization's settings could not be read, safe
+    mode or bare mode with the CLI's own `exitHint`.
+  - **`errors`** names a settings file the CLI skipped (bad JSON, or a schema error elsewhere in
+    the file), as `{file, path, message}` with an absolute `file`; a bad entry inside a hooks
+    block is dropped silently and gives none (runs `run-q4-*`). Each error is a note on the card.
+  - **When Sirio asks.** The CLI never announces a change: a settings edit shows in the listing
+    about a second later on its own, a plugin's hooks only after `reload_plugins`, and no message
+    says so (run `run-q5`). The CLI answers at any time, mid-turn included (run `run-q1`). So the
+    card asks on the Rules card's triggers (panel opened, card unfolded, connection ready and turn
+    end, each only while the panel is open) and after a reload applies; it never polls. A turn end
+    matters: a skill's own hooks appear, as Session hooks, only once the skill ran (run
+    `run-q2`). Known limit: an edit made while the open panel sits idle shows at the next trigger.
+  - **Support.** 2.1.301 to 2.1.327 answer with the same shape (runs `run-q8-*`, `run-bis-*`), and
+    no capability names it. The floor answers `Unsupported control request subtype:
+    get_hooks_listing` and the session goes on (run `run-q8-floor`), so the refusal rule retires
+    the card. An answer without a `hooks` array is unreadable: the card says so and never reads
+    "no hooks".
+  - **Not seen live, fixture only:** managed (`policySettings`) rows, `disabledByPolicy` and
+    `policyHookCount` (the managed tier could not be reached without writing `/etc`), `builtinHook`
+    rows, and hooks from an agent's frontmatter. Hooks a host registers in `initialize` are never
+    listed; Sirio registers none (`hooks: {}`).
 
 ### A9 · Usage and limits
 
