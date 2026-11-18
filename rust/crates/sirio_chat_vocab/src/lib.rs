@@ -57,6 +57,9 @@ pub enum ChatError {
         /// when it reported any before the request that failed.
         methods: Vec<AuthMethodInfo>,
     },
+    /// The CLI could not start, and this is what the user reads: the
+    /// message is already complete.
+    Startup(String),
 }
 
 impl std::fmt::Display for ChatError {
@@ -68,6 +71,7 @@ impl std::fmt::Display for ChatError {
             } => write!(f, "ACP {operation:?} timed out after {duration:?}"),
             Self::Transport(message) => write!(f, "ACP transport error: {message}"),
             Self::Agent(message) => write!(f, "ACP agent error: {message}"),
+            Self::Startup(message) => f.write_str(message),
             Self::AuthRequired { methods } if methods.is_empty() => {
                 write!(f, "ACP agent requires authentication before it can be used")
             }
@@ -647,5 +651,34 @@ pub enum SessionNotice {
         window: Option<String>,
         /// When that window resets, in unix seconds.
         resets_at: Option<i64>,
+    },
+    /// The CLI is retrying a failed API request.
+    Retrying {
+        attempt: u32,
+        max_retries: u32,
+        /// How long it waits before the next try; 0 when it did not say.
+        retry_delay_ms: u64,
+        /// The CLI's word for the failure, e.g. `overloaded`.
+        error: Option<String>,
+        /// The HTTP status; `None` when the connection was lost.
+        error_status: Option<u16>,
+        /// The request got no response at all.
+        no_response: bool,
+    },
+    /// A transient message the CLI raised, held until its own timer ends.
+    Notification {
+        /// What it is about; a later one with the same key replaces it.
+        key: String,
+        text: String,
+        priority: Option<String>,
+        color: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    /// A sentence the CLI wrote for the reader: a refusal, or an
+    /// informational line.
+    CliNotice {
+        text: String,
+        /// The `informational` level was `warning`.
+        warning: bool,
     },
 }

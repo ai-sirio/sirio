@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# The CLI the native chat starts is given CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1 by Sirio itself. This unset is
+# belt and braces: launch() starts Sirio with `env -i` and an allowlist, so the variable cannot reach the CLI
+# from here anyway, and only Sirio's own launch can give it (that is what startup_opt_in proves).
+unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
+
 # End-to-end test of the chat's session panel (spec
 # 2026-10-20-chat-session-panel-design.md §9): a real, isolated debug Sirio, its
 # Claude chat talking to a stub `claude` (Scripts/Tests/stubs/session-panel/claude,
@@ -68,6 +73,29 @@ set -euo pipefail
 #   rate_limit_shared  a forge host paused by the right panel's list is paused for the card
 #                      too: the row says so and the forge sees no read of it during the pause
 #   restore            the column is open, Sirio quits and starts again: it is still open
+#
+# The notice_* scenarios (A7) use Scripts/Tests/stubs/notices/claude, the fixture in its cli_notices mode: the
+# prompt picks the turn (the stub's header, Scripts/Tests/stubs/notices/claude, lists them all).
+# SIRIO_FIXTURE_RETRY_GATE holds `retry twice` after its retries until the file exists;
+# SIRIO_FIXTURE_STARTUP makes the CLI fail to start (the start-up scenarios). They are asserted on `statusLine` of
+# `surface.chat.read` (`""` or {source, text, tone, held[, key, priority]}) and on the transcript's rows
+# (`info` and `info-warning` are the CLI's refusal and informational notices).
+#   notice_retry       the status line reads `Retrying 2 of 10 in 2 s: overloaded` while the CLI holds the retry, and
+#                      is empty with the reply drawn once the gate opens
+#   notice_retry_exhausted  the exhaustion sentence is in exactly one row and the line is empty
+#   notice_notification  the line outlives the turn: immediate over high over low, a same-key one replaced (held 3);
+#                      the newest immediate first; a replaced entry's timer leaves its replacement alone; the
+#                      replacement's own timer returns the line to the older one
+#   notice_refusal     a refusal is an info row between the refused text and the re-asked answer, one that holds
+#                      "\n\nDetails:" and a bidi override shows the override as text, and the informational
+#                      levels are info, info, info-warning
+#   notice_midstream   a reply cut by an error is not glued to the answer that follows
+#   startup_*          (SIRIO_FIXTURE_STARTUP) the chat's error row is the CLI's own start-up text, with no ACP in it:
+#     startup_config_invalid  the sentence, the file and its backup, and the override shown as text
+#     startup_opt_in     a reason the CLI reports only when Sirio's launch sets CLAUDE_CODE_STARTUP_FAILURE_RESULTS
+#                        (the script unsets it, so this proves the launch does)
+#     startup_unknown_reason  `Claude Code could not start (some_future_reason).`
+#     startup_no_result  no result before the exit: the exit code and the stderr tail
 #
 # The trace scenarios (spec 2026-10-21-chat-trace-waterfall-design.md §8) use another stub,
 # Scripts/Tests/stubs/trace/claude, the same fixture in its trace mode: the first word of
@@ -345,7 +373,9 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   rename_session_restored rename_auto_title_quiet
   permission_detail permission_default_no permission_default_no_reject permission_visible_text permission_plain
   permission_rules permission_rules_refused permission_rules_closed_panel permission_rules_coalesced
-  permission_rules_after_always_allow permission_rules_unreadable)
+  permission_rules_after_always_allow permission_rules_unreadable
+  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream
+  startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -616,17 +646,18 @@ done
 # Which claude shim the next launch puts first on the app's PATH: session-panel (the
 # column's own scenarios), session-panel-bypass (the same, the CLI in bypassPermissions), trace (the trace
 # scenarios), file-links (file_links), elicitation (the elicitation scenarios), session-state
-# (session_state_background), background-tasks (the background_* scenarios) or rename (the rename_* scenarios). A scenario picks its stub by
+# (session_state_background), background-tasks (the background_* scenarios), notices (the notice_*
+# scenarios) or rename (the rename_* scenarios). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
-use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation|session-state|background-tasks|rename|permissions
+use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation|session-state|background-tasks|rename|permissions|notices
   SIRIO_E2E_CLAUDE_STUB=$1
   local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
   APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
   resolved=$(PATH="$APP_PATH" command -v claude || true)
   [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
 }
-for stub in session-panel session-panel-bypass trace file-links elicitation session-state background-tasks rename permissions; do
+for stub in session-panel session-panel-bypass trace file-links elicitation session-state background-tasks rename permissions notices; do
   use_stub "$stub"
   echo "OK: claude resolves to the $stub shim"
 done
@@ -685,6 +716,8 @@ def state(surface):
     chat["agentTitle"] = json.loads(chat["agentTitle"]) if chat.get("agentTitle") else ""
     # The question dock as painted (A5): "" when no question is open, else {caption, body, details, options, selected, digits}.
     chat["questionDock"] = json.loads(chat["questionDock"]) if chat.get("questionDock") else ""
+    # The line above the composer (A7): "" when nothing shows, else {source, text, tone, held[, key, priority]}.
+    chat["statusLine"] = json.loads(chat["statusLine"]) if chat["statusLine"] else ""
     chat["first"] = int(chat.get("firstVisibleEntry") or 0)
     chat["last"] = int(chat.get("lastVisibleEntry") or 0)
     return panel, chat
@@ -1181,6 +1214,8 @@ capture() { # name
 #   SIRIO_FIXTURE_RELOAD, SIRIO_FIXTURE_RELOAD_GATE, SIRIO_FIXTURE_SKILLS, SIRIO_FIXTURE_CLI_BUSY_GATE  the session-panel stub's
 #                  reload kind, the file that holds every reload_plugins answer, refused for reload_skills, and the file
 #                  that holds the CLI's running state (reload_*)
+#   SIRIO_FIXTURE_RETRY_GATE, SIRIO_FIXTURE_STARTUP  the notices stub's file that holds `retry twice` after its retries,
+#                  and the kind of start-up failure the CLI reports (notice_*)
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
 #                  every control request to (composer_keys reads them)
@@ -1221,6 +1256,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_TOGGLE=${SIRIO_FIXTURE_TOGGLE:-}" "SIRIO_FIXTURE_TOGGLE_GATE=${SIRIO_FIXTURE_TOGGLE_GATE:-}"
     "SIRIO_FIXTURE_RELOAD=${SIRIO_FIXTURE_RELOAD:-}" "SIRIO_FIXTURE_RELOAD_GATE=${SIRIO_FIXTURE_RELOAD_GATE:-}"
     "SIRIO_FIXTURE_SKILLS=${SIRIO_FIXTURE_SKILLS:-}" "SIRIO_FIXTURE_CLI_BUSY_GATE=${SIRIO_FIXTURE_CLI_BUSY_GATE:-}"
+    "SIRIO_FIXTURE_RETRY_GATE=${SIRIO_FIXTURE_RETRY_GATE:-}" "SIRIO_FIXTURE_STARTUP=${SIRIO_FIXTURE_STARTUP:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -4786,6 +4822,155 @@ scenario_permission_rules_unreadable() {
   stop_app
 }
 
+# ---- the notice_* scenarios (A7) -----------------------------------------------------
+# A fresh Sirio on the notices stub with a Claude chat open and its CLI connected.
+notices_chat() { # name
+  use_stub notices
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  wait_panel "the chat is connected" 'c["status"] in ("idle", "completed")' 30
+}
+# The turn footers of the transcript, and the chat idle.
+notice_turns() { # desc count
+  wait_panel "$1" "len([r for r in c['transcript'] if r.get('kind') == 'turn']) == $2 and c['status'] == 'completed'" 40
+}
+# The rows of the kinds a refusal can leave, in order, as (kind, text) pairs.
+NOTICE_ROWS="[(r['kind'], r.get('text', '')) for r in c['transcript'] if r['kind'] in ('assistant', 'info', 'info-warning')]"
+
+scenario_notice_retry() {
+  SIRIO_FIXTURE_RETRY_GATE="$RUN_DIR/notice_retry-gate"
+  rm -f "$SIRIO_FIXTURE_RETRY_GATE"
+  notices_chat notice_retry
+  send_prompt "retry twice"
+  wait_panel "the line reads the CLI's second retry while the reply is held" \
+    'c["statusLine"] != "" and c["statusLine"]["source"] == "retry" and c["statusLine"]["text"] == "Retrying 2 of 10 in 2 s: overloaded" and c["statusLine"]["tone"] == "plain"' 30
+  : >"$SIRIO_FIXTURE_RETRY_GATE"
+  notice_turns "the turn ends once the gate opens" 1
+  check_panel "the line is empty after the answer" 'c["statusLine"] == ""'
+  check_panel "the reply is the last assistant row" '[r for r in c["transcript"] if r["kind"] == "assistant"][-1]["text"] == "ok"'
+  echo "OK: notice_retry: the retry reads on the line while it is held and is gone with the answer"
+  stop_app
+}
+
+# A guard on the UI side: the sentence is drawn once and no retry line is left. Its RED is Task 1's
+# `an_answer_no_stream_carried_is_drawn_once` (the `retry out` case); the line check fails on a build with no
+# `statusLine` field, because state() reads the field without a default.
+scenario_notice_retry_exhausted() {
+  notices_chat notice_retry_exhausted
+  send_prompt "retry out"
+  notice_turns "the turn ends" 1
+  check_panel "the exhaustion sentence is in exactly one row" 'len([r for r in c["transcript"] if "Repeated 529 Overloaded errors" in r.get("text", "")]) == 1'
+  check_panel "the line is empty" 'c["statusLine"] == ""'
+  echo "OK: notice_retry_exhausted: the sentence is drawn once and no retry line is left"
+  stop_app
+}
+
+scenario_notice_notification() {
+  notices_chat notice_notification
+  send_prompt "notify"
+  notice_turns "the first turn ends" 1
+  check_panel "the line outlives the turn: immediate over high and low, the same key replaced" \
+    'c["statusLine"] != "" and c["statusLine"]["source"] == "notification" and c["statusLine"]["key"] == "stop-hook-error" and c["statusLine"]["tone"] == "plain" and c["statusLine"]["held"] == 3'
+  # sent_at is taken before the 8 s notification can exist (the conservative side for the upper check below);
+  # short_at after its footer (the conservative side for the 10 s lower bound).
+  local sent_at short_at
+  sent_at=$(date +%s%3N)
+  send_prompt "notify short"
+  notice_turns "the second turn ends" 2
+  short_at=$(date +%s%3N)
+  wait_panel "the newest immediate is the line" 'c["statusLine"] != "" and c["statusLine"]["key"] == "short" and c["statusLine"]["tone"] == "error"' 8
+  send_prompt "notify short again"
+  notice_turns "the third turn ends" 3
+  [ $(( $(date +%s%3N) - sent_at )) -lt 8000 ] || fail "the run was too slow to prove the replacement rule: the replaced entry's timer had already run out"
+  check_panel "the replacement is the line" 'c["statusLine"] != "" and c["statusLine"]["key"] == "short" and c["statusLine"]["text"] == "Compaction failed again"'
+  # The one lower bound of the scenario: past the replaced entry's 8 s, the replacement must still stand.
+  while [ $(( $(date +%s%3N) - short_at )) -lt 10000 ]; do sleep 0.2; done
+  check_panel "the replaced entry's timer did not remove its replacement" 'c["statusLine"] != "" and c["statusLine"]["text"] == "Compaction failed again"'
+  wait_panel "the replacement's own timer returned the line to the older notification" 'c["statusLine"] != "" and c["statusLine"]["key"] == "stop-hook-error"' 30
+  echo "OK: notice_notification: the line outlives the turn, orders by priority and each timer clears only its own entry"
+  stop_app
+}
+
+scenario_notice_refusal() {
+  notices_chat notice_refusal
+  send_prompt "refuse"
+  notice_turns "the refusal turn ends" 1
+  check_panel "refused text, the CLI's notice, then the re-asked answer, in that order" \
+    "len($NOTICE_ROWS) == 3 and $NOTICE_ROWS[0] == ('assistant', 'refused-partial') and $NOTICE_ROWS[1][0] == 'info' and $NOTICE_ROWS[1][1].startswith(\"Opus 5.5's safeguards\") and $NOTICE_ROWS[2] == ('assistant', 'ok')"
+  send_prompt "refuse fallback"
+  notice_turns "the fallback turn ends" 2
+  check_panel "the fallback's content keeps its paragraphs and shows the override as text" \
+    'any(r["kind"] == "info" and "\n\nDetails:" in r["text"] and "⟨U+202E⟩" in r["text"] and chr(0x202e) not in r["text"] for r in c["transcript"])'
+  send_prompt "inform levels"
+  notice_turns "the informational turn ends" 3
+  check_panel "the three levels are info, info, info-warning" \
+    '[r["kind"] for r in c["transcript"] if r["kind"] in ("info", "info-warning")][-3:] == ["info", "info", "info-warning"]'
+  # A guard, it cannot go red today: the client never turns a `user` line into a row.
+  check_panel "Guard: the CLI's synthetic user line is not a row" 'not any("stopped by a safety classifier" in r.get("text", "") for r in c["transcript"])'
+  echo "OK: notice_refusal: refusals are rows of their own between the refused text and the answer"
+  stop_app
+}
+
+# Pins the visible bug fix end to end: the reply cut by an error is not glued to the answer after it. Its RED is
+# Task 1's integration test (`an_answer_no_stream_carried_is_drawn_once`), not this scenario.
+scenario_notice_midstream() {
+  notices_chat notice_midstream
+  send_prompt "midstream"
+  notice_turns "the turn ends" 1
+  check_panel "the cut reply and the answer after it are two paragraphs" '[r for r in c["transcript"] if r["kind"] == "assistant"][-1]["text"] == "partial-before-error\n\nok"'
+  echo "OK: notice_midstream: the answer is not glued to the cut reply"
+  stop_app
+}
+
+# ---- the startup_* scenarios (A7) ------------------------------------------------------
+# A fresh Sirio on the notices stub whose CLI cannot start; waits for the chat's error row, not a connection.
+startup_chat() { # name kind
+  SIRIO_FIXTURE_STARTUP="$2"
+  use_stub notices
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  wait_panel "the chat shows an error row" "any(r['kind'] == 'error' for r in c['transcript'])" 30
+}
+# The text of the last error row.
+STARTUP_TEXT="[r for r in c['transcript'] if r['kind'] == 'error'][-1].get('text', '')"
+
+scenario_startup_config_invalid() {
+  startup_chat startup_config_invalid config_invalid
+  check_panel "the row starts with the config sentence" "$STARTUP_TEXT.startswith('Claude Code could not start: a configuration file is not valid JSON.')"
+  check_panel "the row names the file and its backup" "'File: /fixture/config/.claude.json' in $STARTUP_TEXT and 'Backup: /fixture/config/backups/.claude.json.bak' in $STARTUP_TEXT"
+  check_panel "the override is shown as text" "'bidi \u27e8U+202E\u27e9here' in $STARTUP_TEXT"
+  # Guard: cannot go red alone, since the startswith above already excludes the ACP launch text.
+  check_panel "Guard: the row does not mention ACP" "'ACP' not in $STARTUP_TEXT"
+  echo "OK: startup_config_invalid: the chat says why Claude Code could not start"
+  stop_app
+}
+
+scenario_startup_opt_in() {
+  startup_chat startup_opt_in cwd_unavailable
+  check_panel "the row is the reason's sentence" "$STARTUP_TEXT.startswith('Claude Code could not start: this folder no longer exists or cannot be read.')"
+  check_panel "the CLI's errors line follows the sentence" "$STARTUP_TEXT.endswith('\n\nThe current directory no longer exists (it was deleted or moved).')"
+  echo "OK: startup_opt_in: Sirio's launch asks the CLI for its start-up result"
+  stop_app
+}
+
+scenario_startup_unknown_reason() {
+  startup_chat startup_unknown_reason future_reason
+  check_panel "the row names the reason it does not know" "$STARTUP_TEXT.startswith('Claude Code could not start (some_future_reason).')"
+  check_panel "the CLI's errors line follows the sentence" "$STARTUP_TEXT.endswith('\n\nA reason this build does not know.')"
+  echo "OK: startup_unknown_reason: an unknown reason is named as it came"
+  stop_app
+}
+
+scenario_startup_no_result() {
+  startup_chat startup_no_result no_result
+  check_panel "the row says the CLI exited first" "$STARTUP_TEXT.startswith('Claude Code exited before it started (agent exited with code 1)')"
+  check_panel "the row holds the stderr tail" "'fixture: last line' in $STARTUP_TEXT"
+  echo "OK: startup_no_result: the exit and the stderr tail are shown"
+  stop_app
+}
+
 ran=0
 for name in "${SCENARIOS[@]}"; do
   echo "== scenario $name"
@@ -4811,6 +4996,8 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_RELOAD_GATE=""
   SIRIO_FIXTURE_SKILLS=""
   SIRIO_FIXTURE_CLI_BUSY_GATE=""
+  SIRIO_FIXTURE_RETRY_GATE=""
+  SIRIO_FIXTURE_STARTUP=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))

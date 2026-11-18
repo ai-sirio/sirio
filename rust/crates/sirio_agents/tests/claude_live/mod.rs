@@ -363,6 +363,14 @@ impl Session {
         Self::launch(claude, python, root, STATE_API, false, None, None, true, fresh)
     }
 
+    /// Launches `claude` the way `start_state` does, but set up so that it cannot start. It
+    /// never gets a prompt from here. See `BrokenStart`.
+    pub fn start_broken(claude: &Path, python: &Path, root: &Path, broken: BrokenStart) -> Self {
+        Self::launch_broken(
+            claude, python, root, STATE_API, false, None, None, false, true, Some(broken),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn launch(
         claude: &Path,
@@ -374,6 +382,33 @@ impl Session {
         project_settings: Option<&Value>,
         user_mcp: bool,
         fresh: bool,
+    ) -> Self {
+        Self::launch_broken(
+            claude,
+            python,
+            root,
+            api_script,
+            with_mcp,
+            user_settings,
+            project_settings,
+            user_mcp,
+            fresh,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_broken(
+        claude: &Path,
+        python: &Path,
+        root: &Path,
+        api_script: &str,
+        with_mcp: bool,
+        user_settings: Option<&Value>,
+        project_settings: Option<&Value>,
+        user_mcp: bool,
+        fresh: bool,
+        broken: Option<BrokenStart>,
     ) -> Self {
         if fresh {
             let _ = std::fs::remove_dir_all(root);
@@ -449,6 +484,10 @@ impl Session {
                 std::fs::create_dir_all(work.join(".claude")).unwrap();
                 std::fs::write(work.join(".claude/settings.json"), project.to_string()).unwrap();
             }
+            if matches!(broken, Some(BrokenStart::CorruptConfig)) {
+                // The only `.claude.json` write of these tests: in the scratch config dir.
+                std::fs::write(config_dir.join(".claude.json"), "{ \"broken\": ").unwrap();
+            }
         }
         let mcp = serde_json::json!({"mcpServers": {"elic": {
             "type": "stdio", "command": python.display().to_string(),
@@ -460,6 +499,14 @@ impl Session {
         if with_mcp {
             command.args(["--mcp-config", &mcp.to_string(), "--strict-mcp-config"]);
         }
+        let mut launch_env = line.env.clone();
+        if let Some(BrokenStart::BadProxy { opt_in }) = broken {
+            if !opt_in {
+                launch_env.retain(|(name, _)| name != "CLAUDE_CODE_STARTUP_FAILURE_RESULTS");
+            }
+            // Applied after `isolate`, so it replaces the dead proxy for HTTPS only.
+            launch_env.push(("HTTPS_PROXY".to_string(), "not a url".to_string()));
+        }
         let cli = CliEnv {
             claude: claude.to_path_buf(),
             root: root.to_path_buf(),
@@ -467,7 +514,7 @@ impl Session {
             work: work.clone(),
             port,
             session_id: session_id.clone(),
-            launch_env: line.env.clone(),
+            launch_env,
         };
         cli.apply(&mut command);
         command
@@ -562,6 +609,14 @@ impl Session {
         }
     }
 
+    /// Like `write`, but `false` on a broken pipe (the CLI already exited) instead of a panic.
+    pub fn try_write(&mut self, line: &Value) -> bool {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return false;
+        };
+        writeln!(stdin, "{line}").is_ok() && stdin.flush().is_ok()
+    }
+
     pub fn write(&mut self, line: &Value) {
         let stdin = self.stdin.as_mut().expect("the CLI's stdin is still open");
         writeln!(stdin, "{line}").expect("a line is written to claude");
@@ -595,6 +650,16 @@ impl Session {
             }
         }
     }
+}
+
+/// How `Session::start_broken` makes the CLI unable to start.
+#[derive(Clone, Copy)]
+pub enum BrokenStart {
+    /// The config dir's `.claude.json` is cut off in the middle of an object.
+    CorruptConfig,
+    /// `HTTPS_PROXY` is not a URL. `opt_in: false` withholds
+    /// `CLAUDE_CODE_STARTUP_FAILURE_RESULTS`.
+    BadProxy { opt_in: bool },
 }
 
 /// What `Session::poll` found.

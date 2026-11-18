@@ -20,7 +20,8 @@ pub enum CliMessage {
     /// `compact_boundary`, and others.
     System(SystemPayload),
     /// A Messages-API assistant message. With partial messages enabled its
-    /// text also arrives as deltas, so callers read only its tool uses.
+    /// text also arrives as deltas, so a caller reads its text only for an
+    /// answer no stream carried, and otherwise its tool uses.
     Assistant(AssistantPayload),
     /// A user message the CLI echoes back — in practice the tool results it
     /// feeds to itself, which is where a tool call's structured output is.
@@ -184,6 +185,46 @@ pub struct SystemPayload {
     /// Present on `task_updated`: the fields of the task that changed.
     #[serde(deserialize_with = "lenient")]
     pub patch: Option<TaskPatch>,
+    /// Present on `api_retry`: which attempt this is, and how many the CLI
+    /// will make. Every field below is lenient, so a field of another shape
+    /// costs only itself, never the line.
+    #[serde(deserialize_with = "lenient")]
+    pub attempt: Option<u32>,
+    #[serde(deserialize_with = "lenient")]
+    pub max_retries: Option<u32>,
+    /// Present on `api_retry`: how long the CLI waits before the next try.
+    #[serde(deserialize_with = "lenient")]
+    pub retry_delay_ms: Option<u64>,
+    /// Present on `api_retry`: the HTTP status, `null` when there was none.
+    #[serde(deserialize_with = "lenient")]
+    pub error_status: Option<u16>,
+    /// Present on `api_retry`: the CLI's word for the failure, e.g.
+    /// `overloaded`.
+    #[serde(deserialize_with = "lenient")]
+    pub error: Option<String>,
+    /// Present on `api_retry`: an object when the request got no response at
+    /// all, `null` otherwise.
+    #[serde(deserialize_with = "lenient")]
+    pub no_response: Option<serde_json::Value>,
+    /// Present on `notification`: what it is about, a line, how it ranks,
+    /// its colour and how long the CLI shows it.
+    #[serde(deserialize_with = "lenient")]
+    pub key: Option<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub text: Option<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub priority: Option<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub color: Option<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub timeout_ms: Option<u64>,
+    /// Present on `informational`, `model_refusal_fallback` and
+    /// `model_refusal_no_fallback`: the sentence, and (informational only)
+    /// its level.
+    #[serde(deserialize_with = "lenient")]
+    pub content: Option<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub level: Option<String>,
 }
 
 /// What a `task_updated` line changes about a task. Each is optional: a
@@ -418,8 +459,24 @@ pub struct AssistantMessage {
 }
 
 impl AssistantPayload {
-    /// The tool calls this message starts. Text and thinking are
-    /// deliberately not exposed: with `--include-partial-messages` they
+    /// The message's `text` blocks, concatenated. Only an answer the CLI sent
+    /// with no stream before it is drawn from this (see the fold): any other
+    /// text already arrived as deltas, and drawing it again would print the
+    /// reply twice.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tool calls this message starts. Thinking is not exposed, and text
+    /// only through [`Self::text`]: with `--include-partial-messages` both
     /// already arrived as deltas, and reading them here would print every
     /// reply twice.
     pub fn tool_uses(&self) -> impl Iterator<Item = &ToolUse> {
@@ -682,6 +739,52 @@ pub struct ResultPayload {
     pub model_usage: BTreeMap<String, ModelUsage>,
     pub session_id: Option<String>,
     pub uuid: Option<String>,
+    /// Why the CLI could not start, on a result written in place of the
+    /// session. A few reasons are always written (`config_file_invalid`,
+    /// `org_config_required_unavailable`, `org_config_refused`);
+    /// `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` adds every other one.
+    #[serde(deserialize_with = "lenient")]
+    pub startup_failure_reason: Option<String>,
+    /// The lines the CLI would have printed on stderr.
+    #[serde(deserialize_with = "lenient")]
+    pub errors: Option<Vec<String>>,
+    #[serde(deserialize_with = "lenient")]
+    pub invalid_config_file: Option<InvalidConfigFile>,
+}
+
+/// The configuration file a startup failure names.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct InvalidConfigFile {
+    pub path: String,
+    pub is_global: bool,
+    pub backup_path: Option<String>,
+}
+
+/// An error `result` read as the CLI saying it could not start.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartupFailure {
+    pub reason: Option<String>,
+    pub errors: Vec<String>,
+    pub invalid_config_file: Option<InvalidConfigFile>,
+}
+
+impl StartupFailure {
+    /// `Some` only when the result is an error.
+    #[must_use]
+    pub fn from_result(result: &ResultPayload) -> Option<Self> {
+        if !result.is_error {
+            return None;
+        }
+        Some(Self {
+            reason: result
+                .startup_failure_reason
+                .clone()
+                .filter(|reason| !reason.is_empty()),
+            errors: result.errors.clone().unwrap_or_default(),
+            invalid_config_file: result.invalid_config_file.clone(),
+        })
+    }
 }
 
 #[cfg(test)]

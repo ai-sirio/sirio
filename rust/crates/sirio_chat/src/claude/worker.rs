@@ -571,6 +571,31 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
             let _ = startup_tx.send(Startup::Failed(ChatError::Transport(error)));
             AttemptOutcome::Finished
         }
+        // A reason is final: a stale id does not explain it, so no retry.
+        SessionOutcome::StartupRefused(failure) => {
+            let _ = startup_tx.send(Startup::Failed(ChatError::Startup(super::startup::startup_text(
+                &failure,
+            ))));
+            AttemptOutcome::Finished
+        }
+        SessionOutcome::ClosedBeforeHandshake(failure) => {
+            if retryable {
+                return AttemptOutcome::RetryWithoutResume;
+            }
+            block_on(wait_for_stderr_drain(&stderr_drained));
+            let text = match failure.filter(|failure| {
+                !failure.errors.is_empty() || failure.invalid_config_file.is_some()
+            }) {
+                Some(failure) => super::startup::startup_text(&failure),
+                None => {
+                    let report = stderr_tail_report(&stderr_tail);
+                    let exit = block_on(child_exit_report(&child, &exit_status));
+                    format!("Claude Code exited before it started{exit}{report}")
+                }
+            };
+            let _ = startup_tx.send(Startup::Failed(ChatError::Startup(text)));
+            AttemptOutcome::Finished
+        }
         SessionOutcome::Died(detail) => {
             // `pending_permissions` lived inside `session` and died with
             // it: the command channel is gone, so any later answer fails,
@@ -593,11 +618,16 @@ enum SessionOutcome {
     CleanShutdown(mpsc::SyncSender<()>),
     /// The handshake never completed; the launcher already has the error.
     NeverStarted,
-    /// The handshake failed before any session existed, in a way a stale
-    /// `--resume` id explains: the CLI exited, or refused `initialize`.
-    /// Carries the sentence the launcher reports when there is no id left
+    /// The CLI refused `initialize`, in a way a stale `--resume` id
+    /// explains. Carries the sentence the launcher reports when there is no id left
     /// to retry without.
     HandshakeFailed(String),
+    /// An error `result` named why the CLI could not start, before the
+    /// handshake was answered.
+    StartupRefused(sirio_claude::StartupFailure),
+    /// The CLI's output ended before it answered the handshake. Carries the
+    /// reasonless error `result` it wrote first, if any.
+    ClosedBeforeHandshake(Option<sirio_claude::StartupFailure>),
     /// The CLI went away on its own.
     Died(String),
 }
@@ -745,18 +775,15 @@ async fn session(context: SessionContext) -> SessionOutcome {
     // The handshake. Its answer is the whole catalogue, so every picker is
     // populated before the user can type into the composer.
     let handshake_id = next_request_id();
-    if write_line(&mut stdin, &ControlRequest::initialize(&handshake_id))
-        .await
-        .is_err()
-    {
-        return SessionOutcome::HandshakeFailed("could not write the Claude handshake".into());
-    }
+    // A failed write does not end the handshake: the CLI may already have
+    // written why it could not start, and that is read to EOF.
+    let _ = write_line(&mut stdin, &ControlRequest::initialize(&handshake_id)).await;
+    // An error `result` without a reason, kept in case the output ends.
+    let mut early_failure: Option<sirio_claude::StartupFailure> = None;
 
     let mut catalog = loop {
         let Some(Ok(line)) = lines.next().await else {
-            return SessionOutcome::HandshakeFailed(
-                "the Claude agent closed its output before answering the handshake".into(),
-            );
+            return SessionOutcome::ClosedBeforeHandshake(early_failure);
         };
         touch_activity(&activity);
         let at = std::time::Instant::now();
@@ -785,11 +812,18 @@ async fn session(context: SessionContext) -> SessionOutcome {
         if let CliMessage::ControlRequest(value) = &message
             && let Some(refusal) = handshake_refusal(value)
         {
-            if write_line(&mut stdin, &refusal).await.is_err() {
-                return SessionOutcome::HandshakeFailed(
-                    "could not write the Claude handshake".into(),
-                );
+            let _ = write_line(&mut stdin, &refusal).await;
+            continue;
+        }
+        // An error `result` before the answer is the CLI saying it could not
+        // start: never a turn's end, so it is not folded or traced.
+        if let CliMessage::Result(result) = &message
+            && let Some(failure) = sirio_claude::StartupFailure::from_result(result)
+        {
+            if failure.reason.is_some() {
+                return SessionOutcome::StartupRefused(failure);
             }
+            early_failure = Some(failure);
             continue;
         }
         // Anything else before the handshake answer is ordinary traffic.

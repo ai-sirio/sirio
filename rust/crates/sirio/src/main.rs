@@ -24962,6 +24962,8 @@ impl SirioWorkspace {
             ("agentTitle".to_string(), snapshot.agent_title),
             // The question dock as painted: "" or JSON (see `ChatControlSnapshot`).
             ("questionDock".to_string(), snapshot.question_dock),
+            // The line above the composer: "" or JSON (see `ChatControlSnapshot`).
+            ("statusLine".to_string(), snapshot.status_line),
             (
                 "taskOutputRetired".to_string(),
                 snapshot.task_output_retired.to_string(),

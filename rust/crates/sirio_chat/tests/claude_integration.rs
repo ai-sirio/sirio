@@ -1057,6 +1057,245 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
     assert!(client.take_notices().is_empty());
 }
 
+// The rules are wrong if any of these goes red:
+// - a streamed reply or the fixture's `state_text` prints twice;
+// - the exhaustion sentence prints twice;
+// - the re-asked answer is dropped, with or without `message_stop`;
+// - a subagent's text is drawn;
+// - a frame with a wrongly typed field loses the whole line, or yields a
+//   notice built from garbage;
+// - an empty `informational` is drawn;
+// - a `no_response: null` reads as "no response".
+
+/// What one `cli_notices` turn produced, in the order it arrived: the notices
+/// at the point their signal was read, and the reply text.
+#[derive(Debug, PartialEq)]
+enum Seen {
+    Chunk(String),
+    Notices(Vec<SessionNotice>),
+}
+
+fn cli_notices_turn(
+    client: &mut ClaudeClient,
+    events: &sirio_chat::EventStream,
+    prompt: &str,
+) -> Vec<Seen> {
+    client.prompt(prompt).expect("prompt is accepted");
+    let mut seen = Vec::new();
+    loop {
+        match next_event(events) {
+            ChatEvent::AgentMessageChunk(text) => seen.push(Seen::Chunk(text)),
+            ChatEvent::OtherSessionUpdate { kind } if kind == "SessionNotice" => {
+                seen.push(Seen::Notices(client.take_notices()));
+            }
+            ChatEvent::TurnEnded { .. } => return seen,
+            _ => {}
+        }
+    }
+}
+
+fn notices_of(seen: &[Seen]) -> Vec<SessionNotice> {
+    seen.iter()
+        .filter_map(|item| match item {
+            Seen::Notices(notices) => Some(notices.clone()),
+            Seen::Chunk(_) => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn reply_of(seen: &[Seen]) -> String {
+    seen.iter()
+        .filter_map(|item| match item {
+            Seen::Chunk(text) => Some(text.as_str()),
+            Seen::Notices(_) => None,
+        })
+        .collect()
+}
+
+fn retrying(
+    attempt: u32,
+    delay: u64,
+    status: Option<u16>,
+    error: &str,
+    no_response: bool,
+) -> SessionNotice {
+    SessionNotice::Retrying {
+        attempt,
+        max_retries: 10,
+        retry_delay_ms: delay,
+        error: Some(error.into()),
+        error_status: status,
+        no_response,
+    }
+}
+
+#[test]
+fn the_cli_notices_reach_the_client_in_order() {
+    let (mut client, events) = launch("cli_notices");
+    let mut notices = |prompt: &str| notices_of(&cli_notices_turn(&mut client, &events, prompt));
+
+    assert_eq!(
+        notices("retry twice"),
+        vec![
+            retrying(1, 617, Some(529), "overloaded", false),
+            retrying(2, 1101, Some(529), "overloaded", false),
+        ]
+    );
+    // The last frame has a string `attempt`: it yields nothing, and the
+    // lines before it are not lost with it. A `null` status stays `None`,
+    // and a `null` `no_response` is not "no response": only an object is.
+    assert_eq!(
+        notices("retry kinds"),
+        vec![
+            retrying(1, 617, Some(500), "server_error", false),
+            retrying(2, 617, Some(429), "rate_limit", false),
+            retrying(3, 617, None, "unknown", false),
+            retrying(4, 617, None, "unknown", true),
+            // The status is a string: only that field is lost.
+            retrying(5, 617, None, "server_error", false),
+        ]
+    );
+    // `timeout_ms` is a string: the notification stays, without a timeout.
+    assert_eq!(
+        notices("notify typed"),
+        vec![SessionNotice::Notification {
+            key: "typed".into(),
+            text: "Typed badly".into(),
+            priority: Some("low".into()),
+            color: None,
+            timeout_ms: None,
+        }]
+    );
+    let got = notices("notify");
+    let expected: [(&str, &str, &str, Option<&str>); 4] = [
+        (
+            "stop-hook-error",
+            "Stop hook error occurred \u{b7} ctrl+o to see",
+            "immediate",
+            None,
+        ),
+        (
+            "auto-mode-gate-plan-exit-fallback",
+            "Plan mode exit fell back",
+            "high",
+            Some("warning"),
+        ),
+        (
+            "lsp-server-start-failed:demo",
+            "LSP server demo failed to start",
+            "low",
+            None,
+        ),
+        (
+            "lsp-server-start-failed:demo",
+            "LSP server demo failed again",
+            "low",
+            None,
+        ),
+    ];
+    assert_eq!(got.len(), expected.len(), "one notice per notification");
+    for (notice, (key, text, priority, color)) in got.iter().zip(expected) {
+        assert_eq!(
+            notice,
+            &SessionNotice::Notification {
+                key: key.into(),
+                text: text.into(),
+                priority: Some(priority.into()),
+                color: color.map(Into::into),
+                timeout_ms: Some(120_000),
+            }
+        );
+    }
+
+    let got = notices("refuse");
+    assert_eq!(got.len(), 1);
+    assert!(matches!(
+        &got[0],
+        SessionNotice::CliNotice { text, warning: false }
+            if text.starts_with("Opus 5.5's safeguards")
+    ));
+
+    let got = notices("refuse fallback");
+    assert_eq!(got.len(), 1);
+    let override_mark = char::from_u32(0x202E).unwrap();
+    assert!(matches!(
+        &got[0],
+        SessionNotice::CliNotice { text, warning: false }
+            if text.contains("\n\nDetails:") && text.contains(override_mark)
+    ));
+
+    let got = notices("refuse none");
+    assert_eq!(got.len(), 1);
+    assert!(matches!(
+        &got[0],
+        SessionNotice::CliNotice { warning: false, .. }
+    ));
+
+    // The fourth frame has an empty `content` and yields nothing.
+    let got = notices("inform levels");
+    let lines: Vec<(&str, bool)> = got
+        .iter()
+        .map(|notice| match notice {
+            SessionNotice::CliNotice { text, warning } => (text.as_str(), *warning),
+            _ => panic!("every notice here is a CliNotice"),
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("Started in the background: demo", false),
+            ("Try /compact", false),
+            (
+                "A hook gave no usable answer, so it didn't check this action.",
+                true
+            ),
+        ]
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn an_answer_no_stream_carried_is_drawn_once() {
+    let (mut client, events) = launch("cli_notices");
+    let exhaustion = "API Error: Repeated 529 Overloaded errors.";
+    let cases: [(&str, &str); 15] = [
+        // First of a fresh launch: nothing to run on from.
+        ("unstreamed", "ok"),
+        ("midstream", "partial-before-error\n\nok"),
+        ("midstream drop", "partial-before-error\n\nok"),
+        ("retry out", exhaustion),
+        // The error result of the turn before left no separator behind.
+        ("unstreamed", "ok"),
+        ("subagent text", "ok"),
+        ("retry twice", "ok"),
+        ("retry kinds", "ok"),
+        ("notify", "ok"),
+        ("notify short", "ok"),
+        ("notify short again", "ok"),
+        ("refuse fallback", "refused-partialok"),
+        ("refuse none", "refused-partial"),
+        ("inform levels", "ok"),
+        ("anything else", "ok"),
+    ];
+    for (prompt, expected) in cases {
+        let seen = cli_notices_turn(&mut client, &events, prompt);
+        assert_eq!(
+            reply_of(&seen),
+            expected,
+            "the reply text of one turn, drawn once"
+        );
+    }
+    // Both halves were streamed, so no separator is added, and the notice
+    // sits between them.
+    let seen = cli_notices_turn(&mut client, &events, "refuse");
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0], Seen::Chunk("refused-partial".into()));
+    assert!(matches!(&seen[1], Seen::Notices(notices) if notices.len() == 1));
+    assert_eq!(seen[2], Seen::Chunk("ok".into()));
+    client.shutdown().expect("clean shutdown");
+}
+
 /// Everything the stream carries up to and including the first re-read signal
 /// named `kind`, or `None` when none arrives inside `budget`.
 fn events_through_signal(
@@ -2797,4 +3036,167 @@ fn reload_skills_brings_the_new_skill_into_the_slash_list() {
         .expect("the new skill reaches the slash list");
     assert!(offers(&list, "pa:hello"));
     finish(client, &log);
+}
+
+// Failure list for startup failures (E2E, written first). The feature is wrong if:
+//  - a reason result reaches the caller as a timeout or an "ACP transport error";
+//  - the reason result is ignored because it came before the `initialize` answer;
+//  - the opt-in reason never appears because the variable did not reach the child;
+//  - a reason on a resume relaunches a fresh session;
+//  - a resume without a reason no longer retries;
+//  - a refused resume leaves an "ended" footer in the fresh session;
+//  - a CLI that exits silently loses its exit code or its last stderr line;
+//  - an unknown reason loses its errors;
+//  - a config path or backup path is dropped.
+
+/// A fixture launch that cannot start in the way `kind` says, logging each
+/// launch. `resume` makes it a resuming launch.
+fn startup_launch(kind: &str, resume: Option<&str>, tag: &str) -> (ClaudeLaunch, PathBuf) {
+    let launches =
+        std::env::temp_dir().join(format!("sirio-startup-{tag}-{}.launch", std::process::id()));
+    let _ = std::fs::remove_file(&launches);
+    let launch = ClaudeLaunch::fixture(
+        PathBuf::from("python3"),
+        vec![
+            FIXTURE.into(),
+            "normal".into(),
+            format!("--fixture-startup={kind}"),
+            format!("--fixture-launch-log={}", launches.display()),
+        ],
+    );
+    let launch = match resume {
+        Some(id) => launch.resuming(id),
+        None => launch,
+    };
+    (launch, launches)
+}
+
+/// The text of a launch that must fail with `ChatError::Startup`.
+fn startup_error(launch: ClaudeLaunch) -> String {
+    use sirio_chat_vocab::ChatError;
+    let error = ClaudeClient::launch_with_timeouts(
+        launch,
+        std::env::temp_dir(),
+        Duration::from_secs(20),
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    )
+    .expect_err("a CLI that cannot start must not yield a session");
+    assert!(
+        matches!(
+            error.downcast_ref::<ChatError>(),
+            Some(ChatError::Startup(_))
+        ),
+        "the failure must be a startup failure"
+    );
+    format!("{error}")
+}
+
+#[test]
+fn a_startup_reason_is_read_at_the_handshake() {
+    let (launch, launches) = startup_launch("config_invalid", None, "config");
+    let text = startup_error(launch);
+    let rlo = char::from_u32(0x202E).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "Claude Code could not start: a configuration file is not valid JSON.\n\n\
+             Configuration error in /fixture/config/.claude.json: JSON Parse error: \
+             Expected '}}'\nFix the JSON, or move the file aside.\nbidi {rlo}here\n\n\
+             File: /fixture/config/.claude.json\nBackup: /fixture/config/backups/.claude.json.bak"
+        )
+    );
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn the_cli_is_launched_with_startup_results() {
+    if std::env::var_os("CLAUDE_CODE_STARTUP_FAILURE_RESULTS").is_some() {
+        println!("SKIP: CLAUDE_CODE_STARTUP_FAILURE_RESULTS is inherited");
+        return;
+    }
+    let (launch, launches) = startup_launch("cwd_unavailable", None, "cwd");
+    let text = startup_error(launch);
+    assert!(
+        text.starts_with("Claude Code could not start: this folder no longer exists or cannot be read.")
+    );
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn an_unknown_startup_reason_is_shown_verbatim() {
+    let (launch, launches) = startup_launch("future_reason", None, "future");
+    let text = startup_error(launch);
+    assert!(text.starts_with("Claude Code could not start (some_future_reason)."));
+    assert!(text.contains("A reason this build does not know."));
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_cli_that_exits_before_the_handshake_names_its_exit() {
+    let (launch, launches) = startup_launch("no_result", None, "noresult");
+    let text = startup_error(launch);
+    assert!(text.starts_with("Claude Code exited before it started (agent exited with code 1)"));
+    assert!(text.contains("fixture: last line"));
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_startup_reason_on_a_resume_is_final() {
+    let (launch, launches) = startup_launch("resume_reason", Some("sess-held"), "held");
+    let text = startup_error(launch);
+    assert!(text.starts_with(
+        "Claude Code could not resume this conversation: it is running as a background session."
+    ));
+    assert_eq!(
+        json_lines(&launches).len(),
+        1,
+        "a reason must not relaunch a fresh session"
+    );
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_refused_resume_leaves_no_turn_behind() {
+    let (launch, launches) = startup_launch("resume_no_reason", Some("sess-gone"), "gone");
+    let (mut client, events) = ClaudeClient::launch(launch, std::env::temp_dir())
+        .expect("a refused resume must still yield a usable session");
+    assert_eq!(json_lines(&launches).len(), 2, "the resume, then the fresh start");
+    // Nothing was asked yet, so nothing may have ended or been said.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match next_event_within(&events, remaining) {
+            Some(ChatEvent::TurnEnded { .. } | ChatEvent::AgentMessageChunk(_)) => {
+                panic!("a refused resume must leave no turn behind")
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    client.prompt("hello").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+    // One prompt, one end: a second one would arrive right behind the first.
+    let after = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = after.saturating_duration_since(std::time::Instant::now());
+        match next_event_within(&events, remaining) {
+            Some(ChatEvent::TurnEnded { .. }) => panic!("one prompt must end exactly one turn"),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_reasonless_startup_error_shows_its_lines() {
+    let (launch, launches) = startup_launch("no_reason", None, "noreason");
+    let text = startup_error(launch);
+    assert_eq!(
+        text,
+        "Claude Code could not start.\n\nSomething went wrong before the session."
+    );
+    let _ = std::fs::remove_file(&launches);
 }

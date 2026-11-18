@@ -2229,3 +2229,326 @@ fn claude_toggles_a_connector_and_reloads() {
     let cleared = disabled_in_file(&session).is_some_and(|list| !list.iter().any(|n| n == "probe"));
     assert!(cleared, "the folder's disabledMcpServers no longer lists it: {cleared}");
 }
+
+// A7 live proof. Failure list, written before the tests: each of these is a way the live
+// proof would be wrong, or would prove nothing.
+//   - The variable is missing from the launch, so the proxy case gives no result.
+//   - Sirio's parser misses a live field name, so a startup reason or a retry field reads as
+//     absent.
+//   - The startup result is not stdout line 0, so something else could answer first.
+//   - The CLI is left running after it failed to start (checked: stdout reaches EOF, the exit
+//     is read, and no process of the run's HOME is left once it is closed).
+//   - The CLI reaches past the fake API. This holds by construction, not by an assertion: the
+//     isolation (`env_clear`, `ANTHROPIC_BASE_URL` on 127.0.0.1 under `NO_PROXY`, the dead
+//     proxy). The early stop in `read_to_eof` adds that a CLI which answers the handshake or
+//     opens a session after all is killed at once.
+//   - The live `api_retry` shape differs from the fixture's (attempt, error, status, delay).
+//   - The answer the CLI sends with no stream carries the id of a streamed message, which
+//     would make the fold's rule drop it.
+//   - A run that SKIPs is read as a pass: both tests print `claude reports <version>` first.
+
+/// The CLI, the python and the scratch of a live test, or `None` after printing why it SKIPs.
+/// The version line `claude reports ...` is printed before the floor check.
+fn live_claude(
+    name: &str,
+    at_least: sirio_claude::ClaudeVersion,
+) -> Option<(
+    std::path::PathBuf,
+    std::path::PathBuf,
+    claude_live::Scratch,
+)> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return None;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return None;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return None;
+    };
+    let scratch = claude_live::Scratch::new(name, &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version");
+    };
+    eprintln!("claude reports {version_text}");
+    if !version.meets_floor() || version < at_least {
+        eprintln!("SKIP: claude {version} is below what this test needs");
+        return None;
+    }
+    Some((claude, python, scratch))
+}
+
+/// What `read_to_eof` saw.
+struct Startup {
+    lines: Vec<serde_json::Value>,
+    /// Stdout reached EOF.
+    eof: bool,
+    /// The CLI answered the handshake or opened a session (a `control_response` or a
+    /// `system/init` line): it started after all. Reading stops at once, so the test fails
+    /// there and the session's drop kills it.
+    ran: bool,
+}
+
+/// Reads a CLI that was only sent `initialize` until its stdout closes, 30 s pass, or it
+/// shows it started.
+fn read_to_eof(session: &mut claude_live::Session) -> Startup {
+    use claude_live::Polled;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut lines = Vec::new();
+    loop {
+        match session.poll(deadline) {
+            Polled::Line(line) => {
+                let ran = line["type"] == "control_response"
+                    || (line["type"] == "system" && line["subtype"] == "init");
+                lines.push(line);
+                if ran {
+                    return Startup { lines, eof: false, ran: true };
+                }
+            }
+            Polled::Timeout => return Startup { lines, eof: false, ran: false },
+            Polled::Closed => return Startup { lines, eof: true, ran: false },
+        }
+    }
+}
+
+/// Waits up to 2 s for no process to name the session's HOME, then asserts none does.
+fn assert_nothing_left(session: &claude_live::Session) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut left = claude_live::holders_of(&session.home());
+    while left > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        left = claude_live::holders_of(&session.home());
+    }
+    assert!(left == 0, "no process of the run outlives the CLI: false");
+}
+
+/// Proves the real `claude` writes a `result` naming why it could not start, as line 0, and
+/// that `CLAUDE_CODE_STARTUP_FAILURE_RESULTS` (the variable `LaunchLine::chat` sets) is what
+/// makes the proxy case write one.
+///
+/// Three launches, each sent `initialize` and no prompt: a corrupt `.claude.json` in the
+/// scratch config dir (written by the harness, never by Sirio), an invalid `HTTPS_PROXY` with
+/// the variable, and the same without it (the control). It uses the fake API of the
+/// session-state test and nothing beyond 127.0.0.1, but launches a real CLI three times, so it
+/// is `#[ignore]`d and stays off CI:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_reports_why_it_could_not_start
+///
+/// It SKIPs without a resolvable mise `claude` binary, below 2.1.325 and without `python3`.
+#[test]
+#[ignore = "launches the real claude three times"]
+fn claude_reports_why_it_could_not_start() {
+    use claude_live::BrokenStart;
+    use sirio_claude::{CliMessage, ControlRequest, StartupFailure};
+
+    let Some((claude, python, scratch)) =
+        live_claude("startup-reasons", sirio_claude::ClaudeVersion::new(2, 1, 325))
+    else {
+        return;
+    };
+
+    let launch = |name: &str, broken: BrokenStart| {
+        let mut session = claude_live::Session::start_broken(
+            &claude,
+            &python,
+            &scratch.root.join(name),
+            broken,
+        );
+        // The CLI may already be gone: its result is read either way.
+        let _ = session.try_write(&ControlRequest::initialize("startup-init"));
+        let startup = read_to_eof(&mut session);
+        assert!(!startup.ran, "the CLI refused to start, it did not answer: false");
+        assert!(startup.eof, "stdout reached EOF within 30 s: false");
+        let exit = session.close_cli();
+        assert_nothing_left(&session);
+        (startup.lines, exit)
+    };
+    let result_of = |line: &serde_json::Value| match CliMessage::parse(&line.to_string()) {
+        Some(CliMessage::Result(result)) => Some(result),
+        _ => None,
+    };
+
+    // 1. A corrupt config file.
+    let (lines, exit) = launch("corrupt", BrokenStart::CorruptConfig);
+    let first = lines.first().and_then(result_of);
+    assert!(first.is_some(), "the first line is a result: false");
+    let failure = StartupFailure::from_result(&first.unwrap());
+    assert!(failure.is_some(), "the first result is an error: false");
+    let failure = failure.unwrap();
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("config_file_invalid"),
+        "the reason is config_file_invalid"
+    );
+    let global = failure
+        .invalid_config_file
+        .as_ref()
+        .is_some_and(|file| file.is_global);
+    assert!(global, "the config file is the global one: {global}");
+    let has_errors = !failure.errors.is_empty();
+    assert!(has_errors, "the errors are not empty: {has_errors}");
+    let failed = exit.is_some_and(|status| !status.success());
+    assert!(failed, "the CLI exited with a non-zero status: {failed}");
+
+    // 2. An invalid proxy, with the variable.
+    let (lines, exit) = launch("proxy-on", BrokenStart::BadProxy { opt_in: true });
+    let first = lines.first().and_then(result_of);
+    assert!(first.is_some(), "the first line is a result: false");
+    let failure = StartupFailure::from_result(&first.unwrap());
+    assert!(failure.is_some(), "the first result is an error: false");
+    assert_eq!(
+        failure.unwrap().reason.as_deref(),
+        Some("proxy_invalid"),
+        "the reason is proxy_invalid"
+    );
+    let failed = exit.is_some_and(|status| !status.success());
+    assert!(failed, "the CLI exited with a non-zero status: {failed}");
+
+    // 3. The same without the variable: no result, only a failed exit.
+    let (lines, exit) = launch("proxy-off", BrokenStart::BadProxy { opt_in: false });
+    let any_result = lines.iter().any(|line| result_of(line).is_some());
+    assert!(!any_result, "no result line without the variable: {any_result}");
+    let failed = exit.is_some_and(|status| !status.success());
+    assert!(failed, "the CLI exited with a non-zero status: {failed}");
+}
+
+/// One turn against a CLI: sends `prompt`, then returns every line up to and including the
+/// turn's `result`, or panics after 60 s without one.
+fn run_turn(session: &mut claude_live::Session, prompt: &str) -> Vec<serde_json::Value> {
+    session.write(&serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    }));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut lines = Vec::new();
+    while let Some(line) = session.next(deadline) {
+        let done = line["type"] == "result";
+        lines.push(line);
+        if done {
+            return lines;
+        }
+    }
+    panic!("the turn ended with a result within 60 s: false");
+}
+
+/// Proves the live shapes Sirio's notices read: `system/api_retry` (two retries of an
+/// overloaded API, with the status, delay and budget) and an answer no stream carried (the CLI
+/// falls back to a non-streaming request after a stream broke, and its message id was never
+/// named by a `message_start`).
+///
+/// One CLI, two turns against the session-state fake API (`overload twice`, `fail midway`). It
+/// uses no credential and nothing beyond 127.0.0.1, but launches a real CLI, so it is
+/// `#[ignore]`d and stays off CI:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_reports_api_retries_and_unstreamed_answers
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor and without
+/// `python3`.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_reports_api_retries_and_unstreamed_answers() {
+    use sirio_claude::{CliMessage, ControlRequest, MessageLifecycle};
+
+    let Some((claude, python, scratch)) =
+        live_claude("api-retries", sirio_claude::ClaudeVersion::new(2, 1, 257))
+    else {
+        return;
+    };
+    let mut session =
+        claude_live::Session::start_state(&claude, &python, &scratch.root.join("retries"));
+    session.write(&ControlRequest::initialize("retry-init"));
+
+    let parsed = |lines: &[serde_json::Value]| -> Vec<CliMessage> {
+        lines
+            .iter()
+            .filter_map(|line| CliMessage::parse(&line.to_string()))
+            .collect()
+    };
+    let is_system = |message: &CliMessage, subtype: &str| {
+        matches!(message, CliMessage::System(system) if system.subtype == subtype)
+    };
+    let start_id = |message: &CliMessage| match message {
+        CliMessage::StreamEvent(event) => match event.lifecycle() {
+            Some(MessageLifecycle::Start { id, .. }) => Some(id),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    // Turn 1: two overloads, then the answer.
+    let turn = parsed(&run_turn(&mut session, "overload twice"));
+    let retries: Vec<(usize, &sirio_claude::SystemPayload)> = turn
+        .iter()
+        .enumerate()
+        .filter_map(|(at, message)| match message {
+            CliMessage::System(system) if system.subtype == "api_retry" => Some((at, system)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries.len(), 2, "exactly two api_retry lines in the turn");
+    let first_start = turn.iter().position(|message| start_id(message).is_some());
+    assert!(first_start.is_some(), "the turn's answer is streamed: false");
+    for (number, (at, retry)) in retries.iter().enumerate() {
+        assert_eq!(retry.attempt, Some(number as u32 + 1), "the attempt counts from 1");
+        assert_eq!(retry.error.as_deref(), Some("overloaded"), "the cause is overloaded");
+        assert_eq!(retry.error_status, Some(529), "the status is 529");
+        let delay = retry.retry_delay_ms.unwrap_or(0);
+        assert!(delay > 0, "the retry delay is positive: false");
+        let budget = retry.max_retries.unwrap_or(0);
+        assert!(budget >= 2, "the retry budget covers both retries: false");
+        let requested = turn[..*at].iter().any(|message| {
+            matches!(message, CliMessage::System(system)
+                if system.subtype == "status" && system.status.as_deref() == Some("requesting"))
+        });
+        assert!(requested, "a status requesting comes before the retry: {requested}");
+        let before_stream = first_start.is_some_and(|start| *at < start);
+        assert!(before_stream, "the retry comes before the first message_start: {before_stream}");
+    }
+    let ended_ok = turn
+        .iter()
+        .any(|message| matches!(message, CliMessage::Result(result) if !result.is_error));
+    assert!(ended_ok, "the turn's result is not an error: {ended_ok}");
+
+    // Turn 2: a stream that breaks, then an answer from a non-streaming request.
+    let turn = parsed(&run_turn(&mut session, "fail midway"));
+    let retried = turn.iter().any(|message| is_system(message, "api_retry"));
+    assert!(!retried, "no api_retry line when a stream breaks: {retried}");
+    let streamed: Vec<Option<String>> = turn.iter().filter_map(start_id).collect();
+    // A stream started and broke: its message_start and its text arrived first.
+    let started = streamed.contains(&Some("msg_m".to_string()));
+    assert!(started, "the broken stream's message_start arrived: {started}");
+    let partial = turn.iter().any(|message| {
+        matches!(message, CliMessage::StreamEvent(event)
+            if event.delta() == Some(sirio_claude::Delta::Text("partial-before-error".to_string())))
+    });
+    assert!(partial, "the broken stream's text delta arrived: {partial}");
+    let unstreamed = turn.iter().any(|message| match message {
+        CliMessage::Assistant(assistant) => {
+            assistant.text() == "ok"
+                && assistant.message.id.is_some()
+                && !streamed.contains(&assistant.message.id)
+        }
+        _ => false,
+    });
+    assert!(
+        unstreamed,
+        "an assistant answer ok whose id no message_start named: {unstreamed}"
+    );
+    let ended_ok = turn
+        .iter()
+        .any(|message| matches!(message, CliMessage::Result(result) if !result.is_error));
+    assert!(ended_ok, "the turn's result is not an error: {ended_ok}");
+
+    let exit = session.close_cli();
+    let clean = exit.is_some_and(|status| status.success());
+    assert!(clean, "the CLI exited successfully on stdin EOF: {clean}");
+    assert_nothing_left(&session);
+}

@@ -14,10 +14,10 @@ use gpui::{
     transparent_black,
 };
 use sirio_chat::{
-    AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, EffortOption,
-    FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption, SessionNotice,
-    THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
-    TraceEvent,
+    AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ChatError, ContextUsage,
+    EffortOption, FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
+    SessionNotice, THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff,
+    ToolCallLocationInfo, TraceEvent,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -65,6 +65,7 @@ pub use prompt_history::PromptRecord;
 mod question_dock;
 mod visible_text;
 mod session_panel;
+mod status_line;
 mod thought;
 mod tool_calls;
 pub mod trace;
@@ -1156,6 +1157,10 @@ pub struct ChatControlSnapshot {
     /// The question dock as it is painted: `""` when no question is open,
     /// otherwise the JSON `{caption, body, details, options, selected, digits}`.
     pub question_dock: String,
+    /// The line above the composer: `""` when nothing shows, otherwise the JSON
+    /// `{source, text, tone, held}` of a retry or `{source, key, text, priority, tone, held}`
+    /// of a notification.
+    pub status_line: String,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -1608,10 +1613,12 @@ fn restored_entry(entry: ChatEntry) -> Entry {
         ChatEntry::Notice { text, kind } => Entry::Notice {
             text,
             // A kind written by a newer build restores as the plainest of
-            // the three rather than refusing the transcript around it.
+            // the five rather than refusing the transcript around it.
             kind: match kind.as_str() {
                 "compaction" => NoticeKind::Compaction,
                 "warning" => NoticeKind::Warning,
+                "info" => NoticeKind::Info,
+                "info-warning" => NoticeKind::InfoWarning,
                 _ => NoticeKind::BackgroundTask,
             },
         },
@@ -1634,6 +1641,13 @@ enum NoticeKind {
     /// Something is wrong right now — the plan ran out of room. Drawn in
     /// the warning colour and, unlike the other two, never persisted.
     Warning,
+    /// What the CLI said about its own session: a refusal, a fallback, an
+    /// informational line. Drawn like a finished task, and kept: it happened
+    /// to this conversation.
+    Info,
+    /// The CLI's informational line at level `warning`. Drawn in the warning
+    /// colour and kept, unlike the rate limit's [`Self::Warning`].
+    InfoWarning,
 }
 
 impl NoticeKind {
@@ -1644,6 +1658,8 @@ impl NoticeKind {
             Self::Compaction => "compaction",
             Self::BackgroundTask => "task",
             Self::Warning => "warning",
+            Self::Info => "info",
+            Self::InfoWarning => "info-warning",
         }
     }
 
@@ -1653,6 +1669,8 @@ impl NoticeKind {
             Self::Compaction => "notice-compaction",
             Self::BackgroundTask => "notice-task",
             Self::Warning => "notice-warning",
+            Self::Info => "notice-info",
+            Self::InfoWarning => "notice-info-warning",
         }
     }
 }
@@ -2487,6 +2505,8 @@ pub struct Chat {
     mention_task: Option<Task<()>>,
     /// Transient attachment rejection message, e.g. an unsupported file.
     attach_error: Option<String>,
+    /// The line above the composer: the CLI's retry of a request and its notifications.
+    status_line: status_line::StatusLine,
     /// In-flight native file picker.
     attach_task: Option<Task<()>>,
     /// The composer's secondary-click Cut / Copy / Paste menu, at the
@@ -2859,6 +2879,7 @@ impl Chat {
             mention_filter: Filter::new(Vec::new()),
             mention_task: None,
             attach_error: None,
+            status_line: status_line::StatusLine::default(),
             attach_task: None,
             composer_context_menu: Popup::default(),
             transcript_context_menu: Popup::default(),
@@ -2907,17 +2928,27 @@ impl Chat {
     /// conversation, so one that lands while a reply streams sits below it
     /// and the reply's next chunk still joins it. Split there, each half
     /// would be parsed on its own, and a backtick or a link in the second
-    /// would pair with the wrong one.
+    /// would pair with the wrong one. The CLI's own `Info` and `InfoWarning`
+    /// rows are the exception: a refusal ends the text above it, so the
+    /// answer that follows opens a row below it instead of growing the
+    /// refused one.
     fn streamed_entry(&self) -> Option<usize> {
-        self.entries
-            .iter()
-            .rposition(|entry| !matches!(entry, Entry::Notice { .. }))
+        self.entries.iter().rposition(|entry| {
+            !matches!(
+                entry,
+                Entry::Notice {
+                    kind: NoticeKind::Compaction
+                        | NoticeKind::BackgroundTask
+                        | NoticeKind::Warning,
+                    ..
+                }
+            )
+        })
     }
 
-    /// Add one transcript row and keep the virtualizer's index tree in sync.
-    /// Turns one notice into the row it belongs in, at the point in the
-    /// transcript where it arrived.
-    fn apply_notice(&mut self, notice: SessionNotice) {
+    /// Turns one notice into the row, or the status line, it belongs in, at
+    /// the point in the transcript where it arrived.
+    fn apply_notice(&mut self, notice: SessionNotice, cx: &mut Context<Self>) {
         let entry = match notice {
             SessionNotice::Compacted {
                 trigger,
@@ -2958,10 +2989,91 @@ impl Chat {
                     kind: NoticeKind::Warning,
                 }
             }
+            SessionNotice::Retrying {
+                attempt,
+                max_retries,
+                retry_delay_ms,
+                error,
+                error_status,
+                no_response,
+            } => {
+                let text = status_line::retry_text(
+                    attempt,
+                    max_retries,
+                    retry_delay_ms,
+                    error.as_deref(),
+                    error_status,
+                    no_response,
+                );
+                let number = self.status_line.set_retry(text);
+                // A retry line the CLI never follows with content or an end
+                // must still go. The number keeps a later retry's line safe.
+                let expiry = retry_delay_ms
+                    .saturating_add(status_line::RETRY_SAFETY_MS)
+                    .min(status_line::MAX_TIMER_MS);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(expiry))
+                        .await;
+                    let _ = this.update(cx, |chat, cx| {
+                        if chat.status_line.expire_retry(number) {
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+                return;
+            }
+            SessionNotice::Notification {
+                key,
+                text,
+                priority,
+                color,
+                timeout_ms,
+            } => {
+                let text = visible_text::visible_text(&text, false);
+                let timer_key = key.clone();
+                let number = self.status_line.hold(key, text, priority, color.as_deref());
+                let kept = timeout_ms
+                    .unwrap_or(status_line::DEFAULT_NOTIFICATION_MS)
+                    .min(status_line::MAX_TIMER_MS);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(kept))
+                        .await;
+                    let _ = this.update(cx, |chat, cx| {
+                        if chat.status_line.expire_notification(&timer_key, number) {
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+                return;
+            }
+            // The CLI's own words: a refusal, a fallback, an informational line.
+            // Nothing is added for an empty one.
+            SessionNotice::CliNotice { text, warning } => {
+                if text.is_empty() {
+                    return;
+                }
+                // `push_entry` leaves a thought open across a notice, and
+                // `streamed_entry` stops at this row, so nothing after it
+                // would reach that thought to settle it.
+                self.settle_open_thought();
+                Entry::Notice {
+                    text: visible_text::visible_text(&text, true),
+                    kind: if warning {
+                        NoticeKind::InfoWarning
+                    } else {
+                        NoticeKind::Info
+                    },
+                }
+            }
         };
         self.push_entry(entry);
     }
 
+    /// Add one transcript row and keep the virtualizer's index tree in sync.
     fn push_entry(&mut self, entry: Entry) {
         let index = self.entries.len();
         self.turn_message_ids.push(None);
@@ -2974,6 +3086,28 @@ impl Chat {
         if following_tail {
             self.list_state.set_follow_mode(FollowMode::Tail);
         }
+    }
+
+    /// The status line, one caption above the composer card, or nothing.
+    fn render_status_line(&self, theme: &Theme) -> Option<AnyElement> {
+        let shown = self.status_line.shown()?;
+        let color = match shown.tone {
+            status_line::Tone::Error => theme.ely.danger,
+            status_line::Tone::Warning => theme.ely.warning,
+            status_line::Tone::Plain => theme.ely.fg_subtle,
+        };
+        Some(
+            div()
+                .id("status-line")
+                .debug_selector(|| "status-line".into())
+                .w_full()
+                .max_w(px(TRANSCRIPT_WIDTH))
+                .mb(px(8.0))
+                .text_size(theme.typography.caption2)
+                .text_color(color)
+                .child(crate::text_selection::selectable_text(shown.text))
+                .into_any_element(),
+        )
     }
 
     /// MCP failures are deliberately never surfaced: the client's warning
@@ -3193,6 +3327,23 @@ impl Chat {
             sirio_chat::ChatEvent::Trace(_) => "notify.Chat.acp_trace",
             _ => "notify.Chat.acp_other",
         };
+        // The retry line belongs to the request it describes: any content the
+        // CLI sends, and any end of the turn, means it is over. Notifications
+        // are not touched here.
+        if matches!(
+            event,
+            sirio_chat::ChatEvent::AgentMessageChunk(_)
+                | sirio_chat::ChatEvent::ThoughtChunk(_)
+                | sirio_chat::ChatEvent::ToolCallStarted { .. }
+                | sirio_chat::ChatEvent::ToolCallUpdated { .. }
+                | sirio_chat::ChatEvent::ToolCallCompleted { .. }
+                | sirio_chat::ChatEvent::PlanUpdate { .. }
+                | sirio_chat::ChatEvent::TurnEnded { .. }
+                | sirio_chat::ChatEvent::TransportError(_)
+                | sirio_chat::ChatEvent::Timeout { .. }
+        ) {
+            self.status_line.clear_retry();
+        }
         match event {
             sirio_chat::ChatEvent::AgentMessageChunk(text) => {
                 let streamed = self.streamed_entry();
@@ -3791,7 +3942,7 @@ impl Chat {
                     .map(ChatClient::take_notices)
                     .unwrap_or_default();
                 for notice in notices {
-                    self.apply_notice(notice);
+                    self.apply_notice(notice, cx);
                 }
             }
             sirio_chat::ChatEvent::OtherSessionUpdate { ref kind }
@@ -4367,6 +4518,7 @@ impl Chat {
             task_output_retired: self.background.output_retired(),
             agent_title: self.agent_title_json(),
             question_dock: self.question_dock_json(),
+            status_line: self.status_line.snapshot(),
         }
     }
 
@@ -6121,9 +6273,12 @@ impl Chat {
 
     /// Cancels a streaming turn: asks the ACP client to stop, returns the
     /// composer to its idle state, and leaves the transcript showing what
-    /// had already arrived. Safe to call when nothing is streaming — it is
-    /// a no-op then.
+    /// had already arrived. Safe to call when nothing is streaming — it
+    /// still clears the retry line, and does nothing else then.
     fn cancel_turn(&mut self, cx: &mut Context<Self>) {
+        if self.status_line.clear_retry() {
+            cx.notify();
+        }
         if self.streaming {
             if let Some(client) = &self.client {
                 let _ = client.cancel();
@@ -6152,6 +6307,8 @@ impl Chat {
         // launch and a failed launch all pass here.
         self.cli_state = None;
         self.cli_unprompted = false;
+        // A new process has raised none of the notifications, nor retried anything.
+        self.status_line.clear_all();
         // A new process has no tasks, and an answer of the old one's is stale.
         self.connection_generation += 1;
         self.reset_background_tasks(cx);
@@ -6220,8 +6377,17 @@ impl Chat {
                     let _ = this.update(cx, |chat, cx| chat.event_source_closed(cx));
                 }
                 Err(error) => {
-                    let (message, kind) =
-                        classify_connection_error(format!("could not launch ACP agent: {error:#}"));
+                    // The text the CLI could not start with (A7) is shown with no prefix
+                    // and is never run through `classify_connection_error`, since the CLI's own
+                    // errors could contain "requires authentication".
+                    let (message, kind) = match error.downcast_ref::<ChatError>() {
+                        Some(ChatError::Startup(text)) => {
+                            (visible_text::visible_text(text, true), ErrorKind::Connection)
+                        }
+                        _ => classify_connection_error(format!(
+                            "could not launch ACP agent: {error:#}"
+                        )),
+                    };
                     let _ = this.update(cx, |chat, cx| {
                         chat.connecting = false;
                         chat.client = None;
@@ -6249,6 +6415,7 @@ impl Chat {
             return;
         }
         self.client.take();
+        self.status_line.clear_retry();
         // The CLI is gone, whatever it last said.
         self.cli_state = None;
         self.cli_unprompted = false;
@@ -7806,7 +7973,10 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                             // tucked under it. Drawn only while something is queued.
                             .when(!self.queue.is_empty(), |this| {
                                 this.child(self.render_queue(&theme, cx))
-                            }),
+                            })
+                            // The CLI's retry of a request or its newest notification:
+                            // after the queue, directly above the composer card.
+                            .children(self.render_status_line(&theme)),
                     )
                     .child(self.render_composer(&theme, window, cx)),
             )
@@ -18475,7 +18645,7 @@ two"
                 trigger: Some("auto".into()),
                 pre_tokens: Some(43_134),
                 post_tokens: Some(11_574),
-            });
+            }, cx);
             cx.notify();
         });
         refresh_frame(cx);
@@ -18502,7 +18672,7 @@ two"
                        refills tokens in proportion to elapsed time "
             .repeat(6);
         chat.update(cx, |chat, cx| {
-            chat.apply_notice(SessionNotice::BackgroundTaskEnded { summary });
+            chat.apply_notice(SessionNotice::BackgroundTaskEnded { summary }, cx);
             cx.notify();
         });
         refresh_frame(cx);
@@ -18528,7 +18698,7 @@ two"
             chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk("first the ".into()), cx);
             chat.apply_notice(SessionNotice::BackgroundTaskEnded {
                 summary: "The auth agent finished.".into(),
-            });
+            }, cx);
             chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk("tests".into()), cx);
             let thought = chat
                 .entries
@@ -18545,7 +18715,7 @@ two"
             // A background agent ends while the reply is still streaming.
             chat.apply_notice(SessionNotice::BackgroundTaskEnded {
                 summary: "The server agent finished.".into(),
-            });
+            }, cx);
             chat.handle_event(
                 sirio_chat::ChatEvent::AgentMessageChunk("ts` agent has finished.".into()),
                 cx,
@@ -18583,7 +18753,7 @@ two"
             );
             chat.apply_notice(SessionNotice::BackgroundTaskEnded {
                 summary: "The limiter agent finished.".into(),
-            });
+            }, cx);
             chat.streaming = true;
             chat.handle_event(
                 sirio_chat::ChatEvent::AgentMessageChunk("All three are in.".into()),
@@ -18613,20 +18783,28 @@ two"
         let (chat, cx) = chat_view(cx, &["composer"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
         cx.run_until_parked();
-        chat.update(cx, |chat, _| {
+        chat.update(cx, |chat, cx| {
             chat.apply_notice(SessionNotice::Compacted {
                 trigger: Some("auto".into()),
                 pre_tokens: Some(1_000),
                 post_tokens: Some(100),
-            });
+            }, cx);
             chat.apply_notice(SessionNotice::BackgroundTaskEnded {
                 summary: "done".into(),
-            });
+            }, cx);
             chat.apply_notice(SessionNotice::RateLimited {
                 status: "rejected".into(),
                 window: None,
                 resets_at: None,
-            });
+            }, cx);
+            chat.apply_notice(SessionNotice::CliNotice {
+                text: "Opus 5.5's safeguards stopped the response".into(),
+                warning: false,
+            }, cx);
+            chat.apply_notice(SessionNotice::CliNotice {
+                text: "A hook gave no usable answer".into(),
+                warning: true,
+            }, cx);
         });
         let kept: Vec<bool> = chat.read_with(cx, |chat, _| {
             chat.entries
@@ -18639,7 +18817,208 @@ two"
         // conversation. A rate limit is a fact about the account right now,
         // and reopening the tab tomorrow under it would be a lie — the same
         // reason a rewind card is not persisted either.
-        assert_eq!(kept, vec![true, true, false]);
+        assert_eq!(kept, vec![true, true, false, true, true]);
+        // The CLI's own notices are stored under their own spellings and come
+        // back as the kinds they were: an `info` row is not lost on a reopen,
+        // and the rate limit's `warning` is still never stored.
+        let stored: Vec<String> = chat.read_with(cx, |chat, _| {
+            chat.entries
+                .iter()
+                .filter_map(persisted_entry)
+                .filter_map(|entry| match entry {
+                    ChatEntry::Notice { kind, .. } => Some(kind),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(stored, vec!["compaction", "task", "info", "info-warning"]);
+        let restored: Vec<NoticeKind> = stored
+            .into_iter()
+            .map(|kind| {
+                match restored_entry(ChatEntry::Notice {
+                    text: "x".into(),
+                    kind,
+                }) {
+                    Entry::Notice { kind, .. } => kind,
+                    _ => unreachable!("a notice restores as a notice"),
+                }
+            })
+            .collect();
+        assert_eq!(
+            restored,
+            vec![
+                NoticeKind::Compaction,
+                NoticeKind::BackgroundTask,
+                NoticeKind::Info,
+                NoticeKind::InfoWarning
+            ]
+        );
+    }
+
+    // Failure list for the line above the composer. It is wrong if:
+    // - the line is held in state but never drawn (this test reads the painted bounds);
+    // - it is drawn below the composer instead of above it;
+    // - a notification with no timeout of its own dies early or never goes: the default is 10 s;
+    // - its timer is lost when the chat redraws;
+    // - a bidi override in its text or its key reaches the snapshot raw instead of shown.
+    #[gpui::test]
+    async fn the_status_line_is_drawn_above_the_composer(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("status-line").is_none());
+
+        chat.update(cx, |chat, cx| {
+            chat.apply_notice(
+                SessionNotice::Notification {
+                    key: format!("k{}", char::from_u32(0x202E).unwrap()),
+                    text: format!("Stop hook error {}occurred", char::from_u32(0x202E).unwrap()),
+                    priority: Some("immediate".into()),
+                    color: None,
+                    timeout_ms: None,
+                },
+                cx,
+            );
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let line = cx
+            .debug_bounds("status-line")
+            .expect("a held notification is drawn");
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        assert!(
+            line.bottom() <= composer.top(),
+            "the line sits above the composer card"
+        );
+        let snapshot = chat.read_with(cx, |chat, _| chat.status_line.snapshot());
+        let parsed: serde_json::Value = serde_json::from_str(&snapshot).expect("the snapshot is JSON");
+        let text = parsed["text"].as_str().expect("the snapshot has a text");
+        assert!(
+            text.contains("\u{27e8}U+202E\u{27e9}") && !text.contains(char::from_u32(0x202E).unwrap()),
+            "the bidi override in the text is shown, not drawn raw"
+        );
+        let key = parsed["key"].as_str().expect("the snapshot has a key");
+        assert!(
+            key.contains("\u{27e8}U+202E\u{27e9}") && !key.contains(char::from_u32(0x202E).unwrap()),
+            "the bidi override in the key is shown, not stored raw in the snapshot"
+        );
+
+        cx.executor().advance_clock(std::time::Duration::from_secs(9));
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("status-line").is_some(),
+            "the default timeout is not reached yet"
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1500));
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("status-line").is_none(),
+            "the default timeout removed it"
+        );
+    }
+
+    // Failure list: a CLI-supplied timeout reaches the platform timer uncapped, so a huge one
+    // wraps or panics instead of holding the line for at most a day.
+    #[gpui::test]
+    async fn a_huge_notification_timeout_is_capped_at_a_day(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            chat.apply_notice(
+                SessionNotice::Notification {
+                    key: "k".into(),
+                    text: "held".into(),
+                    priority: None,
+                    color: None,
+                    timeout_ms: Some(u64::MAX),
+                },
+                cx,
+            );
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(23 * 60 * 60));
+        cx.run_until_parked();
+        assert_ne!(
+            chat.read_with(cx, |chat, _| chat.status_line.snapshot()),
+            "",
+            "the line is still held before the cap"
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(90 * 60 * 1000));
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.status_line.snapshot()),
+            "",
+            "the cap removed it"
+        );
+    }
+
+    // Failure list: the retry line is wrong if it outlives content or any end of the turn, if
+    // an event that says nothing about the request clears it, if an interrupt leaves it, or
+    // if its safety expiry fires early or never.
+    #[gpui::test]
+    async fn the_retry_line_clears_on_content_and_on_any_end(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        let retry = |chat: &mut Chat, cx: &mut Context<Chat>| {
+            chat.apply_notice(
+                SessionNotice::Retrying {
+                    attempt: 1,
+                    max_retries: 10,
+                    retry_delay_ms: 1000,
+                    error: Some("overloaded".into()),
+                    error_status: Some(529),
+                    no_response: false,
+                },
+                cx,
+            );
+        };
+        let events = || {
+            vec![
+                sirio_chat::ChatEvent::AgentMessageChunk("x".into()),
+                sirio_chat::ChatEvent::TurnEnded {
+                    stop_reason: "EndTurn".into(),
+                },
+                sirio_chat::ChatEvent::TransportError("gone".into()),
+                sirio_chat::ChatEvent::Timeout {
+                    operation: TimeoutOperation::Startup,
+                    duration: std::time::Duration::from_secs(1),
+                },
+            ]
+        };
+        for event in events() {
+            chat.update(cx, |chat, cx| {
+                retry(chat, cx);
+                assert_ne!(chat.status_line.snapshot(), "");
+                chat.handle_event(event, cx);
+                assert_eq!(chat.status_line.snapshot(), "", "content or an end clears the line");
+            });
+        }
+        chat.update(cx, |chat, cx| {
+            retry(chat, cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::OtherSessionUpdate { kind: "x".into() },
+                cx,
+            );
+            assert_ne!(chat.status_line.snapshot(), "", "an unrelated event leaves the line");
+            chat.cancel_turn(cx);
+            assert_eq!(chat.status_line.snapshot(), "", "an interrupt clears the line");
+        });
+        // The safety expiry: the delay plus 30 s, and not before.
+        chat.update(cx, |chat, cx| retry(chat, cx));
+        cx.executor().advance_clock(std::time::Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_ne!(chat.read_with(cx, |chat, _| chat.status_line.snapshot()), "");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1500));
+        cx.run_until_parked();
+        assert_eq!(chat.read_with(cx, |chat, _| chat.status_line.snapshot()), "");
     }
 
     #[gpui::test]

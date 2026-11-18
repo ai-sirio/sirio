@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
-use sirio_claude::message::{CliMessage, Delta, ResultPayload, SystemPayload};
+use sirio_claude::message::{CliMessage, Delta, MessageLifecycle, ResultPayload, SystemPayload};
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
 use sirio_chat_vocab::{
@@ -78,7 +78,25 @@ pub(crate) struct Fold {
     /// and re-announcing an unchanged refusal would stack one banner per
     /// turn until the window resets.
     rate_limit_status: Option<String>,
+    /// Ids of the main-thread messages a `message_start` announced since the
+    /// last `result`. An `assistant` line with one of these ids has already
+    /// been drawn from its deltas.
+    streamed_ids: HashSet<String>,
+    /// The main-thread message a `message_start` opened and no
+    /// `message_stop` has closed: `Some(None)` when it named no id.
+    open_message: Option<Option<String>>,
+    /// A text delta arrived while no message was open. The real CLI never
+    /// does this; the fixture's `state_text` does, and its `assistant` line
+    /// repeats the text. Cleared by every main-thread `assistant` line.
+    orphan_text: bool,
+    /// The last event this turn that opened or extended a transcript row was
+    /// an `AgentMessageChunk`, so the next chunk would run on into it.
+    last_row_was_chunk: bool,
 }
+
+/// What an `assistant` line's model says when the CLI wrote the line itself
+/// (an exhausted retry) rather than a model.
+const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 impl Fold {
     pub(crate) fn new() -> Self {
@@ -144,6 +162,31 @@ impl Fold {
 
     /// Folds one line.
     pub(crate) fn apply(&mut self, message: CliMessage) -> Vec<ChatEvent> {
+        let events = self.apply_line(message);
+        // A tool, a plan or a thought opens a row of its own, so the next
+        // chunk needs no separator after one. Other events leave it as it
+        // was. (A `CliNotice` clears the flag where it is pushed.)
+        for event in &events {
+            match event {
+                ChatEvent::AgentMessageChunk(_) => self.last_row_was_chunk = true,
+                ChatEvent::ThoughtChunk(_)
+                | ChatEvent::ToolCallStarted { .. }
+                | ChatEvent::ToolCallUpdated { .. }
+                | ChatEvent::ToolCallCompleted { .. }
+                | ChatEvent::PlanUpdate { .. } => self.last_row_was_chunk = false,
+                // A turn starts with neither flag set, whatever chunk its
+                // `result` itself carried (an error's text).
+                ChatEvent::TurnEnded { .. } => {
+                    self.last_row_was_chunk = false;
+                    self.orphan_text = false;
+                }
+                _ => {}
+            }
+        }
+        events
+    }
+
+    fn apply_line(&mut self, message: CliMessage) -> Vec<ChatEvent> {
         match message {
             CliMessage::StreamEvent(event) => {
                 // A subagent's deltas carry a parent id. They are not the
@@ -151,8 +194,23 @@ impl Fold {
                 if event.parent_tool_use_id.is_some() {
                     return Vec::new();
                 }
+                match event.lifecycle() {
+                    Some(MessageLifecycle::Start { id, .. }) => {
+                        if let Some(id) = &id {
+                            self.streamed_ids.insert(id.clone());
+                        }
+                        self.open_message = Some(id);
+                    }
+                    Some(MessageLifecycle::Stop) => self.open_message = None,
+                    Some(MessageLifecycle::Delta { .. }) | None => {}
+                }
                 match event.delta() {
-                    Some(Delta::Text(text)) => vec![ChatEvent::AgentMessageChunk(text)],
+                    Some(Delta::Text(text)) => {
+                        if self.open_message.is_none() {
+                            self.orphan_text = true;
+                        }
+                        vec![ChatEvent::AgentMessageChunk(text)]
+                    }
                     // A thought with no text is not a thought. Every model
                     // that does not expose its reasoning still sends the
                     // block -- one `thinking_delta` carrying `""`, then the
@@ -176,10 +234,37 @@ impl Fold {
                         .extend(assistant.tool_uses().map(|tool_use| tool_use.id.clone()));
                     return Vec::new();
                 }
-                if let Some(model) = assistant.message.model.clone() {
+                let synthetic = assistant.message.model.as_deref() == Some(SYNTHETIC_MODEL);
+                if let Some(model) = assistant.message.model.clone()
+                    && !synthetic
+                {
                     self.model = Some(model);
                 }
                 let mut events = Vec::new();
+                // An answer no stream carried: the CLI sent the text whole.
+                // Drawn only when nothing else drew it -- not a synthetic
+                // line (the CLI's own text, never an answer), not a message whose
+                // deltas arrived, not text the fixture streamed outside any
+                // message, and not while a message with no id is open (its
+                // id cannot be matched).
+                let drawn_by_stream = self.orphan_text
+                    || assistant
+                        .message
+                        .id
+                        .as_ref()
+                        .is_none_or(|id| self.streamed_ids.contains(id))
+                    || matches!(self.open_message, Some(None));
+                self.orphan_text = false;
+                if !synthetic && !drawn_by_stream {
+                    let body = assistant.text();
+                    if !body.is_empty() {
+                        events.push(ChatEvent::AgentMessageChunk(if self.last_row_was_chunk {
+                            format!("\n\n{body}")
+                        } else {
+                            body
+                        }));
+                    }
+                }
                 for tool_use in assistant.tool_uses() {
                     // A permission may have arrived first and already drawn
                     // this row; drawing it again would double the call.
@@ -384,6 +469,53 @@ impl Fold {
                     kind: "SessionNotice".into(),
                 });
             }
+            "api_retry" => {
+                if let (Some(attempt), Some(max_retries)) = (system.attempt, system.max_retries) {
+                    self.notices.push(SessionNotice::Retrying {
+                        attempt,
+                        max_retries,
+                        retry_delay_ms: system.retry_delay_ms.unwrap_or(0),
+                        error: system.error.clone(),
+                        error_status: system.error_status,
+                        no_response: system
+                            .no_response
+                            .as_ref()
+                            .is_some_and(serde_json::Value::is_object),
+                    });
+                    events.push(ChatEvent::OtherSessionUpdate {
+                        kind: "SessionNotice".into(),
+                    });
+                }
+            }
+            "notification" => {
+                if let Some(text) = system.text.clone().filter(|text| !text.is_empty()) {
+                    self.notices.push(SessionNotice::Notification {
+                        key: system.key.clone().unwrap_or_default(),
+                        text,
+                        priority: system.priority.clone(),
+                        color: system.color.clone(),
+                        timeout_ms: system.timeout_ms,
+                    });
+                    events.push(ChatEvent::OtherSessionUpdate {
+                        kind: "SessionNotice".into(),
+                    });
+                }
+            }
+            "model_refusal_fallback" | "model_refusal_no_fallback" | "informational" => {
+                if let Some(text) = system.content.clone().filter(|text| !text.is_empty()) {
+                    self.notices.push(SessionNotice::CliNotice {
+                        text,
+                        warning: system.subtype == "informational"
+                            && system.level.as_deref() == Some("warning"),
+                    });
+                    // Its row sits between the text around it, so the next
+                    // chunk opens a new row and needs no separator.
+                    self.last_row_was_chunk = false;
+                    events.push(ChatEvent::OtherSessionUpdate {
+                        kind: "SessionNotice".into(),
+                    });
+                }
+            }
             "task_started" => {
                 if let Some(task_id) = system.task_id.clone()
                     && system.is_backgrounded == Some(true)
@@ -538,6 +670,9 @@ impl Fold {
         // surface must not keep spinners running for work nobody will
         // report on.
         self.open_calls.clear();
+        self.streamed_ids.clear();
+        self.open_message = None;
+        self.last_row_was_chunk = false;
         events.push(ChatEvent::TurnEnded { stop_reason });
         events
     }
@@ -730,6 +865,9 @@ mod tests {
         );
     }
 
+    /// The line has no `id`, so its text is never drawn (an answer is drawn
+    /// only for a message whose id is known and was not streamed); what it
+    /// contributes here is its tool calls.
     #[test]
     fn an_assistant_message_contributes_only_its_tool_calls() {
         let mut fold = Fold::new();

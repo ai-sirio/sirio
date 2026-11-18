@@ -657,13 +657,16 @@ impl Chat {
                         )
                         .child(div().h(px(1.0)).flex_1().bg(theme.ely.border))
                         .into_any_element(),
-                    NoticeKind::BackgroundTask | NoticeKind::Warning => div()
+                    NoticeKind::BackgroundTask
+                    | NoticeKind::Warning
+                    | NoticeKind::Info
+                    | NoticeKind::InfoWarning => div()
                         .w_full()
                         .flex()
                         .items_center()
                         .debug_selector(move || selector.into())
                         .text_size(typography.footnote)
-                        .text_color(if kind == NoticeKind::Warning {
+                        .text_color(if matches!(kind, NoticeKind::Warning | NoticeKind::InfoWarning) {
                             theme.ely.warning
                         } else {
                             theme.ely.fg_subtle

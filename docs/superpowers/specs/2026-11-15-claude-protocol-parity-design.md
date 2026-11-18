@@ -430,6 +430,81 @@ Each item is laid out the same way:
   - A fixture mode that emits each message. The E2E asserts the notices.
   - Live: a startup failure that can be provoked locally, such as an invalid settings file
     (`config_file_invalid`).
+- **Deviations, from the live probe** (`.superpowers/probe-a7/FINDINGS.md`: 2.1.326 over stdio, with
+  2.1.325 and the 2.1.257 floor for comparison; scratch HOME and config, local fake API):
+  - **A startup reason is final; a resume without one still retries.**
+    - Today, any handshake failure on a `--resume` attempt silently retries without the resume.
+    - A resume of a session the CLI does not know gives an error `result` with no reason, so that
+      path stays as it is.
+    - An error `result` that carries a `startup_failure_reason` ends the launch on any attempt.
+      Retrying would relaunch a CLI that fails again (`config_file_invalid`). For
+      `session_held_by_background`, `worktree_resume_refused` and `worktree_unverified`, it would
+      silently open a new session in place of the user's.
+  - **Startup results are opt-in.**
+    - Without `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1`, only `org_config_required_unavailable`,
+      `org_config_refused` and `config_file_invalid` write a result; every other reason ends with
+      stderr and exit 1. A native chat's CLI is therefore launched with that variable.
+    - The error `result` comes instead of the `initialize` answer: stdout line 0, no
+      `control_response`, no `system/init`. Sirio reads it during the handshake.
+    - The chat shows Sirio's sentence for the reason, then the CLI's `errors` lines. For
+      `invalid_config_file` it adds the file's path, and the backup path when there is one.
+    - An unknown reason shows the CLI's `errors` verbatim.
+    - The floor ignores the variable.
+  - **No result: the CLI's last words.** These cases write no result:
+    - the floor, for every startup failure;
+    - every version, for a bad `--mcp-config` or an invalid option.
+
+    In those cases the chat shows the exit code and the last stderr lines, as it already does for a
+    CLI that dies mid-session, instead of the generic transport error. This extends "absent → as
+    today".
+  - **The live proof uses a corrupt `.claude.json`.** An invalid `settings.json`, user or project,
+    is not a startup failure: the CLI skips it silently. Only a corrupt global `.claude.json` is
+    fatal. The live test writes one into its own scratch `CLAUDE_CONFIG_DIR`. That write is the test
+    harness's; Sirio itself still never reads or writes `.claude.json`.
+  - **`api_retry` is as specified.**
+    - `error` is `overloaded`, `server_error`, `rate_limit` or `unknown`.
+    - `error_status` is null for a connection error.
+    - The frame comes after `status: requesting` and before any content. It never comes for a
+      failure inside a stream that has already started.
+    - `no_response` could not be provoked; Sirio reads it when present.
+    - 2.1.325 and the floor send the same frame.
+    - When the retries run out, the CLI sends a synthetic error `assistant` and an `is_error` result
+      with the same sentence. The chat shows that sentence once, as today.
+  - **A stream that fails midway.** The CLI then asks again without streaming and sends the answer
+    as one `assistant` message with no stream events. Sirio draws text only from stream events, so
+    that answer was invisible: the chat now draws the text of an `assistant` message that no stream
+    event carried.
+  - **`notification` carries `color` and seldom `timeout_ms`.**
+    - The fields are `{key, text, priority: low|medium|high|immediate, color?: error|warning,
+      timeout_ms?}`.
+    - Only the CLI's queued items set `timeout_ms` (10 s in its code), and none was seen on the
+      wire.
+    - Sirio keeps the line for `timeout_ms`, or for 10 s without it; `color` sets the line's tone.
+    - The one key seen live, `stop-hook-error`, comes just before the turn's `result`, so the line
+      outlives the turn.
+    - The text is the CLI's own and may name a terminal key ("ctrl+o to see").
+    - 2.1.325 and the floor send the same frame for `stop-hook-error`. On the floor the text reads
+      "Stop hook error occurred · ctrl+o to see".
+  - **Refusals: the CLI's own sentence.**
+    - `model_refusal_fallback` comes only where the refused model has a fallback. It was seen live
+      on the floor: `scope` was `session`, `direction` was `retry`, and the retry went to the
+      fallback model. The notice is the frame's `content`, which already names both models; Sirio
+      does not build a sentence of its own.
+    - On 2.1.325 and 2.1.326 the default model has no fallback. A refusal there gives
+      `system/informational` (`level: notice`) and a retry on the same model. So the chat also shows
+      `system/informational` as a notice:
+      - its levels are `info`, `notice`, `suggestion` and `warning`, and `warning` takes the warning
+        tone;
+      - it is rare: in 87 probe runs it came only with a refusal.
+    - `model_refusal_no_fallback` is read from the schema the same way, by its `content`. It never
+      came in a session with no fallback.
+  - **`session_writes_lost` is not shown in A7.**
+    - The CLI sends it only for ENOSPC or EDQUOT, once, 2 to 3 ms after stdin EOF, as it exits with
+      status 0. The floor never sends it.
+    - Sirio closes stdin only to end a session, and stops reading stdout at that moment.
+    - To show the frame, Sirio would have to keep reading after the end and save the warning with a
+      chat that is closing.
+    - A follow-up issue keeps it.
 
 ### A8 · Hooks card
 

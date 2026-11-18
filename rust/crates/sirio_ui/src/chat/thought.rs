@@ -223,10 +223,12 @@ impl Chat {
             )
     }
 
-    /// Settles the thought at the tail (notices aside), if one is still open:
+    /// Settles the thought at the tail (the notices that sit below a reply aside; the CLI's own
+    /// `Info` and `InfoWarning` rows stop the search), if one is still open:
     /// stores its elapsed time and remeasures the row (the header's word and
     /// the body's auto-open both change). Called before any entry other than
-    /// a thought or a notice is pushed, and when the turn ends.
+    /// a thought or a notice is pushed, before the CLI's own notice rows, and
+    /// when the turn ends.
     pub(crate) fn settle_open_thought(&mut self) {
         let index = self.streamed_entry();
         if let Some(index) = index

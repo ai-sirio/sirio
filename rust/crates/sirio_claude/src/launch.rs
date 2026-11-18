@@ -85,6 +85,13 @@ impl LaunchLine {
                     "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".to_string(),
                     "1".to_string(),
                 ),
+                // A CLI that cannot start writes a `result` naming the
+                // reason, as well as its line on stderr. Only the chat
+                // asks for it; its own children inherit it too.
+                (
+                    "CLAUDE_CODE_STARTUP_FAILURE_RESULTS".to_string(),
+                    "1".to_string(),
+                ),
             ],
         }
     }
