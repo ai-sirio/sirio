@@ -620,7 +620,8 @@ Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 # unread (a codex stub reports running then done in the other worktree) lights
 # the bell, whose menu selects that session's tab; Search shows the filter and
 # Esc hides it; a click on the centre pane, then a card, then the centre pane
-# moves listFocused false, true, false; a second project of 22 worktrees makes
+# moves listFocused false, true, false, and the list's left edge is the same
+# focused and unfocused (no focus ring is drawn); a second project of 22 worktrees makes
 # the list overflow, and on idle frames with the pointer off the list the bar's
 # strip differs between right after a wheel turn and 2.2 s later while the list
 # body does not (it fails when no bar is drawn). --display :N is a private Xvfb
