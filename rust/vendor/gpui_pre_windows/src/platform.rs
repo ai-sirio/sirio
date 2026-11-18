@@ -444,11 +444,11 @@ impl WindowsPlatform {
                 let vsync_provider = VSyncProvider::new();
                 loop {
                     let signal_source = vsync_provider.wait_for_vsync();
-                    sirio_perf::event("Windows.vsync", 0);
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
+                    sirio_perf::event("Windows.vsync", 0);
                     if check_device_lost(&directx_device.device)
                         || invalidate_devices.fetch_and(false, Ordering::Acquire)
                     {
