@@ -609,6 +609,73 @@ Each item is laid out the same way:
     - The audit could not confirm that a slash command sent as user text runs in stream-json
       mode, so the test answers that first. If it does not run, `/usage` gets no card and the item
       keeps only the rate-limit part.
+- **Deviations, from the live probe** (`.superpowers/probe-a9/FINDINGS.md`: 2.1.327 over stdio
+  against a local fake API, with 2.1.326, 2.1.325, 2.1.310, 2.1.301 and the 2.1.257 floor for
+  comparison; no real account):
+  - **No real account.** No test of Sirio's runs against a real sign-in or the real `~/.claude`.
+    `usage_report` cannot be reached without one: the plan's rows come from the fixed
+    `https://api.anthropic.com/api/oauth/usage`, not from `ANTHROPIC_BASE_URL`. So the fixture
+    proves the card, with the shape read from the binary and SDK 0.3.281's `sdk.d.ts`. The
+    real-account test stays, `#[ignore]` and opt-in through `SIRIO_LIVE_CLAUDE_ACCOUNT=1`: it sends
+    only `/usage`, checks only the shape, and Enzo runs it by hand; never CI, never an agent.
+    Approved by t2s, 2026-11-18.
+  - **Who gets `rate_limit_event`, and when.** The CLI builds it from the
+    `anthropic-ratelimit-unified-*` response headers, and only for a claude.ai subscriber or a
+    gateway sign-in: an API-key session never gets one (run `run-q4-key-control`). It comes after
+    the answer and before `result`, and only when the state changes. `resetsAt` is in epoch
+    seconds. `utilization` is a 0–1 fraction, at the top level for a warning and per window
+    under `unifiedWindows` (runs `run-q4-gw-*`). A plain rejection is retried up to ten times
+    (about three minutes) with `api_retry` and no event. The event comes when the retries end,
+    and the turn ends with the CLI's own sentence as its error (`You've hit your limit · resets
+    3:15pm (<zone>)`). A7's retry line (`rate limited`) is the early signal, and Sirio already
+    writes that sentence into the transcript as sent (a failed `result`'s text); it is never
+    parsed.
+  - **`limitScope` and `overageEnabled`.** `limitScope` (`group_pool`, `service`, `channel`)
+    comes only with an extra-usage denial (`rateLimitType: overage` with an
+    `overageDisabledReason`), which the CLI does not retry. `overageEnabled` needs a real
+    account's profile and was not seen. The floor's event has no `limitScope`.
+  - **The notice.** Today it shows neither the status nor the reset (`Usage limit reached
+    (five_hour)`, with the raw window token), and it says the same for `allowed_warning`, which is
+    false. Sirio now writes one line per change of status or window, and `allowed` stays silent:
+    - `allowed_warning`: `Approaching the <window> usage limit: <n>% used, resets at <time>.`
+    - `rejected`: `<Window> usage limit reached, resets at <time>.` With `limitScope` it adds
+      which budget ran out, in the CLI's own words: `your individual spend limit` (`service`),
+      `your team's pooled budget` (`group_pool`), `your channel's monthly spend limit`
+      (`channel`).
+    - The window words are 5-hour, weekly, weekly Opus, weekly Sonnet, weekly (for
+      `seven_day_overage_included`) and extra (for `overage`). An unknown token shows as sent,
+      through `visible_text`. The time is the local clock (`15:15`, or `Thu 15:15` when it is not
+      today). A part with no value is left out.
+  - **`/usage` is answered locally, and Sirio draws none of it today.** On every version, `/usage`
+    sent as user text runs with no model turn (runs `run-q1-*`, `run-q2-*`). The CLI writes a
+    synthetic assistant message (`model: "<synthetic>"`) holding its own text, a stats block,
+    then a `result` with `num_turns: 0`. No `system/local_command_output` is sent. From 2.1.301
+    the message carries `local_command_run: {command, args}` and the `result` carries
+    `local_command`; the floor carries neither, and the first version with them is between
+    2.1.258 and 2.1.300, none installed. Sirio drops every synthetic message, so `/usage` shows
+    nothing in a native chat today. Sirio now draws a synthetic message that carries
+    `local_command_run` as that command's output: its text as written, in a monospace block so
+    its columns line up, never parsed (its first label changed from `Total cost` to `Estimated
+    cost` at 2.1.326). The rule holds for any local command answered this way, not only
+    `/usage`. On the floor the answer stays undrawn, as today.
+  - **The usage card.** With `usage_report`, the card replaces the text. The shape (binary and
+    SDK): `session` totals (`total_cost_usd`, `total_api_duration_ms`, `total_duration_ms`, lines
+    added and removed, `model_usage` per model) and `rate_limits`, `null` when the CLI could not
+    fetch them, with `limits` (`null`, or rows `{kind, group, percent, resets_at, scope?,
+    severity, is_active}`) and `extra_usage?`. A row has no label: it shows its scope's
+    `display_name` when it has one, else a word for its `kind`, or the `kind` as sent when the
+    word is unknown. Rows group under `group` in the server's order. `severity` (`normal`,
+    `warning`, `critical`; anything else reads as `normal`) colours the bar, and `is_active` marks
+    the headline row. `rate_limits: null` or `limits: null` says the plan's limits are
+    unavailable; `limits: []` says none are reported. The card sits in the transcript where the
+    text would be.
+  - **Live proof without an account.** One test: `/usage` is answered locally (the synthetic
+    message with `local_command_run`, `result.local_command`, and no request to the fake API).
+    Another: `rate_limit_event` through a gateway-style sign-in, whose token is unsigned, carries
+    `aud: claude-gateway`, is built at run time, sits only in the CLI's environment and reaches
+    only the fake API, which sends the headers. It checks a warning's fields and an extra-usage
+    denial with `limitScope`. It rests on how the CLI detects a gateway, so it is `#[ignore]` like
+    the other live tests.
 
 ### A10 · Subagent text: designed with Enzo when it comes up
 
