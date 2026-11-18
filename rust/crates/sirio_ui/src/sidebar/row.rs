@@ -980,7 +980,33 @@ impl Sidebar {
         // layout read. The card has no border, so a full-size absolute child
         // spans its whole box.
         let card_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card.clone());
-        row_view.child(content).when_some(card_probe, |this, cell| {
+        // A worktree card reports where it is and whether the pointer is on it,
+        // for the hover card beside the sidebar.
+        let hover_bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<Pixels>>));
+        let hover_probe = is_worktree.then(|| hover_bounds.clone());
+        let row_view = if is_worktree {
+            let hover_entity = entity.clone();
+            row_view.on_hover(move |hovered, _, cx| {
+                let bounds = hover_bounds.get();
+                hover_entity.update(cx, |sidebar, cx| {
+                    sidebar.hover_card_hover(row_id, bounds, *hovered, cx)
+                });
+            })
+        } else {
+            row_view
+        };
+        row_view
+            .when_some(hover_probe, |this, cell| {
+                this.child(
+                    gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+            })
+            .child(content)
+            .when_some(card_probe, |this, cell| {
             this.child(
                 gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
                     .absolute()

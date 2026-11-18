@@ -56,6 +56,7 @@ use crate::status::ActivityStatus;
 use crate::text_selection::selectable_text;
 
 mod fade;
+mod hover_card;
 mod row;
 mod section;
 mod sessions;
@@ -771,6 +772,10 @@ pub struct Sidebar {
     cache_rows: bool,
     /// What the debug layout read measures; see [`ProbeRects`].
     probe: std::rc::Rc<ProbeRects>,
+    /// The worktree card's hover card; see `hover_card.rs`.
+    hover_card: hover_card::HoverCardState,
+    /// Where the sidebar was drawn last, for placing the hover card beside it.
+    sidebar_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     list_scroll: ScrollHandle,
     /// When each list last moved, for its fading scrollbar.
     list_bar: crate::scroll::BarActivity,
@@ -1134,6 +1139,8 @@ impl Sidebar {
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
             probe: Default::default(),
+            hover_card: Default::default(),
+            sidebar_bounds: Default::default(),
             list_scroll: ScrollHandle::new(),
             list_bar: Default::default(),
             sessions_bar: Default::default(),
@@ -1247,6 +1254,8 @@ impl Sidebar {
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
             probe: Default::default(),
+            hover_card: Default::default(),
+            sidebar_bounds: Default::default(),
             list_scroll: ScrollHandle::new(),
             list_bar: Default::default(),
             sessions_bar: Default::default(),
@@ -3393,6 +3402,111 @@ impl Sidebar {
             .count()
     }
 
+    /// Whether something should keep the hover card shut: a drag, any popup,
+    /// a form or prompt, a narrow sidebar, or the list being folded away.
+    fn hover_card_blocked(&self, cx: &App) -> bool {
+        cx.has_active_drag()
+            || self.context_menu.get().is_some()
+            || self.worktree_close_menu.get().is_some()
+            || self.add_project_menu.get().is_some()
+            || self.view_menu.get().is_some()
+            || self.bell_menu.get().is_some()
+            || self.new_chat_menu.get().is_some()
+            || self.project_form.is_some()
+            || self.prompt.is_some()
+            || self.prompt_open
+            || self.panel_width < hover_card::MIN_SIDEBAR_WIDTH
+            || self.view != SidebarView::Projects
+            || self.list_hidden()
+    }
+
+    /// The pointer entered or left a worktree card.
+    fn hover_card_hover(
+        &mut self,
+        row_id: usize,
+        bounds: Option<Bounds<Pixels>>,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !hovered {
+            self.hover_card.leave(cx);
+        } else if let Some(bounds) = bounds
+            && !self.hover_card_blocked(cx)
+        {
+            self.hover_card.scroll_y = self.list_scroll.offset().y;
+            self.hover_card.hover(row_id, bounds, cx);
+        }
+    }
+
+    /// The pointer entered or left the open hover card.
+    fn hover_card_pointer(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.hover_card.keep();
+        } else {
+            self.hover_card.leave(cx);
+        }
+    }
+
+    /// The open hover card, or `None` when it is not open or must close: the
+    /// list scrolled, or its worktree left the visible rows.
+    fn hover_card_element(
+        &mut self,
+        rows: &[SidebarRow],
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let row_id = self.hover_card.row_id?;
+        let row = rows.iter().find(|row| row.id == row_id && row.kind == RowKind::Worktree);
+        let stale = row.is_none()
+            || self.hover_card_blocked(cx)
+            || self.list_scroll.offset().y != self.hover_card.scroll_y;
+        let (Some(row), false) = (row, stale) else {
+            self.hover_card.dismiss();
+            return None;
+        };
+        if !self.hover_card.shown {
+            return None;
+        }
+        let row_bounds = self.hover_card.row_bounds?;
+        let sidebar_right = self.sidebar_bounds.get()?.right();
+        let project_name = self
+            .rows
+            .iter()
+            .take_while(|candidate| candidate.id != row_id)
+            .filter(|candidate| candidate.kind == RowKind::Project)
+            .last()
+            .map(|project| project.title.clone())
+            .unwrap_or_default();
+        let origin = hover_card::card_origin(
+            row_bounds,
+            sidebar_right,
+            gpui::size(px(hover_card::HOVER_CARD_WIDTH), hover_card::estimated_height(row, row.pills.len())),
+            window.viewport_size(),
+        );
+        let card = hover_card::render_card(
+            row,
+            &project_name,
+            &row.pills,
+            self.hover_card.opened_at_ms,
+            theme,
+        );
+        let entity = cx.entity();
+        let body = div()
+            .id("sidebar-hover-card")
+            .debug_selector(|| "sidebar-hover-card".to_owned())
+            .occlude()
+            .on_hover(move |hovered, _, cx| {
+                entity.update(cx, |sidebar, cx| sidebar.hover_card_pointer(*hovered, cx));
+            })
+            .child(card);
+        let placed = gpui::anchored()
+            .anchor(gpui::Anchor::TopLeft)
+            .position(origin)
+            .child(body);
+        Some(ely_gpui_component::primitives::raise("sidebar-hover-card-layer", placed).into_any_element())
+    }
+
     fn visible_rows(&self) -> Vec<SidebarRow> {
         let query = self.filter.trim().to_lowercase();
         let searching = !query.is_empty();
@@ -4461,6 +4575,8 @@ impl Render for Sidebar {
         let sticky_worktree_count = sticky_section
             .as_ref()
             .map_or(0, |row| self.worktree_count(row.id));
+        let hover_card_element = self.hover_card_element(&rows, &theme, window, cx);
+        let sidebar_bounds = self.sidebar_bounds.clone();
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
@@ -4801,6 +4917,13 @@ impl Render for Sidebar {
             .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
+            .child(
+                gpui::canvas(move |bounds, _, _| sidebar_bounds.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
             .child(self.render_header(&theme, window, cx))
             .child(self.render_new_chat(&theme, cx))
             .when(show_filter, |this| this.child(
@@ -5333,6 +5456,7 @@ impl Render for Sidebar {
             .when_some(project_form, |this, form| {
                 this.child(Self::render_project_form(form, entity.clone(), theme))
             })
+            .when_some(hover_card_element, |this, card| this.child(card))
     }
 }
 
@@ -9187,6 +9311,155 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         (window, cx)
+    }
+
+
+    fn hover_ms(cx: &mut VisualTestContext, ms: u64) {
+        cx.executor().advance_clock(std::time::Duration::from_millis(ms));
+        cx.run_until_parked();
+    }
+
+    fn pointer_away(cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(gpui::point(px(1500.0), px(900.0)), None, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn linked_row(cx: &mut VisualTestContext) -> usize {
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        sidebar.read_with(cx, |s, _| {
+            s.rows
+                .iter()
+                .find(|row| row.kind == RowKind::Worktree && !row.is_primary)
+                .map(|row| row.id)
+                .expect("the worktree row exists")
+        })
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_opens_after_half_a_second(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 400);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "not yet at 400 ms");
+        hover_ms(&mut cx, 110);
+        let card = cx.debug_bounds("sidebar-hover-card").expect("open at 510 ms");
+        assert!(
+            card.left() >= px(300.0 + hover_card::GAP),
+            "the card sits 4 px past the sidebar's right edge: {card:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_lingers_then_closes(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 150);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "lingers at 150 ms");
+        hover_ms(&mut cx, 100);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "gone at 250 ms");
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_never_opens_while_a_menu_is_open(cx: &mut TestAppContext) {
+        for menu in ["context", "bell", "new_chat", "view"] {
+            let (window, mut cx) = new_chat_fixture(cx, true);
+            let id = linked_row(&mut cx);
+            window
+                .update(&mut cx, |s, window, cx| match menu {
+                    "context" => s.open_context_menu(id, gpui::point(px(150.0), px(400.0)), window, cx),
+                    "bell" => s.toggle_bell_menu(cx),
+                    "new_chat" => s.toggle_new_chat_menu(cx),
+                    _ => s.toggle_view_menu(cx),
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let row = cx.debug_bounds(Box::leak(format!("sidebar-row-{id}").into_boxed_str()) as &'static str);
+            if let Some(row) = row {
+                cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+            }
+            hover_ms(&mut cx, 600);
+            assert!(
+                cx.debug_bounds("sidebar-hover-card").is_none(),
+                "no hover card while the {menu} menu is open"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn scrolling_or_filtering_closes_the_hover_card(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        sidebar.update(&mut cx, |s, cx| {
+            s.list_scroll.set_offset(gpui::point(px(0.0), px(-40.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "scrolling closes it");
+
+        sidebar.update(&mut cx, |s, cx| {
+            s.list_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "shown again");
+        window
+            .update(&mut cx, |s, _, cx| {
+                s.filter = "main".to_string();
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "a filter that drops the row closes it");
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_stays_off_on_a_narrow_sidebar(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        window.update(&mut cx, |s, _, cx| s.set_panel_width(190.0, cx)).unwrap();
+        cx.run_until_parked();
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 600);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none());
+        // The control: the same pointer opens it once the sidebar is wide enough.
+        window.update(&mut cx, |s, _, cx| s.set_panel_width(300.0, cx)).unwrap();
+        cx.run_until_parked();
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_lists_the_worktree_tabs(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let id = sidebar.read_with(&cx, |s, _| {
+            s.rows.iter().find(|row| !row.pills.is_empty()).map(|row| row.id).expect("a worktree with tabs")
+        });
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        for selector in [
+            "sidebar-hover-card-project-sirio",
+            "sidebar-hover-card-tab-Chat",
+            "sidebar-hover-card-tab-Terminal",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector} is drawn in the card");
+        }
     }
 
     #[gpui::test]
