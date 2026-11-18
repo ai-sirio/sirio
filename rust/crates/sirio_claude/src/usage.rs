@@ -449,6 +449,8 @@ mod usage_report_tests {
 
     #[test]
     fn usage_report_parse_cases() {
+        // Guard: holds with a parser that reads nothing (it returns `None` for
+        // everything); the cases below are the ones that need the reading.
         // A report that is not an object, or names neither part, is not one.
         for not_a_report in [json!(null), json!(7), json!("x"), json!([]), json!({}), json!({"x": 1})] {
             assert_eq!(UsageReport::parse(&not_a_report), None);
@@ -465,6 +467,15 @@ mod usage_report_tests {
             assert_eq!(report.extra, None);
             assert_eq!(report.totals.expect("totals").cost_usd, Some(2.5));
         }
+
+        // `rate_limits: null` beside an `extra_usage` that sits at the report's
+        // top level: the extra line lives under `rate_limits`, so there is none.
+        let report = UsageReport::parse(&json!({
+            "rate_limits": null, "extra_usage": {"is_enabled": true, "used_credits": 5}
+        }))
+        .expect("rate_limits is present");
+        assert_eq!(report.limits, PlanLimits::Unavailable);
+        assert_eq!(report.extra, None);
 
         // `limits` absent or of the wrong type is unavailable while the extra
         // line, which does not depend on the rows, is still read.
@@ -529,6 +540,15 @@ mod usage_report_tests {
         let names: Vec<Option<&str>> = rows(&report).iter().map(|row| row.scope_name.as_deref()).collect();
         assert_eq!(names, [Some("M"), Some("S"), Some("S"), None]);
 
+        // A surface that is not an object, or has no string name, gives no name.
+        let report = UsageReport::parse(&json!({"rate_limits": {"limits": [
+            {"scope": {"surface": 4}},
+            {"scope": {"surface": {"display_name": 4}}}
+        ]}}))
+        .expect("a report");
+        let names: Vec<Option<&str>> = rows(&report).iter().map(|row| row.scope_name.as_deref()).collect();
+        assert_eq!(names, [None, None]);
+
         // `session` that is not an object leaves no totals.
         let report = UsageReport::parse(&json!({"session": 5, "rate_limits": null})).expect("a report");
         assert_eq!(report.totals, None);
@@ -564,6 +584,34 @@ mod usage_report_tests {
                 ),
             ]
         );
+        // Each wrongly typed count is `None` while its siblings still read.
+        let report = UsageReport::parse(&json!({"session": {
+            "total_lines_added": "7", "total_lines_removed": 3,
+            "model_usage": {
+                "a": {"inputTokens": "1", "outputTokens": 2, "cacheReadInputTokens": 3,
+                      "cacheCreationInputTokens": 4},
+                "b": {"inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": "3",
+                      "cacheCreationInputTokens": 4},
+                "c": {"inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3,
+                      "cacheCreationInputTokens": "4"}
+            }
+        }}))
+        .expect("a report");
+        let totals = report.totals.expect("totals");
+        assert_eq!((totals.lines_added, totals.lines_removed), (None, Some(3)));
+        let counts: Vec<[Option<u64>; 4]> = totals
+            .models
+            .iter()
+            .map(|(_, t)| [t.input, t.output, t.cache_read, t.cache_write])
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                [None, Some(2), Some(3), Some(4)],
+                [Some(1), Some(2), None, Some(4)],
+                [Some(1), Some(2), Some(3), None],
+            ]
+        );
         let report = UsageReport::parse(&json!({"session": {"model_usage": [1]}})).expect("a report");
         assert_eq!(report.totals.expect("totals").models, vec![]);
 
@@ -577,6 +625,19 @@ mod usage_report_tests {
         assert_eq!(
             report.extra,
             Some(ExtraUsage { enabled: false, monthly_limit: None, used: Some(1234.0), currency: None })
+        );
+        let report = UsageReport::parse(&json!({"rate_limits": {"extra_usage": {
+            "is_enabled": true, "monthly_limit": 5000, "used_credits": "12", "currency": "USD"
+        }}}))
+        .expect("a report");
+        assert_eq!(
+            report.extra,
+            Some(ExtraUsage {
+                enabled: true,
+                monthly_limit: Some(5000.0),
+                used: None,
+                currency: Some("USD".to_string())
+            })
         );
     }
 }

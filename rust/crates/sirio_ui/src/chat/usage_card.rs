@@ -133,14 +133,17 @@ fn row_name(row: &LimitRow) -> String {
     }
 }
 
-fn row_line<Tz: TimeZone>(row: &LimitRow, bold: bool, now: &DateTime<Tz>) -> CardLine
+/// One row, or `None` when it has no part at all (no name, percent, reset or
+/// severity word): a line with nothing on it is dropped.
+fn row_line<Tz: TimeZone>(row: &LimitRow, bold: bool, now: &DateTime<Tz>) -> Option<CardLine>
 where
     Tz::Offset: Display,
 {
-    let mut rest = String::new();
+    let name = row_name(row);
     let percent = row.percent.map(whole_percent);
+    let mut parts = Vec::new();
     if let Some(percent) = percent {
-        rest.push_str(&format!(" · {percent}%"));
+        parts.push(format!("{percent}%"));
     }
     // A reset that does not parse leaves its part out.
     if let Some(at) = row
@@ -148,29 +151,39 @@ where
         .as_deref()
         .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
     {
-        rest.push_str(&format!(
-            " · resets at {}",
+        parts.push(format!(
+            "resets at {}",
             reset_time(&at.with_timezone(&now.timezone()), now)
         ));
     }
     let severity = match row.severity.as_str() {
         "warning" => {
-            rest.push_str(" · warning");
+            parts.push("warning".to_string());
             Severity::Warning
         }
         "critical" => {
-            rest.push_str(" · critical");
+            parts.push("critical".to_string());
             Severity::Critical
         }
         _ => Severity::Normal,
     };
-    CardLine::Row {
-        name: row_name(row),
+    if name.is_empty() && parts.is_empty() {
+        return None;
+    }
+    // The separators sit between parts that exist: with no name there is
+    // nothing for the first one to follow.
+    let rest = if name.is_empty() {
+        parts.join(" · ")
+    } else {
+        parts.iter().map(|part| format!(" · {part}")).collect()
+    };
+    Some(CardLine::Row {
+        name,
         rest,
         percent,
         severity,
         bold,
-    }
+    })
 }
 
 /// An amount in minor units: `$12.34`, `12.34 EUR`, or `12.34` with no code.
@@ -225,11 +238,9 @@ where
                 }
             }
             let mut first_active = rows.iter().position(|row| row.is_active);
+            let mut drawn = 0;
             for (group, members) in groups {
-                let title = heading(group);
-                if !title.is_empty() {
-                    lines.push(CardLine::Heading(title));
-                }
+                let mut group_lines = Vec::new();
                 for row in members {
                     // Groups reorder the rows, so the first active row is
                     // found by identity, not by its place in the group.
@@ -238,8 +249,19 @@ where
                     if is_first_active {
                         first_active = None;
                     }
-                    lines.push(row_line(row, is_first_active, now));
+                    group_lines.extend(row_line(row, is_first_active, now));
                 }
+                // A heading stands over rows that were drawn.
+                let title = heading(group);
+                if !group_lines.is_empty() && !title.is_empty() {
+                    lines.push(CardLine::Heading(title));
+                }
+                drawn += group_lines.len();
+                lines.extend(group_lines);
+            }
+            // Rows that held nothing to draw leave the same line as no rows.
+            if drawn == 0 {
+                lines.push(CardLine::Plain("Plan limits: none reported".into()));
             }
         }
     }
@@ -347,9 +369,15 @@ pub(super) fn render(
                     Severity::Critical => theme.ely.danger,
                 };
                 // A shared minimum width lines the bars up under each other.
-                let name = text(name, format!("{id}-name"), theme.ely.fg, interaction)
-                    .flex_none()
-                    .min_w(px(112.0));
+                // An empty name draws no text, only the space that keeps
+                // the bars aligned.
+                let name = if name.is_empty() {
+                    div().flex_none().min_w(px(112.0))
+                } else {
+                    text(name, format!("{id}-name"), theme.ely.fg, interaction)
+                        .flex_none()
+                        .min_w(px(112.0))
+                };
                 let name = if bold {
                     name.font_weight(gpui::FontWeight::BOLD)
                 } else {
