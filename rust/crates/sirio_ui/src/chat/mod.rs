@@ -7926,6 +7926,10 @@ fn subagent_part_item(part: &SubagentPart) -> serde_json::Value {
             item.insert("text".into(), call.title.clone().into());
             item.insert("id".into(), call.id.clone().into());
             item.insert("status".into(), call.status.clone().into());
+            let content = visible_text::visible_text(&content_text(&call.content), true);
+            if !content.is_empty() {
+                item.insert("content".into(), content.into());
+            }
             call.agent.as_ref()
         }
         SubagentPart::Text { agent, text, .. } => {

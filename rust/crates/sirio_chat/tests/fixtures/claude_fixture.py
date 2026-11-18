@@ -1274,13 +1274,23 @@ def script_subagent_text():
     text("ok")
     message_end("end_turn", 10)
     trace_result(0.08, started)
-    # The background agent keeps writing after the result, then ends.
-    pause()
-    trace_assistant("msg_bgt_1", {"type": "text", "text": "Background start. Still going."},
-                    parent=bg, agent_id=aid("task-bg-t"))
-    # Long enough for a check to read the card at work, whatever the checks before it cost.
-    pause(TRACE_BACKGROUND_HOLD * 2)
-    task_ended("task-bg-t", bg, 5000, summary="Watched the logs.")
+    # The background agent keeps writing after the result, on a thread of its own: it waits
+    # for the next prompt's turn to be answered, so its lines reach a card a new turn began after.
+    TRACE_NEXT_ANSWERED.clear()
+
+    def background():
+        while not TRACE_NEXT_ANSWERED.is_set() and not TRACE_EOF.is_set():
+            time.sleep(0.05)
+        if TRACE_EOF.is_set():
+            return
+        pause(8)
+        trace_assistant("msg_bgt_1", {"type": "text", "text": "Background start. Still going."},
+                        parent=bg, agent_id=aid("task-bg-t"))
+        # Long enough for a check to read the card at work, whatever the checks before it cost.
+        pause(TRACE_BACKGROUND_HOLD * 2)
+        task_ended("task-bg-t", bg, 5000, summary="Watched the logs.")
+
+    threading.Thread(target=background, daemon=True).start()
 
 
 TRACE_SCRIPTS = {
@@ -1314,7 +1324,7 @@ def trace_turns():
         TRACE_INTERRUPT.clear()
         first = prompt.split(None, 1)[0].lower() if prompt.split() else ""
         TRACE_SCRIPTS.get(first, script_other)()
-        if first != "bgprompt":
+        if first not in ("bgprompt", "subagent_text"):
             TRACE_NEXT_ANSWERED.set()
 
 

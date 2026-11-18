@@ -2329,6 +2329,16 @@ scenario_trace_cost() {
   send_prompt subagents
   answer_permission allow_once
   wait_panel "the first turn is Done at \$0.31" "$DONE_031" 40
+  check_panel "the items go on with the Bash, the grandchild's line under its own name, and the final sentence" \
+    "(lambda n: n[:5] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed'), ('tool', 'toolu_sub_bash', 'Completed')] and n[5][:2] == ('tool', 'toolu_agent_grand') and n[6:] == [('text', 'Grandchild here. All clear.', 'Check one thing'), ('text', 'Done. The file says hi.')])(norm(card_items('toolu_agent_text')))"
+  check_panel "the hand-back frame is drawn nowhere and the subagent's lane has no sentence left" \
+    "'Subagent hand-back' not in json.dumps(c['transcript']) and lane('toolu_agent_text')['said'] is None"
+  check_panel "no card item holds the hand-back frame, the nested Agent call's own content included" \
+    "'Subagent hand-back' not in json.dumps(card_items('toolu_agent_text')) and 'Subagent hand-back' not in json.dumps(card_items('toolu_agent_bg')) and 'Subagent hand-back' not in next(i for i in card_items('toolu_agent_text') if i.get('id') == 'toolu_agent_grand').get('content', '')"
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  check_panel "the subagent's span and its model calls are there, and none of them is a final span" \
+    'T("toolu_agent_text") is not None and any(s["kind"] == "llm" and s["parent"] == "toolu_agent_text" for s in tab()["spans"]) and not any(s["id"].startswith("toolu_agent_text") and s["id"].endswith("/final") for s in tab()["spans"])'
   send_prompt second
   wait_panel "the second turn's cost is the difference of the process's totals: \$0.12" \
     're.match(r"^Done · .+ · \$0\.12$", S("trace")["summary"])' 30
@@ -2368,7 +2378,8 @@ bg_agent_running() { # agent
 # under SIRIO_FIXTURE_FLOOR=1 (2.1.257) no line or ask names its agent.
 SUBAGENT_ODD='"First I read the file " + chr(0x27E8) + "U+202E" + chr(0x27E9) + "txt."'
 SUBAGENT_CARD='card("toolu_agent_text")'
-subagent_text_run() { # name
+subagent_text_run() { # name mode (forward|floor)
+  local mode=$2
   trace_chat "$1"
   send_prompt subagent_text
   wait_panel "the Trace card appears" 'S("trace") is not None' 30
@@ -2381,40 +2392,50 @@ subagent_text_run() { # name
     "(lambda n: n[:4] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed')] and n[4][:2] == ('tool', 'toolu_sub_bash') and len(n) == 5)(norm(card_items('toolu_agent_text')))"
   check_panel "the lane says the sentence, and no hidden character reaches an item or the lane" \
     "lane('toolu_agent_text')['said'] == $SUBAGENT_ODD and chr(0x202E) not in json.dumps(card_items('toolu_agent_text'), ensure_ascii=False) and chr(0x202E) not in json.dumps(lane('toolu_agent_text'), ensure_ascii=False)"
-  capture subagent-text
   answer_permission allow_once
   # The Trace reads Live until the background agent ends, so the turn's end is the chat's status.
   wait_panel "the turn is over and the subagent's lane is done" 'c["status"] == "completed" and len(pending()) == 0 and lane("toolu_agent_text")["tag"] == "done"' 40
-  echo "step: the background agent writes after the result"
-  wait_panel "the background agent's card is in progress until its line and its end" \
-    'card("toolu_agent_bg") is not None and any(i["kind"] == "text" and i["text"] == "Background start. Still going." for i in card_items("toolu_agent_bg"))' 40
-  check_panel "that card is still in progress" 'card("toolu_agent_bg")["status"] == "InProgress"'
+  wait_panel "the background card is at work and holds only its prompt" \
+    'card("toolu_agent_bg") is not None and card("toolu_agent_bg")["status"] == "InProgress" and [i["kind"] for i in card_items("toolu_agent_bg")] == ["prompt"]' 20
   check_panel "the items go on with the Bash, the grandchild's line under its own name, and the final sentence" \
     "(lambda n: n[:5] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed'), ('tool', 'toolu_sub_bash', 'Completed')] and n[5][:2] == ('tool', 'toolu_agent_grand') and n[6:] == [('text', 'Grandchild here. All clear.', 'Check one thing'), ('text', 'Done. The file says hi.')])(norm(card_items('toolu_agent_text')))"
   check_panel "the hand-back frame is drawn nowhere and the subagent's lane has no sentence left" \
     "'Subagent hand-back' not in json.dumps(c['transcript']) and lane('toolu_agent_text')['said'] is None"
+  check_panel "no card item holds the hand-back frame, the nested Agent call's own content included" \
+    "'Subagent hand-back' not in json.dumps(card_items('toolu_agent_text')) and 'Subagent hand-back' not in json.dumps(card_items('toolu_agent_bg')) and 'Subagent hand-back' not in next(i for i in card_items('toolu_agent_text') if i.get('id') == 'toolu_agent_grand').get('content', '')"
   panel_ctl activate trace/open >/dev/null
   wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
-  check_panel "an agent whose latest message was text has no final span" \
-    'not any(s["id"].startswith("toolu_agent_text") and s["id"].endswith("/final") for s in tab()["spans"])'
+  check_panel "the subagent's span and its model calls are there, and none of them is a final span" \
+    'T("toolu_agent_text") is not None and any(s["kind"] == "llm" and s["parent"] == "toolu_agent_text" for s in tab()["spans"]) and not any(s["id"].startswith("toolu_agent_text") and s["id"].endswith("/final") for s in tab()["spans"])'
+  # A new turn adopts a new trace: the lanes of this one are kept for the artifact first.
+  local lanes
+  lanes=$(find_panel "the first turn's lanes" 'json.dumps({k: {"said": v.get("said"), "label": v.get("label"), "tag": v.get("tag")} for k, v in lanes_of().items()})' 10)
+  echo "step: the background agent has not written yet; a second turn runs first"
+  send_prompt second
+  wait_panel "the second turn is answered and complete" '"A second turn." in json.dumps(c["transcript"]) and c["status"] == "completed"' 30
+  wait_panel "the background agent's line reaches its card after the new turn began, and the card still runs" \
+    'card("toolu_agent_bg")["status"] == "InProgress" and any(i["kind"] == "text" and i["text"] == "Background start. Still going." for i in card_items("toolu_agent_bg"))' 40
   wait_panel "the card is completed once the task ends" 'card("toolu_agent_bg")["status"] == "Completed"' 60
-  check_panel "the end notice is drawn as before" \
-    'any(r.get("id") != "toolu_agent_bg" and "Watched the logs." in json.dumps(r) for r in c["transcript"])'
-  local artifact="$OUT_DIR/subagent-text.json"
-  find_panel "the final items and lanes" \
-    'json.dumps({"toolu_agent_text": card_items("toolu_agent_text"), "toolu_agent_bg": card_items("toolu_agent_bg"), "lanes": {k: {"said": v.get("said"), "label": v.get("label"), "tag": v.get("tag")} for k, v in lanes_of().items()}}, indent=2, ensure_ascii=False)' 10 >"$artifact"
-  [ -s "$artifact" ] || fail "no subagent-text.json was written"
-  echo "OK: $artifact holds the final items of both cards and the lanes"
+  wait_panel "the end notice is drawn as before" \
+    'any(r.get("id") != "toolu_agent_bg" and "Watched the logs." in json.dumps(r) for r in c["transcript"])' 30
+  # The card is folded in a state-only run: no seam of the control socket expands a transcript row,
+  # and a real click needs the row's bounds, which are not exposed (reported, not worked around).
+  capture "$1"
+  local artifact="$OUT_DIR/$(echo "$1" | tr _ -)".json
+  find_panel "the final items" \
+    'json.dumps({"mode": "'"$mode"'", "toolu_agent_text": card_items("toolu_agent_text"), "toolu_agent_bg": card_items("toolu_agent_bg"), "lanes_first_turn": json.loads(r"""'"$lanes"'""")}, indent=2, ensure_ascii=False)' 10 >"$artifact"
+  [ -s "$artifact" ] || fail "no $artifact was written"
+  echo "OK: $artifact holds the final items of both cards and the first turn's lanes"
   stop_app
 }
 
 scenario_subagent_text() {
-  subagent_text_run subagent_text
+  subagent_text_run subagent_text forward
 }
 
 scenario_subagent_text_floor() {
   SIRIO_FIXTURE_FLOOR=1
-  subagent_text_run subagent_text_floor
+  subagent_text_run subagent_text_floor floor
 }
 
 scenario_trace_background() {
