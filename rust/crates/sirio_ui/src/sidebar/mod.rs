@@ -5004,7 +5004,7 @@ impl Render for Sidebar {
             .when(view == SidebarView::Projects, |this| this.child(
                 list_frame(
                     ring_active,
-                    crate::scroll::bar_fading("sidebar-list-bar", &self.list_scroll, &self.list_bar, window),
+                    crate::scroll::bar_fading("sidebar-list-bar", &self.list_scroll, &self.list_bar, window, cx),
                     &theme,
                     div()
                     .id("sidebar-tree")
@@ -5086,7 +5086,7 @@ impl Render for Sidebar {
                 this.child(
                     list_frame(
                         ring_active,
-                        crate::scroll::bar_fading("sidebar-sessions-bar", &self.sessions_scroll, &self.sessions_bar, window),
+                        crate::scroll::bar_fading("sidebar-sessions-bar", &self.sessions_scroll, &self.sessions_bar, window, cx),
                         &theme,
                         div()
                         .id("sidebar-sessions")
@@ -8788,8 +8788,8 @@ mod tests {
         assert_eq!(cx.debug_bounds("sidebar-list-ring"), Some(tree));
     }
 
-    #[gpui::test]
-    async fn the_list_scrollbar_shows_only_after_the_list_moved(cx: &mut TestAppContext) {
+    /// A sidebar with 20 worktrees in a 320x240 window, so the list overflows.
+    fn long_list_fixture(cx: &mut TestAppContext) -> (gpui::WindowHandle<Sidebar>, VisualTestContext) {
         cx.update(Theme::init);
         let project_root = PathBuf::from("/tmp/sidebar-bar-fade");
         let worktrees = (0..20)
@@ -8814,21 +8814,59 @@ mod tests {
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-list-bar").is_none(),
-            "an idle list draws no scrollbar, so it covers nothing"
-        );
-        cx.simulate_event(ScrollWheelEvent {
-            position: point(px(160.0), px(180.0)),
-            delta: ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
-            modifiers: Modifiers::none(),
-            touch_phase: TouchPhase::Moved,
-        });
+        (window, cx)
+    }
+
+    /// The point on the list's scrollbar thumb at rest (top of the track).
+    fn bar_thumb_point(cx: &mut VisualTestContext) -> gpui::Point<gpui::Pixels> {
+        let bar = cx
+            .debug_bounds("sidebar-list-bar")
+            .expect("the bar stays mounted while the list overflows, so it can be grabbed");
+        point(bar.right() - px(8.0), bar.top() + px(6.0))
+    }
+
+    #[gpui::test]
+    async fn a_faded_scrollbar_can_still_be_grabbed(cx: &mut TestAppContext) {
+        let (window, mut cx) = long_list_fixture(cx);
+        let grab = bar_thumb_point(&mut cx);
+        cx.simulate_mouse_move(grab, None, Modifiers::none());
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-list-bar").is_some(),
-            "scrolling brings the scrollbar up"
-        );
+        cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(grab + point(px(0.0), px(8.0)), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(grab + point(px(0.0), px(16.0)), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(grab + point(px(0.0), px(60.0)), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let offset = window.update(&mut cx, |s, _, _| s.list_scroll.offset().y).unwrap();
+        cx.simulate_mouse_up(grab + point(px(0.0), px(60.0)), gpui::MouseButton::Left, Modifiers::none());
+        assert!(offset < px(0.0), "dragging the idle bar's thumb scrolls the list: {offset:?}");
+    }
+
+    #[gpui::test]
+    async fn a_thumb_held_past_the_idle_window_keeps_scrolling(cx: &mut TestAppContext) {
+        let (window, mut cx) = long_list_fixture(cx);
+        let grab = bar_thumb_point(&mut cx);
+        let at = |dy: f32| grab + point(px(0.0), px(dy));
+        let offset = |cx: &mut VisualTestContext| {
+            window.update(cx, |s, _, _| s.list_scroll.offset().y).unwrap()
+        };
+        cx.simulate_mouse_move(grab, None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(6.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(12.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(20.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        // The fade is wall time, so the hold is real: longer than idle + fade.
+        std::thread::sleep(crate::scroll::BAR_IDLE + crate::scroll::BAR_FADE + std::time::Duration::from_millis(200));
+        cx.simulate_mouse_move(at(30.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let before = offset(&mut cx);
+        cx.simulate_mouse_move(at(40.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(60.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let after = offset(&mut cx);
+        cx.simulate_mouse_up(at(60.0), gpui::MouseButton::Left, Modifiers::none());
+        assert!(after < before, "the held drag still scrolls after the idle window: {before:?} -> {after:?}");
     }
 
     #[gpui::test]

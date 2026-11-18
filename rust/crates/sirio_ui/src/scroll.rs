@@ -136,34 +136,73 @@ pub(crate) fn fade_presence(since_moved: Option<std::time::Duration>) -> f32 {
     1.0 - (quiet.as_secs_f32() / BAR_FADE.as_secs_f32()).min(1.0)
 }
 
-/// When a fading bar's surface last moved, kept by whoever owns the surface.
+/// What keeps a fading bar up: when its surface last moved, and whether the
+/// pointer is on the bar. Kept by whoever owns the surface.
 #[derive(Default)]
 pub(crate) struct BarActivity {
     offset: Cell<gpui::Point<gpui::Pixels>>,
-    moved_at: Cell<Option<std::time::Instant>>,
+    moved_at: Rc<Cell<Option<std::time::Instant>>>,
+    hovered: Rc<Cell<bool>>,
 }
+
+/// The least presence a mounted bar gets. Ely's thumb unmounts at zero, and
+/// with it the track that takes the drag, so an idle bar is drawn at this
+/// instead: invisible, but still there to be grabbed.
+const REST_PRESENCE: f32 = 0.001;
+/// How wide a strip along the bar's edge counts as the pointer being on it.
+const BAR_HOVER_STRIP: f32 = 14.0;
 
 /// [`bar`] for a surface whose bar should not sit on it while it is idle:
 /// the thumb shows while the surface moves, holds for [`BAR_IDLE`], then fades
-/// over [`BAR_FADE`]. Nothing is drawn, and no frame is asked for, once it is
-/// gone; the next move brings it back.
+/// over [`BAR_FADE`]. It stays up while the pointer is on the bar's edge or a
+/// drag is in progress, and an idle bar stays mounted at [`REST_PRESENCE`] so
+/// the thumb can still be grabbed. Frames are asked for only while the
+/// presence is changing or a drag is held.
 pub(crate) fn bar_fading(
     id: impl Into<SharedString>,
     handle: &ScrollHandle,
     activity: &BarActivity,
     window: &mut gpui::Window,
+    cx: &gpui::App,
 ) -> AnyElement {
+    let now = std::time::Instant::now();
     let offset = handle.offset();
     if activity.offset.get() != offset {
         activity.offset.set(offset);
-        activity.moved_at.set(Some(std::time::Instant::now()));
+        activity.moved_at.set(Some(now));
+    }
+    let dragging = cx.has_active_drag();
+    let held = activity.hovered.get() || dragging;
+    if held {
+        activity.moved_at.set(Some(now));
     }
     let presence = fade_presence(activity.moved_at.get().map(|at| at.elapsed()));
-    if presence <= 0.0 {
-        return div().absolute().size_full().into_any_element();
+    if dragging || (presence > 0.0 && !held) {
+        window.request_animation_frame();
     }
-    window.request_animation_frame();
-    bar_with(id, handle, presence)
+    let hovered = activity.hovered.clone();
+    let moved_at = activity.moved_at.clone();
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .child(
+            div()
+                .id("bar-hover-strip")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(BAR_HOVER_STRIP))
+                .on_hover(move |over, window, _| {
+                    hovered.set(*over);
+                    moved_at.set(Some(std::time::Instant::now()));
+                    window.refresh();
+                }),
+        )
+        .child(bar_with(id, handle, presence.max(REST_PRESENCE)))
+        .into_any_element()
 }
 
 /// Ely's vertical bar over one tracked surface, under a selector the
