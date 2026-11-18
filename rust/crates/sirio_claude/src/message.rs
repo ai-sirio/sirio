@@ -357,7 +357,8 @@ impl TaskOutput {
 pub struct RateLimitPush {
     /// What the CLI says about the plan: `allowed` (room), `allowed_warning`
     /// (room, nearing the limit), `rejected` (no room). Any other value is
-    /// kept as sent, and callers show it as sent.
+    /// kept as sent and shown as sent, except an empty one, which the fold
+    /// reads like `allowed`.
     pub status: Option<String>,
     /// Which window `status` is about, e.g. `five_hour`.
     pub rate_limit_type: Option<String>,
@@ -369,7 +370,7 @@ pub struct RateLimitPush {
     pub five_hour: Option<f64>,
     /// Seven-day window utilization on the **0–100 scale**.
     pub seven_day: Option<f64>,
-    /// How full that window is, in whole percent: the event's top-level
+    /// How full the `rate_limit_type` window is, in whole percent: the event's top-level
     /// `utilization`, or else that window's own entry in `unifiedWindows`,
     /// by [`crate::whole_percent`].
     pub used_percent: Option<u8>,

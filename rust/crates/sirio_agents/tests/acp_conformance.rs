@@ -3231,8 +3231,8 @@ fn claude_usage_report_on_account() {
     );
 }
 
-/// The guard `CliEnv::apply` runs before any CLI starts (so at every spawn site that applies
-/// it, `launch_broken` included). This test starts no CLI.
+/// The guard `CliEnv::apply` runs before a CLI that carries the gateway token starts (so at
+/// every spawn site that applies it, `launch_broken` included). This test starts no CLI.
 ///
 /// Failure list, written first: a userinfo that hides another host
 /// (`http://127.0.0.1:1@example.com/`) passes a prefix check, and so would an empty port.

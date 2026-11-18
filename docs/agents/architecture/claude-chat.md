@@ -627,10 +627,10 @@ out, and a row with no part at all is dropped:
 - The plan's rows under one heading per group, in the order the groups first appear (`Session`,
   `Weekly`, any other group as sent). A heading shows only over rows that were drawn. A row reads
   `{name} · {p}% · resets at {time} · {severity}`, the last part only for `warning` and `critical`,
-  as the word the CLI sent. The name is the scope's `display_name`, else `Current session`
-  (`session`), `All models` (`weekly_all`), or the `kind` as sent. The percent is the row's
-  `percent` as sent (already 0-100), through `whole_percent`. The reset uses the same time format as
-  the notice.
+  as the word the CLI sent. The name is the scope's `display_name` (an empty one counts as
+  absent), else `Current session` (`session`), `All models` (`weekly_all`), or the `kind` as sent.
+  The percent is the row's `percent` as sent (already 0-100), through `whole_percent`. The reset
+  uses the same time format as the notice.
 - `Plan limits: unavailable` or `Plan limits: none reported`; the second also stands for rows that
   all held nothing to draw.
 - `Extra usage: off`; `Extra usage: $12.34 of $50.00 this month` (amounts are minor units; USD

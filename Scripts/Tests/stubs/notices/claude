@@ -9,7 +9,7 @@
 #   SIRIO_FIXTURE_RETRY_GATE  --fixture-retry-gate  holds `retry twice` after its retries until the file exists
 #   SIRIO_FIXTURE_STARTUP     --fixture-startup     the kind of start-up failure the CLI reports (A7 Task 5)
 #   SIRIO_FIXTURE_LIMITS      --fixture-limits      JSON {"soon": epoch, "later": epoch}, the resets of the `limit ...` prompts
-#   SIRIO_FIXTURE_USAGE       --fixture-usage       JSON {"marker": bool, "report": value, "fails": bool}, how `/usage` and `/context` answer
+#   SIRIO_FIXTURE_USAGE       --fixture-usage       JSON {"marker": bool, "report": value, "fails": bool, "text": str}, how `/usage` and `/context` answer
 # Every call is recorded in $SIRIO_STUB_LOG when the run names one.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 [ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"

@@ -215,7 +215,8 @@ pub struct LimitRow {
     pub percent: Option<f64>,
     /// The reset as the CLI sent it (ISO 8601), unparsed.
     pub resets_at: Option<String>,
-    /// `scope.model.display_name`, else `scope.surface.display_name`.
+    /// `scope.model.display_name`, else `scope.surface.display_name`; an empty name counts as
+    /// absent.
     pub scope_name: Option<String>,
     pub severity: String,
     pub is_active: bool,

@@ -2148,10 +2148,10 @@ def cli_inform(content, level):
     cli_system("informational", content=content, level=level)
 
 
-# `--fixture-usage=<file>`: JSON `{"marker": bool, "report": <value>, "fails": bool}` for the local
-# commands `/usage` and `/context`, re-read on every one. A missing key means: `marker` true, no
-# `usage_report` field written, `fails` false. `"report": null` writes `usage_report: null`.
-# An optional `"text"` replaces the command's answer text (default: the block below).
+# `--fixture-usage=<file>`: JSON `{"marker": bool, "report": <value>, "fails": bool, "text": str}`
+# for the local commands `/usage` and `/context`, re-read on every one. A missing key means:
+# `marker` true, no `usage_report` field written, `fails` false, the command's own text (the
+# blocks below). `"report": null` writes `usage_report: null`.
 USAGE_PATH = flag_value("fixture-usage")
 USAGE_TEXT = ("Estimated cost:        $0.0000\nTotal duration (API):  0s\n"
               "Total duration (wall): 3s\n"

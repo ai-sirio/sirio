@@ -5427,7 +5427,8 @@ PY
   stop_app
 }
 
-# A malformed report never crashes and never reads 0% (A9 review focus 4): eight answers, each its own row.
+# A malformed or partial report never crashes and never reads 0% (A9 review focus 4): eight answers, each its
+# own row; the last has totals with only removed lines.
 scenario_usage_unavailable() {
   SIRIO_FIXTURE_USAGE="$RUN_DIR/usage_unavailable-usage.json"
   usage_options '{}'
@@ -5447,7 +5448,7 @@ scenario_usage_unavailable() {
     send_prompt "/usage"
     notice_turns "the /usage turn $n ends" "$n"
   done
-  check_panel "each malformed report reads as unavailable or none reported, and a row with no percent shows no %" \
+  check_panel "each malformed report reads as unavailable or none reported, a row with no percent shows no %, and only removed lines read 2 lines removed" \
     "[r['card'] for r in c['transcript'] if r['kind'] == 'command-output'] == ['Plan limits: unavailable', 'Plan limits: none reported', 'Plan limits: unavailable', 'Plan limits: unavailable', 'Session\nCurrent session', '50%', 'Plan limits: none reported', 'This chat: 2 lines removed\nPlan limits: unavailable']"
   echo "OK: usage_unavailable: a malformed report is unavailable, never 0%"
   stop_app
