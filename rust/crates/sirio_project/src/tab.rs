@@ -33,6 +33,10 @@ pub enum TabKind {
     /// it lives in the Secondary half. It holds no data of its own, only the
     /// chat's trace store, so it is never saved and closes with its chat.
     Trace,
+    /// Claude's proposed edit (`openDiff` of the IDE bridge): the file's diff with Accept,
+    /// Edit and Reject. Something the user looks at, so it lives in the Secondary half. It is
+    /// never saved: the request it answers lives in the connection that made it.
+    Proposal,
 }
 
 /// Which half of the [center split] a tab is drawn in.
@@ -82,7 +86,8 @@ impl TabKind {
             | Self::ProjectSettings
             | Self::ChangeRequest
             | Self::CiLog
-            | Self::Trace => PaneRole::Secondary,
+            | Self::Trace
+            | Self::Proposal => PaneRole::Secondary,
         }
     }
 
@@ -99,7 +104,8 @@ impl TabKind {
             | Self::ProjectSettings
             | Self::ChangeRequest
             | Self::CiLog
-            | Self::Trace => false,
+            | Self::Trace
+            | Self::Proposal => false,
         }
     }
 
@@ -120,7 +126,8 @@ impl TabKind {
             | Self::ProjectSettings
             | Self::ChangeRequest
             | Self::CiLog
-            | Self::Trace => false,
+            | Self::Trace
+            | Self::Proposal => false,
         }
     }
 }

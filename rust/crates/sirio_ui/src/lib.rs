@@ -51,6 +51,7 @@ pub mod popup;
 pub mod project_forms;
 pub mod project_identity;
 pub mod project_identity_dialog;
+pub mod proposal_tab;
 pub mod prompts;
 // Views the example probes draw; reaches `pub(crate)` scrollbars. Not application code.
 #[doc(hidden)]

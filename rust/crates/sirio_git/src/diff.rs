@@ -558,6 +558,124 @@ fn line_count(path: &Path) -> Option<usize> {
     }
 }
 
+/// A scratch file that is removed when it goes out of scope, on every path out.
+struct ScratchFile {
+    dir: PathBuf,
+    name: String,
+}
+
+impl ScratchFile {
+    /// Creates a new file with a unique name in `dir`. `create_new` refuses a name that
+    /// already exists, a planted symlink included; on Unix the file is private (0600).
+    fn create(dir: &Path, contents: &[u8]) -> std::io::Result<Self> {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = format!(
+            "proposal-{}-{}-{nanos}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(dir.join(&name))?;
+        let file_guard = Self { dir: dir.to_path_buf(), name };
+        file.write_all(contents)?;
+        Ok(file_guard)
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join(&self.name));
+    }
+}
+
+/// Diffs a proposed file (`new`) against what is on disk (`old`, `None` for a file that
+/// does not exist yet).
+///
+/// Both sides are written to private files in `scratch` and git sees only their relative
+/// names (with `scratch` as its working directory), or `/dev/null` for a missing old side:
+/// the path the proposal named is untrusted and never reaches git's command line. The
+/// returned diff carries `display_path`.
+pub fn diff_proposal(
+    old: Option<&[u8]>,
+    new: &[u8],
+    display_path: &Path,
+    scratch: &Path,
+    context_lines: usize,
+) -> Result<FileDiff, GitError> {
+    let io_error = |error: std::io::Error| GitError::CommandFailed {
+        code: -1,
+        stderr: error.to_string(),
+    };
+    if !scratch.is_dir() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(scratch).map_err(io_error)?;
+    }
+    let old_file = old
+        .map(|bytes| ScratchFile::create(scratch, bytes))
+        .transpose()
+        .map_err(io_error)?;
+    let new_file = ScratchFile::create(scratch, new).map_err(io_error)?;
+
+    let unified = format!("--unified={context_lines}");
+    // `diff_entry`'s `--no-index` flags (`--no-color`, `--no-ext-diff`, `--unified`, and
+    // the zero-context pair), so the user's git config cannot change what comes back.
+    // Unlike `diff_entry`, the `-c` pairs below are added too: a proposal's whole point
+    // can be a line-ending change, which `diff_entry`'s callers do not need pinned.
+    let zero_context: &[&str] = if context_lines == 0 {
+        &["--inter-hunk-context=0", "--no-textconv"]
+    } else {
+        &[]
+    };
+    // `core.autocrlf` would normalise a line-ending change away (exit 0, no output) and a
+    // global attributes file can force a textconv driver or `-diff` onto the scratch files,
+    // so both are pinned off for this call.
+    let mut args: Vec<&str> = vec![
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.attributesFile=",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-index",
+        &unified,
+    ];
+    args.extend(zero_context);
+    args.extend([
+        "--",
+        old_file.as_ref().map_or("/dev/null", |f| f.name.as_str()),
+        new_file.name.as_str(),
+    ]);
+    let result = git::run_accepting(&args, scratch, &[0, 1])?;
+    // Exit 1 means "differs" and prints a diff; with nothing printed it is git failing to
+    // read a side ("Could not access"), not an empty diff.
+    if result.status == Some(1) && result.stdout.is_empty() {
+        return Err(GitError::CommandFailed {
+            code: 1,
+            stderr: result.stderr,
+        });
+    }
+    Ok(parse_diff(&result.stdout_string(), display_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,5 +1010,191 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod diff_proposal_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// A fresh, empty scratch directory path (not yet created) under the system temp dir.
+    fn scratch_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sirio-diff-proposal-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn entries(dir: &Path) -> usize {
+        std::fs::read_dir(dir).expect("scratch dir is readable").count()
+    }
+
+    #[test]
+    fn missing_old_is_all_added() {
+        let scratch = scratch_dir();
+        let diff =
+            diff_proposal(None, b"one\ntwo\n", Path::new("src/new.rs"), &scratch, 3).unwrap();
+        assert_eq!(diff.additions, 2);
+        assert_eq!(diff.deletions, 0);
+        assert_eq!(diff.hunks.len(), 1);
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn identical_is_no_hunks() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"same\n"),
+            b"same\n",
+            Path::new("same.txt"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert!(diff.hunks.is_empty());
+        assert_eq!((diff.additions, diff.deletions), (0, 0));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn crlf_lines_survive_parse() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"a\r\nb\r\n"),
+            b"a\r\nc\r\n",
+            Path::new("crlf.txt"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert_eq!(diff.hunks.len(), 1);
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn binary_is_marked_binary() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"\0old"),
+            b"\0new",
+            Path::new("blob.bin"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert!(diff.is_binary);
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn path_is_the_display_path() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"a\n"),
+            b"b\n",
+            Path::new("deep/real name.txt"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert_eq!(diff.path, Path::new("deep/real name.txt"));
+        let dump = format!("{diff:?}");
+        assert!(!dump.contains("sirio-diff-proposal"), "{dump}");
+        assert!(!dump.contains("proposal-"), "{dump}");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn scratch_files_are_removed() {
+        let scratch = scratch_dir();
+        diff_proposal(Some(b"a\n"), b"b\n", Path::new("f.txt"), &scratch, 3).unwrap();
+        assert_eq!(entries(&scratch), 0, "left files after Ok");
+
+        // Err after both files exist: a 1-byte output cap makes git's diff come back
+        // as `OutputTruncated`.
+        crate::git::set_output_limit_override_for_test(Some(1));
+        let result = diff_proposal(Some(b"a\n"), b"b\n", Path::new("f.txt"), &scratch, 3);
+        crate::git::set_output_limit_override_for_test(None);
+        assert!(matches!(result, Err(GitError::OutputTruncated { .. })), "{result:?}");
+        assert_eq!(entries(&scratch), 0, "left files after Err");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Runs `body` in a child copy of this test binary whose `GIT_CONFIG_GLOBAL` is
+    /// `config_text` (written to a temp file), so no test mutates this process's
+    /// environment. The child is filtered to exactly this test and never calls
+    /// `sirio_env::install`, so `sirio_env::command` inherits the variable; the child
+    /// also checks that git reports the setting before it diffs, so it cannot pass
+    /// vacuously.
+    fn with_global_config(test: &str, env_marker: &str, config_text: impl Fn(&Path) -> String) {
+        let scratch = scratch_dir();
+        std::fs::create_dir_all(&scratch).unwrap();
+        let attributes = scratch.join("attributes");
+        std::fs::write(&attributes, "* text=auto\n").unwrap();
+        let config = scratch.join("gitconfig");
+        std::fs::write(&config, config_text(&attributes)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(env_marker, "1")
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .output()
+            .expect("rerun the test with the git config");
+        std::fs::remove_dir_all(&scratch).ok();
+        assert!(
+            output.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child ran no test (filter selected nothing)"
+        );
+    }
+
+    fn line_ending_change_has_hunks(setting: &str) {
+        let scratch = scratch_dir();
+        std::fs::create_dir_all(&scratch).unwrap();
+        // The user's setting must be visible to git through the same runner.
+        let seen = git::run_accepting(&["config", "--global", "--get", setting], &scratch, &[0])
+            .expect("git sees the global setting");
+        assert!(!seen.stdout_string().trim().is_empty());
+        let diff = diff_proposal(
+            Some(b"a\nb\n"),
+            b"a\r\nb\r\n",
+            Path::new("eol.txt"),
+            &scratch,
+            3,
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+        assert!(!diff.unwrap().hunks.is_empty());
+    }
+
+    #[test]
+    fn user_autocrlf_does_not_hide_a_line_ending_change() {
+        const TEST: &str = "diff::diff_proposal_tests::user_autocrlf_does_not_hide_a_line_ending_change";
+        if std::env::var_os("SIRIO_DIFF_PROPOSAL_AUTOCRLF").is_some() {
+            return line_ending_change_has_hunks("core.autocrlf");
+        }
+        with_global_config(TEST, "SIRIO_DIFF_PROPOSAL_AUTOCRLF", |_| {
+            "[core]\n\tautocrlf = true\n".to_string()
+        });
+    }
+
+    #[test]
+    fn user_global_attributes_do_not_hide_a_line_ending_change() {
+        const TEST: &str =
+            "diff::diff_proposal_tests::user_global_attributes_do_not_hide_a_line_ending_change";
+        if std::env::var_os("SIRIO_DIFF_PROPOSAL_ATTRIBUTES").is_some() {
+            return line_ending_change_has_hunks("core.attributesFile");
+        }
+        with_global_config(TEST, "SIRIO_DIFF_PROPOSAL_ATTRIBUTES", |attributes| {
+            format!("[core]\n\tattributesFile = {}\n", attributes.display())
+        });
     }
 }

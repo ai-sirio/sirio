@@ -656,6 +656,8 @@ pub struct AppSettings {
     pub updates_enabled: bool,
     /// "session.resumeAgentSessions" — default: true.
     pub resume_agent_sessions: bool,
+    /// "claude.ideBridge" — default: true. Whether Sirio serves Claude Code's `/ide`.
+    pub claude_ide_bridge: bool,
     /// "general.autoNaming" — default: false.
     pub auto_naming: bool,
     /// "chat.limitHistory" — default: true.
@@ -764,6 +766,7 @@ impl Default for AppSettings {
             control_socket_enabled: true,
             updates_enabled: true,
             resume_agent_sessions: true,
+            claude_ide_bridge: true,
             auto_naming: false,
             limit_chat_history: true,
             chat_retention: 100,
@@ -811,6 +814,10 @@ pub mod settings_keys {
     pub const CONTROL_SOCKET_ENABLED: &str = "controlSocket.enabled";
     pub const UPDATES_ENABLED: &str = "updates.enabled";
     pub const RESUME_AGENT_SESSIONS: &str = "session.resumeAgentSessions";
+    pub const CLAUDE_IDE_BRIDGE: &str = "claude.ideBridge";
+    /// Not a setting of the user's: the endpoint the IDE bridge last served (`ide_bridge_endpoint`).
+    pub const IDE_BRIDGE_PORT: &str = "ideBridge.port";
+    pub const IDE_BRIDGE_TOKEN: &str = "ideBridge.token";
     pub const AUTO_NAMING: &str = "general.autoNaming";
     pub const LIMIT_CHAT_HISTORY: &str = "chat.limitHistory";
     pub const CHAT_RETENTION: &str = "chat.retentionCount";

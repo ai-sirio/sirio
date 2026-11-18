@@ -57,6 +57,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ely_gpui_component::{
@@ -339,6 +340,7 @@ impl ChangeSection {
     fn label_in(self, source: &ChangesSource) -> &'static str {
         match (self, source) {
             (ChangeSection::Staged, ChangesSource::Range { .. }) => "Changes",
+            (ChangeSection::Staged, ChangesSource::Proposal { .. }) => "Proposed change",
             _ => self.label(),
         }
     }
@@ -579,7 +581,15 @@ enum ChangesSource {
     /// its row opens, because a whole-request patch can exceed the git
     /// runner's output cap.
     Range { base: String, head: String },
+    /// Claude's proposed edit of one file, already diffed by the host. Immutable
+    /// and never polled; `ChangesTab::set_proposal` swaps the diff.
+    /// `is_new`: the file does not exist yet.
+    Proposal { diff: Arc<FileDiff>, is_new: bool },
 }
+
+/// Why the proposed side takes no new comment once the proposal was edited.
+pub const PROPOSED_SIDE_CLOSED: &str =
+    "The proposed side takes no new comment once the text is edited. Comment on the file's own lines.";
 
 type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
 
@@ -604,6 +614,8 @@ pub struct ChangesTab {
     is_git: bool,
     /// What this surface reads and whether it may mutate it.
     source: ChangesSource,
+    /// Bumped by `set_proposal`: a load that started for an older diff is dropped when it lands.
+    proposal_generation: u64,
     entries: Vec<StatusEntry>,
     diffs: HashMap<PathBuf, FileDiff>,
     /// Commentable diff positions, computed when their diff is loaded.
@@ -614,6 +626,8 @@ pub struct ChangesTab {
     reveal_annotation: Option<u64>,
     /// Draws the gutter "+": only a change request's diff, asked by its owner.
     commentable: bool,
+    /// Whether the new side takes a comment (a proposal the user edited does not).
+    new_side_commentable: bool,
     gutter_press: Option<GutterPoint>,
     last_pick: Option<GutterPoint>,
     stats: HashMap<PathBuf, DiffStat>,
@@ -716,6 +730,8 @@ pub struct ChangesTab {
     /// diff on every frame, and one wheel tick over a large diff cost
     /// seconds. Kept in step with the row stream by `sync_list_rows`.
     list_state: ListState,
+    /// The row stream `list_state` was last spliced to: what the list draws, item by item.
+    list_rows: Rc<Vec<ListRow>>,
     /// Fingerprint of the row stream `list_state` was last spliced to
     /// (kinds, sections, paths, keys -- never text). A refresh that
     /// re-reads an unchanged diff leaves it alone; an expand, a collapse
@@ -769,6 +785,41 @@ impl ChangesTab {
         Self::with_source(repo_root, ChangesSource::Range { base, head }, true, cx)
     }
 
+    /// Creates a read-only surface over Claude's proposed edit of one file (`is_new`: the file
+    /// does not exist yet). `display_root` is only what the surface is rooted at; nothing is
+    /// read from it. The file's row is open, and `set_commentable` is the owner's to turn on.
+    /// The diff is held on return: a proposal's snapshot is applied in the same update.
+    pub fn for_proposal(
+        display_root: PathBuf,
+        diff: Arc<FileDiff>,
+        is_new: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let path = diff.path.clone();
+        let mut tab = Self::with_source(display_root, ChangesSource::Proposal { diff, is_new }, true, cx);
+        tab.expand_proposal(path);
+        tab
+    }
+
+    /// Shows `diff` instead, in the same update: `refresh` applies a proposal's snapshot
+    /// synchronously (a clone, no I/O), so what is held is what the owner just handed over.
+    pub fn set_proposal(&mut self, diff: Arc<FileDiff>, is_new: bool, cx: &mut Context<Self>) {
+        if !matches!(self.source, ChangesSource::Proposal { .. }) {
+            return;
+        }
+        self.proposal_generation += 1;
+        self.git_task = None;
+        let path = diff.path.clone();
+        self.source = ChangesSource::Proposal { diff, is_new };
+        self.expand_proposal(path);
+        self.refresh(cx);
+    }
+
+    fn expand_proposal(&mut self, path: PathBuf) {
+        self.expanded_changes.insert((ChangeSection::Staged, path.clone()));
+        self.last_focus = Some(path);
+    }
+
     /// The `(base, head)` this surface shows, or `None` for any other source.
     pub fn range(&self) -> Option<(&str, &str)> {
         match &self.source {
@@ -777,9 +828,24 @@ impl ChangesTab {
         }
     }
 
+    /// The focus handle the diff list's keys go through (once it has drawn).
+    pub fn focus_handles(&self) -> Vec<FocusHandle> {
+        self.list_focus.iter().cloned().collect()
+    }
+
     pub fn set_commentable(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.commentable != on {
             self.commentable = on;
+            self.gutter_press = None;
+            self.last_pick = None;
+            cx.notify();
+        }
+    }
+
+    /// Whether the new side's lines take a comment; the old side's always do.
+    pub fn set_new_side_commentable(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.new_side_commentable != on {
+            self.new_side_commentable = on;
             self.gutter_press = None;
             self.last_pick = None;
             cx.notify();
@@ -823,6 +889,12 @@ impl ChangesTab {
         if from.path != to.path || from.side != to.side {
             cx.emit(ChangesTabEvent::CommentRefused(
                 "A range stays on one side of the diff.".to_string(),
+            ));
+            return;
+        }
+        if to.side == AnnotationSide::New && !self.new_side_commentable {
+            cx.emit(ChangesTabEvent::CommentRefused(
+                PROPOSED_SIDE_CLOSED.to_string(),
             ));
             return;
         }
@@ -907,6 +979,7 @@ impl ChangesTab {
             repo_root,
             is_git,
             source,
+            proposal_generation: 0,
             entries: Vec::new(),
             diffs: HashMap::new(),
             commentable_by_path: Rc::default(),
@@ -953,7 +1026,9 @@ impl ChangesTab {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
+            new_side_commentable: true,
             gutter_press: None,
             last_pick: None,
         };
@@ -983,7 +1058,9 @@ impl ChangesTab {
     pub fn commit(&self) -> Option<&str> {
         match &self.source {
             ChangesSource::Commit(sha) => Some(sha),
-            ChangesSource::WorkingTree | ChangesSource::Range { .. } => None,
+            ChangesSource::WorkingTree
+            | ChangesSource::Range { .. }
+            | ChangesSource::Proposal { .. } => None,
         }
     }
 
@@ -1133,6 +1210,15 @@ impl ChangesTab {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if let ChangesSource::Proposal { diff, is_new } = &self.source {
+            let snapshot = load_proposal_snapshot(diff, *is_new);
+            self.has_loaded = true;
+            self.git_error = None;
+            self.git_error_from_mutation = false;
+            self.apply_snapshot(snapshot, cx);
+            cx.notify();
+            return;
+        }
         if !self.is_git {
             self.has_loaded = true;
             self.git_error = None;
@@ -1150,6 +1236,7 @@ impl ChangesTab {
         }
         let repo_root = self.repo_root.clone();
         let source = self.source.clone();
+        let generation = self.proposal_generation;
         let expanded_paths = self.expanded_paths_for_load();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -1158,6 +1245,9 @@ impl ChangesTab {
                 })
                 .await;
             let _ = this.update(cx, |tab, cx| {
+                if tab.proposal_generation != generation {
+                    return;
+                }
                 tab.git_task = None;
                 tab.has_loaded = true;
                 match result {
@@ -1576,6 +1666,17 @@ impl ChangesTab {
         self.reveal_line = Some((path.to_path_buf(), AnnotationSide::New, Some(line)));
         self.focus_path(path, cx);
         self.resolve_reveal_line(cx);
+    }
+
+    /// Whether the list laid out the item that draws `line` of `path` on `side` inside its
+    /// viewport (partly in view counts): `Some(false)` when that item lies wholly above or below
+    /// it, `None` when no row draws the line or the list has not laid the item out yet. Read
+    /// from `ListState`'s own layout, through the row stream the list was spliced with.
+    pub fn line_in_view(&self, path: &Path, side: AnnotationSide, line: u32) -> Option<bool> {
+        let index = line_row_index(&self.list_rows, path, side, Some(line as usize))?;
+        let above = self.list_state.item_is_above_viewport(index)?;
+        let below = self.list_state.item_is_below_viewport(index)?;
+        Some(!above && !below)
     }
 
     /// Opens the file and reveals its annotation, or a line on either side.
@@ -2007,7 +2108,14 @@ impl ChangesTab {
         perf_baseline::list_build(rows.len());
         if fingerprint != self.list_fingerprint {
             let old_count = self.list_state.item_count();
+            // `splice` over the whole stream puts the scroll top back to the first item; a
+            // composer growing under the user's keystrokes must not take the view with it.
+            let scroll_top = self.list_state.logical_scroll_top();
             self.list_state.splice(0..old_count, rows.len());
+            if scroll_top.item_ix > 0 && !rows.is_empty() {
+                let item_ix = scroll_top.item_ix.min(rows.len() - 1);
+                self.list_state.scroll_to(gpui::ListOffset { item_ix, offset_in_item: scroll_top.offset_in_item });
+            }
             #[cfg(test)]
             perf_baseline::splice();
             self.list_fingerprint = fingerprint;
@@ -2065,7 +2173,9 @@ impl ChangesTab {
                 }
             }
         }
-        Rc::new(rows)
+        let rows = Rc::new(rows);
+        self.list_rows = rows.clone();
+        rows
     }
 
     /// Puts row `index` at the top of the view. A reveal runs in the rebuild
@@ -2083,6 +2193,7 @@ impl ChangesTab {
         split_right_x: Pixels,
         allows_staging: bool,
         draws_open_diff: bool,
+        opens_files: bool,
         selected: Option<&(ChangeSection, PathBuf)>,
         forge: Option<Rc<ForgeFiles>>,
         annotation_view: Option<AnyView>,
@@ -2111,6 +2222,7 @@ impl ChangesTab {
                         expanded,
                         allows_staging,
                         draws_open_diff,
+                        opens_files,
                         is_selected,
                         open_threads,
                         entity,
@@ -2381,6 +2493,7 @@ impl ChangesTab {
         expanded: bool,
         allows_staging: bool,
         draws_open_diff: bool,
+        opens_files: bool,
         is_selected: bool,
         open_threads: usize,
         entity: gpui::Entity<Self>,
@@ -2549,26 +2662,28 @@ impl ChangesTab {
                                 },
                             ))
                         })
-                        .child(row_icon_button(
-                            format!("open-{}-{}", section.slug(), path.display()),
-                            "changes-open-file",
-                            IconName::SquarePen,
-                            "Open file",
-                            move |_, cx| {
-                                // `entry.path` is repo-relative, and the host
-                                // opens an editor tab straight from whatever
-                                // this event carries — a relative path made
-                                // `FileView` resolve against the process CWD
-                                // and render "This file does not exist" for a
-                                // file that plainly does. Resolve against this
-                                // surface's own root, the way the Files tree
-                                // already emits absolute paths.
-                                entity_for_open.update(cx, |tab, cx| {
-                                    let absolute = tab.repo_root.join(&path);
-                                    cx.emit(ChangesTabEvent::OpenFile(absolute));
-                                });
-                            },
-                        )),
+                        .when(opens_files, |this| {
+                            this.child(row_icon_button(
+                                format!("open-{}-{}", section.slug(), path.display()),
+                                "changes-open-file",
+                                IconName::SquarePen,
+                                "Open file",
+                                move |_, cx| {
+                                    // `entry.path` is repo-relative, and the host
+                                    // opens an editor tab straight from whatever
+                                    // this event carries — a relative path made
+                                    // `FileView` resolve against the process CWD
+                                    // and render "This file does not exist" for a
+                                    // file that plainly does. Resolve against this
+                                    // surface's own root, the way the Files tree
+                                    // already emits absolute paths.
+                                    entity_for_open.update(cx, |tab, cx| {
+                                        let absolute = tab.repo_root.join(&path);
+                                        cx.emit(ChangesTabEvent::OpenFile(absolute));
+                                    });
+                                },
+                            ))
+                        }),
                 )
             })
     }
@@ -2671,12 +2786,23 @@ impl ChangesTab {
             line.new_line_number.unwrap_or(0)
         );
         let group = SharedString::from(format!("diff-row-{row_id}"));
-        let position = if let Some(number) = line.new_line_number {
-            u32::try_from(number).ok().map(|line| (AnnotationSide::New, line))
-        } else {
-            line.old_line_number
-                .and_then(|number| u32::try_from(number).ok())
-                .map(|line| (AnnotationSide::Old, line))
+        // A context line has both numbers and is offered as its new side, unless only its
+        // old side takes a comment (a proposal the user edited keeps the disk side).
+        let new_position = line
+            .new_line_number
+            .and_then(|number| u32::try_from(number).ok())
+            .map(|line| (AnnotationSide::New, line));
+        let old_position = line
+            .old_line_number
+            .and_then(|number| u32::try_from(number).ok())
+            .map(|line| (AnnotationSide::Old, line));
+        let is_open = |position: &(AnnotationSide, u32)| {
+            open_lines.get(&path).is_some_and(|lines| lines.contains(position))
+        };
+        let position = match (new_position, old_position) {
+            (Some(new), Some(old)) if !is_open(&new) && is_open(&old) => Some(old),
+            (Some(new), _) => Some(new),
+            (None, old) => old,
         };
         let plus = position
             .filter(|(side, line)| {
@@ -2813,7 +2939,9 @@ impl ChangesTab {
         let mode_entity = entity.clone();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
-        let title = if self.git_error.is_some() {
+        let title = if matches!(self.source, ChangesSource::Proposal { .. }) {
+            "Proposed change".to_string()
+        } else if self.git_error.is_some() {
             "Local changes (unavailable)".to_string()
         } else {
             format!("Local changes ({})", self.entries.len())
@@ -2869,13 +2997,15 @@ impl ChangesTab {
             // spinner while a snapshot loads (a refresh runs every second),
             // and a click during one is a no-op by `refresh`'s own
             // single-flight guard.
-            .child(crate::ely_ui::icon_button(
-                "changes-refresh",
-                IconName::RefreshCw,
-                "Refresh",
-                true,
-                move |_, cx| refresh_entity.update(cx, |tab, cx| tab.refresh(cx)),
-            ))
+            .when(!matches!(self.source, ChangesSource::Proposal { .. }), |this| {
+                this.child(crate::ely_ui::icon_button(
+                    "changes-refresh",
+                    IconName::RefreshCw,
+                    "Refresh",
+                    true,
+                    move |_, cx| refresh_entity.update(cx, |tab, cx| tab.refresh(cx)),
+                ))
+            })
             .child(crate::ely_ui::icon_button(
                 "changes-expand-all",
                 IconName::Maximize2,
@@ -2949,6 +3079,17 @@ fn reveal_target(rows: &[ListRow], path: &Path, line: usize) -> Option<usize> {
 fn reveal_anchor_target(
     rows: &[ListRow], path: &Path, side: AnnotationSide, line: Option<usize>,
 ) -> Option<usize> {
+    line_row_index(rows, path, side, line).or_else(|| {
+        rows.iter().position(|row| {
+            matches!(row, ListRow::Change(ChangeRow::File { entry, .. }) if entry.path == path)
+        })
+    })
+}
+
+/// The index of the list item that draws `line` of `path` on `side`, if the stream has one.
+fn line_row_index(
+    rows: &[ListRow], path: &Path, side: AnnotationSide, line: Option<usize>,
+) -> Option<usize> {
     rows.iter()
         .position(|row| match row {
             ListRow::Change(ChangeRow::Line { path: row_path, line: row_line, .. }) => {
@@ -2966,11 +3107,6 @@ fn reveal_anchor_target(
                 row_path == path && line.is_some() && number == line
             }
             _ => false,
-        })
-        .or_else(|| {
-            rows.iter().position(|row| {
-                matches!(row, ListRow::Change(ChangeRow::File { entry, .. }) if entry.path == path)
-            })
         })
 }
 
@@ -3439,11 +3575,22 @@ impl ChangesTab {
         }
         let rows = self.sync_list_rows(sections);
         let row_entity = entity.clone();
-        let open_lines: Rc<CommentableByPath> = if self.commentable {
+        let open_lines: Rc<CommentableByPath> = if !self.commentable {
+            Rc::default()
+        } else if self.new_side_commentable {
             self.commentable_by_path.clone()
         } else {
-            Rc::default()
+            Rc::new(
+                self.commentable_by_path
+                    .iter()
+                    .map(|(path, lines)| {
+                        let old = lines.iter().filter(|(side, _)| *side == AnnotationSide::Old).copied();
+                        (path.clone(), old.collect())
+                    })
+                    .collect(),
+            )
         };
+        let opens_files = !matches!(self.source, ChangesSource::Proposal { .. });
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
         let source = self.source.clone();
@@ -3521,6 +3668,7 @@ impl ChangesTab {
                             split_right_x,
                             allows_staging,
                             draws_open_diff,
+                            opens_files,
                             selected.as_ref(),
                             forge.clone(),
                             match row {
@@ -4163,6 +4311,28 @@ fn load_snapshot(
         ChangesSource::WorkingTree => load_worktree_snapshot(repo_root, expanded_paths),
         ChangesSource::Commit(sha) => load_commit_snapshot(repo_root, sha),
         ChangesSource::Range { base, head } => load_range_snapshot(repo_root, base, head),
+        ChangesSource::Proposal { diff, is_new } => Ok(load_proposal_snapshot(diff, *is_new)),
+    }
+}
+
+/// The snapshot of a proposal: its one file, with the diff the host already computed.
+fn load_proposal_snapshot(diff: &FileDiff, is_new: bool) -> GitSnapshot {
+    let entry = StatusEntry {
+        path: diff.path.clone(),
+        original_path: None,
+        index_status: Some(if is_new { StatusKind::Added } else { StatusKind::Modified }),
+        worktree_status: None,
+    };
+    let stat = DiffStat {
+        additions: diff.additions,
+        deletions: diff.deletions,
+        is_binary: diff.is_binary,
+    };
+    GitSnapshot {
+        stats: HashMap::from([(diff.path.clone(), stat)]),
+        diffs: HashMap::from([(diff.path.clone(), diff.clone())]),
+        entries: vec![entry],
+        diff_errors: HashMap::new(),
     }
 }
 
@@ -4312,6 +4482,7 @@ fn load_expanded_diff(
             entry.original_path.as_deref(),
             CHANGES_CONTEXT_LINES,
         ),
+        ChangesSource::Proposal { diff, .. } => Ok((**diff).clone()),
     }
 }
 
@@ -5115,6 +5286,8 @@ mod tests {
             repo_root,
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
+            new_side_commentable: true,
             entries: Vec::new(),
             diffs: HashMap::new(),
             commentable_by_path: Rc::default(),
@@ -5161,6 +5334,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -7054,6 +7228,8 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![StatusEntry {
                 path: PathBuf::from("x.rs"),
                 original_path: None,
@@ -7108,6 +7284,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -7141,6 +7318,8 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![StatusEntry {
                 path: PathBuf::from("image.bin"),
                 original_path: None,
@@ -7202,6 +7381,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -7436,6 +7616,8 @@ mod tests {
             repo_root: PathBuf::from("/repo"),
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![StatusEntry {
                 path: path.clone(),
                 original_path: None,
@@ -7490,6 +7672,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,
@@ -7904,6 +8087,8 @@ mod tests {
                 repo_root: PathBuf::from("/repo"),
                 is_git: true,
                 source: ChangesSource::WorkingTree,
+                proposal_generation: 0,
+                new_side_commentable: true,
                 entries: vec![StatusEntry {
                     path: path.clone(),
                     original_path: None,
@@ -7965,6 +8150,7 @@ mod tests {
                 annotation_views: Rc::default(),
                 open_threads: Rc::default(),
                 reveal_annotation: None,
+                list_rows: Rc::default(),
                 commentable: false,
                 gutter_press: None,
                 last_pick: None,
@@ -8388,6 +8574,8 @@ mod tests {
             repo_root: PathBuf::from("."),
             is_git: true,
             source: ChangesSource::Commit("synthetic".to_owned()),
+            proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![entry],
             diffs,
             commentable_by_path: Rc::default(),
@@ -8434,6 +8622,7 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            list_rows: Rc::default(),
             commentable: false,
             gutter_press: None,
             last_pick: None,

@@ -544,6 +544,15 @@ pub enum SidebarEvent {
         project_id: String,
         path: PathBuf,
     },
+    /// The user confirmed "Remove worktree?" and the host has taken over the removal
+    /// (`Sidebar::set_host_continues_removal`): it may still ask something, and then calls
+    /// `Sidebar::remove_worktree_row(row_id, remote, ..)` (the row found again by `path`, never
+    /// by a position that may have moved), which runs git off the UI thread. `path` was read
+    /// before the question was asked.
+    WorktreeRemovalRequested {
+        remote: Option<UpstreamBranch>,
+        path: PathBuf,
+    },
     /// Close the open tab with this id.
     CloseTab(usize),
     /// The user picked a view on the title menu; the host persists it.
@@ -847,6 +856,9 @@ pub struct Sidebar {
     /// sees only prompts gpui draws inside the window, and on macOS and
     /// Windows this one is native, so the sidebar tracks it itself.
     prompt_open: bool,
+    /// The host asks first (and so continues a confirmed removal itself): a confirmed
+    /// "Remove worktree?" emits `WorktreeRemovalRequested` instead of running git.
+    host_continues_removal: bool,
     /// Debug builds' stand-in for the not-a-git-repository prompt's reply,
     /// set by `control_add_path` and consumed by the next
     /// `confirm_add_project`: `0` Initialize Git, `1` Add without Git, `2`
@@ -1277,6 +1289,7 @@ impl Sidebar {
             clones_in_flight: Vec::new(),
             creates_in_flight: Vec::new(),
             prompt_open: false,
+            host_continues_removal: false,
             debug_prompt_answer: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
@@ -1393,6 +1406,7 @@ impl Sidebar {
             clones_in_flight: Vec::new(),
             creates_in_flight: Vec::new(),
             prompt_open: false,
+            host_continues_removal: false,
             debug_prompt_answer: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
@@ -2236,6 +2250,30 @@ impl Sidebar {
         }
     }
 
+    /// The host takes a confirmed worktree removal over (see `WorktreeRemovalRequested`).
+    pub fn set_host_continues_removal(&mut self, on: bool) {
+        self.host_continues_removal = on;
+    }
+
+    /// Debug entry point of `surface.ide.act ask_remove_worktree`: the "Remove worktree?" prompt
+    /// a context-menu pick or the hover-x opens, for the worktree at `path`, left up for the
+    /// caller to answer. `false` when no worktree row has that path.
+    pub fn ask_remove_worktree(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(row_id) = self.worktree_row_for(path) else {
+            return false;
+        };
+        self.request_remove_worktree(row_id, None, window, cx);
+        true
+    }
+
+    /// The row id of the worktree at `path`, for a host that continues a removal itself.
+    pub fn worktree_row_for(&self, path: &Path) -> Option<usize> {
+        self.rows
+            .iter()
+            .find(|row| row.kind == RowKind::Worktree && row.path.as_deref() == Some(path))
+            .map(|row| row.id)
+    }
+
     /// Whether the not-a-git-repository prompt is waiting for an answer.
     pub fn prompt_open(&self) -> bool {
         self.prompt_open
@@ -2935,7 +2973,8 @@ impl Sidebar {
                             TabKind::Editor
                             | TabKind::Diff
                             | TabKind::Browser
-                            | TabKind::ProjectSettings => Icon::File,
+                            | TabKind::ProjectSettings
+                            | TabKind::Proposal => Icon::File,
                             TabKind::ChangeRequest => Icon::PullRequest,
                             TabKind::AgentChat => Icon::MessageSquare,
                             TabKind::Trace => Icon::Clock,
@@ -3340,12 +3379,14 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(branch) = self
+        // The worktree is named now, before the question: rows can move while it is up (a catalog
+        // refresh, a `workspace.create`), so the answer acts on this path, never on `row_id`.
+        let Some((branch, path)) = self
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
             .filter(|_| !self.is_main_checkout(row_id))
-            .map(|row| row.title.clone())
+            .and_then(|row| row.path.clone().map(|path| (row.title.clone(), path)))
         else {
             return;
         };
@@ -3369,7 +3410,16 @@ impl Sidebar {
         cx.spawn_in(window, async move |sidebar, cx| {
             if receiver.await.unwrap_or(1) == 0 {
                 let _ = sidebar.update(cx, |sidebar, cx| {
-                    sidebar.remove_worktree_row(row_id, remote, cx)
+                    // Gone while the question was up (removed behind the app's back): nothing
+                    // is removed.
+                    let Some(row_id) = sidebar.worktree_row_for(&path) else {
+                        return;
+                    };
+                    if sidebar.host_continues_removal {
+                        cx.emit(SidebarEvent::WorktreeRemovalRequested { remote, path });
+                    } else {
+                        sidebar.remove_worktree_row(row_id, remote, cx);
+                    }
                 });
             }
         })
@@ -3427,7 +3477,7 @@ impl Sidebar {
     /// and a failure (a locked checkout, a removal killed at its deadline)
     /// is logged rather than shown. The next catalog refresh restores
     /// whatever is genuinely still on disk.
-    fn remove_worktree_row(
+    pub fn remove_worktree_row(
         &mut self,
         row_id: usize,
         remote: Option<UpstreamBranch>,

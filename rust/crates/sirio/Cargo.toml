@@ -35,6 +35,8 @@ sirio_persistence.workspace = true
 sirio_activity.workspace = true
 # OpenCode reports nothing in the terminal: its status is read from its own service.
 sirio_opencode_watch = { path = "../sirio_opencode_watch" }
+# Claude Code's IDE protocol, served so its `/ide` connects to Sirio (spec 2026-11-15).
+sirio_ide = { path = "../sirio_ide" }
 sirio_control.workspace = true
 sirio_release.workspace = true
 sirio_update.workspace = true

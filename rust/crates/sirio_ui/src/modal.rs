@@ -163,14 +163,17 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 .text_color(theme.ely.fg)
                 .debug_selector(move || title_id.clone())
                 .child(selectable_text(spec.title)),
-        )
-        .child(
+        );
+    // A modal with no body draws no band for it.
+    if !spec.body.is_empty() {
+        sheet = sheet.child(
             div()
                 .text_size(theme.typography.footnote)
                 .text_color(theme.ely.fg_muted)
                 .debug_selector(move || body_id.clone())
                 .child(selectable_text(spec.body)),
         );
+    }
 
     if let Some(field) = spec.text_field {
         let field_id = format!("{}-field", spec.id);

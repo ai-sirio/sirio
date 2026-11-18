@@ -704,6 +704,8 @@ pub(crate) enum PaneContent {
     CiLog(Entity<sirio_ui::ci_log_tab::CiLogTab>),
     /// A native Claude chat's full trace, read-only, in the Secondary half.
     Trace(Entity<sirio_ui::trace_tab::TraceTab>),
+    /// Claude's proposed edit (`openDiff`), in the Secondary half; never saved.
+    Proposal(Entity<sirio_ui::proposal_tab::ProposalTab>),
 }
 
 impl PaneContent {
@@ -717,7 +719,8 @@ impl PaneContent {
             | Self::ProjectSettings(_)
             | Self::ChangeRequest(_)
             | Self::CiLog(_)
-            | Self::Trace(_) => None,
+            | Self::Trace(_)
+            | Self::Proposal(_) => None,
         }
     }
 }

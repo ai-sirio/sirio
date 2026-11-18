@@ -399,6 +399,13 @@ impl WorktreeDrawer {
         self.problems.for_path(path)
     }
 
+    /// Every file with findings, as the store holds them (paths relative to the
+    /// worktree), every server's findings merged per file: what a connected
+    /// IDE client's whole-workspace diagnostics read is answered from.
+    pub fn all_problems(&self) -> Vec<(PathBuf, Vec<StoredProblem>)> {
+        self.problems.files(None)
+    }
+
     /// What Problems says when it has nothing to list.
     pub fn problems_note(&self) -> String {
         problems_view::empty_note(&self.running_servers)

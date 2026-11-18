@@ -291,6 +291,7 @@ mod forge;
 mod login_path;
 mod host_programs;
 mod host_sessions;
+mod ide_bridge;
 mod lsp;
 mod lsp_install;
 // Compiled everywhere so every platform checks it; macOS and Linux route to it.
@@ -1520,6 +1521,29 @@ enum ControlAction {
         act: AttentionAct,
         reply: ControlReply,
     },
+    /// Debug-only `surface.ide.state`: what the IDE bridge holds.
+    IdeState { reply: ControlReply },
+    /// Debug-only `surface.ide.switch {on}`: the setter the Settings toggle calls.
+    IdeSwitch { on: bool, reply: ControlReply },
+    /// Debug-only `surface.ide.act {tab_name, action, text?}`: presses what a user presses on
+    /// Claude's proposed change (`ide_bridge::proposals`).
+    IdeAct {
+        tab_name: Option<String>,
+        action: String,
+        text: Option<String>,
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.ide.comment {tab_name, side, line, end_line?, text, commit?}`: what a
+    /// click on a proposal's gutter and typing do (`ide_bridge::proposals`).
+    IdeComment {
+        tab_name: String,
+        side: String,
+        line: u32,
+        end_line: Option<u32>,
+        text: String,
+        commit: bool,
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -1885,6 +1909,8 @@ enum WorkspaceAction {
     /// Window-needing follow-up from a non-Window context.
     OpenNewTabPalette,
     SetTranslucency(bool),
+    /// "Connect Claude Code to Sirio (/ide)" was changed in Settings.
+    SetIdeBridge(bool),
     /// The Markdown Preview's PlantUML server changed in Settings; the
     /// diagram settings global follows it (needs an `App`, hence the queue).
     SetPlantumlServer(String),
@@ -3506,6 +3532,75 @@ impl ControlHandler for AppControlHandler {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
                 self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
             }
+            "surface.ide.state" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::IdeState { reply })
+            }
+            "surface.ide.switch" if cfg!(debug_assertions) => {
+                let on = match request.params.get("on").map(String::as_str) {
+                    Some("true") => true,
+                    Some("false") => false,
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.ide.switch requires on=true or on=false",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::IdeSwitch { on, reply })
+            }
+            "surface.ide.act" if cfg!(debug_assertions) => {
+                let action = match request.params.get("action").map(String::as_str) {
+                    Some(
+                        action @ ("accept" | "reject" | "edit" | "show_diff" | "close" | "confirm_reject"
+                        | "cancel" | "close_worktree" | "remove_project" | "close_others"
+                        | "ask_remove_worktree"),
+                    ) => action.to_string(),
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.ide.act requires action=accept|reject|edit|show_diff|close|confirm_reject|cancel|close_worktree|remove_project|close_others|ask_remove_worktree",
+                        );
+                    }
+                };
+                let tab_name = request.params.get("tab_name").cloned();
+                let text = request.params.get("text").cloned();
+                self.queue_action(request, move |reply| ControlAction::IdeAct { tab_name, action, text, reply })
+            }
+            "surface.ide.comment" if cfg!(debug_assertions) => {
+                let number = |key: &str| request.params.get(key).and_then(|value| value.parse::<u32>().ok());
+                let (Some(tab_name), Some(side), Some(line), Some(text)) = (
+                    request.params.get("tab_name").cloned(),
+                    request.params.get("side").cloned(),
+                    number("line"),
+                    request.params.get("text").cloned(),
+                ) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.ide.comment requires tab_name, side=old|new, line, text, and optionally end_line and commit=false",
+                    );
+                };
+                let end_line = match request.params.get("end_line") {
+                    None => None,
+                    Some(_) => match number("end_line") {
+                        Some(end_line) => Some(end_line),
+                        None => return ControlResponse::failure(&request.id, "surface.ide.comment: end_line is not a line number"),
+                    },
+                };
+                let commit = match request.params.get("commit").map(String::as_str) {
+                    None | Some("true") => true,
+                    Some("false") => false,
+                    Some(_) => return ControlResponse::failure(&request.id, "surface.ide.comment: commit must be true or false"),
+                };
+                self.queue_action(request, move |reply| ControlAction::IdeComment {
+                    tab_name,
+                    side,
+                    line,
+                    end_line,
+                    text,
+                    commit,
+                    reply,
+                })
+            }
             "surface.attention.read" if cfg!(debug_assertions) => self.queue_action(request, |reply| {
                 ControlAction::Attention {
                     act: AttentionAct::Read,
@@ -4964,7 +5059,9 @@ fn changes_report_pairs(
             .find(|section| section.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| format!("Changes report is missing {name} section"))
     };
-    let staged = section("Staged").or_else(|_| section("Changes"))?;
+    let staged = section("Staged")
+        .or_else(|_| section("Changes"))
+        .or_else(|_| section("Proposed change"))?;
     let changed = section("Changed")?;
     let untracked = section("Untracked")?;
 
@@ -5106,6 +5203,10 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
         (
             "resumeAgentSessions".to_string(),
             report.resume_agent_sessions.to_string(),
+        ),
+        (
+            "claudeIdeBridge".to_string(),
+            snapshot.claude_ide_bridge.to_string(),
         ),
         ("autoNaming".to_string(), report.auto_naming.to_string()),
         (
@@ -5278,9 +5379,10 @@ fn paths_name_the_same_document(a: &Path, b: &Path) -> bool {
 /// The variables a terminal of the worktree that holds `directory` starts
 /// with: `SIRIO_WORKTREE_ID`, the id `worktree-set --worktree` accepts (spec
 /// §5.3), which is the id the control state names the worktree by. The deepest
-/// worktree holding `directory` wins; empty when no known worktree holds it.
+/// worktree holding `directory` wins; none when no known worktree holds it.
+/// `CLAUDE_CODE_SSE_PORT` joins them whenever the IDE bridge is up, whatever the directory.
 fn worktree_environment_in(control: &ControlState, directory: &Path) -> BTreeMap<String, String> {
-    control
+    let mut environment = control
         .workspaces
         .iter()
         .filter(|workspace| {
@@ -5289,7 +5391,13 @@ fn worktree_environment_in(control: &ControlState, directory: &Path) -> BTreeMap
         })
         .max_by_key(|workspace| workspace.path.len())
         .map(|workspace| BTreeMap::from([("SIRIO_WORKTREE_ID".to_string(), workspace.id.clone())]))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Outside the worktree match: a terminal in no worktree connects to Sirio's IDE bridge too.
+    let ide_port = ide_bridge::SSE_PORT.load(Ordering::SeqCst);
+    if ide_port != 0 {
+        environment.insert("CLAUDE_CODE_SSE_PORT".to_string(), ide_port.to_string());
+    }
+    environment
 }
 
 /// `open_paths` only ever contains this workspace's own already-open tabs
@@ -5333,6 +5441,7 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
         TabKind::ProjectSettings => Icon::Settings,
         TabKind::ChangeRequest => Icon::PullRequest,
         TabKind::Trace => Icon::Clock,
+        TabKind::Proposal => Icon::File,
     }
 }
 
@@ -5777,6 +5886,29 @@ fn trace_open_tab(
     }
 }
 
+/// The strip's entry for Claude's proposed edit: Secondary, never moved, never saved.
+fn proposal_open_tab(
+    id: usize,
+    persistence_id: String,
+    title: String,
+    pane_id: usize,
+    view: Entity<sirio_ui::proposal_tab::ProposalTab>,
+) -> OpenTab {
+    OpenTab {
+        id,
+        persistence_id,
+        title,
+        kind: TabKind::Proposal,
+        pane: TabKind::Proposal.default_pane(),
+        agent_icon: None,
+        agent_id: None,
+        session_state: SessionTabState::with_root(pane_id),
+        panes: PaneNode::leaf(pane_id, TabContent::Proposal(view)),
+        focused_pane: pane_id,
+        title_is_auto_named: false,
+    }
+}
+
 fn next_pane_id(tabs: &[OpenTab]) -> usize {
     tabs.iter()
         .flat_map(|tab| tab.panes.leaf_ids())
@@ -6184,6 +6316,15 @@ struct SirioWorkspace {
     /// End All Terminal Sessions confirmation (SP2 spec §4.2): shown only
     /// when some session reports `foreground.running` or an agent.
     pending_end_all: Option<PendingEndAll>,
+    /// The window this workspace is drawn in, noted on every draw: the delivery that opens a
+    /// proposal reads the keyboard focus through it (`ide_focus_in_secondary`).
+    window_handle: std::cell::Cell<Option<gpui::AnyWindowHandle>>,
+    /// Whether the keyboard focus was inside a Secondary tab when last read (every draw, and each
+    /// time a proposal opens): what the debug state reports. No element wraps Secondary to track
+    /// it, because a wrapper takes the focus of every press nothing below it handles.
+    secondary_focused: std::cell::Cell<bool>,
+    /// Whether a window prompt (a native or drawn dialog) was up in the last frame drawn.
+    prompt_up: std::cell::Cell<bool>,
     /// F-WIN-10: a transient, floating, auto-dismissing notice -- distinct
     /// from `Sidebar::set_notice`'s persistent inline banner, which stays
     /// silent when the sidebar isn't the visible surface. `toast_id` tags
@@ -6200,6 +6341,14 @@ struct SirioWorkspace {
     /// Set when `render` defers `open_next_identity_dialog` and cleared by it,
     /// so two renders before the deferred call runs cannot pop two entries.
     identity_open_scheduled: bool,
+    /// The agents of each worktree in the order the user focused them (spec 2026-11-15, 4.5):
+    /// an at-mention goes to the first of them that can take it.
+    agent_focus: ide_bridge::AgentFocus,
+    /// The (tab id, pane id) an at-mention chose to bring to the front. Focus needs a window,
+    /// which an event handler lacks, so `render` drains it.
+    pending_ide_focus: Option<(usize, usize)>,
+    /// Bumped by every `ide_resolve_ownerless`, so only the newest chain of retries goes on.
+    ide_resolve_generation: u64,
     /// The id of the toast that reports a failed identity save. The drain
     /// waits until it is gone, so the next dialog does not cover it.
     identity_error_toast: Option<u64>,
@@ -6307,6 +6456,14 @@ struct SirioWorkspace {
     /// back the rest of a strip: it comes back from here, and only when its
     /// chat did. Cleared wherever `retained_worktree_chats` is.
     parked_trace_tabs: BTreeMap<String, Vec<ParkedTrace>>,
+    /// Claude's proposed edits (`openDiff`) of worktrees that are not on screen, kept
+    /// tab-less beside the worktree they belong to and put back with it. A proposal is never
+    /// dropped by an eviction: only answering it, Claude withdrawing it or its connection
+    /// closing ends it (spec 2026-11-15 10.8).
+    parked_proposals: BTreeMap<String, Vec<Entity<sirio_ui::proposal_tab::ProposalTab>>>,
+    /// The proposals' bookkeeping, the requests still waiting for an owner and the close
+    /// confirmation (`ide_bridge::proposals`).
+    ide_proposals: ide_bridge::proposals::Proposals,
     /// What each worktree the user switched away from still holds, as the
     /// sidebar lists it under that worktree: its persisted strip, mapped to
     /// parked rows (`SidebarTabRef::Parked`). Filled lazily by
@@ -6522,6 +6679,7 @@ impl SirioWorkspace {
         let (opencode_events, opencode_inbox) =
             futures::channel::mpsc::unbounded::<(u64, sirio_opencode_watch::WatchEvent)>();
         Self::start_opencode_delivery(opencode_inbox, cx);
+        Self::start_ide_delivery(cx);
         cx.bind_keys([
             // cmd-w is the macOS close convention, not a readline key, so it
             // stays unguarded.
@@ -6688,6 +6846,9 @@ impl SirioWorkspace {
                                 WorkspaceAction::SetTranslucency(enabled) => {
                                     workspace.apply_translucency(enabled, window, cx);
                                 }
+                                WorkspaceAction::SetIdeBridge(on) => {
+                                    workspace.ide_set_enabled(on, cx);
+                                }
                                 WorkspaceAction::SetPlantumlServer(server) => {
                                     sirio_ui::markdown_preview::DiagramSettings::apply(&server, cx);
                                     cx.refresh_windows();
@@ -6757,7 +6918,19 @@ impl SirioWorkspace {
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::CloseWorkspace { selector, reply } => {
-                                    let result = workspace.close_workspace(&selector, cx);
+                                    // The verb cannot ask: it refuses while Claude waits on a
+                                    // change in the worktree.
+                                    let held = workspace
+                                        .control_state
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .path_for_selector(&selector)
+                                        .is_some_and(|path| workspace.ide_worktree_holds_proposal(&path));
+                                    let result = if held {
+                                        Err(ide_bridge::proposals::WORKTREE_HOLDS_PROPOSAL.to_string())
+                                    } else {
+                                        workspace.close_workspace(&selector, cx)
+                                    };
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::RestoreSession { reply } => {
@@ -6928,6 +7101,28 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::Attention { act, reply } => {
                                     let _ = reply.send(workspace.control_attention(act, window, cx));
+                                }
+                                ControlAction::IdeState { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_ide_state(cx)));
+                                }
+                                ControlAction::IdeSwitch { on, reply } => {
+                                    workspace.ide_set_enabled(on, cx);
+                                    let _ = reply.send(Ok(Vec::new()));
+                                }
+                                ControlAction::IdeAct { tab_name, action, text, reply } => {
+                                    let result = workspace.control_ide_act(
+                                        tab_name.as_deref(),
+                                        &action,
+                                        text.as_deref(),
+                                        window,
+                                        cx,
+                                    );
+                                    let _ = reply.send(result);
+                                }
+                                ControlAction::IdeComment { tab_name, side, line, end_line, text, commit, reply } => {
+                                    let result =
+                                        workspace.control_ide_comment(&tab_name, &side, line, end_line, &text, commit, window, cx);
+                                    let _ = reply.send(result);
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -7264,6 +7459,7 @@ impl SirioWorkspace {
             });
         }
 
+        sidebar.update(cx, |sidebar, _| sidebar.set_host_continues_removal(true));
         cx.subscribe(&sidebar, |workspace, _, event: &SidebarEvent, cx| {
             workspace.handle_sidebar_event(event, cx)
         })
@@ -7476,12 +7672,18 @@ impl SirioWorkspace {
             restore_focus_pending: false,
             pending_pane_close: None,
             pending_end_all: None,
+            window_handle: std::cell::Cell::new(None),
+            secondary_focused: std::cell::Cell::new(false),
+            prompt_up: std::cell::Cell::new(false),
             published_pane_directories: BTreeSet::new(),
             toast: None,
             next_toast_id: 0,
             identity_queue: VecDeque::new(),
             identity_dialog: None,
             identity_open_scheduled: false,
+            agent_focus: ide_bridge::AgentFocus::default(),
+            pending_ide_focus: None,
+            ide_resolve_generation: 0,
             identity_error_toast: None,
             identity_last_outcome: None,
             identity_seq: 0,
@@ -7507,6 +7709,8 @@ impl SirioWorkspace {
             new_agent_launches: Vec::new(),
             retained_worktree_chats: BTreeMap::new(),
             parked_trace_tabs: BTreeMap::new(),
+            parked_proposals: BTreeMap::new(),
+            ide_proposals: ide_bridge::proposals::Proposals::default(),
             parked_sidebar_tabs: BTreeMap::new(),
             files_snapshots: HashMap::new(),
             files_snapshot_in_flight: HashSet::new(),
@@ -8255,7 +8459,8 @@ impl SirioWorkspace {
     /// live chat's memory, and a restored chat has none.
     fn saved_layout(&self, cx: &App) -> SessionLayout {
         let owned_tabs = persisted_tabs(self.worktree_tabs(), |tab| {
-            tab_shows_attached_session(tab, cx) || tab.kind == TabKind::Trace
+            tab_shows_attached_session(tab, cx)
+                || matches!(tab.kind, TabKind::Trace | TabKind::Proposal)
         });
         self.layout_of(cx, owned_tabs)
     }
@@ -8363,7 +8568,7 @@ impl SirioWorkspace {
                             // Nothing to save: the tab is never written
                             // (`saved_layout`), and the in-memory layout that
                             // parking keeps needs no more than its place.
-                            TabContent::Trace(_) => {}
+                            TabContent::Trace(_) | TabContent::Proposal(_) => {}
                             TabContent::CiLog(view) => {
                                 let view = view.read(cx);
                                 state.ci_log = Some(session::PersistedCiLog {
@@ -8489,6 +8694,7 @@ impl SirioWorkspace {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         publish_worktree_lookup(&self.project_catalog, cx);
+        self.ide_sync_workspace_folders(cx);
     }
 
     fn mounted_worktree_paths(&self, excluded_path: Option<&Path>) -> Vec<PathBuf> {
@@ -9321,12 +9527,21 @@ impl SirioWorkspace {
                         }
                         workspace.refresh_git_diff(path, &view, cx);
                         workspace.push_language_server_status(path, &view, cx);
+                        // Opening a file focuses its tab, and a focused file says its selection.
+                        if workspace
+                            .active_file_view()
+                            .is_some_and(|active| active.entity_id() == view.entity_id())
+                        {
+                            workspace.ide_selection_changed(&view, cx);
+                        }
                     }
                     FileViewEvent::GitDiffStale(path) => {
                         workspace.refresh_git_diff(path, &view, cx);
+                        workspace.ide_proposal_disk_signal(path, cx);
                     }
                     FileViewEvent::Saved(path) => {
                         workspace.refresh_symbols_now(path, cx);
+                        workspace.ide_proposal_disk_signal(path, cx);
                         // A title-only save of a prompt notifies nothing else.
                         workspace.sync_prompt_tab_title(&view, cx);
                     }
@@ -9351,16 +9566,9 @@ impl SirioWorkspace {
                         lines,
                         text,
                         language,
-                    } => {
-                        if let Some(chat) = workspace.active_chat_for(path) {
-                            let label = workspace
-                                .repo_relative(path)
-                                .unwrap_or_else(|| path.display().to_string());
-                            let payload = sirio_ui::file_context_menu::agent_payload(
-                                &label, *lines, text, language,
-                            );
-                            chat.update(cx, |chat, cx| chat.control_append(&payload, cx));
-                        }
+                    } => workspace.send_selection_to_agent(path, *lines, text, language, cx),
+                    FileViewEvent::SelectionChanged { .. } => {
+                        workspace.ide_selection_changed(&view, cx);
                     }
                     FileViewEvent::CopyPermalink { path, lines } => {
                         if let Some(url) = workspace.permalink_for(path, *lines) {
@@ -9569,7 +9777,10 @@ impl SirioWorkspace {
         FileContextFacts {
             in_git_repo: worktree.is_some(),
             has_github_remote,
-            has_agent_chat: self.active_chat_for(path).is_some(),
+            // A chat, or any agent an at-mention can reach: with the IDE bridge on, the row is
+            // ready and says so when no terminal or chat of the worktree can take it (a toast).
+            has_agent_chat: self.active_chat_for(path).is_some()
+                || ide_bridge::SSE_PORT.load(Ordering::SeqCst) != 0,
             definition_available: worktree
                 .as_deref()
                 .is_some_and(|root| self.lsp.definition_available(path, root)),
@@ -9639,27 +9850,35 @@ impl SirioWorkspace {
     /// agent's PTY is interference Sirio avoids everywhere else.
     fn active_chat_for(&self, path: &Path) -> Option<Entity<Chat>> {
         let worktree = self.worktree_root_for(path)?;
-        self.tabs.iter().find_map(|tab| {
-            if tab.kind != TabKind::AgentChat {
-                return None;
-            }
-            let owned = self
-                .tab_worktree_paths
-                .get(&tab.id)
-                .is_some_and(|owner| paths_name_the_same_document(owner, &worktree));
-            if !owned {
-                return None;
-            }
-            let mut chat = None;
-            tab.panes.for_each(&mut |_, content| {
-                if chat.is_none()
-                    && let TabContent::Chat(entity) = content
-                {
-                    chat = Some(entity.clone());
+        self.chats_in(&worktree).into_iter().next()
+    }
+
+    /// The chats open in `worktree`'s tabs, in tab order.
+    fn chats_in(&self, worktree: &Path) -> Vec<Entity<Chat>> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| {
+                if tab.kind != TabKind::AgentChat {
+                    return None;
                 }
-            });
-            chat
-        })
+                let owned = self
+                    .tab_worktree_paths
+                    .get(&tab.id)
+                    .is_some_and(|owner| paths_name_the_same_document(owner, worktree));
+                if !owned {
+                    return None;
+                }
+                let mut chat = None;
+                tab.panes.for_each(&mut |_, content| {
+                    if chat.is_none()
+                        && let TabContent::Chat(entity) = content
+                    {
+                        chat = Some(entity.clone());
+                    }
+                });
+                chat
+            })
+            .collect()
     }
 
     /// Reveals the History panel for the worktree `path` belongs to. The path
@@ -11415,6 +11634,150 @@ impl SirioWorkspace {
         .detach();
     }
 
+    /// The IDE bridge's events, onto the UI thread. The bridge's threads wake this loop through
+    /// the channel `ide_bridge::IdeBridge` holds, so nothing polls. Without the global (an
+    /// in-process UI test) there is no bridge and no loop.
+    fn start_ide_delivery(cx: &mut Context<Self>) {
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return;
+        }
+        let Some(mut events) = cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+            bridge.take_events()
+        }) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(event) = events.next().await {
+                let connected = matches!(event, sirio_ide::BridgeEvent::Connected { .. });
+                let delivered = this.update(cx, |workspace, cx| {
+                    if let sirio_ide::BridgeEvent::Diagnostics { id, conn, path } = event {
+                        workspace.ide_answer_diagnostics(id, conn, path, cx);
+                        return;
+                    }
+                    if matches!(
+                        event,
+                        sirio_ide::BridgeEvent::OpenDiff { .. }
+                            | sirio_ide::BridgeEvent::DiffWithdrawn { .. }
+                            | sirio_ide::BridgeEvent::DiffsWithdrawn { .. }
+                    ) {
+                        workspace.ide_proposal_event(event, cx);
+                        return;
+                    }
+                    let disconnected = match &event {
+                        sirio_ide::BridgeEvent::Disconnected { conn } => Some(*conn),
+                        _ => None,
+                    };
+                    cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+                        bridge.on_event(event);
+                    });
+                    if let Some(conn) = disconnected {
+                        workspace.ide_proposals_disconnected(conn, cx);
+                    }
+                    if connected {
+                        workspace.ide_resolve_after_connect(cx);
+                    }
+                    cx.notify();
+                });
+                if delivered.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The root of every worktree of every project in the sidebar, parked or not: what the
+    /// lockfile's `workspaceFolders` says.
+    fn ide_workspace_folders(&self) -> Vec<PathBuf> {
+        ide_bridge::workspace_folders(&self.project_catalog)
+    }
+
+    /// Tells the lockfile the catalog's worktrees, when they differ from what it holds. The
+    /// rewrite is queued to the bridge's writer thread; nothing here touches the disk.
+    fn ide_sync_workspace_folders(&self, cx: &mut App) {
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return;
+        }
+        let folders = self.ide_workspace_folders();
+        cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+            bridge.set_workspace_folders(folders);
+        });
+    }
+
+    /// The one setter behind Settings' "Connect Claude Code to Sirio (/ide)" and the debug verb
+    /// `surface.ide.switch`: persists the setting, shows it in Settings, and starts or ends the
+    /// bridge. Starting binds and writes the lockfile on the background executor.
+    fn ide_set_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut stored = self.session.load_settings();
+        if stored.claude_ide_bridge != on {
+            stored.claude_ide_bridge = on;
+            self.session.save_settings(&stored);
+        }
+        self.settings
+            .update(cx, |settings, cx| settings.apply_claude_ide_bridge(on, cx));
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return;
+        }
+        if !on {
+            // No connection outlives the switch, so no proposal does; nothing is answered.
+            self.ide_close_all_proposals(cx);
+            cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| bridge.disable());
+            cx.notify();
+            return;
+        }
+        let folders = self.ide_workspace_folders();
+        let Some(job) = cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+            bridge.begin_enable(folders)
+        }) else {
+            return;
+        };
+        Self::ide_run_start(job, cx);
+    }
+
+    /// Runs a start on the background executor and installs it; a start that finds the switch
+    /// moved on hands back the job for the next one.
+    fn ide_run_start(job: ide_bridge::StartJob, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let started = cx.background_executor().spawn(async move { job.run() }).await;
+            let _ = this.update(cx, |workspace, cx| {
+                let session = workspace.session.clone();
+                let next = cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+                    bridge.finish_start(started, &session)
+                });
+                if let Some(next) = next {
+                    Self::ide_run_start(next, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Debug-only `surface.ide.state`.
+    fn control_ide_state(&self, cx: &App) -> Vec<(String, String)> {
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return vec![("state".to_string(), "{\"enabled\":false}".to_string())];
+        }
+        let live = self.ide_live_panes(cx);
+        let (proposals, confirmation) = self.ide_proposals_state(cx);
+        // The position (as `surface.tabs.read` numbers them) of the tab Secondary shows.
+        let shown = self
+            .center_split
+            .active(PaneRole::Secondary)
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .map(|index| index + 1);
+        let extra = serde_json::json!({
+            "secondary_shown": shown,
+            "secondary_focused": self.secondary_focused.get(),
+            "prompt_up": self.prompt_up.get(),
+        });
+        vec![(
+            "state".to_string(),
+            cx.global::<ide_bridge::IdeBridge>().state_json(&live, proposals, confirmation, extra),
+        )]
+    }
+
     /// What OpenCode's watch says, onto the UI thread. The watch lives on a thread of its
     /// own and wakes this loop through the channel (the way `install_host_sessions` wakes
     /// its views), so nothing polls: the loop sleeps until the watch has something to say.
@@ -12035,6 +12398,10 @@ impl SirioWorkspace {
                 }
                 self.refresh_closed_sessions(cx);
             }
+            // The sidebar's confirmed removal: asks first when Claude waits on a change in it.
+            SidebarEvent::WorktreeRemovalRequested { remote, path } => {
+                self.ide_request_worktree_removal(remote.clone(), path, cx);
+            }
             SidebarEvent::CloseTab(id) => self.close_tab_by_id(*id, None, cx),
             SidebarEvent::OpenProjectSettings(id) => {
                 self.add_project_settings_tab(id, cx);
@@ -12350,6 +12717,11 @@ impl SirioWorkspace {
                     .collect()
             })
             .unwrap_or_default();
+        // A project whose worktrees hold Claude's proposed change asks first; Reject answers
+        // it and removes the project.
+        if self.ide_guard_project_removal(&removed_paths, id, cx) {
+            return;
+        }
         // Read before the project leaves the catalog, so each of its worktrees
         // is still known when a session's deepest owner is worked out.
         let known_before = self.known_worktree_paths();
@@ -12383,6 +12755,7 @@ impl SirioWorkspace {
                 self.parked_worktree_tabs.remove(&worktree_id);
                 self.retained_worktree_chats.remove(&worktree_id);
                 self.parked_trace_tabs.remove(&worktree_id);
+                self.ide_forget_worktree_proposals(&worktree_id);
                 self.invalidate_unmounted_sessions();
             }
             self.refresh_tray_flags();
@@ -13097,7 +13470,8 @@ impl SirioWorkspace {
             | TabContent::ProjectSettings(_)
             | TabContent::ChangeRequest(_)
             | TabContent::CiLog(_)
-            | TabContent::Trace(_) => None,
+            | TabContent::Trace(_)
+            | TabContent::Proposal(_) => None,
         }
     }
 
@@ -13170,7 +13544,8 @@ impl SirioWorkspace {
                 | TabContent::ProjectSettings(_)
                 | TabContent::ChangeRequest(_)
                 | TabContent::CiLog(_)
-                | TabContent::Trace(_) => return,
+                | TabContent::Trace(_)
+                | TabContent::Proposal(_) => return,
                 _ => self.pane_status(tab, pane_id),
             };
             if status.is_none_or(|current| activity_rank(candidate) < activity_rank(current)) {
@@ -13244,7 +13619,8 @@ impl SirioWorkspace {
                 | TabContent::ProjectSettings(_)
                 | TabContent::ChangeRequest(_)
                 | TabContent::CiLog(_)
-                | TabContent::Trace(_) => ActivityStatus::Idle,
+                | TabContent::Trace(_)
+                | TabContent::Proposal(_) => ActivityStatus::Idle,
                 _ => self.pane_status(tab, pane_id),
             };
         });
@@ -13761,7 +14137,8 @@ impl SirioWorkspace {
                     | TabContent::ProjectSettings(_)
                     | TabContent::ChangeRequest(_)
                     | TabContent::CiLog(_)
-                    | TabContent::Trace(_) => (
+                    | TabContent::Trace(_)
+                    | TabContent::Proposal(_) => (
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
@@ -14140,6 +14517,8 @@ impl SirioWorkspace {
             );
             // The Trace tabs this worktree parked come back with their chats.
             self.readopt_trace_tabs(&selected_worktree_id, &selected_path, &mut new_tabs);
+            // So do the proposals Claude is waiting on there (never dropped by an eviction).
+            self.readopt_proposal_tabs(&selected_worktree_id, &mut new_tabs, cx);
             // Whatever this worktree had retained was just re-adopted into
             // `new_tabs`; a running chat whose tab the database no longer
             // names is dropped rather than resurrected, so the DB stays the
@@ -14330,6 +14709,9 @@ impl SirioWorkspace {
         if rescan_in_background {
             self.refresh_project_for_path_in_background(&selected_path, cx);
         }
+        // The worktree's terminals are attached again: a Claude that connected while they were
+        // not is owned now (the resolution retries while their sessions come up).
+        self.ide_resolve_ownerless(cx);
         cx.notify();
         Ok(())
     }
@@ -14570,6 +14952,7 @@ impl SirioWorkspace {
         self.parked_worktree_tabs.remove(&worktree_id);
         self.retained_worktree_chats.remove(&worktree_id);
         self.parked_trace_tabs.remove(&worktree_id);
+        self.ide_forget_worktree_proposals(&worktree_id);
         self.invalidate_unmounted_sessions();
         self.refresh_tray_flags();
         if was_current {
@@ -16378,7 +16761,8 @@ impl SirioWorkspace {
             | TabKind::ProjectSettings
             | TabKind::ChangeRequest
             | TabKind::CiLog
-            | TabKind::Trace => CHAT_TAB_MIN_WIDTH,
+            | TabKind::Trace
+            | TabKind::Proposal => CHAT_TAB_MIN_WIDTH,
             TabKind::Terminal => TERMINAL_TAB_MIN_WIDTH,
             TabKind::Browser => CHAT_TAB_MIN_WIDTH,
         }
@@ -16470,6 +16854,7 @@ impl SirioWorkspace {
             if let Some(window) = window {
                 self.focus_active_pane(window, cx);
             }
+            self.ide_tab_focused(index, cx);
             self.schedule_save(cx);
             self.mark_activity_dirty();
             cx.notify();
@@ -16681,6 +17066,7 @@ impl SirioWorkspace {
                 retained.insert(tab.persistence_id.clone(), tab.clone());
             }
         }
+        self.park_proposal_tabs(&worktree_id);
         let traces = self.parked_traces(cx);
         if traces.is_empty() {
             self.parked_trace_tabs.remove(&worktree_id);
@@ -17031,6 +17417,11 @@ impl SirioWorkspace {
         }
 
         let tab_id = self.tabs[index].id;
+        // Closing what holds Claude's proposed change asks first (spec 2026-11-15 10.8); the
+        // answer, Reject, then continues this close.
+        if self.ide_guard_tab_close(&[tab_id], cx) {
+            return;
+        }
         // #319 invariant: closing a tab hands its half to the *nearest*
         // remaining tab of the same role, not to that role's first tab.
         // `CenterSplit::rebuild` cannot decide this alone — it sees only the
@@ -17232,6 +17623,10 @@ impl SirioWorkspace {
 
     fn request_close_ids(&mut self, ids: Vec<usize>, window: &mut Window, cx: &mut Context<Self>) {
         if ids.is_empty() {
+            return;
+        }
+        // One question for the whole group, before any of it closes.
+        if self.ide_guard_tab_close(&ids, cx) {
             return;
         }
         for id in &ids {
@@ -21148,6 +21543,96 @@ impl SirioWorkspace {
         }
     }
 
+    /// Opens Claude's proposed edit as a tab of the current worktree's Secondary half
+    /// (spec 2026-11-15 4.7): Secondary is revealed and the keyboard stays where it was, so the
+    /// user may answer in the terminal. When the window's keyboard focus is inside Secondary, in
+    /// any of its tabs, the proposal joins the strip and Secondary keeps its shown tab (the
+    /// editor being typed in is never unmounted); anywhere else, or with no focus, it becomes
+    /// Secondary's shown tab.
+    fn add_proposal_tab(
+        &mut self,
+        view: Entity<sirio_ui::proposal_tab::ProposalTab>,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = self.next_tab_id;
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        let focus_in_secondary = self.ide_focus_in_secondary(cx);
+        let active_in_secondary = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.pane == PaneRole::Secondary);
+        self.tabs.push(proposal_open_tab(
+            tab_id,
+            persistence_id,
+            title.clone(),
+            self.next_pane_id,
+            view,
+        ));
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        self.open_secondary_pane();
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &title) {
+            self.rebuild_center_split();
+        }
+        // Keyboard focus in Secondary stays on the tab it is in (an editor being typed in is
+        // never unmounted): the proposal is in the strip beside it. Anywhere else it becomes
+        // Secondary's shown tab.
+        if !focus_in_secondary {
+            self.center_split.set_active(PaneRole::Secondary, Some(tab_id));
+            // The active tab is what the workspace calls focused: when it was a Secondary tab
+            // the proposal now covers, it follows.
+            if active_in_secondary {
+                self.active_tab = self.tabs.len() - 1;
+            }
+        }
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    /// Parks the proposal tabs of `worktree_id`, the worktree being switched away from, so
+    /// they come back with it. They are the requests of a Claude that is still waiting.
+    fn park_proposal_tabs(&mut self, worktree_id: &str) {
+        let mut mounted = Vec::new();
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Proposal(view) = content {
+                    mounted.push(view.clone());
+                }
+            });
+        }
+        if mounted.is_empty() {
+            return;
+        }
+        let parked = self.parked_proposals.entry(worktree_id.to_owned()).or_default();
+        for view in mounted {
+            if !parked.iter().any(|known| known.entity_id() == view.entity_id()) {
+                parked.push(view);
+            }
+        }
+    }
+
+    /// Puts back the proposal tabs `worktree_id` parked, among the restored `tabs`. A proposal
+    /// whose request ended meanwhile is no longer parked (its record closed it).
+    fn readopt_proposal_tabs(&mut self, worktree_id: &str, tabs: &mut Vec<OpenTab>, cx: &mut Context<Self>) {
+        let Some(parked) = self.parked_proposals.remove(worktree_id) else {
+            return;
+        };
+        for view in parked {
+            let Some(title) = self.ide_proposals.title_of(view.entity_id()) else {
+                continue;
+            };
+            self.ide_refresh_owner_titles(&view, tabs, cx);
+            let pane_id = next_pane_id(tabs).max(self.next_pane_id);
+            self.next_pane_id = pane_id + 1;
+            let id = tabs.len();
+            let persistence_id = self.session.new_tab_id(Path::new(worktree_id), id);
+            tabs.push(proposal_open_tab(id, persistence_id, title, pane_id, view));
+        }
+    }
+
     /// `surface.trace.read`: whether `surface_id`'s chat has a Trace tab, and
     /// the turn it shows with its spans and how many spans past the cap it
     /// did not keep.
@@ -22749,13 +23234,14 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    fn active_changes_view(&self) -> Option<(&OpenTab, Entity<ChangesTab>)> {
+    fn active_changes_view(&self, cx: &App) -> Option<(&OpenTab, Entity<ChangesTab>)> {
         let tab = self.tabs.get(self.active_tab)?;
         let mut view = None;
-        tab.panes.for_each(&mut |_, content| {
-            if let TabContent::Changes(changes) = content {
-                view = Some(changes.clone());
-            }
+        tab.panes.for_each(&mut |_, content| match content {
+            TabContent::Changes(changes) => view = Some(changes.clone()),
+            // A proposal draws its diff on a Changes surface of its own, once it has one.
+            TabContent::Proposal(proposal) => view = proposal.read(cx).changes(),
+            _ => {}
         });
         view.map(|view| (tab, view))
     }
@@ -22823,7 +23309,7 @@ impl SirioWorkspace {
         refresh: bool,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
-        let Some((_, view)) = self.active_changes_view() else {
+        let Some((_, view)) = self.active_changes_view(cx) else {
             return Err("Changes surface is not open".to_string());
         };
         let mode = match mode.as_deref() {
@@ -22844,7 +23330,7 @@ impl SirioWorkspace {
         close: bool,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
-        let Some((_, view)) = self.active_changes_view() else {
+        let Some((_, view)) = self.active_changes_view(cx) else {
             return Err("Changes surface is not open".to_string());
         };
         view.update(cx, |tab, cx| match (discard, all, close) {
@@ -22866,7 +23352,7 @@ impl SirioWorkspace {
     }
 
     fn control_changes_confirm(&mut self, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
-        let Some((_, view)) = self.active_changes_view() else {
+        let Some((_, view)) = self.active_changes_view(cx) else {
             return Err("Changes surface is not open".to_string());
         };
         if !view.update(cx, |tab, cx| tab.confirm_discard(cx)) {
@@ -22977,7 +23463,7 @@ impl SirioWorkspace {
     }
 
     fn control_read_changes(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
-        let Some((tab, view)) = self.active_changes_view() else {
+        let Some((tab, view)) = self.active_changes_view(cx) else {
             return Err("Changes surface is not open".to_string());
         };
         let mut pairs = changes_report_pairs(tab.id, &view.read(cx).report())?;
@@ -24176,6 +24662,9 @@ impl SirioWorkspace {
         if !moved {
             return;
         }
+        // A proposal of this file warns while the file has unsaved edits (spec 10.13).
+        let path = view.read(cx).path().to_path_buf();
+        self.ide_proposal_dirty_changed(&path, cx);
         let drawers: Vec<_> = self
             .drawers
             .iter()
@@ -25142,7 +25631,8 @@ impl SirioWorkspace {
                         | TabContent::Browser(_)
                         | TabContent::ProjectSettings(_)
                         | TabContent::ChangeRequest(_)
-                        | TabContent::CiLog(_) => None,
+                        | TabContent::CiLog(_)
+                        | TabContent::Proposal(_) => None,
                     };
                 }
             });
@@ -25161,6 +25651,7 @@ impl SirioWorkspace {
                 .into_owned();
             self.terminal_pane_cache
                 .focus(&worktree_id, &format!("terminal-{pane_id}"));
+            self.record_agent_focus(tab_id, pane_id);
             self.mark_activity_dirty();
             cx.notify();
         }
@@ -25297,6 +25788,17 @@ impl SirioWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        // A split is refused as `split_focused_with_placement` refuses an impossible one: nothing
+        // happens (and, checked first, no shell is started for it). A Proposal tab is answered
+        // for by Accept, Reject or the close confirmation, and closing it closes the whole tab
+        // and every session in it, so it never holds a terminal beside it (spec 10, ruling 88).
+        if self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id && tab.kind == TabKind::Proposal)
+        {
+            return;
+        }
         let pane_id = self.next_pane_id;
         let working_directory = self.working_directory.clone();
         let terminal = cx.new(|cx| {
@@ -25427,7 +25929,8 @@ impl SirioWorkspace {
                             | TabContent::Browser(_)
                             | TabContent::ProjectSettings(_)
                             | TabContent::ChangeRequest(_)
-                            | TabContent::CiLog(_) => None,
+                            | TabContent::CiLog(_)
+                            | TabContent::Proposal(_) => None,
                         };
                     }
                 });
@@ -25472,7 +25975,8 @@ impl SirioWorkspace {
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
                     | TabContent::ChangeRequest(_)
-                    | TabContent::CiLog(_) => None,
+                    | TabContent::CiLog(_)
+                    | TabContent::Proposal(_) => None,
                 };
             }
         });
@@ -25514,7 +26018,8 @@ impl SirioWorkspace {
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
                     | TabContent::ChangeRequest(_)
-                    | TabContent::CiLog(_) => None,
+                    | TabContent::CiLog(_)
+                    | TabContent::Proposal(_) => None,
                 };
             }
         });
@@ -25626,6 +26131,10 @@ impl SirioWorkspace {
                         .child(view.clone())
                         .into_any_element(),
                     TabContent::Trace(view) => div()
+                        .size_full()
+                        .child(self.child_view(view.clone()))
+                        .into_any_element(),
+                    TabContent::Proposal(view) => div()
                         .size_full()
                         .child(self.child_view(view.clone()))
                         .into_any_element(),
@@ -26095,13 +26604,59 @@ impl SirioWorkspace {
                         .into_any_element()
                 }
             });
-        div()
+        let group = div()
             .flex()
             .flex_row()
             .size_full()
             .bg(theme.ely.bg)
-            .child(surface)
-            .into_any_element()
+            .child(surface);
+        group.into_any_element()
+    }
+
+    /// The focus handles keys reach the tabs of the Secondary half through: each view's own (a
+    /// press on it focuses it), so that focus is "in" a tab when one of them contains it. A tab
+    /// whose views track none (a loading file, a browser) has none, and focus there reads as not
+    /// in Secondary, as it did for a press nothing below handled.
+    fn secondary_focus_handles(&self, cx: &App) -> Vec<FocusHandle> {
+        let mut handles = Vec::new();
+        for tab in self.tabs.iter().filter(|tab| tab.pane == PaneRole::Secondary) {
+            tab.panes.for_each(&mut |_, content| match content {
+                TabContent::Terminal { view } => handles.push(view.focus_handle(cx)),
+                TabContent::Chat(chat) => handles.push(chat.focus_handle(cx)),
+                TabContent::Trace(view) => handles.push(view.focus_handle(cx)),
+                TabContent::File { view } => handles.extend(view.read(cx).focus_handles(cx)),
+                TabContent::Changes(changes) => handles.extend(changes.read(cx).focus_handles()),
+                TabContent::Proposal(view) => handles.extend(view.read(cx).focus_handles(cx)),
+                TabContent::Browser(_)
+                | TabContent::ProjectSettings(_)
+                | TabContent::ChangeRequest(_)
+                | TabContent::CiLog(_) => {}
+            });
+        }
+        handles
+    }
+
+    /// Whether the window's keyboard focus is inside a Secondary tab, from the frame last drawn.
+    fn focus_in_secondary(&self, window: &Window, cx: &App) -> bool {
+        self.secondary_focus_handles(cx)
+            .iter()
+            .any(|handle| handle.contains_focused(window, cx))
+    }
+
+    /// The same, asked through the window a delivery can reach (ruling 72): the keyboard focus
+    /// read when a proposal arrives, not a value a draw cached. The workspace is being updated, so
+    /// the window is read with the handles collected beforehand; when the window cannot be read
+    /// (it is mid-update), what the last draw saw stands.
+    fn ide_focus_in_secondary(&self, cx: &mut Context<Self>) -> bool {
+        let handles = self.secondary_focus_handles(cx);
+        let read = self.window_handle.get().and_then(|window| {
+            window
+                .update(cx, |_, window, cx| handles.iter().any(|handle| handle.contains_focused(window, cx)))
+                .ok()
+        });
+        let focused = read.unwrap_or_else(|| self.secondary_focused.get());
+        self.secondary_focused.set(focused);
+        focused
     }
 
     fn has_current_worktree(&self) -> bool {
@@ -26581,7 +27136,8 @@ impl SirioWorkspace {
                 | TabContent::ProjectSettings(_)
                 | TabContent::ChangeRequest(_)
                 | TabContent::CiLog(_)
-                | TabContent::Trace(_) => false,
+                | TabContent::Trace(_)
+                | TabContent::Proposal(_) => false,
             };
         });
         dirty
@@ -27201,7 +27757,8 @@ impl SirioWorkspace {
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
                     | TabContent::ChangeRequest(_)
-                    | TabContent::CiLog(_) => None,
+                    | TabContent::CiLog(_)
+                    | TabContent::Proposal(_) => None,
                 };
             }
         });
@@ -28937,6 +29494,12 @@ impl SirioWorkspace {
             cx.stop_propagation();
             return;
         }
+        // The same for "Closing rejects Claude's change".
+        if self.ide_proposals.confirmation.is_some() {
+            self.handle_proposal_confirm_key(event, window, cx);
+            cx.stop_propagation();
+            return;
+        }
 
         let key = event.keystroke.key.as_str();
         // Project-entry cards live in the sidebar, but Escape must dismiss one
@@ -29039,6 +29602,7 @@ impl SirioWorkspace {
         self.pending_pane_close.is_some()
             || self.pending_end_all.is_some()
             || self.pending_title_prompt.is_some()
+            || self.ide_proposals.confirmation.is_some()
     }
 
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -29526,6 +30090,7 @@ impl SirioWorkspace {
     fn render_global_overlays(&self, theme: Theme, entity: Entity<Self>) -> Vec<AnyElement> {
         [
             self.render_pane_close_confirm(theme, entity.clone()),
+            self.render_proposal_confirm(theme, entity.clone()),
             self.render_title_prompt(theme, entity.clone()),
             self.render_update_card(entity.clone()),
             // Just before the toast, so a toast raised while the dialog is
@@ -29671,6 +30236,10 @@ impl SirioWorkspace {
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
+        // Where the keyboard focus is, from the frame last drawn (the handles were in it).
+        self.window_handle.set(Some(window.window_handle()));
+        self.secondary_focused.set(self.focus_in_secondary(window, cx));
+        self.prompt_up.set(window.has_active_prompt());
         // Spec 2026-11-01-primary-rail §5, before anything reads the active tab.
         self.settle_primary_peek(window, cx);
         // Spec 2026-09-24 §5: a tab drag that ended without a drop leaves
@@ -29765,6 +30334,14 @@ impl Render for SirioWorkspace {
             let focus = pending.focus.clone();
             focus.focus(window, cx);
         }
+        if self.identity_dialog.is_none()
+            && let Some(pending) = self.ide_proposals.confirmation.as_mut()
+            && pending.needs_focus
+        {
+            pending.needs_focus = false;
+            let focus = pending.focus.clone();
+            focus.focus(window, cx);
+        }
         // F-SID-19: if nothing at all holds keyboard focus this frame (e.g.
         // the previously-focused surface -- a terminal, a sidebar row --
         // was just unmounted, and nothing claimed focus in its place, as
@@ -29813,6 +30390,14 @@ impl Render for SirioWorkspace {
             self.identity_open_scheduled = true;
             cx.defer_in(window, |workspace, window, cx| {
                 workspace.open_next_identity_dialog(window, cx);
+            });
+        }
+        // An at-mention that went to a Claude terminal brings that terminal forward; focus needs
+        // a window, which the handler that chose it did not have.
+        if let Some((tab_id, pane_id)) = self.pending_ide_focus.take() {
+            cx.defer_in(window, move |workspace, window, cx| {
+                workspace.select_tab(tab_id, Some(window), cx);
+                workspace.select_pane(pane_id, Some(window), cx);
             });
         }
         // The Set Title modal's caret shares the workspace's render pass:
@@ -31163,7 +31748,7 @@ fn restore_tabs_with_terminal_cache(
             Some(TabKind::ProjectSettings) => continue,
             // Never saved, so never restored: its data is a live chat's
             // memory, and a restored chat has none.
-            Some(TabKind::Trace) => continue,
+            Some(TabKind::Trace | TabKind::Proposal) => continue,
             None => continue,
         };
         let panes = match content {
@@ -31747,7 +32332,7 @@ fn restore_tabs_in_workspace(
             Some(TabKind::ProjectSettings) => continue,
             // Never saved, so never restored: its data is a live chat's
             // memory, and a restored chat has none.
-            Some(TabKind::Trace) => continue,
+            Some(TabKind::Trace | TabKind::Proposal) => continue,
             None => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
@@ -31931,6 +32516,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         // it is runtime state, not an AppSettings field.
         socket_path: String::new(),
         resume_agent_sessions: settings.resume_agent_sessions,
+        claude_ide_bridge: settings.claude_ide_bridge,
         auto_naming: settings.auto_naming,
         limit_chat_history: settings.limit_chat_history,
         chat_retention: settings.chat_retention.clamp(5, 500) as i32,
@@ -31966,6 +32552,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         // is persisted by its dedicated host callback.
         updates_enabled: true,
         resume_agent_sessions: snapshot.resume_agent_sessions,
+        claude_ide_bridge: snapshot.claude_ide_bridge,
         auto_naming: snapshot.auto_naming,
         limit_chat_history: snapshot.limit_chat_history,
         chat_retention: i64::from(snapshot.chat_retention.clamp(5, 500)),
@@ -33495,6 +34082,16 @@ fn main() {
         // project/worktree id convention.
         session_store.schedule_catalog(&project_catalog);
         let saved_settings = app_settings_with_environment_override(session_store.load_settings());
+        // Binds the IDE bridge's port and writes its lockfile before any terminal is created
+        // or restored, so every one of them is born with `CLAUDE_CODE_SSE_PORT`. A failure
+        // leaves it off and is logged without content.
+        // What a crashed Sirio left of a proposal's temporary files goes first.
+        ide_bridge::proposals::sweep_scratch();
+        cx.set_global(ide_bridge::start_at_launch(
+            &session_store,
+            saved_settings.claude_ide_bridge,
+            ide_bridge::workspace_folders(&project_catalog),
+        ));
         // The base colour first: `Theme::set_mode` recovers it from the
         // installed theme, so setting the mode before the colour would build
         // one frame with the default and then throw it away.
@@ -33881,6 +34478,7 @@ fn main() {
                         .on_change(move |snapshot| {
                             let plantuml_server = snapshot.plantuml_server.clone();
                             let translucency = snapshot.translucency;
+                            let ide_bridge_enabled = snapshot.claude_ide_bridge;
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
                             let stored = session_store_for_settings.load_settings();
@@ -33889,6 +34487,7 @@ fn main() {
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
                                 actions.push(WorkspaceAction::SetPlantumlServer(plantuml_server));
+                                actions.push(WorkspaceAction::SetIdeBridge(ide_bridge_enabled));
                             }
                         })
                         .on_revoke_browser_origin({
@@ -34067,6 +34666,9 @@ fn main() {
         let session_store_for_quit = session_store.clone();
         let panes_for_quit = panes.clone();
         cx.on_app_quit(move |cx| {
+            // The lockfile goes before the listener does: it never names a port nobody
+            // listens on while Sirio is alive.
+            cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| bridge.shutdown());
             // A prompt typed less than the autosave delay ago is written
             // now. Outside any workspace update: the flush updates every
             // open prompt view.
@@ -46350,6 +46952,7 @@ done
             control_socket_enabled: false,
             updates_enabled: true,
             resume_agent_sessions: false,
+            claude_ide_bridge: false,
             auto_naming: true,
             limit_chat_history: false,
             chat_retention: 37,
@@ -46394,6 +46997,7 @@ done
         assert_eq!(snapshot.terminal_font_size, 16);
         assert!(!snapshot.control_socket_enabled);
         assert!(!snapshot.resume_agent_sessions);
+        assert!(!snapshot.claude_ide_bridge);
         assert!(snapshot.auto_naming);
         assert!(!snapshot.limit_chat_history);
         assert_eq!(snapshot.chat_retention, 37);
@@ -46425,6 +47029,7 @@ done
             restored.resume_agent_sessions,
             persisted.resume_agent_sessions
         );
+        assert_eq!(restored.claude_ide_bridge, persisted.claude_ide_bridge);
         assert_eq!(restored.auto_naming, persisted.auto_naming);
         assert_eq!(restored.limit_chat_history, persisted.limit_chat_history);
         assert_eq!(restored.chat_retention, persisted.chat_retention);
@@ -49706,6 +50311,10 @@ done
             | ControlAction::FilesRead { reply }
             | ControlAction::ProjectIdentityAct { reply, .. }
             | ControlAction::Attention { reply, .. }
+            | ControlAction::IdeState { reply }
+            | ControlAction::IdeSwitch { reply, .. }
+            | ControlAction::IdeAct { reply, .. }
+            | ControlAction::IdeComment { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -49836,6 +50445,10 @@ done
             "surface.host.end_all" => request_with_params(method, &[]),
             "surface.terminal.open" => request_with_params(method, &[]),
             "surface.settings.act" => request_with_params(method, &[("action", "install-hooks")]),
+            "surface.ide.state" => request_with_params(method, &[]),
+            "surface.ide.switch" => request_with_params(method, &[("on", "true")]),
+            "surface.ide.act" => request_with_params(method, &[("action", "cancel")]),
+            "surface.ide.comment" => request_with_params(method, &[("tab_name", "p"), ("side", "old"), ("line", "1"), ("text", "x")]),
             "surface.attention.read" => request::attention_read(),
             "surface.attention.act" => request_with_params(method, &[("focus", "active")]),
             "surface.terminal.restart" | "surface.terminal.state" => {
@@ -50350,7 +50963,8 @@ done
                     TabContent::ProjectSettings(_) => {}
                     TabContent::ChangeRequest(_)
                     | TabContent::CiLog(_)
-                    | TabContent::Trace(_) => {}
+                    | TabContent::Trace(_)
+                    | TabContent::Proposal(_) => {}
                 });
             }
             (failed, live)

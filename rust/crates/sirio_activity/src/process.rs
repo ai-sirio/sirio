@@ -179,6 +179,35 @@ fn read_comm(proc_root: &Path, pid: u32) -> io::Result<Option<String>> {
     }
 }
 
+/// The parent of `pid`, or `None` when it has none, is gone, or cannot be read. One step of a walk
+/// up the process tree (`sirio_ide::resolve_owner`).
+#[cfg(target_os = "linux")]
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(Path::new(PROC_ROOT).join(pid.to_string()).join("stat")).ok()?;
+    parent_from_stat(&stat)
+}
+
+/// The parent field of a `/proc/<pid>/stat` line. The command name sits in parentheses and may
+/// hold spaces and parentheses of its own, so the fields are counted from the last `)`.
+#[cfg(target_os = "linux")]
+fn parent_from_stat(stat: &str) -> Option<u32> {
+    let after_command = &stat[stat.rfind(')')? + 1..];
+    let parent: u32 = after_command.split_whitespace().nth(1)?.parse().ok()?;
+    (parent != 0).then_some(parent)
+}
+
+/// The working directory of `pid`, where the platform lets it be read (Linux: `/proc/<pid>/cwd`);
+/// `None` elsewhere, and for a process that is gone or not ours.
+#[cfg(target_os = "linux")]
+pub fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(Path::new(PROC_ROOT).join(pid.to_string()).join("cwd")).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn process_cwd(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 mod macos_process {
     use std::io;
@@ -192,6 +221,54 @@ mod macos_process {
     unsafe extern "C" {
         fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
         fn proc_name(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
+        fn proc_pidinfo(
+            pid: c_int,
+            flavor: c_int,
+            arg: u64,
+            buffer: *mut c_void,
+            buffersize: c_int,
+        ) -> c_int;
+    }
+
+    const PROC_PIDTBSDINFO: c_int = 3;
+
+    /// `struct proc_bsdinfo` of `<sys/proc_info.h>`: 136 bytes, the parent at its fifth field.
+    #[repr(C)]
+    struct ProcBsdInfo {
+        flags: u32,
+        status: u32,
+        xstatus: u32,
+        pid: u32,
+        parent_pid: u32,
+        ids: [u32; 6],
+        reserved: u32,
+        command: [u8; 16],
+        name: [u8; 32],
+        nfiles: u32,
+        process_group: u32,
+        job_control_count: u32,
+        controlling_device: u32,
+        controlling_group: u32,
+        nice: i32,
+        start_seconds: u64,
+        start_microseconds: u64,
+    }
+
+    /// The parent of `pid`, or `None` when it has none or the call fails.
+    pub fn parent_pid(pid: u32) -> Option<u32> {
+        let pid = to_pid_t(pid).ok()?;
+        let mut info = std::mem::MaybeUninit::<ProcBsdInfo>::zeroed();
+        let size = std::mem::size_of::<ProcBsdInfo>() as c_int;
+        // SAFETY: `info` is a writable buffer of exactly `size` bytes, which libproc fills.
+        let written = unsafe {
+            proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size)
+        };
+        if written != size {
+            return None;
+        }
+        // SAFETY: libproc wrote the whole struct, and an all-zero one is valid anyway.
+        let parent = unsafe { info.assume_init() }.parent_pid;
+        (parent != 0).then_some(parent)
     }
 
     fn to_pid_t(pid: u32) -> io::Result<c_int> {
@@ -252,6 +329,13 @@ mod macos_process {
     pub fn is_process_gone(error: &io::Error) -> bool {
         error.kind() == io::ErrorKind::NotFound || matches!(error.raw_os_error(), Some(3))
     }
+}
+
+/// The parent of `pid`, or `None` when it has none, is gone, or cannot be read. One step of a walk
+/// up the process tree (`sirio_ide::resolve_owner`).
+#[cfg(target_os = "macos")]
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    macos_process::parent_pid(pid)
 }
 
 /// Returns process names for the shell's descendants using macOS's live
@@ -487,6 +571,24 @@ mod windows_process {
             value.encode_utf16().collect()
         }
     }
+}
+
+/// Every process's parent, from one Toolhelp32 snapshot: a walk up the process tree
+/// (`sirio_ide::resolve_owner`) takes this once and looks parents up in it. A process with no
+/// parent (0) is left out.
+#[cfg(windows)]
+pub fn parent_table() -> io::Result<HashMap<u32, u32>> {
+    Ok(windows_process::entries()?
+        .into_iter()
+        .filter(|entry| entry.parent_pid != 0)
+        .map(|entry| (entry.pid, entry.parent_pid))
+        .collect())
+}
+
+/// The parent of `pid`, from a fresh snapshot; prefer [`parent_table`] for more than one lookup.
+#[cfg(windows)]
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    parent_table().ok()?.get(&pid).copied()
 }
 
 /// Returns process names for the shell's descendants using one Toolhelp32

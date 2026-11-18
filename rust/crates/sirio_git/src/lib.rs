@@ -66,7 +66,7 @@ pub use checkout::{
 pub use clone::{GitClone, clone_repository};
 pub use diff::{
     DEFAULT_CONTEXT_LINES, DiffLine, DiffOrigin, DiffStat, FileDiff, Hunk,
-    WHOLE_FILE_CONTEXT_LINES, commit_diff_entry, commit_files, diff_entry, parse_diff,
+    WHOLE_FILE_CONTEXT_LINES, commit_diff_entry, commit_files, diff_entry, diff_proposal, parse_diff,
     parse_numstat, stats,
 };
 pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, directory_statuses};

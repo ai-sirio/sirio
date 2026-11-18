@@ -62,15 +62,22 @@ fn write_transaction(conn: &Connection) -> Result<rusqlite::Transaction<'_>, Per
 
 impl AppDatabase {
     /// Opens (creating if missing) the database at `path`, migrating it
-    /// forward to the current schema. The parent directory must exist.
+    /// forward to the current schema. On unix a missing parent directory is created (0700);
+    /// elsewhere it must exist.
     ///
     /// A corrupt or unreadable file returns [`PersistenceError::Corrupt`] /
     /// [`PersistenceError::Sqlite`] — it is never panicked on and never
     /// silently discarded: the file is left untouched.
+    ///
+    /// On unix the directory the file lives in is made owner-only (0700) before anything is
+    /// written there, and the file with its `-wal` and `-shm` beside it owner-only (0600): the
+    /// database holds the IDE bridge's token (spec section 10.11).
     pub fn open(path: &Path) -> Result<Self, PersistenceError> {
+        make_directory_private(path);
         let _initial_open_lock = acquire_initial_open_lock(path)?;
         validate_existing_file(path)?;
         let conn = Self::open_connection(path)?;
+        make_files_private(path);
         Ok(Self {
             conn,
             path: Some(path.to_path_buf()),
@@ -1233,6 +1240,27 @@ impl AppDatabase {
         Ok(())
     }
 
+    /// The port Sirio's IDE bridge listened on last, and the token it served. Both are kept so
+    /// a restarted Sirio listens where the terminals it left behind expect it, and a client
+    /// that lost its connection can reconnect with what it already holds. Absent until the
+    /// bridge first starts; an unparseable port reads back as absent.
+    pub fn ide_bridge_endpoint(&self) -> Result<(Option<u16>, Option<String>), PersistenceError> {
+        let port = self
+            .setting_value(settings_keys::IDE_BRIDGE_PORT)?
+            .and_then(|value| value.parse::<u16>().ok());
+        let token = self.setting_value(settings_keys::IDE_BRIDGE_TOKEN)?;
+        Ok((port, token))
+    }
+
+    /// Saves the IDE bridge's port and token together.
+    pub fn set_ide_bridge_endpoint(&self, port: u16, token: &str) -> Result<(), PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        set_setting(&transaction, settings_keys::IDE_BRIDGE_PORT, &port.to_string())?;
+        set_setting(&transaction, settings_keys::IDE_BRIDGE_TOKEN, token)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
@@ -1268,6 +1296,9 @@ impl AppDatabase {
         }
         if let Some(value) = self.setting_value(settings_keys::RESUME_AGENT_SESSIONS)? {
             defaults.resume_agent_sessions = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::CLAUDE_IDE_BRIDGE)? {
+            defaults.claude_ide_bridge = parse_bool_setting(&value, true);
         }
         if let Some(value) = self.setting_value(settings_keys::AUTO_NAMING)? {
             defaults.auto_naming = parse_bool_setting(&value, false);
@@ -1462,6 +1493,15 @@ impl AppDatabase {
             &transaction,
             settings_keys::RESUME_AGENT_SESSIONS,
             if settings.resume_agent_sessions {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::CLAUDE_IDE_BRIDGE,
+            if settings.claude_ide_bridge {
                 "true"
             } else {
                 "false"
@@ -1796,6 +1836,57 @@ fn initial_open_lock_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| std::borrow::Cow::Borrowed("database"));
     path.with_file_name(format!(".{file_name}.sirio-open.lock"))
 }
+
+/// Creates `path`'s directory as 0700 if it is missing and makes it 0700 if it is not already.
+/// A sticky directory (a shared one such as /tmp) is left alone, and so is one this user cannot
+/// change. Best effort: a failure is logged without the path and never stops the open.
+#[cfg(unix)]
+fn make_directory_private(path: &Path) {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return;
+    };
+    if let Err(error) = fs::DirBuilder::new().recursive(true).mode(0o700).create(dir) {
+        eprintln!("[persistence] the state directory could not be created: {}", error.kind());
+        return;
+    }
+    let Ok(metadata) = fs::metadata(dir) else {
+        return;
+    };
+    let mode = metadata.permissions().mode();
+    if mode & 0o1000 != 0 || mode & 0o777 == 0o700 {
+        return;
+    }
+    if let Err(error) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
+        eprintln!("[persistence] the state directory is not owner-only: {}", error.kind());
+    }
+}
+
+#[cfg(not(unix))]
+fn make_directory_private(_path: &Path) {}
+
+/// Makes the database and its `-wal` and `-shm` (whichever exist) owner-only. SQLite gives a
+/// sidecar the mode its database file has, so the ones created later follow.
+#[cfg(unix)]
+fn make_files_private(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let file = PathBuf::from(name);
+        let Ok(metadata) = fs::metadata(&file) else {
+            continue;
+        };
+        if metadata.permissions().mode() & 0o777 != 0o600
+            && let Err(error) = fs::set_permissions(&file, fs::Permissions::from_mode(0o600))
+        {
+            eprintln!("[persistence] the database is not owner-only: {}", error.kind());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn make_files_private(_path: &Path) {}
 
 /// Validates an existing file before opening it read-write. A missing path is
 /// a new database; an existing empty file is almost certainly a truncated
@@ -2341,6 +2432,89 @@ mod agent_account_tests {
         );
 
         drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// What the database holds is private to its user: the bridge's token is in it (spec section
+/// 10.11), and with these modes it is no easier to read than the lockfile's.
+///
+/// Every way this could fail, written before the code:
+/// - `an_existing_state_directory_becomes_owner_only`: a directory that already exists as 0755 is
+///   left as it was (only a freshly created one is private);
+/// - `a_new_database_and_its_sidecars_are_owner_only`: the file, the -wal and the -shm come out
+///   0644 under the usual umask;
+/// - `an_existing_world_readable_database_becomes_owner_only`: a database an older Sirio made
+///   0644 stays so;
+/// - `a_sticky_directory_is_left_alone`: opening a database that sits directly in a shared
+///   directory such as /tmp changes that directory's mode.
+#[cfg(all(test, unix))]
+mod private_modes_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sirio-modes-{tag}-{}-{}",
+            std::process::id(),
+            unix_timestamp_millis()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).expect("metadata").permissions().mode() & 0o7777
+    }
+
+    fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
+    #[test]
+    fn an_existing_state_directory_becomes_owner_only() {
+        let dir = scratch("dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _db = AppDatabase::open(&dir.join("state.sqlite")).expect("open");
+        assert_eq!(mode(&dir), 0o700);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_database_and_its_sidecars_are_owner_only() {
+        let dir = scratch("new");
+        let path = dir.join("state.sqlite");
+        let _db = AppDatabase::open(&path).expect("open");
+        assert_eq!(mode(&path), 0o600);
+        // WAL mode keeps both beside the file while the connection is open.
+        for suffix in ["-wal", "-shm"] {
+            assert_eq!(mode(&sidecar(&path, suffix)), 0o600, "{suffix}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_world_readable_database_becomes_owner_only() {
+        let dir = scratch("old");
+        let path = dir.join("state.sqlite");
+        drop(AppDatabase::open(&path).expect("create"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _db = AppDatabase::open(&path).expect("reopen");
+        assert_eq!(mode(&path), 0o600);
+        for suffix in ["-wal", "-shm"] {
+            assert_eq!(mode(&sidecar(&path, suffix)), 0o600, "{suffix}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sticky_directory_is_left_alone() {
+        let dir = scratch("sticky");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let _db = AppDatabase::open(&dir.join("state.sqlite")).expect("open");
+        assert_eq!(mode(&dir), 0o1777);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
