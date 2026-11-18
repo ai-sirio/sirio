@@ -676,6 +676,11 @@ Each item is laid out the same way:
     only the fake API, which sends the headers. It checks a warning's fields and an extra-usage
     denial with `limitScope`. It rests on how the CLI detects a gateway, so it is `#[ignore]` like
     the other live tests.
+  - **Approval.** t2s approved every deviation above on 2026-11-18, the local-command rule as
+    written (any command answered with `local_command_run`, the floor unchanged), with three
+    conditions. The gateway token lives only in the CLI's environment and the test's TMPDIR, and
+    the test checks that the base URL is 127.0.0.1 before it starts the CLI; the PR's Merge
+    Danger says so. The new rate-limit copy goes in the PR's release-notes line.
 
 ### A10 · Subagent text: designed with Enzo when it comes up
 
