@@ -13,6 +13,7 @@
 pub mod catalog;
 pub mod context;
 pub mod control;
+pub mod hooks;
 pub mod launch;
 pub mod mcp;
 pub mod message;
@@ -34,6 +35,7 @@ pub use control::{
     CanUseTool, ControlEnvelope, ControlRequest, ElicitationRequest, PermissionResult,
     THINKING_DISPLAYS, control_error, control_request_subtype, elicitation_response, is_refusal,
 };
+pub use hooks::{Hook, HookEvent, HooksListing, HooksMode, HooksPolicy, parse_hooks_listing};
 pub use launch::{ChatSession, LaunchLine};
 pub use mcp::{McpAuthStart, McpOrigin, McpServer, McpState, parse_mcp_status};
 pub use message::{

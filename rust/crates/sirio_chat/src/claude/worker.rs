@@ -23,9 +23,9 @@ use sirio_chat_child::{
 };
 use sirio_claude::{
     Catalog, ChatSession, CliMessage, ContextBreakdown, ContextUsageReport, ControlEnvelope,
-    ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer, McpServerStatus,
-    PermissionRules, PluginsReloaded, RewindOutcome, TaskOutput, parse_mcp_status,
-    parse_permission_rules, parse_plugins_reload,
+    ControlRequest, EFFORT_DEFAULT, FastMode, HooksListing, LaunchLine, McpAuthStart, McpServer,
+    McpServerStatus, PermissionRules, PluginsReloaded, RewindOutcome, TaskOutput,
+    parse_hooks_listing, parse_mcp_status, parse_permission_rules, parse_plugins_reload,
 };
 
 use super::{ClaudeLaunch, ReloadError};
@@ -99,6 +99,11 @@ pub(super) enum Command {
     /// own refusal text when it refuses.
     PermissionRules {
         reply: mpsc::SyncSender<Result<PermissionRules, String>>,
+    },
+    /// Ask the CLI for the hooks it loaded. The reply carries the CLI's own
+    /// refusal text when it refuses.
+    HooksListing {
+        reply: mpsc::SyncSender<Result<HooksListing, String>>,
     },
     /// Ask the CLI to connect a server again.
     McpReconnect {
@@ -759,6 +764,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
         String,
         mpsc::SyncSender<Result<PermissionRules, String>>,
     > = HashMap::new();
+    let mut pending_hooks_listing: HashMap<String, mpsc::SyncSender<Result<HooksListing, String>>> =
+        HashMap::new();
     let mut pending_mcp_reconnects: HashMap<String, mpsc::SyncSender<Result<(), String>>> =
         HashMap::new();
     let mut pending_mcp_auths: HashMap<String, mpsc::SyncSender<Result<McpAuthStart, String>>> =
@@ -1126,6 +1133,17 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                     (None, Some(error)) => Err(error.clone()),
                                     (None, None) => Err(no_rules()),
+                                });
+                            }
+                            if let Some(reply) = pending_hooks_listing.remove(&envelope.request_id)
+                            {
+                                let no_hooks = || "the answer had no hooks".to_string();
+                                let _ = reply.send(match (&envelope.payload, &envelope.error) {
+                                    (Some(payload), _) => {
+                                        parse_hooks_listing(payload).ok_or_else(no_hooks)
+                                    }
+                                    (None, Some(error)) => Err(error.clone()),
+                                    (None, None) => Err(no_hooks()),
                                 });
                             }
                             if let Some(reply) = pending_mcp_reconnects.remove(&envelope.request_id)
@@ -1792,6 +1810,19 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the permission rules request".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::HooksListing { reply }) => {
+                        let id = next_request_id();
+                        pending_hooks_listing.insert(id.clone(), reply);
+                        if write_line(&mut stdin, &ControlRequest::get_hooks_listing(&id))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the hooks listing request".into(),
                             );
                         }
                     }

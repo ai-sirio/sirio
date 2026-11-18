@@ -141,6 +141,13 @@ impl ControlRequest {
         Self::envelope(request_id, json!({"subtype": "list_permission_rules"}))
     }
 
+    /// The hooks the session loaded, as the CLI's `/hooks` menu lists them.
+    /// Older CLIs refuse it as an unsupported subtype.
+    #[must_use]
+    pub fn get_hooks_listing(request_id: &str) -> Value {
+        Self::envelope(request_id, json!({"subtype": "get_hooks_listing"}))
+    }
+
     /// Asks the CLI to connect a server again.
     #[must_use]
     pub fn mcp_reconnect(request_id: &str, server: &str) -> Value {
