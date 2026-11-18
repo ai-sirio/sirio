@@ -608,7 +608,7 @@ impl Chat {
                     }
                 };
                 if agent != previous_agent
-                    && let Some(name) = &agent
+                    && let Some(name) = agent.as_ref().or(Some(&title))
                 {
                     group = group.child(
                         div()
@@ -652,19 +652,21 @@ impl Chat {
                         output_scrolls,
                     ),
                     SubagentPart::Text { document, .. } => div()
+                        .id(part_id)
                         .px(px(12.0))
                         .py(px(6.0))
                         .text_size(theme.typography.callout)
-                        .child(MarkdownBody::new(document))
+                        .child(MarkdownBody::with_file_links(document, entity.clone()))
                         .into_any_element(),
                     SubagentPart::Thought { text, open, .. } => {
                         let toggle_entity = entity.clone();
                         let mut block = ely_gpui_component::chat::ThinkingBlock::new(
                             part_id,
-                            "Thought",
+                            "",
                             false,
                             std::time::Duration::ZERO,
                         )
+                        .label("Thought")
                         .header_selector(format!(
                             "subagent-thought-toggle-{task_index}-{child_index}"
                         ))

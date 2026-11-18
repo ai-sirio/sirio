@@ -149,6 +149,9 @@ struct MarkdownBody {
     /// What a transcript response's last layout recorded, read after paint to
     /// report where its links are drawn.
     hit: Option<DocHit>,
+    /// A body that is not part of the transcript selection but whose file
+    /// links still open in Sirio: the chat that handles them.
+    file_links: Option<Entity<Chat>>,
 }
 
 /// Where an assistant response's rendered markdown sits in the transcript's
@@ -285,6 +288,16 @@ impl MarkdownBody {
             selection: None,
             rendered: None,
             hit: None,
+            file_links: None,
+        }
+    }
+
+    /// A body outside the transcript selection (a subagent card's text) whose
+    /// file links open through `chat`, as a response's do.
+    fn with_file_links(document: bezel_markdown::Doc, chat: Entity<Chat>) -> Self {
+        Self {
+            file_links: Some(chat),
+            ..Self::new(document)
         }
     }
 
@@ -303,6 +316,7 @@ impl MarkdownBody {
             }),
             rendered: None,
             hit: None,
+            file_links: None,
         }
     }
 
@@ -449,6 +463,50 @@ impl MarkdownBody {
         if let Some(selection) = self.selection.clone() {
             let (element, hit) = self.build_selectable(selection, window, cx);
             return (element, Some(hit));
+        }
+        if let Some(chat) = self.file_links.clone() {
+            let layouts = bezel_markdown::BlockLayouts::default();
+            let rendered = bezel_markdown::render_with_selection(
+                &self.document,
+                None,
+                Some(&layouts),
+                None,
+                bezel_markdown::Caption::Shown,
+                window,
+                cx,
+            );
+            let document = self.document.clone();
+            let element = div()
+                .w_full()
+                .capture_any_mouse_up(move |event, window, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+                    let position = event.position;
+                    let Some(target) = layouts
+                        .over_text(position)
+                        .then(|| layouts.hit(position))
+                        .flatten()
+                        .and_then(|cursor| markdown_link_at(&document, cursor))
+                        .and_then(|url| file_link_target(&url))
+                    else {
+                        return;
+                    };
+                    chat.update(cx, |_, cx| {
+                        if file_links::may_open_on_click(&target.path) {
+                            cx.emit(ChatEvent::OpenFileAt {
+                                path: target.path.clone(),
+                                line: target.line,
+                                column: target.column,
+                            });
+                        }
+                    });
+                    cx.stop_propagation();
+                    window.prevent_default();
+                })
+                .child(rendered)
+                .into_any_element();
+            return (element, None);
         }
         (
             bezel_markdown::render(&self.document, bezel_markdown::Caption::Shown, window, cx),
@@ -3304,14 +3362,14 @@ impl Chat {
             SubagentItem::Opened => return,
             SubagentItem::Text(text) => {
                 let text = visible_text::visible_text(&text, true);
-                if text.is_empty() {
+                if text.trim().is_empty() {
                     return;
                 }
                 self.text_part(agent, text)
             }
             SubagentItem::Thinking(text) => {
                 let text = visible_text::visible_text(&text, true);
-                if text.is_empty() {
+                if text.trim().is_empty() {
                     return;
                 }
                 SubagentPart::Thought {
