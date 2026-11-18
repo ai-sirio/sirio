@@ -57,6 +57,7 @@ mod controls;
 mod file_links;
 use file_links::file_link_target;
 mod history;
+mod limit_notice;
 pub(crate) mod list_scroll;
 mod menus;
 mod mode_cycle;
@@ -2979,13 +2980,26 @@ impl Chat {
                 text: summary,
                 kind: NoticeKind::BackgroundTask,
             },
-            SessionNotice::RateLimited { window, .. } => {
-                let text = match window {
-                    Some(window) => format!("Usage limit reached ({window})"),
-                    None => "Usage limit reached".to_string(),
-                };
+            SessionNotice::RateLimited {
+                status,
+                window,
+                resets_at,
+                used_percent,
+                limit_scope,
+            } => {
+                let now = chrono::Local::now();
+                let resets_at = resets_at
+                    .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+                    .map(|at| at.with_timezone(&chrono::Local));
                 Entry::Notice {
-                    text,
+                    text: limit_notice::rate_limit_sentence(
+                        &status,
+                        window.as_deref(),
+                        used_percent,
+                        resets_at,
+                        limit_scope.as_deref(),
+                        &now,
+                    ),
                     kind: NoticeKind::Warning,
                 }
             }
@@ -18798,6 +18812,8 @@ two"
                 status: "rejected".into(),
                 window: None,
                 resets_at: None,
+                used_percent: None,
+                limit_scope: None,
             }, cx);
             chat.apply_notice(SessionNotice::CliNotice {
                 text: "Opus 5.5's safeguards stopped the response".into(),

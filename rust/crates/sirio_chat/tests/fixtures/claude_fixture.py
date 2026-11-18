@@ -2084,6 +2084,35 @@ def wait_for_handshake_gate():
 # ---------------------------------------------------------------------------
 
 RETRY_GATE_PATH = flag_value("fixture-retry-gate")
+# `--fixture-limits=<file>`: JSON `{"soon": epoch, "later": epoch}`, the reset times the
+# `limit ...` prompts report (read when the prompt arrives, so the file may be written late).
+LIMITS_PATH = flag_value("fixture-limits")
+
+
+def cli_limit_resets():
+    with open(LIMITS_PATH, encoding="utf-8") as handle:
+        limits = json.load(handle)
+    return limits["soon"], limits["later"]
+
+
+def cli_limit_event(info):
+    send({"type": "rate_limit_event", "rate_limit_info": info,
+          "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
+def cli_limit_refused(text_body, info):
+    """A turn the plan refused: the event, the CLI's synthetic error message and a
+    failed `result`, with no model reply (written by hand like `retry out`)."""
+    cli_limit_event(info)
+    send({"type": "assistant",
+          "message": {"id": trace_uuid(), "type": "message", "role": "assistant",
+                      "model": "<synthetic>", "content": [{"type": "text", "text": text_body}],
+                      "stop_reason": "stop_sequence"},
+          "error": "rate_limit", "is_api_error_message": True, "api_error_status": 429,
+          "parent_tool_use_id": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+    send({"type": "result", "subtype": "success", "is_error": True, "result": text_body,
+          "terminal_reason": "api_error", "api_error_status": 429,
+          "stop_reason": "stop_sequence", "session_id": SESSION_ID, "uuid": trace_uuid()})
 
 
 def cli_system(subtype, **fields):
@@ -2150,6 +2179,31 @@ def cli_notices_turn(prompt):
               "session_id": SESSION_ID, "uuid": trace_uuid()})
         send({"type": "result", "subtype": "success", "is_error": True, "result": sentence,
               "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+        return
+    elif prompt in ("limit warning", "limit warning again", "limit allowed"):
+        soon, _ = cli_limit_resets()
+        cli_streamed("ok", "msg_lw")
+        info = {"status": "allowed", "resetsAt": soon, "rateLimitType": "five_hour"}
+        if prompt != "limit allowed":
+            info.update({"status": "allowed_warning", "utilization": 0.92,
+                         "surpassedThreshold": 0.9})
+        if prompt == "limit warning":
+            info["unifiedWindows"] = {"five_hour": {"utilization": 0.92, "resetsAt": soon}}
+        cli_limit_event(info)
+    elif prompt == "limit rejected":
+        soon, _ = cli_limit_resets()
+        cli_limit_refused(
+            "You've hit your limit \u00b7 resets 3:15pm (UTC)",
+            {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": soon,
+             "unifiedWindows": {"five_hour": {"utilization": 1, "resetsAt": soon}}})
+        return
+    elif prompt == "limit pooled":
+        _, later = cli_limit_resets()
+        cli_limit_refused(
+            "You've hit your team's pooled group budget",
+            {"status": "rejected", "rateLimitType": "overage", "resetsAt": later,
+             "overageDisabledReason": "org_level_disabled_until",
+             "limitScope": "group_pool"})
         return
     elif prompt == "notify":
         cli_streamed("ok", "msg_n")

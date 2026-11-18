@@ -1042,6 +1042,9 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
                 status: "rejected".into(),
                 window: Some("five_hour".into()),
                 resets_at: Some(1_789_990_800),
+                used_percent: Some(100),
+                // The CLI sends a scope only with an overage denial.
+                limit_scope: None,
             },
         ]
     );

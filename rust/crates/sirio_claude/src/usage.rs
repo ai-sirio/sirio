@@ -6,6 +6,18 @@
 
 use serde_json::Value;
 
+/// A percent as the whole number a reader sees: `value` is already on the
+/// 0–100 scale, rounded down, so a warning never reads 100%. The epsilon
+/// keeps IEEE products whole: `0.57 * 100.0` is `56.99999999999999` and must
+/// read 57. Anything outside 0–100 (and NaN) is clamped into it.
+#[must_use]
+pub fn whole_percent(value: f64) -> u8 {
+    // Truncation is the point: the value is clamped to 0..=100 first.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let whole = (value + 1e-9).floor().clamp(0.0, 100.0) as u8;
+    whole
+}
+
 /// One rate-limit window: how full it is and when it resets.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RateLimitWindow {

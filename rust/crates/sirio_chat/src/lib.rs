@@ -443,5 +443,5 @@ pub use sirio_claude::{
     CacheImpact, ContextBreakdown, ContextOrigins, FastMode, Hook, HookEvent, HooksListing,
     HooksMode, HooksPolicy, McpAuthStart, McpOrigin, McpServer, McpState, OriginNode,
     PermissionRule, PermissionRules, PluginsReloaded, SettingsError, Standing, THINKING_DISPLAYS,
-    TaskOutput, is_refusal,
+    TaskOutput, is_refusal, whole_percent,
 };

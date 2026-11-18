@@ -2,11 +2,13 @@
 # The `claude` of test-chat-session-panel-e2e.sh's notice_* scenarios: the version probe answers at once
 # (above sirio_claude::MIN_CLAUDE_VERSION, so the chat is native), and any other call is the stream-json
 # fixture in its cli_notices mode (the prompt picks the turn: retry twice, retry kinds, retry out, notify,
-# notify short, notify short again, notify typed, refuse, refuse fallback, refuse none, inform levels,
+# notify short, notify short again, notify typed, limit warning, limit warning again, limit allowed, limit rejected,
+# limit pooled, refuse, refuse fallback, refuse none, inform levels,
 # subagent text, midstream, midstream drop, unstreamed; anything else answers ok). Every SIRIO_FIXTURE_*
 # variable below that the scenario sets is handed to the fixture as its matching flag; an unset one passes nothing:
 #   SIRIO_FIXTURE_RETRY_GATE  --fixture-retry-gate  holds `retry twice` after its retries until the file exists
 #   SIRIO_FIXTURE_STARTUP     --fixture-startup     the kind of start-up failure the CLI reports (A7 Task 5)
+#   SIRIO_FIXTURE_LIMITS      --fixture-limits      JSON {"soon": epoch, "later": epoch}, the resets of the `limit ...` prompts
 # Every call is recorded in $SIRIO_STUB_LOG when the run names one.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 [ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
@@ -18,4 +20,5 @@ esac
 exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" cli_notices \
   ${SIRIO_FIXTURE_RETRY_GATE:+"--fixture-retry-gate=$SIRIO_FIXTURE_RETRY_GATE"} \
   ${SIRIO_FIXTURE_STARTUP:+"--fixture-startup=$SIRIO_FIXTURE_STARTUP"} \
+  ${SIRIO_FIXTURE_LIMITS:+"--fixture-limits=$SIRIO_FIXTURE_LIMITS"} \
   "$@"

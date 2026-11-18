@@ -651,6 +651,11 @@ pub enum SessionNotice {
         window: Option<String>,
         /// When that window resets, in unix seconds.
         resets_at: Option<i64>,
+        /// How full that window is, in whole percent, when the event said.
+        used_percent: Option<u8>,
+        /// What an overage denial was charged to (`service`, `group_pool`,
+        /// `channel`), as the CLI sent it.
+        limit_scope: Option<String>,
     },
     /// The CLI is retrying a failed API request.
     Retrying {

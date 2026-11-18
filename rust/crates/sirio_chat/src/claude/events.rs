@@ -74,10 +74,11 @@ pub(crate) struct Fold {
     backgrounded: BTreeSet<String>,
     /// How many background tasks the CLI last said were running.
     background_tasks: usize,
-    /// The last rate-limit status announced. The push repeats every turn,
-    /// and re-announcing an unchanged refusal would stack one banner per
-    /// turn until the window resets.
-    rate_limit_status: Option<String>,
+    /// The last rate-limit line announced, as (status, window, scope). The
+    /// push repeats every turn, and re-announcing an unchanged one would
+    /// stack one banner per turn until the window resets. An `allowed` push
+    /// clears it, so the same warning is news again after the plan has room.
+    rate_limit_seen: Option<(String, Option<String>, Option<String>)>,
     /// Ids of the main-thread messages a `message_start` announced since the
     /// last `result`. An `assistant` line with one of these ids has already
     /// been drawn from its deltas.
@@ -328,21 +329,34 @@ impl Fold {
             | CliMessage::ControlCancelRequest(_) => Vec::new(),
             CliMessage::RateLimit(limit) => {
                 // The push arrives every turn and almost always says the
-                // plan has room, which is not news. Only a change to a
-                // status that is not `allowed` is.
+                // plan has room, which is not news. Only a change to the
+                // (status, window, scope) of one that is not `allowed` is:
+                // the CLI sends a new event for each scope.
+                //
+                // Known limit: a warning on a second window leaves the
+                // event's top level unchanged (the second window only shows
+                // up under `unifiedWindows`), so it has the same key and
+                // adds no line.
                 let status = limit.status.clone().unwrap_or_default();
                 if status.is_empty() || status == "allowed" {
-                    self.rate_limit_status = Some(status);
+                    self.rate_limit_seen = None;
                     return Vec::new();
                 }
-                if self.rate_limit_status.as_deref() == Some(status.as_str()) {
+                let key = (
+                    status.clone(),
+                    limit.rate_limit_type.clone(),
+                    limit.limit_scope.clone(),
+                );
+                if self.rate_limit_seen.as_ref() == Some(&key) {
                     return Vec::new();
                 }
-                self.rate_limit_status = Some(status.clone());
+                self.rate_limit_seen = Some(key);
                 self.notices.push(SessionNotice::RateLimited {
                     status,
                     window: limit.rate_limit_type.clone(),
                     resets_at: limit.resets_at,
+                    used_percent: limit.used_percent,
+                    limit_scope: limit.limit_scope.clone(),
                 });
                 vec![ChatEvent::OtherSessionUpdate {
                     kind: "SessionNotice".into(),
@@ -1127,12 +1141,60 @@ mod tests {
                 status: "rejected".into(),
                 window: Some("seven_day".into()),
                 resets_at: Some(1_790_496_000),
+                used_percent: Some(100),
+                limit_scope: None,
             }]
         );
         // The push repeats every turn. Saying it again while nothing has
         // changed would stack one banner per turn for the rest of the day.
         assert!(fold.apply(parse(line)).is_empty());
         assert!(fold.take_notices().is_empty());
+    }
+
+    // Failure list, written before the code: a rejection on the same window
+    // swallowed by the warning that came before it (status-only key); a
+    // rejection under a new scope swallowed by the one before it; the same
+    // warning announced twice because one carried `unifiedWindows`; the same
+    // warning swallowed after an `allowed` in between.
+    #[test]
+    fn a_rate_limit_is_announced_again_only_when_status_window_or_scope_changes() {
+        let push = |info: serde_json::Value| {
+            json!({"type": "rate_limit_event", "rate_limit_info": info})
+        };
+        let warning = || {
+            json!({"status": "allowed_warning", "rateLimitType": "five_hour",
+                   "utilization": 0.92, "resetsAt": 1789990800})
+        };
+        let mut fold = Fold::new();
+        let mut announced = |fold: &mut Fold, info: serde_json::Value| {
+            fold.apply(parse(push(info)));
+            fold.take_notices().len()
+        };
+        assert_eq!(announced(&mut fold, warning()), 1);
+        // The same warning, with or without the per-window detail.
+        let mut detailed = warning();
+        detailed["unifiedWindows"] = json!({"five_hour": {"utilization": 0.92}});
+        assert_eq!(announced(&mut fold, detailed), 0);
+        assert_eq!(announced(&mut fold, warning()), 0);
+        // The same window refusing is a change of status.
+        let mut rejected = warning();
+        rejected["status"] = json!("rejected");
+        assert_eq!(announced(&mut fold, rejected.clone()), 1);
+        assert_eq!(announced(&mut fold, rejected.clone()), 0);
+        // A new scope is a new event, with the same status and window.
+        let mut scoped = rejected.clone();
+        scoped["limitScope"] = json!("group_pool");
+        assert_eq!(announced(&mut fold, scoped.clone()), 1);
+        assert_eq!(announced(&mut fold, scoped), 0);
+        // Another window with the same status is a change of window.
+        let mut weekly = rejected;
+        weekly["rateLimitType"] = json!("seven_day");
+        assert_eq!(announced(&mut fold, weekly), 1);
+        // The plan having room clears the memory: the warning is news again.
+        let mut allowed = warning();
+        allowed["status"] = json!("allowed");
+        assert_eq!(announced(&mut fold, allowed), 0);
+        assert_eq!(announced(&mut fold, warning()), 1);
     }
 
     #[test]

@@ -90,6 +90,9 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      "\n\nDetails:" and a bidi override shows the override as text, and the informational
 #                      levels are info, info, info-warning
 #   notice_midstream   a reply cut by an error is not glued to the answer that follows
+#   limit_notice       (SIRIO_FIXTURE_LIMITS, SIRIO_E2E_TZ=UTC) the rate-limit rows say which window, how full and when
+#                      it resets: a warning once (not again, but again after an allowed), then the refusal, then the
+#                      overage refusal with its scope; the CLI's own refusal text is still one assistant row
 #   startup_*          (SIRIO_FIXTURE_STARTUP) the chat's error row is the CLI's own start-up text, with no ACP in it:
 #     startup_config_invalid  the sentence, the file and its backup, and the override shown as text
 #     startup_opt_in     a reason the CLI reports only when Sirio's launch sets CLAUDE_CODE_STARTUP_FAILURE_RESULTS
@@ -389,7 +392,7 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   permission_rules permission_rules_refused permission_rules_closed_panel permission_rules_coalesced
   permission_rules_after_always_allow permission_rules_unreadable
   hooks_card hooks_policy hooks_refused hooks_closed_panel hooks_coalesced hooks_refresh hooks_unreadable
-  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream
+  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream limit_notice
   startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
@@ -1234,6 +1237,8 @@ capture() { # name
 #                  and the file that holds every one of those answers (hooks_*)
 #   SIRIO_FIXTURE_RETRY_GATE, SIRIO_FIXTURE_STARTUP  the notices stub's file that holds `retry twice` after its retries,
 #                  and the kind of start-up failure the CLI reports (notice_*)
+#   SIRIO_FIXTURE_LIMITS  the notices stub's JSON {"soon": epoch, "later": epoch}: the resets the `limit ...` prompts report
+#   SIRIO_E2E_TZ   when set, the TZ Sirio runs under, so local times are the same wherever the run happens
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
 #                  every control request to (composer_keys reads them)
@@ -1275,6 +1280,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_RELOAD=${SIRIO_FIXTURE_RELOAD:-}" "SIRIO_FIXTURE_RELOAD_GATE=${SIRIO_FIXTURE_RELOAD_GATE:-}"
     "SIRIO_FIXTURE_SKILLS=${SIRIO_FIXTURE_SKILLS:-}" "SIRIO_FIXTURE_CLI_BUSY_GATE=${SIRIO_FIXTURE_CLI_BUSY_GATE:-}"
     "SIRIO_FIXTURE_RETRY_GATE=${SIRIO_FIXTURE_RETRY_GATE:-}" "SIRIO_FIXTURE_STARTUP=${SIRIO_FIXTURE_STARTUP:-}"
+    "SIRIO_FIXTURE_LIMITS=${SIRIO_FIXTURE_LIMITS:-}"
     "SIRIO_FIXTURE_HOOKS=${SIRIO_FIXTURE_HOOKS:-}" "SIRIO_FIXTURE_HOOKS_GATE=${SIRIO_FIXTURE_HOOKS_GATE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
@@ -1283,6 +1289,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
   # A performance trace names a file that does not exist yet, one per launch.
   [ -z "${PERF_TRACE:-}" ] || pairs+=("SIRIO_PERF_TRACE=$PERF_TRACE")
   [ -z "${LC_ALL:-}" ] || pairs+=("LC_ALL=$LC_ALL")
+  [ -z "${SIRIO_E2E_TZ:-}" ] || pairs+=("TZ=$SIRIO_E2E_TZ")
   if [ -n "$DISPLAY_TARGET" ]; then
     pairs+=("DISPLAY=$DISPLAY_TARGET" "GPUI_X11_SCALE_FACTOR=1" "${VULKAN_ENV[@]}")
   fi
@@ -5246,6 +5253,45 @@ scenario_notice_midstream() {
   stop_app
 }
 
+# The rate-limit rows (A9): every reset is 3 or 4 days off, so `{T}` is `%a %H:%M` whenever this runs. The unit
+# test of `rate_limit_sentence` covers the same-day and far-date formats. Guard: the CLI's own refusal text is one
+# assistant row (true before A9).
+scenario_limit_notice() {
+  SIRIO_E2E_TZ=UTC
+  SIRIO_FIXTURE_LIMITS="$RUN_DIR/limit_notice-limits.json"
+  local ts tl
+  read -r ts tl < <(python3 - "$SIRIO_FIXTURE_LIMITS" <<'PY'
+import json, sys, time
+from datetime import datetime, timezone
+days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+now = int(time.time())
+soon, later = now + 3 * 86400, now + 4 * 86400
+with open(sys.argv[1], "w") as handle:
+    json.dump({"soon": soon, "later": later}, handle)
+def text(epoch):
+    at = datetime.fromtimestamp(epoch, timezone.utc)
+    return "%s_%s" % (days[at.weekday()], at.strftime("%H:%M"))
+print(text(soon), text(later))
+PY
+)
+  ts=${ts/_/ }
+  tl=${tl/_/ }
+  notices_chat limit_notice
+  local n=0 prompt
+  for prompt in "limit warning" "limit warning again" "limit allowed" "limit warning" "limit rejected" "limit pooled"; do
+    n=$((n + 1))
+    send_prompt "$prompt"
+    notice_turns "the turn of '$prompt' ends" "$n"
+  done
+  check_panel "the warnings, once per change, then the refusals, each saying which and when" \
+    "[r['text'] for r in c['transcript'] if r['kind'] == 'warning'] == ['Approaching the 5-hour usage limit: 92% used, resets at $ts.', 'Approaching the 5-hour usage limit: 92% used, resets at $ts.', '5-hour usage limit reached, resets at $ts.', \"Extra usage limit reached (your team's pooled budget), resets at $tl.\"]"
+  # Guard: true before A9.
+  check_panel "Guard: the CLI's refusal text is one assistant row" \
+    "len([r for r in c['transcript'] if r['kind'] == 'assistant' and r.get('text') == \"You've hit your limit · resets 3:15pm (UTC)\"]) == 1"
+  echo "OK: limit_notice: the rate-limit rows name the window, the fill, the scope and the reset"
+  stop_app
+}
+
 # ---- the startup_* scenarios (A7) ------------------------------------------------------
 # A fresh Sirio on the notices stub whose CLI cannot start; waits for the chat's error row, not a connection.
 startup_chat() { # name kind
@@ -5321,6 +5367,8 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_CLI_BUSY_GATE=""
   SIRIO_FIXTURE_RETRY_GATE=""
   SIRIO_FIXTURE_STARTUP=""
+  SIRIO_FIXTURE_LIMITS=""
+  SIRIO_E2E_TZ=""
   SIRIO_FIXTURE_HOOKS=""
   SIRIO_FIXTURE_HOOKS_GATE=""
   "scenario_$name"

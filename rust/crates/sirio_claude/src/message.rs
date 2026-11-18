@@ -368,6 +368,13 @@ pub struct RateLimitPush {
     pub five_hour: Option<f64>,
     /// Seven-day window utilization on the **0–100 scale**.
     pub seven_day: Option<f64>,
+    /// How full the window `status` is about is, in whole percent: the
+    /// event's top-level `utilization`, or else that window's own entry in
+    /// `unifiedWindows`, by [`crate::whole_percent`].
+    pub used_percent: Option<u8>,
+    /// What an overage denial was charged to: `service`, `group_pool`,
+    /// `channel`. The CLI sends it only with an overage denial.
+    pub limit_scope: Option<String>,
 }
 
 impl RateLimitPush {
@@ -383,12 +390,21 @@ impl RateLimitPush {
                 .as_f64()
                 .map(to_percent)
         };
+        let rate_limit_type = string(info, "rateLimitType");
+        let used = info
+            .get("utilization")
+            .and_then(serde_json::Value::as_f64)
+            .map(to_percent)
+            .or_else(|| window(rate_limit_type.as_deref()?))
+            .map(crate::whole_percent);
         Some(Self {
             status: string(info, "status"),
-            rate_limit_type: string(info, "rateLimitType"),
+            rate_limit_type,
             resets_at: info.get("resetsAt").and_then(serde_json::Value::as_i64),
             five_hour: window("five_hour"),
             seven_day: window("seven_day"),
+            used_percent: used,
+            limit_scope: string(info, "limitScope"),
         })
     }
 }
@@ -937,6 +953,44 @@ mod tests {
         assert_eq!(compaction.trigger.as_deref(), Some("manual"));
         assert_eq!(compaction.pre_tokens, Some(43_134));
         assert_eq!(compaction.post_tokens, Some(11_574));
+    }
+
+    // Failure list, written before the code: 0.57 read as 56 (IEEE product),
+    // 0.999 rounded up to 100, the top-level utilization ignored in favour of
+    // the window's, a window with no top level not read at all, a `limitScope`
+    // dropped, a missing utilization read as 0%, a utilization of a wrong type
+    // taking the line down.
+    #[test]
+    fn a_pushed_limit_says_how_full_it_is_and_what_was_charged() {
+        let read = |info: &str| {
+            let line = format!(r#"{{"type":"rate_limit_event","rate_limit_info":{info}}}"#);
+            let Some(CliMessage::RateLimit(limit)) = CliMessage::parse(&line) else {
+                panic!("a rate_limit_event should parse as a rate limit");
+            };
+            limit
+        };
+        for (utilization, percent) in [(0.57, 57), (0.29, 29), (0.58, 58), (0.999, 99), (1.0, 100)] {
+            let limit = read(&format!(r#"{{"status":"allowed_warning","utilization":{utilization}}}"#));
+            assert_eq!(limit.used_percent, Some(percent));
+        }
+        // The top level wins over the window's own entry.
+        let both = read(
+            r#"{"rateLimitType":"five_hour","utilization":0.92,
+                "unifiedWindows":{"five_hour":{"utilization":0.5}}}"#,
+        );
+        assert_eq!(both.used_percent, Some(92));
+        // With no top level, the window `rateLimitType` names answers.
+        let windowed = read(
+            r#"{"rateLimitType":"seven_day",
+                "unifiedWindows":{"five_hour":{"utilization":0.5},"seven_day":{"utilization":0.58}}}"#,
+        );
+        assert_eq!(windowed.used_percent, Some(58));
+        let neither = read(r#"{"status":"rejected","rateLimitType":"overage","limitScope":"group_pool"}"#);
+        assert_eq!(neither.used_percent, None);
+        assert_eq!(neither.limit_scope.as_deref(), Some("group_pool"));
+        let mistyped = read(r#"{"status":"allowed_warning","utilization":"high"}"#);
+        assert_eq!(mistyped.used_percent, None);
+        assert_eq!(mistyped.status.as_deref(), Some("allowed_warning"));
     }
 
     #[test]
