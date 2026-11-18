@@ -476,20 +476,37 @@ impl MarkdownBody {
                 cx,
             );
             let document = self.document.clone();
-            let element = div()
-                .w_full()
-                .capture_any_mouse_up(move |event, window, cx| {
-                    if event.button != MouseButton::Left {
-                        return;
-                    }
-                    let position = event.position;
-                    let Some(target) = layouts
+            let link_at = {
+                let layouts = layouts.clone();
+                move |position| {
+                    layouts
                         .over_text(position)
                         .then(|| layouts.hit(position))
                         .flatten()
                         .and_then(|cursor| markdown_link_at(&document, cursor))
-                        .and_then(|url| file_link_target(&url))
-                    else {
+                }
+            };
+            let down_chat = chat.clone();
+            let down_link_at = link_at.clone();
+            let element = div()
+                .w_full()
+                .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                    let pressed = down_link_at(event.position);
+                    down_chat.update(cx, |chat, _| chat.card_link_press = pressed);
+                })
+                .capture_any_mouse_up(move |event, window, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+                    // Only a release on the link that was pressed is a click;
+                    // one with no press (a file dropped from the OS arrives as
+                    // a release) falls through untouched.
+                    let released = link_at(event.position);
+                    let pressed = chat.update(cx, |chat, _| chat.card_link_press.take());
+                    let Some(url) = released.filter(|url| pressed.as_ref() == Some(url)) else {
+                        return;
+                    };
+                    let Some(target) = file_link_target(&url) else {
                         return;
                     };
                     chat.update(cx, |_, cx| {
@@ -2578,6 +2595,9 @@ pub struct Chat {
     /// transcript offset: a release at the same offset is a click, which is
     /// what opens a file link (a release elsewhere ended a drag).
     transcript_press: Option<usize>,
+    /// The link a subagent card's text was last pressed on: a release on the
+    /// same link is a click, and no press (a dropped file) is none.
+    card_link_press: Option<String>,
     /// Which candidate paths exist, for the assistant entry being built: one
     /// disk lookup per distinct candidate, not one per streamed chunk. Reset
     /// whenever a new assistant entry starts.
@@ -3018,6 +3038,7 @@ impl Chat {
             transcript_selection: None,
             transcript_dragging: false,
             transcript_press: None,
+            card_link_press: None,
             file_link_memo: file_links::FileLinkMemo::default(),
             transcript_links: Rc::default(),
             folded_turns: BTreeSet::new(),
