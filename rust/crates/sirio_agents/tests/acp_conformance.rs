@@ -2921,9 +2921,9 @@ fn gateway_token() -> String {
 /// turn with an error result.
 ///
 /// The CLI emits the event only under subscriber or gateway auth, so the token is a fake
-/// gateway JWT built at run time and passed to the CLI as `ANTHROPIC_AUTH_TOKEN` alone: never
-/// printed, never written. `Session::start_limits` refuses to start unless the CLI's base URL
-/// is on 127.0.0.1. The CLI runs in a scratch HOME against `fake_limits_api.py`, so nothing
+/// gateway JWT built at run time and passed to the CLI as `ANTHROPIC_AUTH_TOKEN` alone: it
+/// lives only in the CLI's environment and the test's TMPDIR. `CliEnv::apply` refuses to
+/// start the CLI unless its base URL is on 127.0.0.1. The CLI runs in a scratch HOME against `fake_limits_api.py`, so nothing
 /// leaves the machine. It launches a real CLI, so it is `#[ignore]`d and stays off CI:
 ///
 ///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_reports_rate_limits_through_a_gateway
@@ -2944,8 +2944,8 @@ fn claude_reports_rate_limits_through_a_gateway() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let in_five_hours = now + 3 * 3600;
-    let in_a_week = now + 4 * 86400;
+    let in_three_hours = now + 3 * 3600;
+    let in_four_days = now + 4 * 86400;
     let limits = scratch.root.join("limits.json");
     let write_limits = |status: u16, headers: serde_json::Map<String, serde_json::Value>| {
         std::fs::write(
@@ -2961,13 +2961,13 @@ fn claude_reports_rate_limits_through_a_gateway() {
             "allowed_warning",
             "five_hour",
             &[
-                ("reset", in_five_hours.to_string()),
+                ("reset", in_three_hours.to_string()),
                 ("5h_utilization", "0.92".into()),
-                ("5h_reset", in_five_hours.to_string()),
+                ("5h_reset", in_three_hours.to_string()),
                 ("5h_surpassed_threshold", "0.9".into()),
                 ("5h_status", "allowed_warning".into()),
                 ("7d_utilization", "0.1".into()),
-                ("7d_reset", in_a_week.to_string()),
+                ("7d_reset", in_four_days.to_string()),
             ],
         ),
     );
@@ -2998,7 +2998,7 @@ fn claude_reports_rate_limits_through_a_gateway() {
     );
     assert!(push.used_percent == Some(92), "the window is 92 percent used: false");
     assert!(
-        push.resets_at == Some(in_five_hours),
+        push.resets_at == Some(in_three_hours),
         "the event carries the written reset: false"
     );
     // `run_turn` stops at the turn's result, so an event in `turn` came before it.
@@ -3010,11 +3010,11 @@ fn claude_reports_rate_limits_through_a_gateway() {
             "rejected",
             "overage",
             &[
-                ("reset", in_a_week.to_string()),
+                ("reset", in_four_days.to_string()),
                 ("overage_status", "rejected".into()),
                 ("overage_disabled_reason", "org_spend_cap_reached".into()),
                 ("overage_scope", "group_pool".into()),
-                ("overage_reset", in_a_week.to_string()),
+                ("overage_reset", in_four_days.to_string()),
             ],
         ),
     );
@@ -3230,8 +3230,8 @@ fn claude_usage_report_on_account() {
     );
 }
 
-/// The guard `Session::start_limits` runs before any command that carries the gateway token
-/// starts. It starts no CLI.
+/// The guard `CliEnv::apply` runs before any CLI starts (so at every spawn site that applies
+/// it, `launch_broken` included). This test starts no CLI.
 ///
 /// Failure list, written first: a userinfo that hides another host
 /// (`http://127.0.0.1:1@example.com/`) passes a prefix check, and so would an empty port.
@@ -3243,6 +3243,7 @@ fn the_gateway_base_url_guard_checks_the_host() {
         assert!(!claude_live::is_local_base_url(url), "a URL that is not the local API is refused");
     }
     for url in ["http://127.0.0.1:8080", "http://127.0.0.1:8080/v1"] {
+        // Guard: holds before the change (the old prefix check also accepts these).
         assert!(claude_live::is_local_base_url(url), "a local API URL is accepted");
     }
 }

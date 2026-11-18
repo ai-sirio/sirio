@@ -5,8 +5,7 @@
 # body. Which one, and the response headers, come from LIMITS_FILE, re-read on every request:
 #   {"status": 200 | 429, "headers": {"anthropic-ratelimit-unified-status": "allowed_warning", ...}}
 # Every request, of any method, appends {"method": ..., "path": ...} to LIMITS_FILE + ".requests".
-# Nothing else of a
-# request is logged: no header (the bearer token lives in one) and no body.
+# Nothing else of a request is logged: no header (the bearer token lives in one) and no body.
 # usage: fake_limits_api.py PORT LIMITS_FILE
 # Binds 127.0.0.1 only. Nothing here is a credential.
 import json, sys

@@ -1184,9 +1184,9 @@ mod tests {
         assert!(fold.take_notices().is_empty());
     }
 
-    // Failure list, written before the code: a rejection on the same window
-    // swallowed by the warning that came before it (status-only key); a
-    // rejection under a new scope swallowed by the one before it; the same
+    // Failure list, written before the code: a rejection under a new scope
+    // swallowed by the one before it; a rejection on another window
+    // swallowed by it; the same
     // warning announced twice because one carried `unifiedWindows`; the same
     // warning swallowed after an `allowed` in between.
     #[test]
@@ -1203,6 +1203,7 @@ mod tests {
             fold.apply(parse(push(info)));
             fold.take_notices().len()
         };
+        // Guard: holds before the change. The first warning is announced.
         assert_eq!(announced(&mut fold, warning()), 1);
         // Guard: holds before the change. The same warning, with or without
         // the per-window detail, adds nothing.
@@ -1210,7 +1211,8 @@ mod tests {
         detailed["unifiedWindows"] = json!({"five_hour": {"utilization": 0.92}});
         assert_eq!(announced(&mut fold, detailed), 0);
         assert_eq!(announced(&mut fold, warning()), 0);
-        // The same window refusing is a change of status.
+        // Guard: holds before the change (the old status-only key also saw
+        // the change of status). The same window refusing is announced once.
         let mut rejected = warning();
         rejected["status"] = json!("rejected");
         assert_eq!(announced(&mut fold, rejected.clone()), 1);
@@ -1219,6 +1221,7 @@ mod tests {
         let mut scoped = rejected.clone();
         scoped["limitScope"] = json!("group_pool");
         assert_eq!(announced(&mut fold, scoped.clone()), 1);
+        // Guard: holds before the change. The repeat of it adds nothing.
         assert_eq!(announced(&mut fold, scoped), 0);
         // Another window with the same status is a change of window.
         let mut weekly = rejected;

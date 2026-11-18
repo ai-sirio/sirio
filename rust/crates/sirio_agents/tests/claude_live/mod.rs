@@ -368,9 +368,10 @@ impl Session {
     /// on every request) and logs method and path of each request to `limits` + `.requests`.
     ///
     /// `auth_token`, when given, is passed to the CLI's command alone as `ANTHROPIC_AUTH_TOKEN`
-    /// (the gateway auth under which the CLI emits `rate_limit_event`). It is never printed or
-    /// written. Once every variable is applied and before the CLI starts, the command's
-    /// `ANTHROPIC_BASE_URL` must start with `http://127.0.0.1:`, or this panics.
+    /// (the gateway auth under which the CLI emits `rate_limit_event`). It lives only in the
+    /// CLI's environment and the test's TMPDIR. Before the CLI starts, `CliEnv::apply` checks
+    /// that the command's `ANTHROPIC_BASE_URL` has the host `127.0.0.1` (`http://127.0.0.1:`,
+    /// port digits, then the end or `/`), and panics otherwise.
     pub fn start_limits(
         claude: &Path,
         python: &Path,

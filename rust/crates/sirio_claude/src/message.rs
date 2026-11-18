@@ -355,8 +355,9 @@ impl TaskOutput {
 /// here so that only one convention — percent — ever leaves this crate.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RateLimitPush {
-    /// `allowed` while the plan has room. Anything else is the CLI
-    /// reporting that it does not, and is the only field worth a warning.
+    /// What the CLI says about the plan: `allowed` (room), `allowed_warning`
+    /// (room, nearing the limit), `rejected` (no room). Any other value is
+    /// kept as sent, and callers show it as sent.
     pub status: Option<String>,
     /// Which window `status` is about, e.g. `five_hour`.
     pub rate_limit_type: Option<String>,
@@ -368,9 +369,9 @@ pub struct RateLimitPush {
     pub five_hour: Option<f64>,
     /// Seven-day window utilization on the **0–100 scale**.
     pub seven_day: Option<f64>,
-    /// How full the window `status` is about is, in whole percent: the
-    /// event's top-level `utilization`, or else that window's own entry in
-    /// `unifiedWindows`, by [`crate::whole_percent`].
+    /// How full that window is, in whole percent: the event's top-level
+    /// `utilization`, or else that window's own entry in `unifiedWindows`,
+    /// by [`crate::whole_percent`].
     pub used_percent: Option<u8>,
     /// What an overage denial was charged to: `service`, `group_pool`,
     /// `channel`. The CLI sends it only with an overage denial.
@@ -1014,6 +1015,7 @@ mod tests {
         assert_eq!(blank.limit_scope, None);
         let mistyped = read(r#"{"status":"allowed_warning","utilization":"high"}"#);
         assert_eq!(mistyped.used_percent, None);
+        // Guard: holds before the change. A mistyped percent leaves the status.
         assert_eq!(mistyped.status.as_deref(), Some("allowed_warning"));
     }
 
