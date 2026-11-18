@@ -557,24 +557,28 @@ Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 # §3, §6) in a real, isolated Sirio under a private Xvfb, driven by real X
 # clicks, wheel turns and keys at the rects the app reports (`shellRects`'
 # sidebar keys) and read over the control socket (`surface attention read`'s
-# `sidebar` object: listFocused, filterShown, hoverCardRow, bell). Steps: the
-# header, New Chat row, section header, project row (31) and card (53) drawn at
-# their heights; the project row folds and unfolds; its + and three dots, and
-# the section header's expand all / collapse all, show only under the pointer
-# (frames compared); the title menu switches to Sessions and back; the hover card
-# opens beside the sidebar after 500 ms and closes when the pointer leaves, and a
-# Primary shows a filled star where a plain card shows its star and cross; a
-# session left unread (a codex stub reports running then done in the other
-# worktree) lights the bell, whose menu selects that session's tab; Search shows
-# the filter and Esc hides it; a click on a card focuses the list and a click on
-# the centre pane takes the focus away; a second project of 22 worktrees makes
-# the list overflow, and the scrollbar is up after a wheel turn and faded 2 s
-# later. --display :N is a private Xvfb of at least 1600x1000 with Mesa's
-# lavapipe; --appearance light|dark (run both); --state-only runs with no
-# display and checks only that the sidebar read is reported; --out-dir DIR (must
-# be empty) keeps transcript.log, app.log, measurements.tsv (case, key, expected,
-# drawn, ok), reads/, attention-*.json and PID-matched captures in
-# frames/<what>-<appearance>.png.
+# `sidebar` object: listFocused, filterShown, hoverCardRow, bell; and the served
+# `primary` flag of `project list`). Steps: the header, New Chat row, section
+# header, project row (31) and card (53) drawn at their heights; the project row
+# folds and unfolds; the project row and the section header change under the
+# pointer (their + / three dots and expand all / collapse all are judged by eye
+# in frames/: a pixel diff cannot tell them from the hover wash); the title menu
+# switches to Sessions and back; the hover card opens beside the sidebar (4 px
+# past its visible right edge) and closes when the pointer leaves; the main
+# worktree is the Primary, a click on its star unsets it (served flag true then
+# false, the star crop changes) and a second click restores it; a session left
+# unread (a codex stub reports running then done in the other worktree) lights
+# the bell, whose menu selects that session's tab; Search shows the filter and
+# Esc hides it; a click on the centre pane, then a card, then the centre pane
+# moves listFocused false, true, false; a second project of 22 worktrees makes
+# the list overflow, and on idle frames with the pointer off the list the bar's
+# strip differs between right after a wheel turn and 2.2 s later while the list
+# body does not (it fails when no bar is drawn). --display :N is a private Xvfb
+# of at least 1600x1000 with Mesa's lavapipe; --appearance light|dark (run both);
+# --state-only runs with no display and checks only that the sidebar read is
+# reported; --out-dir DIR (must be empty) keeps transcript.log, app.log,
+# measurements.tsv (case, key, expected, drawn, ok), reads/, attention-*.json and
+# PID-matched captures in frames/<what>-<appearance>.png.
 Scripts/Tests/test-sidebar-shell-e2e.sh   # -> prints "SIDEBAR SHELL E2E OK (dark|light|state only)"
 
 # Acting on a change request: every write of sirio_forge on the wire (the token

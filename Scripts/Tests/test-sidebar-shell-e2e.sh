@@ -13,30 +13,34 @@ set -eEuo pipefail
 #       New Chat row and section header are drawn; the project row is 31 px, the
 #       card 53, the section header 28, the New Chat row 31
 #    2  a click on the project row folds it (its cards leave the list), another
-#       unfolds it; the row is captured with the pointer on it (its + and the
-#       three dots show) and off it, and the section header the same (expand all
-#       and collapse all)
+#       unfolds it; the row and the section header are captured with the pointer on
+#       them and off, and the crops of their right ends are asserted to change.
+#       That the project row's + and three dots and the header's expand all /
+#       collapse all show only under the pointer is judged by eye in frames/
+#       (a pixel difference cannot tell the buttons from the row's hover wash)
 #    3  the title menu switches to Sessions (the Projects rows are not drawn) and
 #       back, by real clicks on the menu's rows
 #    4  the pointer on a card: after 500 ms the hover card is open beside the
-#       sidebar (its left edge 4 px past the sidebar's content edge: the left rect
-#       ends 1 px, the panel's border, past it, so at least left.x + left.w + 3), the
-#       card's star is drawn; the star and cross take the bloom's place. The main worktree is the Primary: a hover shows its filled star only; a plain
-#       card shows its outline star and its cross; a click on the Primary's star
-#       unsets it, and the same card then shows the outline star (the two frames
-#       differ at the star)
+#       sidebar (its left edge at least left.x + left.w + 4: 4 px past the sidebar's
+#       visible right edge, border included), the hover card and the open state
+#       agree, the star's rect lies inside the card. The main worktree is the
+#       Primary (the served `primary` flag is read): a hover shows its filled star
+#       only, a plain card its outline star and its cross (judged by eye in
+#       frames/). A click on the Primary's star unsets it (the flag goes true then
+#       false, and the same card's star crop differs); a second click restores it
 #    5  one session made unread (a codex stub reports running then done while the
 #       other worktree is selected): the bell reads "unread"; a click on the bell
 #       opens its menu; a click on the entry selects the session's tab and the bell
 #       reads nothing
 #    6  a click on Search shows the filter field (filterShown), Esc hides it
-#    7  a click on a card gives the list keyboard focus (listFocused); a click on
-#       the centre pane takes it away; both captured (the focus ring on and off)
-#    8  a second project with 22 worktrees makes the list overflow: a wheel turn
-#       over the list is captured with the scrollbar up, and 2.2 s later with it
-#       faded; the two frames differ in the bar's strip, and a frame is read for
-#       the pixel difference of every opacity-only part (the + and the dots, the
-#       header's buttons, the star) between its two states
+#    7  a click on the centre pane (listFocused false), then on a card
+#       (listFocused true), then on the centre pane again (false); the focus ring
+#       on and off captured
+#    8  a second project with 22 worktrees: the list is captured at rest, after a
+#       wheel turn with the pointer off the list (idle frame, bar up) and 2.2 s
+#       later (bar faded). The list body is the same in the last two and the bar's
+#       strip differs, so the check fails when no bar is drawn; the body differs
+#       from the rest frame (the list overflowed and moved)
 # Every step ends with its captures; the run ends with
 # SIDEBAR SHELL E2E OK (<appearance>).
 #
@@ -143,6 +147,9 @@ command -v git >/dev/null || fail "git is required"
 command -v python3 >/dev/null || fail "python3 is required"
 echo "display: ${DISPLAY_TARGET:-none (--state-only)}; appearance: ${APPEARANCE:-default}"
 TAG="${APPEARANCE:-default}"
+
+# The seed repositories read no git configuration of the user's.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 # ---- the run's own directory and what must be stopped ---------------------
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sirio-sidebar-XXXXXX")
@@ -312,9 +319,14 @@ def read():
     A = rpc("surface.attention.read")
     S = json.loads(A["sidebar"])
     P = json.loads(A["projects"])
-    LAST["state"] = {"rects": raw, "sidebar": S, "projects": P}
+    # The served `primary` flag of every worktree, by the last component of its path.
+    W = {}
+    for project in json.loads(rpc("project.list")["projects"]):
+        for wt in json.loads(project["worktrees"]):
+            W[os.path.basename(wt["path"].rstrip("/"))] = wt["primary"] == "true"
+    LAST["state"] = {"rects": raw, "sidebar": S, "projects": P, "primary": W}
     rects = {k: (SimpleNamespace(x=v[0], y=v[1], w=v[2], h=v[3]) if v is not None else None) for k, v in raw.items()}
-    return {"R": rects, "S": S, "P": P, "L": L, "A": A}
+    return {"R": rects, "S": S, "P": P, "L": L, "A": A, "PRIM": W}
 
 
 def snapshot():
@@ -445,7 +457,8 @@ PY
 export SB_TSV="$OUT_DIR/measurements.tsv" SB_READS="$OUT_DIR/reads"
 SB() { python3 -I "$RUN_DIR/sb.py" "$@"; }
 # Polls until EXPR holds. EXPR sees R (rects of the shell, an object with x y w h, or None),
-# S (the sidebar's state object), P (the projects) and L (the layout read).
+# S (the sidebar's state object), P (the projects), PRIM (the served primary flag of each
+# worktree, by the last component of its path) and L (the layout read).
 wait_for() { # case label expr [seconds]
   SB wait "$1" "${4:-30}" "$2" "$3" || fail "$2"
 }
@@ -707,7 +720,7 @@ park_pointer
 capture shell
 
 # ---- step 2 ----------------------------------------------------------------
-step 2 "the project row folds and unfolds; the hover-only parts of the row and the header show under the pointer"
+step 2 "the project row folds and unfolds; the row and the header change under the pointer"
 move_rect sidebarSection
 sleep 0.5
 capture project-row-hover
@@ -719,12 +732,15 @@ capture section-header-hover
 park_pointer
 capture section-header-idle
 # The row's right end is where its + and its three dots show, and the header's right end holds
-# add project (always) and expand all / collapse all (under the pointer).
+# add project (always) and expand all / collapse all (under the pointer). A pixel difference
+# cannot tell those buttons from the hover wash the row gets, so the rows below only say that
+# the crop changes under the pointer; that the buttons show is judged by eye in frames/
+# project-row-hover-* and section-header-hover-*.
 ROW=$(rect_of sidebarSection)
 HEAD=$(rect_of sidebarSectionHeader)
-expect_frames_differ 2 "the project row's + and dots show only under the pointer" project-row-hover project-row-idle \
+expect_frames_differ 2 "the project row changes under the pointer (its + and dots are judged by eye in frames/)" project-row-hover project-row-idle \
   "$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (64, round(h), round(x + w - 64), round(y)))' $ROW)"
-expect_frames_differ 2 "the header's expand all and collapse all show only under the pointer" section-header-hover section-header-idle \
+expect_frames_differ 2 "the section header changes under the pointer (its expand all / collapse all are judged by eye in frames/)" section-header-hover section-header-idle \
   "$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (90, round(h), round(x + w - 90), round(y)))' $HEAD)"
 click_rect sidebarSection
 wait_for 2 "the click folded the project" "P[0]['expanded'] is False and R['sidebarCard'] is None"
@@ -763,8 +779,8 @@ sleep 0.8
 wait_for 4 "the hover card is open and the state names its row, both agreeing" \
   "S['hoverCardRow'] is not None and R['sidebarHoverCard'] is not None"
 measure 4 \
-  "hover card is beside the sidebar: 4 px past its content edge, the 1 px border of the left rect included|R['sidebarHoverCard'].x|>=|R['left'].x + R['left'].w + 3" \
-  "the card's star is drawn|R['sidebarCardStar'] is not None|==|True" \
+  "hover card is beside the sidebar: 4 px past its visible right edge|R['sidebarHoverCard'].x|>=|R['left'].x + R['left'].w + 4" \
+  "the star's rect lies inside the card (that it is drawn is judged by eye in frames/)|R['sidebarCardStar'] is not None and R['sidebarCardStar'].x >= R['sidebarCard'].x and R['sidebarCardStar'].x + R['sidebarCardStar'].w <= R['sidebarCard'].x + R['sidebarCard'].w and R['sidebarCardStar'].y >= R['sidebarCard'].y and R['sidebarCardStar'].y + R['sidebarCardStar'].h <= R['sidebarCard'].y + R['sidebarCard'].h|==|True" \
   "the hover card stays inside the window|R['sidebarHoverCard'].y + R['sidebarHoverCard'].h|<=|$WINDOW_H"
 # The first card is the repository's main worktree, which Sirio makes the Primary: its star is
 # the filled one and it has no cross. The card under it ("other") is a plain worktree.
@@ -779,17 +795,22 @@ print("%dx%d+%d+%d" % (24, 24, round(x + w / 2) - 12, round(y + h / 2) - 12))' $
 move_window "$(python3 -c 'import sys; print(round(float(sys.argv[1]) + 40), round(float(sys.argv[2]) + float(sys.argv[4]) + 26))' $CARD)"
 sleep 0.8
 capture card-hover-star-cross
-# A click on the Primary's star unsets it (the same action as the menu's Unset Primary); the same
-# card under the same pointer then shows the outline star and its cross.
+# A click on the Primary's star unsets it (the same action as the menu's Unset Primary): the served
+# flag goes true then false, and the same card under the same pointer shows the outline star.
+wait_for 4 "the main worktree is the Primary" "PRIM['repo'] is True and PRIM['other'] is False"
 park_pointer
 move_rect sidebarCardStar
 click_rect sidebarCardStar
+wait_for 4 "the click on the Primary's star unset it" "PRIM['repo'] is False and PRIM['other'] is False"
 park_pointer
 move_rect sidebarCard 0 0
 sleep 0.8
 capture card-hover-unset-primary-star
 expect_frames_differ 4 "the Primary's filled star is not the outline star of the same card once unset" \
   card-hover-primary-star card-hover-unset-primary-star "$STAR_CROP"
+# The run leaves the Primary as it found it.
+click_rect sidebarCardStar
+wait_for 4 "a second click on the star made it the Primary again" "PRIM['repo'] is True and PRIM['other'] is False"
 park_pointer
 wait_for 4 "the hover card closes when the pointer leaves" "S['hoverCardRow'] is None and R['sidebarHoverCard'] is None"
 
@@ -836,31 +857,60 @@ capture filter-hidden
 
 # ---- step 7 ----------------------------------------------------------------
 step 7 "a click on a card focuses the list; a click on the centre pane takes the focus away"
+CENTER_CLICK=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.argv[3]) / 2), round(float(sys.argv[2]) + float(sys.argv[4]) / 2))' $(rect_of center))
+# The precondition: the centre pane holds the focus, so the card click below is what moves it.
+click_window "$CENTER_CLICK"
+wait_for 7 "the centre pane holds the focus before the card is clicked" "S['listFocused'] is False"
+move_rect sidebarSection
+capture focus-ring-off
 click_rect sidebarCard 0 0
-wait_for 7 "the list has the keyboard focus" "S['listFocused'] is True"
+wait_for 7 "the card click gave the list the keyboard focus" "S['listFocused'] is True"
 move_rect sidebarSection
 capture focus-ring-on
-CENTER=$(rect_of center)
-click_window "$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.argv[3]) / 2), round(float(sys.argv[2]) + float(sys.argv[4]) / 2))' $CENTER)"
-wait_for 7 "the centre pane took the focus" "S['listFocused'] is False"
-capture focus-ring-off
+click_window "$CENTER_CLICK"
+wait_for 7 "a click on the centre pane took the focus away again" "S['listFocused'] is False"
 
 # ---- step 8 ----------------------------------------------------------------
-step 8 "the list's scrollbar is up while it moves and faded after"
+step 8 "the list's scrollbar is up after the list moves and faded once it idles"
 ctl project add "$BIG" >/dev/null
-wait_for 8 "the second project's cards overflow the list" "R['left'].h > 0 and len(P) == 2" 30
-# 25 cards of 53 px do not fit in a 1000 px window.
-move_rect sidebarCard 0 40
-for _ in 1 2 3 4 5; do
-  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool click 5 || fail "xdotool could not turn the wheel"
-done
-capture_now scrollbar-visible
-sleep 2.2
-capture_now scrollbar-faded
+wait_for 8 "the second project is listed" "len(P) == 2" 30
+# 25 cards of 53 px do not fit in a 1000 px window. The scrollbar is judged on idle frames only,
+# with the pointer off the list (no hover wash in the crops): one taken right after the wheel
+# stopped, one 2.2 s later (the bar holds 900 ms, then fades over 300 ms). The list body must be
+# the same in both (it had stopped moving), so the strip's difference is the bar and nothing else;
+# and it must differ from a frame taken before the wheel (the list overflowed and moved).
 LEFT=$(rect_of left)
+BODY=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (200, round(h) - 160, round(x + 20), round(y + 120)))' $LEFT)
 STRIP=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (14, round(h) - 160, round(x + w - 16), round(y + 120)))' $LEFT)
-expect_frames_differ 8 "the scrollbar is drawn while the list moves and gone when it idles" scrollbar-visible scrollbar-faded "$STRIP"
+CENTER_XY=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.argv[3]) / 2), round(float(sys.argv[2]) + float(sys.argv[4]) / 2))' $(rect_of center))
 park_pointer
+capture scroll-rest
+bar_seen=0
+for attempt in 1 2 3; do
+  move_rect sidebarCard 0 40
+  for _ in 1 2 3 4 5; do
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool click 5 || fail "xdotool could not turn the wheel"
+  done
+  move_window "$CENTER_XY"
+  capture_now scrollbar-visible
+  sleep 2.2
+  capture_now scrollbar-faded
+  body_diff=$(frame_diff scrollbar-visible scrollbar-faded "$BODY")
+  strip_diff=$(frame_diff scrollbar-visible scrollbar-faded "$STRIP")
+  echo "  attempt $attempt: list body differs by $body_diff, bar strip by $strip_diff"
+  if [ "$body_diff" -eq 0 ] && [ "$strip_diff" -gt 0 ]; then
+    bar_seen=1
+    break
+  fi
+done
+if [ "$bar_seen" -eq 1 ]; then
+  tsv_row 8 "the list body is the same in the visible and the faded frame (it had stopped)" "0" "$body_diff" ok
+  tsv_row 8 "the bar strip differs between the visible and the faded frame (the bar is drawn, then gone)" "> 0" "$strip_diff" ok
+else
+  tsv_row 8 "the bar strip differs between the visible and the faded frame, the body not" "body 0, strip > 0" "body $body_diff, strip $strip_diff" FAIL
+  fail "no attempt showed a scrollbar on an idle list: body $body_diff, strip $strip_diff"
+fi
+expect_frames_differ 8 "the wheel moved the list (it overflows)" scroll-rest scrollbar-faded "$BODY"
 SB attn-save "$OUT_DIR/attention-final.json" || fail "could not save the attention read"
 
 STEP="the last check"
