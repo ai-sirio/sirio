@@ -739,6 +739,52 @@ pub struct ResultPayload {
     pub model_usage: BTreeMap<String, ModelUsage>,
     pub session_id: Option<String>,
     pub uuid: Option<String>,
+    /// Why the CLI could not start, on a result written in place of the
+    /// session. A few reasons are always written (`config_file_invalid`,
+    /// `org_config_required_unavailable`, `org_config_refused`);
+    /// `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` adds every other one.
+    #[serde(deserialize_with = "lenient")]
+    pub startup_failure_reason: Option<String>,
+    /// The lines the CLI would have printed on stderr.
+    #[serde(deserialize_with = "lenient")]
+    pub errors: Option<Vec<String>>,
+    #[serde(deserialize_with = "lenient")]
+    pub invalid_config_file: Option<InvalidConfigFile>,
+}
+
+/// The configuration file a startup failure names.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct InvalidConfigFile {
+    pub path: String,
+    pub is_global: bool,
+    pub backup_path: Option<String>,
+}
+
+/// An error `result` read as the CLI saying it could not start.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartupFailure {
+    pub reason: Option<String>,
+    pub errors: Vec<String>,
+    pub invalid_config_file: Option<InvalidConfigFile>,
+}
+
+impl StartupFailure {
+    /// `Some` only when the result is an error.
+    #[must_use]
+    pub fn from_result(result: &ResultPayload) -> Option<Self> {
+        if !result.is_error {
+            return None;
+        }
+        Some(Self {
+            reason: result
+                .startup_failure_reason
+                .clone()
+                .filter(|reason| !reason.is_empty()),
+            errors: result.errors.clone().unwrap_or_default(),
+            invalid_config_file: result.invalid_config_file.clone(),
+        })
+    }
 }
 
 #[cfg(test)]

@@ -3037,3 +3037,166 @@ fn reload_skills_brings_the_new_skill_into_the_slash_list() {
     assert!(offers(&list, "pa:hello"));
     finish(client, &log);
 }
+
+// Failure list for startup failures (E2E, written first). The feature is wrong if:
+//  - a reason result reaches the caller as a timeout or an "ACP transport error";
+//  - the reason result is ignored because it came before the `initialize` answer;
+//  - the opt-in reason never appears because the variable did not reach the child;
+//  - a reason on a resume relaunches a fresh session;
+//  - a resume without a reason no longer retries;
+//  - a refused resume leaves an "ended" footer in the fresh session;
+//  - a CLI that exits silently loses its exit code or its last stderr line;
+//  - an unknown reason loses its errors;
+//  - a config path or backup path is dropped.
+
+/// A fixture launch that cannot start in the way `kind` says, logging each
+/// launch. `resume` makes it a resuming launch.
+fn startup_launch(kind: &str, resume: Option<&str>, tag: &str) -> (ClaudeLaunch, PathBuf) {
+    let launches =
+        std::env::temp_dir().join(format!("sirio-startup-{tag}-{}.launch", std::process::id()));
+    let _ = std::fs::remove_file(&launches);
+    let launch = ClaudeLaunch::fixture(
+        PathBuf::from("python3"),
+        vec![
+            FIXTURE.into(),
+            "normal".into(),
+            format!("--fixture-startup={kind}"),
+            format!("--fixture-launch-log={}", launches.display()),
+        ],
+    );
+    let launch = match resume {
+        Some(id) => launch.resuming(id),
+        None => launch,
+    };
+    (launch, launches)
+}
+
+/// The text of a launch that must fail with `ChatError::Startup`.
+fn startup_error(launch: ClaudeLaunch) -> String {
+    use sirio_chat_vocab::ChatError;
+    let error = ClaudeClient::launch_with_timeouts(
+        launch,
+        std::env::temp_dir(),
+        Duration::from_secs(20),
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    )
+    .expect_err("a CLI that cannot start must not yield a session");
+    assert!(
+        matches!(
+            error.downcast_ref::<ChatError>(),
+            Some(ChatError::Startup(_))
+        ),
+        "the failure must be a startup failure"
+    );
+    format!("{error}")
+}
+
+#[test]
+fn a_startup_reason_is_read_at_the_handshake() {
+    let (launch, launches) = startup_launch("config_invalid", None, "config");
+    let text = startup_error(launch);
+    let rlo = char::from_u32(0x202E).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "Claude Code could not start: a configuration file is not valid JSON.\n\n\
+             Configuration error in /fixture/config/.claude.json: JSON Parse error: \
+             Expected '}}'\nFix the JSON, or move the file aside.\nbidi {rlo}here\n\n\
+             File: /fixture/config/.claude.json\nBackup: /fixture/config/backups/.claude.json.bak"
+        )
+    );
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn the_cli_is_launched_with_startup_results() {
+    if std::env::var_os("CLAUDE_CODE_STARTUP_FAILURE_RESULTS").is_some() {
+        println!("SKIP: CLAUDE_CODE_STARTUP_FAILURE_RESULTS is inherited");
+        return;
+    }
+    let (launch, launches) = startup_launch("cwd_unavailable", None, "cwd");
+    let text = startup_error(launch);
+    assert!(
+        text.starts_with("Claude Code could not start: this folder no longer exists or cannot be read.")
+    );
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn an_unknown_startup_reason_is_shown_verbatim() {
+    let (launch, launches) = startup_launch("future_reason", None, "future");
+    let text = startup_error(launch);
+    assert!(text.starts_with("Claude Code could not start (some_future_reason)."));
+    assert!(text.contains("A reason this build does not know."));
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_cli_that_exits_before_the_handshake_names_its_exit() {
+    let (launch, launches) = startup_launch("no_result", None, "noresult");
+    let text = startup_error(launch);
+    assert!(text.starts_with("Claude Code exited before it started (agent exited with code 1)"));
+    assert!(text.contains("fixture: last line"));
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_startup_reason_on_a_resume_is_final() {
+    let (launch, launches) = startup_launch("resume_reason", Some("sess-held"), "held");
+    let text = startup_error(launch);
+    assert!(text.starts_with(
+        "Claude Code could not resume this conversation: it is running as a background session."
+    ));
+    assert_eq!(
+        json_lines(&launches).len(),
+        1,
+        "a reason must not relaunch a fresh session"
+    );
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_refused_resume_leaves_no_turn_behind() {
+    let (launch, launches) = startup_launch("resume_no_reason", Some("sess-gone"), "gone");
+    let (mut client, events) = ClaudeClient::launch(launch, std::env::temp_dir())
+        .expect("a refused resume must still yield a usable session");
+    assert_eq!(json_lines(&launches).len(), 2, "the resume, then the fresh start");
+    // Nothing was asked yet, so nothing may have ended or been said.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match next_event_within(&events, remaining) {
+            Some(ChatEvent::TurnEnded { .. } | ChatEvent::AgentMessageChunk(_)) => {
+                panic!("a refused resume must leave no turn behind")
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    client.prompt("hello").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+    // One prompt, one end: a second one would arrive right behind the first.
+    let after = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let remaining = after.saturating_duration_since(std::time::Instant::now());
+        match next_event_within(&events, remaining) {
+            Some(ChatEvent::TurnEnded { .. }) => panic!("one prompt must end exactly one turn"),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_reasonless_startup_error_shows_its_lines() {
+    let (launch, launches) = startup_launch("no_reason", None, "noreason");
+    let text = startup_error(launch);
+    assert_eq!(
+        text,
+        "Claude Code could not start.\n\nSomething went wrong before the session."
+    );
+    let _ = std::fs::remove_file(&launches);
+}

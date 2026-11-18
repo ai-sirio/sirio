@@ -10,6 +10,7 @@
 mod events;
 mod permission;
 mod prompt;
+mod startup;
 mod trace;
 mod worker;
 

@@ -57,6 +57,9 @@ pub enum ChatError {
         /// when it reported any before the request that failed.
         methods: Vec<AuthMethodInfo>,
     },
+    /// The CLI could not start, and this is what the user reads: the
+    /// message is already complete.
+    Startup(String),
 }
 
 impl std::fmt::Display for ChatError {
@@ -68,6 +71,7 @@ impl std::fmt::Display for ChatError {
             } => write!(f, "ACP {operation:?} timed out after {duration:?}"),
             Self::Transport(message) => write!(f, "ACP transport error: {message}"),
             Self::Agent(message) => write!(f, "ACP agent error: {message}"),
+            Self::Startup(message) => f.write_str(message),
             Self::AuthRequired { methods } if methods.is_empty() => {
                 write!(f, "ACP agent requires authentication before it can be used")
             }

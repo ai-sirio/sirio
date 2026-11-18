@@ -2163,6 +2163,69 @@ def cli_notices_prompt(message):
     return trace_prompt_text(message).strip()
 
 
+# ---------------------------------------------------------------------------
+# `--fixture-startup=<kind>`: a CLI that cannot start. Unless a kind says
+# otherwise it writes at once, never reads stdin, and exits 1. Shapes copy the
+# live probe (`.superpowers/probe-a7`, Q5).
+# ---------------------------------------------------------------------------
+
+
+def startup_failure_result(reason, errors, **extra):
+    line = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+            "startup_failure_reason": reason, "duration_ms": 0, "errors": errors,
+            "session_id": SESSION_ID, "uuid": "startup-uuid"}
+    line.update(extra)
+    send(line)
+
+
+def startup_main(kind):
+    """Returns only for a kind that carries on as a normal session."""
+    opted_in = os.environ.get("CLAUDE_CODE_STARTUP_FAILURE_RESULTS") == "1"
+    if kind == "config_invalid":
+        startup_failure_result(
+            "config_file_invalid",
+            ["Configuration error in /fixture/config/.claude.json: JSON Parse error: "
+             "Expected '}'\nFix the JSON, or move the file aside.",
+             "bidi \N{RIGHT-TO-LEFT OVERRIDE}here"],
+            invalid_config_file={"path": "/fixture/config/.claude.json", "is_global": True,
+                                 "backup_searched": True,
+                                 "backup_path": "/fixture/config/backups/.claude.json.bak"})
+    elif kind in ("cwd_unavailable", "future_reason"):
+        reason, line = (
+            ("cwd_unavailable", "The current directory no longer exists (it was deleted or moved).")
+            if kind == "cwd_unavailable"
+            else ("some_future_reason", "A reason this build does not know."))
+        if opted_in:
+            startup_failure_result(reason, [line])
+        else:
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+    elif kind == "no_result":
+        sys.stderr.write("fixture: first line\nfixture: last line\n")
+        sys.stderr.flush()
+    elif kind == "resume_reason":
+        if "--resume" not in sys.argv:
+            return
+        startup_failure_result("session_held_by_background",
+                               ["Session is running in the background."])
+    elif kind in ("resume_no_reason", "no_reason"):
+        if kind == "resume_no_reason" and "--resume" not in sys.argv:
+            return
+        # By hand, as live (`run-q5-cur-resume-missing`): no `result` key and
+        # no reason, with `modelUsage`, `total_cost_usd` and `num_turns`.
+        errors = (["No conversation found with session ID: fixture"]
+                  if kind == "resume_no_reason"
+                  else ["Something went wrong before the session."])
+        send({"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "duration_ms": 0, "num_turns": 0, "stop_reason": None,
+              "session_id": SESSION_ID, "total_cost_usd": 0, "modelUsage": {},
+              "errors": errors, "uuid": "startup-uuid"})
+    else:
+        return
+    sys.stdout.flush()
+    os._exit(1)
+
+
 def main():
     if LAUNCH_LOG_PATH:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
@@ -2170,6 +2233,8 @@ def main():
                 "resume": resume_arg(),
                 "session_id": argv_value("--session-id"),
             }) + "\n")
+    if flag_value("fixture-startup"):
+        startup_main(flag_value("fixture-startup"))
     if MODE == "trace":
         trace_main()
         return
