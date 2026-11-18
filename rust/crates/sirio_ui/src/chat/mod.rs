@@ -21431,6 +21431,26 @@ two"
     async fn a_reset_or_end_with_no_held_card_writes_nothing(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let chat = chat_with_a_past_session(cx, &dir, &["an older question"]);
+        // What the tab holds already, unlike anything this chat would write.
+        let path = dir.0.join("history.sqlite");
+        let sentinel = ChatTranscript {
+            tab_id: "current-chat".into(),
+            turns: vec![ChatTurn {
+                entries: vec![
+                    ChatEntry::UserMessage {
+                        text: "stored before".into(),
+                        at: None,
+                    },
+                    ChatEntry::TurnFooter {
+                        text: "12:00".into(),
+                    },
+                ],
+            }],
+        };
+        AppDatabase::open(&path)
+            .unwrap()
+            .save_chat_transcript(&sentinel)
+            .unwrap();
         chat.update(cx, |chat, cx| {
             chat.submit_turn("this session".into(), Vec::new(), Vec::new(), cx);
             notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
@@ -21448,12 +21468,11 @@ two"
             );
             assert_eq!(card_status(chat, 1), "InProgress", "no card was held");
         });
-        let path = dir.0.join("history.sqlite");
-        let db = AppDatabase::open(&path).unwrap();
-        assert!(
-            db.load_chat_transcript("current-chat").unwrap().is_none(),
-            "nothing was written for the tab"
-        );
+        let stored = AppDatabase::open(&path)
+            .unwrap()
+            .load_chat_transcript("current-chat")
+            .unwrap();
+        assert!(stored == Some(sentinel), "the stored transcript was left as it was");
     }
 
     #[gpui::test]
