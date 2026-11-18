@@ -4859,7 +4859,6 @@ impl Render for Sidebar {
                 },
             ));
         }
-        let ring_active = self.tree_focus.is_focused(window);
         let filter_is_focused = filter_focus.is_focused(window);
         // Sidebar text fields (filter, worktree prompt) share one blink:
         // window focus is unique, so at most one caret is ever visible.
@@ -5391,9 +5390,7 @@ impl Render for Sidebar {
             })
             .when(view == SidebarView::Projects, |this| this.child(
                 list_frame(
-                    ring_active,
                     crate::scroll::bar_fading("sidebar-list-bar", &self.list_scroll, &self.list_bar, window, cx),
-                    &theme,
                     div()
                     .id("sidebar-tree")
                     .debug_selector(|| "sidebar-tree".to_owned())
@@ -5473,9 +5470,7 @@ impl Render for Sidebar {
                 let empty = session_list.open.is_empty() && session_list.closed.is_empty();
                 this.child(
                     list_frame(
-                        ring_active,
                         crate::scroll::bar_fading("sidebar-sessions-bar", &self.sessions_scroll, &self.sessions_bar, window, cx),
-                        &theme,
                         div()
                         .id("sidebar-sessions")
                         .debug_selector(|| "sidebar-sessions".to_owned())
@@ -5726,15 +5721,9 @@ impl Render for Sidebar {
 }
 
 /// The frame a list scrolls in: a plain box under the list that carries what
-/// must not scroll with it, the overlay scrollbar and the focus ring. The ring
-/// is always drawn, transparent while the list is unfocused, so focus moves no
-/// pixel of layout.
-fn list_frame(
-    ring_active: bool,
-    bar: gpui::AnyElement,
-    theme: &Theme,
-    list: impl IntoElement,
-) -> gpui::Div {
+/// must not scroll with it, the overlay scrollbar. The list draws no focus
+/// ring: a focused list looks the same as an unfocused one.
+fn list_frame(bar: gpui::AnyElement, list: impl IntoElement) -> gpui::Div {
     div()
         .mt(px(11.0))
         .flex_1()
@@ -5742,23 +5731,6 @@ fn list_frame(
         .relative()
         .child(list)
         .child(bar)
-        .child({
-            let color = if ring_active { theme.ely.focus } else { gpui::transparent_black() };
-            div()
-                .debug_selector(|| "sidebar-list-ring".to_owned())
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(color)
-                // What the drawn-frame tests read: present only while the ring
-                // is painted in the focus colour.
-                .when(color == theme.ely.focus, |this| {
-                    this.child(div().debug_selector(|| "sidebar-list-ring-focused".to_owned()).size_full())
-                })
-        })
 }
 
 #[cfg(test)]
@@ -9156,24 +9128,6 @@ mod tests {
                 .is_none(),
             "a linked worktree keeps the outline star"
         );
-    }
-
-    #[gpui::test]
-    async fn the_list_ring_follows_list_focus(cx: &mut TestAppContext) {
-        let (window, mut cx) = new_chat_fixture(cx, true);
-        let ring = cx.debug_bounds("sidebar-list-ring").expect("the ring is always drawn");
-        let tree = cx.debug_bounds("sidebar-tree").expect("the list is drawn");
-        assert_eq!(ring, tree, "the ring lays over the list and shifts nothing");
-        let active = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("sidebar-list-ring-focused").is_some()
-        };
-        assert!(!active(&mut cx), "no ring while the list is not focused");
-        window
-            .update(&mut cx, |s, window, cx| s.tree_focus.focus(window, cx))
-            .unwrap();
-        cx.run_until_parked();
-        assert!(active(&mut cx), "the ring shows while the list has focus");
-        assert_eq!(cx.debug_bounds("sidebar-list-ring"), Some(tree));
     }
 
     /// A sidebar with 20 worktrees in a 320x240 window, so the list overflows.

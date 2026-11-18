@@ -48,7 +48,9 @@ In the order he decided them:
 
 **Goals**
 - The sidebar's chrome reads like Codex's: header, New Chat, Projects section,
-  folder rows, hover-only actions, hover card, overlay scrollbar, focus ring.
+  folder rows, hover-only actions, hover card, overlay scrollbar. (The list's focus ring
+  shipped with #794 and was removed afterwards at Enzo's request: a focused
+  list draws no blue outline.)
 - Built from Ely components and `theme.ely` tokens.
 
 **Non-goals**
@@ -133,8 +135,9 @@ nothing new. **(my call)**
 - An overlay scrollbar that fades when idle: Sirio's `scroll::bar` over the
   list's `ScrollHandle`, which wraps Ely's `Scrollbar` (Ely's `ScrollArea` has
   no caller in Sirio; the wrapper is the established pattern).
-- A 1 px `theme.ely.focus` border, radius 8, **only while the list has keyboard
-  focus**. Codex's blue border reads as focus, not decoration. **(my call)**
+- ~~A 1 px `theme.ely.focus` border, radius 8, only while the list has keyboard
+  focus.~~ Shipped in #794, then removed at Enzo's request: the list draws no
+  focus ring, focused or not.
 
 ### §3.5 Project row — 31 px
 
@@ -199,14 +202,14 @@ Today's two-line card (`row.rs` `render_row`), with these changes:
 ### §3.8 Sessions view
 
 Content unchanged. It is reached through the title menu (§3.1), shares the
-header, the New Chat row and the list's scroll area and focus ring.
+header, the New Chat row and the list's scroll area.
 
 ## §4 Ely
 
 **Already vendored and used as they are:** `IconName::{Folder, FolderOpen,
 Bell, Search, SquarePen, Star, X, Plus, Ellipsis, ChevronDown}` (Sirio's own
 `icons.rs` has no bell, pen or star, so the sidebar's chrome uses Ely's set),
-`IconButton` (Ghost), `DotBadge`, `Disclosure`, `focus_ring`, `menus::{Menu,
+`IconButton` (Ghost), `DotBadge`, `Disclosure`, `menus::{Menu,
 layer, Hang}`, `Tooltip`.
 
 **Port reference: upstream `main` at `2d827752`** (2026-11-15, the newest; Enzo
@@ -249,7 +252,7 @@ captures, with the transcript as the re-runnable artifact:
 - a hovered card with its ★ and × and its hover card beside the sidebar;
 - the bell's popover with one unread session, and choosing it;
 - the filter shown by Search and hidden by `Esc`;
-- the focus ring on and off.
+- the list focused and unfocused, with no focus ring drawn.
 
 The existing sidebar tests keep passing. The Zed-parity E2E that measures "a
 sidebar section header 31" must still pass, now against the project row. A new

@@ -38,8 +38,8 @@ set -eEuo pipefail
 #       reads nothing
 #    6  a click on Search shows the filter field (filterShown), Esc hides it
 #    7  a click on the centre pane (listFocused false), then on a card
-#       (listFocused true), then on the centre pane again (false); the focus ring
-#       on and off captured
+#       (listFocused true), then on the centre pane again (false); the list draws
+#       no focus ring, so its left edge is the same focused and unfocused
 #    8  a second project with 22 worktrees: the list is captured at rest, after a
 #       wheel turn with the pointer off the list (idle frame, bar up) and 2.2 s
 #       later (bar faded). The list body is the same in the last two and the bar's
@@ -899,11 +899,21 @@ CENTER_CLICK=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sy
 click_window "$CENTER_CLICK"
 wait_for 7 "the centre pane holds the focus before the card is clicked" "S['listFocused'] is False"
 move_rect sidebarSection
-capture focus-ring-off
+capture list-focus-off
 click_rect sidebarCard 0 0
 wait_for 7 "the card click gave the list the keyboard focus" "S['listFocused'] is True"
 move_rect sidebarSection
-capture focus-ring-on
+capture list-focus-on
+# The list's left edge in the empty lower part of the list (one project, two cards, a 1000 px
+# window): a focus ring would draw its left border here, the cards and their selection do not.
+EDGE=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (24, round(h * 0.3), round(x), round(y + h * 0.55)))' $(rect_of left))
+edge_diff=$(frame_diff list-focus-off list-focus-on "$EDGE")
+if [ "$edge_diff" -eq 0 ]; then
+  tsv_row 7 "the list's left edge is the same focused and unfocused (no focus ring) in $EDGE" "0" "$edge_diff" ok
+else
+  tsv_row 7 "the list's left edge is the same focused and unfocused (no focus ring) in $EDGE" "0" "$edge_diff" FAIL
+  fail "focusing the list changed its left edge by $edge_diff in $EDGE: a focus ring is drawn"
+fi
 click_window "$CENTER_CLICK"
 wait_for 7 "a click on the centre pane took the focus away again" "S['listFocused'] is False"
 
