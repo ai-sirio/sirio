@@ -57,7 +57,7 @@ pub struct HooksPolicy {
     pub disabled_by_policy: bool,
     /// Only the organization's hooks run.
     pub managed_only: bool,
-    /// Only plugin hooks run.
+    /// The organization limits hooks to plugins: the CLI marks the settings rows disabled.
     pub plugin_only: bool,
     /// `disableAllHooks` is set in the merged settings.
     pub all_disabled: bool,

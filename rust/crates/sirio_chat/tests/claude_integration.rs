@@ -2802,7 +2802,7 @@ fn rules_success_without_state_is_an_error() {
 //   - the trace, state and background fixture loops answering `{}` to the verb
 //     (the main loop is covered by the refusal test; the session-panel E2E's
 //     trace, session-state and background-tasks scenarios open the panel, so
-//     they ask it of the other three).
+//     they send the request to the other three, but none asserts the answer).
 
 fn hooks_client(payload: Option<&str>) -> (ClaudeClient, sirio_chat::EventStream, Option<PathBuf>) {
     let path = payload.map(|payload| scratch_json("hooks", payload));
@@ -2840,7 +2840,8 @@ fn hooks_listing_is_read() {
     // commands. The rest are synthetic edge cases.
     let (mut client, _events, path) = hooks_client(Some(
         r#"{"events":[
-              {"name":"PreToolUse","summary":"Before tool execution","supportsMatcher":true,"hookCount":2},
+              {"name":"PreToolUse","summary":"Before tool execution",
+               "supportsMatcher":true,"hookCount":2},
               {"summary":"no name"},
               {"name":"Stop"}],
             "hooks":[
@@ -2848,7 +2849,8 @@ fn hooks_listing_is_read() {
                "sourceLabel":"User settings (~/.claude/settings.json)","type":"command",
                "displayText":"echo user-pre-bash","commandText":"echo user-pre-bash",
                "contentLabel":"Command",
-               "editable":{"matcher":"Bash","config":{"type":"command","command":"echo user-pre-bash"}}},
+               "editable":{"matcher":"Bash",
+                           "config":{"type":"command","command":"echo user-pre-bash"}}},
               {"event":"PreToolUse","matcher":"Bash","source":"userSettings",
                "sourceLabel":"User settings (~/.claude/settings.json)","type":"command",
                "displayText":"Checking bash","commandText":"true","contentLabel":"Command",

@@ -3,7 +3,7 @@
 //! It holds one card per section, stacked and scrolling as a whole; a card
 //! opens and closes from its title. `Chat::session_panel_sections` is the one
 //! list of sections, in the order they are drawn (Environment, then Context,
-//! Connectors, Permissions, Trace and Change request as they land), and both
+//! Connectors, Permissions, Hooks, Trace and Change request as they land), and both
 //! the drawing and the control snapshot read it, so a section appears in each
 //! at once.
 //! Open or closed is the chat's own and survives a relaunch

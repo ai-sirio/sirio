@@ -131,7 +131,10 @@ fn notes(listing: &HooksListing) -> Vec<String> {
         );
     }
     if policy.plugin_only {
-        notes.push("Only plugin hooks run: the others are marked disabled.".to_string());
+        notes.push(
+            "Your organization limits hooks to plugins: the hooks marked disabled do not run."
+                .to_string(),
+        );
     }
     if policy.unreadable {
         notes.push("Your organization's settings could not be read.".to_string());

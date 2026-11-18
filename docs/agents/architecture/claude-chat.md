@@ -86,7 +86,7 @@ folded by origin, from `get_context_usage` through `sirio_claude::context`; aske
 when no report exists yet), Connectors (the session's MCP servers by origin, with Sign in and
 Reconnect and a switch on every server row, from `sirio_claude::mcp` and `sirio_chat::McpControl`,
 whose calls wait for the CLI and so run off the GPUI thread; the switch is below), Permissions
-(below), Trace (below) and Change request (the
+(below), Hooks (below), Trace (below) and Change request (the
 branch's pull or merge request through the forge source, sharing the right panel's per-host
 rate-limit pause, and read
 only once the card is unfolded and a frame paints the column, so a chat in a background tab asks
@@ -207,7 +207,7 @@ absent before the first answer, after a refusal and with no hooks control.
   is not: it feeds an add-hook form, and the card edits nothing. A row's `editable`, its raw
   configuration with the characters unescaped, is never read: it is not in the reader's type, so it
   cannot reach `surface.chat.read`. A row with neither `displayText` nor `commandText`, or with no
-  `event`, is dropped; a field of the wrong JSON type counts as absent.
+  `event` or an empty one, is dropped; a field of the wrong JSON type counts as absent.
 - **Rows.** One group per event, with its hook count as the tag and the CLI's `summary` of the event
   as the detail; each group folds on its own and starts open (row keys `hooks/PreToolUse`,
   `hooks/PreToolUse/0`, ...; a `/` in an event name is `%2F` in the key; no row has an action).
@@ -228,17 +228,18 @@ absent before the first answer, after a refusal and with no hooks control.
   multi-line part, so its own text cannot pose as a line above it. Only `commandText` goes in the
   body: `displayText` may be a status message. Every CLI string goes through `visible_text`, so a
   bidi override shows as `⟨U+202E⟩`, never carried.
-- **Notes.** The card's note is one line per condition. None claims every hook is off, and the
-  lines about disabled hooks (`disabledByPolicy`, `disableAllHooks`, `pluginOnly`, safe mode and
-  bare mode) point at the rows marked disabled, since disabled is the CLI's mark on a row and
-  Sirio computes none. `disabledByPolicy` says `Your organization turned hooks off: ...`, and when
-  it is set the `allDisabled` flag adds nothing; otherwise it says `disableAllHooks is set` (the
-  settings key that sets the flag; a fixture's `policy` uses `allDisabled`). `managedOnly` says
-  hooks from settings files are not listed (a plugin row stays, marked disabled), `pluginOnly` says
-  the others are marked disabled, and `policyUnreadable` says the organization's settings could not
-  be read. Safe mode and bare mode each add a line with the CLI's `exitHint`, and safe mode adds
-  that the organization's hooks still run when `managedHooksStillApply`. Each skipped settings file
-  is `Skipped <file>: <message>`.
+- **Notes.** The card's note is one line per condition. The lines about disabled hooks
+  (`disabledByPolicy`, `disableAllHooks`, `pluginOnly`, safe mode and bare mode) point at the rows
+  marked disabled rather than claiming every hook is off, since disabled is the CLI's mark on a row
+  and Sirio computes none. `disabledByPolicy` says `Your organization turned hooks off: ...`, and
+  when it is set the `allDisabled` flag adds nothing; otherwise it says `disableAllHooks is set`
+  (`allDisabled` is the CLI's own key in `policy`; `disableAllHooks` is the settings key that sets
+  it). `managedOnly` says hooks from settings files are not listed (a plugin row stays, marked
+  disabled), `pluginOnly` says `Your organization limits hooks to plugins: the hooks marked disabled
+  do not run.` (session and organization hooks are never marked and still run), and
+  `policyUnreadable` says the organization's settings could not be read. Safe mode and bare mode
+  each add a line with the CLI's `exitHint`, and safe mode adds that the organization's hooks still
+  run when `managedHooksStillApply`. Each skipped settings file is `Skipped <file>: <message>`.
 - **Triggers.** The ask runs only while the panel is open, and the section's state is that of the
   current client: it is cleared with each new one. The triggers are opening the panel, restoring
   it open, unfolding the card, a connection becoming ready, a turn's end and a plugin reload that
