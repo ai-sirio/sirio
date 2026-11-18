@@ -3429,7 +3429,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         if !hovered {
-            self.hover_card.leave(cx);
+            self.hover_card.leave(row_id, cx);
         } else if let Some(bounds) = bounds
             && !self.hover_card_blocked(cx)
         {
@@ -3443,7 +3443,7 @@ impl Sidebar {
         if hovered {
             self.hover_card.keep();
         } else {
-            self.hover_card.leave(cx);
+            self.hover_card.leave_card(cx);
         }
     }
 
@@ -3478,12 +3478,7 @@ impl Sidebar {
             .last()
             .map(|project| project.title.clone())
             .unwrap_or_default();
-        let origin = hover_card::card_origin(
-            row_bounds,
-            sidebar_right,
-            gpui::size(px(hover_card::HOVER_CARD_WIDTH), hover_card::estimated_height(row, row.pills.len())),
-            window.viewport_size(),
-        );
+        let origin = hover_card::card_origin(row_bounds, sidebar_right, window.viewport_size().width);
         let card = hover_card::render_card(
             row,
             &project_name,
@@ -3502,6 +3497,7 @@ impl Sidebar {
             .child(card);
         let placed = gpui::anchored()
             .anchor(gpui::Anchor::TopLeft)
+            .snap_to_window()
             .position(origin)
             .child(body);
         Some(ely_gpui_component::primitives::raise("sidebar-hover-card-layer", placed).into_any_element())
@@ -9364,11 +9360,24 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "gone at 250 ms");
     }
 
-    #[gpui::test]
-    async fn the_hover_card_never_opens_while_a_menu_is_open(cx: &mut TestAppContext) {
-        for menu in ["context", "bell", "new_chat", "view"] {
-            let (window, mut cx) = new_chat_fixture(cx, true);
-            let id = linked_row(&mut cx);
+    fn tabbed_row(cx: &mut VisualTestContext) -> usize {
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        sidebar.read_with(cx, |s, _| {
+            s.rows.iter().find(|row| !row.pills.is_empty()).map(|row| row.id).expect("a worktree with tabs")
+        })
+    }
+
+    /// Opens `menu` while the pointer rests on `id`, waits past the open delay
+    /// and says whether the hover card is up.
+    fn card_after_opening(
+        cx: &mut TestAppContext,
+        menu: Option<&str>,
+    ) -> bool {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let id = tabbed_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 200);
+        if let Some(menu) = menu {
             window
                 .update(&mut cx, |s, window, cx| match menu {
                     "context" => s.open_context_menu(id, gpui::point(px(150.0), px(400.0)), window, cx),
@@ -9378,16 +9387,76 @@ mod tests {
                 })
                 .unwrap();
             cx.run_until_parked();
-            let row = cx.debug_bounds(Box::leak(format!("sidebar-row-{id}").into_boxed_str()) as &'static str);
-            if let Some(row) = row {
-                cx.simulate_mouse_move(row.center(), None, Modifiers::none());
-            }
-            hover_ms(&mut cx, 600);
-            assert!(
-                cx.debug_bounds("sidebar-hover-card").is_none(),
-                "no hover card while the {menu} menu is open"
-            );
         }
+        hover_ms(&mut cx, 400);
+        cx.debug_bounds("sidebar-hover-card").is_some()
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_never_opens_while_a_menu_is_open(cx: &mut TestAppContext) {
+        assert!(card_after_opening(cx, None), "control: with no menu the same hover opens the card");
+        for menu in ["context", "bell", "new_chat", "view"] {
+            assert!(!card_after_opening(cx, Some(menu)), "no hover card while the {menu} menu is open");
+        }
+    }
+
+    #[gpui::test]
+    async fn moving_to_the_next_card_keeps_an_open_hover_card_open(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let (a, b) = (tabbed_row(&mut cx), linked_row(&mut cx));
+        hover_card(&mut cx, a);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        hover_card(&mut cx, b);
+        hover_ms(&mut cx, 400);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "still open on the next card");
+    }
+
+    #[gpui::test]
+    async fn moving_to_the_next_card_before_the_hover_card_opens_still_opens_it(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let (a, b) = (tabbed_row(&mut cx), linked_row(&mut cx));
+        hover_card(&mut cx, a);
+        hover_ms(&mut cx, 100);
+        hover_card(&mut cx, b);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "the next card's timer survives");
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_stays_while_the_pointer_is_on_it(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let id = tabbed_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        let card = cx.debug_bounds("sidebar-hover-card").expect("open");
+        cx.simulate_mouse_move(card.center(), None, Modifiers::none());
+        hover_ms(&mut cx, 400);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "open while the pointer is on it");
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 250);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "gone after the pointer leaves it");
+    }
+
+    #[gpui::test]
+    async fn a_hover_card_near_the_bottom_is_lifted_inside_the_window(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        cx.simulate_resize(gpui::size(px(1200.0), px(200.0)));
+        cx.run_until_parked();
+        let id = tabbed_row(&mut cx);
+        // A 28-character branch: long enough for any height guess to count two
+        // lines for it, while it is drawn on one.
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        sidebar.update(&mut cx, |s, cx| {
+            s.rows.iter_mut().find(|row| row.id == id).expect("row").title = "a-branch-name-of-28-chars-x".to_owned();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        let card = cx.debug_bounds("sidebar-hover-card").expect("open");
+        assert!(card.top() >= px(0.0), "{card:?}");
+        assert!((card.bottom() - px(200.0)).abs() < px(1.0), "flush with the window bottom: {card:?}");
     }
 
     #[gpui::test]

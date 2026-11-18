@@ -9,9 +9,10 @@ use ely_gpui_component::{
     theme::IconSize as EIconSize,
 };
 use gpui::{
-    AnyElement, Bounds, Context, FontWeight, Pixels, Point, Size, Task, div, point, prelude::*,
+    AnyElement, Bounds, Context, FontWeight, Pixels, Point, Task, div, point, prelude::*,
     px,
 };
+use sirio_project::TabKind;
 use sirio_theme::Theme;
 
 use super::icons::{Icon, IconElement, IconSize};
@@ -31,17 +32,17 @@ pub(super) const GAP: f32 = 4.0;
 pub(super) const MIN_SIDEBAR_WIDTH: f32 = 200.0;
 
 /// Where the card's top-left corner goes: past the sidebar's right edge, level
-/// with the row, and moved inside the window when it would cross an edge. A
-/// card larger than the window starts at the top left.
+/// with the row, never above the window. Its bottom edge is the anchored
+/// layer's to fit, once the card's real height is laid out.
 pub(super) fn card_origin(
     row: Bounds<Pixels>,
     sidebar_right: Pixels,
-    card: Size<Pixels>,
-    window: Size<Pixels>,
+    window_width: Pixels,
 ) -> Point<Pixels> {
-    let x = (sidebar_right + px(GAP)).min(window.width - card.width).max(px(0.0));
-    let y = row.origin.y.min(window.height - card.height).max(px(0.0));
-    point(x, y)
+    let x = (sidebar_right + px(GAP))
+        .min(window_width - px(HOVER_CARD_WIDTH))
+        .max(px(0.0));
+    point(x, row.origin.y.max(px(0.0)))
 }
 
 /// What the hover card is doing: which worktree card it is about, where that
@@ -56,6 +57,8 @@ pub(super) struct HoverCardState {
     /// Where the list was scrolled when the card was asked for; a different
     /// offset closes it.
     pub(super) scroll_y: Pixels,
+    /// The pointer is on the open card itself.
+    on_card: bool,
     timer: Option<Task<()>>,
 }
 
@@ -70,6 +73,7 @@ impl HoverCardState {
     ) {
         self.row_id = Some(row_id);
         self.row_bounds = Some(bounds);
+        self.on_card = false;
         if self.shown {
             self.timer = None;
             self.opened_at_ms = sessions::unix_now_ms();
@@ -91,21 +95,39 @@ impl HoverCardState {
         }));
     }
 
-    /// The pointer is on the open card itself: it stays.
+    /// The pointer is on the open card itself: it stays, and a worktree card's
+    /// leave that arrives after this one (a move straight from the card onto
+    /// the hover card is one event) does not start the linger.
     pub(super) fn keep(&mut self) {
         if self.shown {
+            self.on_card = true;
             self.timer = None;
         }
     }
 
-    /// The pointer left the worktree card or the hover card. A card not yet
+    /// The pointer left the open hover card.
+    pub(super) fn leave_card(&mut self, cx: &mut Context<Sidebar>) {
+        self.on_card = false;
+        self.linger(cx);
+    }
+
+    /// The pointer left worktree card `row_id`. Ignored when the card is about
+    /// another row (a move from one card to the next reports the new row's
+    /// enter first) or when the pointer is on the hover card. A card not yet
     /// open never opens; an open one stays for [`LINGER`].
-    pub(super) fn leave(&mut self, cx: &mut Context<Sidebar>) {
-        if self.row_id.is_none() {
+    pub(super) fn leave(&mut self, row_id: usize, cx: &mut Context<Sidebar>) {
+        if self.row_id != Some(row_id) || self.on_card {
             return;
         }
         if !self.shown {
             self.dismiss();
+            return;
+        }
+        self.linger(cx);
+    }
+
+    fn linger(&mut self, cx: &mut Context<Sidebar>) {
+        if !self.shown {
             return;
         }
         self.timer = Some(cx.spawn(async move |this, cx| {
@@ -123,38 +145,50 @@ impl HoverCardState {
         self.row_id = None;
         self.row_bounds = None;
         self.shown = false;
+        self.on_card = false;
         self.timer = None;
     }
 }
 
-/// The card's height before it is laid out, for keeping it inside the window.
-/// A branch of more than about 26 characters is taken to wrap to two lines.
-pub(super) fn estimated_height(row: &SidebarRow, pills: usize) -> Pixels {
-    let branch_lines = if row.title.chars().count() > 26 { 2.0 } else { 1.0 };
-    let pill_block = if pills == 0 { 0.0 } else { 9.0 + pills as f32 * 22.0 };
-    px(24.0 + branch_lines * 18.0 + 8.0 + 18.0 + pill_block)
+/// What a tab's line starts with.
+#[derive(Debug, PartialEq)]
+pub(super) enum Lead {
+    Unread,
+    Bloom(ActivityStatus),
+    Terminal,
+    Nothing,
+}
+
+pub(super) fn lead_kind(pill: &SidebarPill) -> Lead {
+    if pill.unread {
+        return Lead::Unread;
+    }
+    match pill.status {
+        Some(status) if status != ActivityStatus::Idle => Lead::Bloom(status),
+        _ if pill.kind == TabKind::Terminal => Lead::Terminal,
+        _ => Lead::Nothing,
+    }
 }
 
 /// What a tab's line starts with: its unread dot, or its status bloom, or the
 /// terminal glyph.
 fn lead(pill: &SidebarPill, theme: &Theme) -> AnyElement {
     let slot = div().w(px(14.0)).h(px(14.0)).flex_none().flex().items_center().justify_center();
-    if pill.unread {
-        return slot
+    match lead_kind(pill) {
+        Lead::Unread => slot
             .child(div().size(px(7.0)).rounded_full().bg(theme.ely.info))
-            .into_any_element();
-    }
-    match pill.status {
-        Some(status) if status != ActivityStatus::Idle => slot
+            .into_any_element(),
+        Lead::Bloom(status) => slot
             .child(loading::settled_bloom(
                 "sidebar-hover-card-bloom",
                 loading::BLOOM_GLYPH,
                 status_color(status, *theme),
             ))
             .into_any_element(),
-        _ => slot
+        Lead::Terminal => slot
             .child(IconElement::new(Icon::SquareTerminal, IconSize::XSmall).text_color(theme.ely.fg_subtle))
             .into_any_element(),
+        Lead::Nothing => slot.into_any_element(),
     }
 }
 
@@ -262,37 +296,61 @@ mod tests {
         Bounds::new(point(px(8.0), px(y)), size(px(284.0), px(53.0)))
     }
 
-    fn origin(row_y: f32, card_h: f32, window_w: f32) -> Point<Pixels> {
-        card_origin(
-            row_at(row_y),
-            px(300.0),
-            size(px(HOVER_CARD_WIDTH), px(card_h)),
-            size(px(window_w), px(900.0)),
-        )
+    fn origin(row_y: f32, window_w: f32) -> Point<Pixels> {
+        card_origin(row_at(row_y), px(300.0), px(window_w))
+    }
+
+    fn pill(kind: TabKind, status: Option<ActivityStatus>, unread: bool) -> SidebarPill {
+        SidebarPill {
+            tab_id: Some(1),
+            parked_tab: None,
+            title: "t".to_owned(),
+            icon: Icon::SquareTerminal,
+            brand: None,
+            status,
+            selected: false,
+            kind,
+            persistence_id: String::new(),
+            last_event_at: None,
+            unread,
+        }
+    }
+
+    #[test]
+    fn an_idle_agent_tab_leads_with_nothing_and_a_terminal_with_its_glyph() {
+        assert_eq!(lead_kind(&pill(TabKind::AgentChat, None, false)), Lead::Nothing);
+        assert_eq!(lead_kind(&pill(TabKind::AgentChat, Some(ActivityStatus::Idle), false)), Lead::Nothing);
+        assert_eq!(lead_kind(&pill(TabKind::Terminal, None, false)), Lead::Terminal);
+    }
+
+    #[test]
+    fn a_tab_with_news_leads_with_its_dot_or_bloom_whatever_its_kind() {
+        for kind in [TabKind::AgentChat, TabKind::Terminal] {
+            assert_eq!(lead_kind(&pill(kind, None, true)), Lead::Unread);
+            assert_eq!(
+                lead_kind(&pill(kind, Some(ActivityStatus::Running), false)),
+                Lead::Bloom(ActivityStatus::Running)
+            );
+        }
     }
 
     #[test]
     fn the_card_sits_beside_the_sidebar_at_the_row_top() {
-        assert_eq!(origin(250.0, 140.0, 1200.0), point(px(304.0), px(250.0)));
-    }
-
-    #[test]
-    fn a_card_that_would_cross_the_bottom_is_lifted_inside() {
-        assert_eq!(origin(820.0, 140.0, 1200.0).y, px(760.0));
-    }
-
-    #[test]
-    fn a_card_taller_than_the_window_starts_at_the_top() {
-        assert_eq!(origin(250.0, 1000.0, 1200.0).y, px(0.0));
+        assert_eq!(origin(250.0, 1200.0), point(px(304.0), px(250.0)));
     }
 
     #[test]
     fn a_card_that_would_cross_the_right_edge_is_pulled_left() {
-        assert_eq!(origin(250.0, 140.0, 500.0).x, px(210.0));
+        assert_eq!(origin(250.0, 500.0).x, px(210.0));
     }
 
     #[test]
     fn a_row_partly_above_the_window_clamps_to_zero() {
-        assert_eq!(origin(-20.0, 140.0, 1200.0).y, px(0.0));
+        assert_eq!(origin(-20.0, 1200.0).y, px(0.0));
+    }
+
+    #[test]
+    fn a_window_narrower_than_the_card_starts_it_at_the_left_edge() {
+        assert_eq!(origin(250.0, 200.0).x, px(0.0));
     }
 }
