@@ -1,19 +1,14 @@
 # `rust/vendor/` — local overrides and Ely chat components
 
-> **Engine swap (gpui-pre 0.3.12).** The workspace builds on `gpui-pre` 0.3.12, not `bezel-gpui`
-> 0.3.8. `gpui_linux/` and `gpui_windows/` are now the `gpui-pre-linux` and `gpui-pre-windows`
-> 0.3.12 sources (patched through `gpui-pre-linux` / `gpui-pre-windows` in `[patch.crates-io]`),
-> with this directory's fixes carried over: the XDND drop and the child environment on Linux, the
-> bitblt swap chain and additive alpha blend on Windows. `bezel_theme/` is `bezel-theme` 0.1.4
-> with only its `gpui` dependency moved to `gpui-pre =0.3.12`, and `bezel_markdown/` the same.
-> `reqwest_client/` is the HTTP client gpui-pre no longer ships; it is a workspace member and
-> `sirio_ui::app_platform` installs it. The sections below still describe the 0.3.8 arrangement
-> where they name `bezel-gpui-*` and are not yet rewritten.
+Sirio builds on the published `gpui-pre` 0.3.12 family (`gpui-pre`, `gpui-pre-platform` and the
+backends under it). This directory holds what that family does not give us as it is: two
+platform backends carrying Sirio's patches, the HTTP client gpui-pre no longer installs, and the
+two Bezel crates the shell still draws with, repointed at the new engine.
 
 `ely-gpui-component/` is the pinned Ely chat/agent component source, licensed
 MIT OR Apache-2.0 and built as a workspace path dependency. Its
 `LOCAL-CHANGES.md` records provenance, the supported module closure and the
-compatibility changes. It uses the same published Bezel GPUI packages and
+compatibility changes. It builds on the same gpui-pre packages and
 the patches described below.
 
 `ely-palette/` extracts Ely's upstream `src/theme/palette.rs` and
@@ -22,158 +17,184 @@ small crate, so a host's theme crate can use Ely's palette without compiling
 Ely's components; `ely-gpui-component` re-exports those types at their original
 paths.
 
-This directory holds `[patch.crates-io]` overrides for three packages: `bezel-gpui-linux` and
-`bezel-gpui-windows` (both release `0.3.8`) and `bezel-markdown` (release `0.1.4`), all wired in
-via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the Bezel GPUI family
-(`gpui`, `gpui_platform`, and the rest) still comes straight from the published crates.io releases,
-unpatched.
+## What is here
 
-Each override changes one thing about its crate and nothing else (`bezel_markdown` changes four, all
-in `src/render.rs`, plus the one-line `src/lib.rs` re-export of the third); the four are unrelated fixes that happen to need the same mechanism.
-`gpui_linux` is described first and at length because it established the arrangement; `gpui_windows` and `bezel_markdown`
-follow it, each with its own short section at the end.
+| Directory | Package | Relation to upstream | Wired by |
+|---|---|---|---|
+| `gpui_linux/` | `gpui-pre-linux` 0.3.12 | two Sirio patches | `[patch.crates-io]` |
+| `gpui_windows/` | `gpui-pre-windows` 0.3.12 | three Sirio changes | `[patch.crates-io]` |
+| `bezel_theme/` | `bezel-theme` 0.1.4 | pristine `src/`, manifest repointed | `[patch.crates-io]` |
+| `bezel_markdown/` | `bezel-markdown` 0.1.4 | four changes in `src/render.rs` (+ `lib.rs` re-export), manifest repointed | `[patch.crates-io]` |
+| `reqwest_client/` | `sirio-reqwest-client` | zed's `reqwest_client`, republished by bezel | workspace member |
+| `ely-palette/`, `ely-gpui-component/` | as above | Ely sources | workspace members |
 
-## Why this exists: F-CORE-FILE-03A
+macOS builds on the upstream `gpui-pre-macos` / `gpui-pre-apple` 0.3.12, unpatched, so there is no `gpui_macos/`
+here. That is an accepted difference, not an oversight: its Metal blend alpha differs from the
+Windows renderer's, it has no backdrop-blur pass and no inset shadows, and Sirio uses neither
+API. If a Mac shows a regression, vendor `gpui-pre-apple` (and `gpui-pre-macos` if it must change) the way `gpui_windows/` is vendored.
 
-Upstream `gpui_linux`'s Wayland `wl_data_device` handling
-(`src/linux/wayland/client.rs`) reads the dragged `text/uri-list` off a pipe in
-a **background task** kicked off by `Enter`, and only stores `DragState::window` once that task's
-foreground continuation completes. `Drop`'s handler bailed out immediately whenever
-`DragState::window` was still unset — no `data_offer.finish()`/`destroy()`, no error logged, no
-event delivered to the app — which a provider slower than roughly 150ms reliably triggers, since
-`Enter`→`Drop` can arrive from the compositor faster than the pipe read resolves. The result: a
-real XDND drop is silently and totally discarded, with no trace on either side of the protocol.
+`gpui_platform` is not patched. `gpui-pre-platform` takes `gpui-pre-linux` and `gpui-pre-windows`
+as ordinary registry dependencies, so one `[patch.crates-io]` entry per backend substitutes the
+vendored tree for every consumer that resolves that package name from crates.io.
 
-Full root-cause writeup: `docs/linux-rewrite/tasks/P133-gpui-xdnd-slow-provider-race.md`. Live
-reproduction: `Scripts/wayland-drive.sh`'s `xdnd <x1> <y1> <x2> <y2> <file...> --delay-ms 400`
-action against a Terminal pane (see `docs/linux-rewrite/WAYLAND-LANE.md`'s XDND section).
+## How a vendored package is laid out
 
-## What's patched, and how little
+Every `[patch.crates-io]` package here follows the same recipe, and re-vendoring one means
+repeating it:
 
-- **`gpui_linux`** (`vendor/gpui_linux/`) — the actual fix. `DragState` gained a `PendingDrop`
-  flag: `Drop` sets it instead of bailing out when `window` is unset; the `Enter` continuation
-  checks it once the paths are resolved and, if set, finishes the transfer itself (an `Entered`
-  then a `Submit`, at the last position `Motion` tracked — not `Enter`'s own, possibly stale,
-  entry-point coordinate, which was a real bug caught live while building this fix). See the
-  `pending_drop`/`PendingDrop`/`pending_drop_submit_position` doc comments in
-  `src/linux/wayland/client.rs` for the exact mechanism, and the `tests` module at the bottom of
-  that file for regression coverage. Apart from that fix and the child environment described under
-  `gpui_linux — links open in the user's environment` below, every file in this crate is
-  byte-for-byte the released `bezel-gpui-linux` 0.3.8 source.
-- **`gpui_platform`** is **not** patched, and `vendor/gpui_platform/` no longer exists. It was
-  patched under the old zed-git-rev dependency only because that `gpui_platform`'s own
-  `gpui_linux = { workspace = true }` dependency was a *path* dependency inside the zed checkout —
-  a different Cargo source than the git URL the old `[patch]` targeted, so patching `gpui_linux`
-  alone would never have been seen by it. The published `bezel-gpui-platform` crate takes
-  `gpui_linux` as an ordinary crates.io registry dependency instead (`package = "bezel-gpui-linux"`,
-  version-pinned, no path involved — verified against its published manifest), so a single
-  `[patch.crates-io] bezel-gpui-linux = { path = "vendor/gpui_linux" }` entry is enough:
-  `[patch.crates-io]` substitutes the vendored tree for *every* consumer resolving that package
-  name from crates.io, `bezel-gpui-platform` included. The reason the second override existed is
-  gone, so it was removed rather than carried forward as dead weight.
+- **A pristine first commit.** The released source goes in unmodified, so
+  `git diff <that commit> -- rust/vendor/<dir>` always shows exactly Sirio's changes. Patches
+  land as later commits.
+- **A normalized manifest.** `[package] name` stays the published package name so it matches
+  what `[patch.crates-io]` targets, and `[lib] name` stays the import name consumers already use;
+  `publish = false`. Whatever the released manifest expresses as `.workspace = true` (zed's root
+  workspace does not exist here) is written out as the literal registry dependency it resolves to.
+  Dependencies on the engine are `=0.3.12` pins.
+- **Its own `[workspace]` table**, because Cargo refuses a directory that is both a `[patch]`
+  target and an implicit member of the enclosing workspace, plus an entry in `rust/Cargo.toml`'s
+  `[workspace] exclude` (today `vendor/gpui_linux`, `vendor/gpui_windows` and
+  `vendor/bezel_theme`; `bezel_markdown` carries the table but is not listed there).
+  `reqwest_client/` is the exception: it is a workspace member and carries no `[workspace]` table.
+- **Its own committed `Cargo.lock`** where the crate has one (`gpui_linux`, `gpui_windows`,
+  `bezel_theme`), so a standalone `cargo test --manifest-path rust/vendor/<dir>/Cargo.toml` is
+  reproducible. Never hand-edit a lockfile.
+- **The `[patch.crates-io]` entry by package name** in `rust/Cargo.toml`, and a comment there
+  saying why.
+- `target/` under any of them is covered by `rust/.gitignore`'s bare `target/` rule; never commit
+  it, it runs to several GB.
+- `LICENSE-APACHE` (or the MIT licence) sits next to the crate, as upstream ships it.
 
-`vendor/gpui_linux/Cargo.toml` carries a comment explaining every field that had to change from
-the published manifest: `[package] name` stays `bezel-gpui-linux` so it matches what
-`[patch.crates-io]` targets; `[lib] name` stays `gpui_linux` so it keeps resolving as the same
-import path every consumer already uses; dependencies the released manifest expresses as
-`.workspace = true` (resolving against zed's own root workspace, which does not exist here) are
-written out as the literal registry dependency they resolve to instead. Everything else —
-features, lints, `cargo-shear` metadata, dependency versions — mirrors the released manifest
-field-for-field.
+After touching a dependency line in a vendored manifest, run
+`cargo tree --target x86_64-unknown-linux-gnu -i gpui-pre-linux` (or `-i gpui-pre-windows` for the
+Windows crate, with the Windows target) and confirm it resolves to the path source with no
+`patch ... was not used in the crate graph` warning. A candidate whose requirement the graph cannot
+satisfy is dropped *silently*, with only that warning, and the build then uses the unpatched
+registry crate.
 
-## Layout notes
+## `gpui_linux` — two patches
 
-- `vendor/gpui_linux` carries its own `[workspace]` table so it resolves as an independent
-  workspace root (Cargo refuses to treat a directory as both a `[patch]` target *and* an implicit
-  member of the enclosing workspace). `rust/Cargo.toml`'s `[workspace] exclude` keeps the outer
-  workspace from trying to claim it too.
-- It has its own committed `Cargo.lock`, so `cargo test --manifest-path
-  rust/vendor/gpui_linux/Cargo.toml` is reproducible standalone, independent of the main `rust/`
-  build.
-- `target/` under it is covered by `rust/.gitignore`'s bare `target/` rule (gitignore patterns
-  without a leading `/` match at any depth) — never commit it; it runs to several GB.
-- `LICENSE-APACHE` is copied alongside the crate, matching upstream's own per-crate licensing.
+`vendor/gpui_linux/` is `gpui-pre-linux` 0.3.12 plus two changes. Every other file is the
+released source.
 
-## Keeping the standalone lock honest
+### A drop that beats a slow provider (F-CORE-FILE-03A)
 
-`vendor/gpui_linux/Cargo.lock` only proves something if it describes the same dependency graph
-`rust/Cargo.lock` actually ships. For every package the two locks share, their versions must
-agree — otherwise `Scripts/ci-linux.sh`'s vendored-crate stage is testing a graph that exists
-nowhere else. `bezel-gpui`, `bezel-gpui-wgpu`, and `bezel-gpui-linux` are the exception: those
-three are pinned exactly to `0.3.8` on purpose, everything else the family pulls in (its
-`bezel-zed-*` build-dep chain) resolves to whatever later patch release satisfies the caret range,
-`0.3.8` as of this writing — that's ordinary semver composition of a published family, not drift.
+Upstream's Wayland `wl_data_device` handling (`src/linux/wayland/client.rs`) reads the dragged
+`text/uri-list` off a pipe in a background task kicked off by `Enter`, and only stores
+`DragState::window` once that task's continuation completes. `Drop` bailed out whenever the window
+was still unset: no `finish()`/`destroy()`, no event, no log. A provider slower than roughly 150 ms
+reliably triggers it, since `Enter` to `Drop` can arrive faster than the read resolves, and a real
+XDND drop was then discarded with no trace on either side of the protocol. Root cause writeup:
+`docs/linux-rewrite/tasks/P133-gpui-xdnd-slow-provider-race.md`. Live reproduction:
+`Scripts/wayland-drive.sh`'s `xdnd <x1> <y1> <x2> <y2> <file...> --delay-ms 400` against a Terminal
+pane (`docs/linux-rewrite/WAYLAND-LANE.md`).
 
-To re-sync after `rust/Cargo.lock` moves: `cargo update --manifest-path
-vendor/gpui_linux/Cargo.toml -p <package> --precise <version>` per drifted package, matching
-whatever `rust/Cargo.lock` resolved it to. Never hand-edit either lockfile.
+`DragState` now remembers the drop (`pending_drop`, with `uri_read_unresolved` and a
+`uri_read_generation` that ties it to one `Enter`'s read):
 
-**Trap:** don't "fix" this by pinning those `bezel-zed-*` dependencies to an exact `=0.3.8` in
-`vendor/gpui_linux/Cargo.toml`. Cargo unifies each package to one version graph-wide, and the
-build-dep chain above is free to resolve those packages to a later compatible `0.3.x` release; an
-exact `=0.3.8` requirement inside the `[patch.crates-io]` candidate then makes that candidate
-infeasible as soon as it does, and cargo falls back to the unpatched registry crate — *silently*,
-with only a warning, not a build failure. The symptom is `patch ... was not used in the crate
-graph` and a registry-sourced `bezel-gpui-linux` in
-`rust/Cargo.lock` instead of the path-sourced one. After touching those dependency lines, always
-run `cargo tree --target x86_64-unknown-linux-gnu -i bezel-gpui-linux` and confirm it resolves to
-the path source with no such warning.
+- A `Drop` with the read unresolved is remembered instead of dropped.
+- When the read resolves with files, the continuation delivers the transfer itself: an `Entered`,
+  then a `Submit` at the last position `Motion` tracked, not `Enter`'s own, possibly stale, entry
+  position.
+- A `Leave` while a drop is pending is ignored, because the compositor ends a drag with a `Leave`
+  after the `Drop` and the files are still being read.
+- Only a newer `Enter` (a new read supersedes the old one and its pending drop) or a read that
+  fails or lists no files cancels the pending drop.
 
-## Maintenance cost — read before bumping the pinned `bezel-gpui-linux` version
+The `tests` module at the bottom of `client.rs` covers it, and `Scripts/ci-linux.sh` runs the
+crate's own tests (`cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked --features
+test-support`; the gpui-pre copy compiles its tests only with that feature).
 
-This is a real, standing fork of one crate, not a one-line patch. Bumping
-`rust/Cargo.toml`'s pinned `bezel-gpui-linux` version requires re-diffing `gpui_linux`'s
-`client.rs` against the new release and re-applying the `PendingDrop` mechanism by hand (or
-dropping this override entirely, if upstream has fixed the race some other way by then — worth
-checking first). Nothing else in the vendored crate should ever need hand-merging, since nothing
-else was changed from upstream.
-
-## `gpui_linux` — links open in the user's environment
+### Links open in the user's environment
 
 `set_child_environment(env)` is a process-wide setter, its pairs held in a `OnceLock` in
 `src/linux.rs` and re-exported from `src/gpui_linux.rs`. gpui starts `xdg-open` for
 `open_with_system` and the URL opener for every `cx.open_url`, and both inherited the app's
 environment: under an AppImage that is the mount's `LD_LIBRARY_PATH`, `XDG_DATA_DIRS` and GTK
 variables, so the user's browser started with them. Once the setter has been called, each of those
-commands is started with its environment cleared and the pairs given instead
-(`with_child_environment`, applied in `open_with_system`, `open_uri_internal` and the file-manager
-fallback of `reveal_path_internal` in `src/linux/platform.rs`; the last replaces
-`open::that_detached` with the same `open::commands` loop, first command that starts wins, nothing
-waits). `sirio`'s `main` calls it on Linux, right after `sirio_env::install`, with the user's
-environment. The crate takes no dependency on Sirio's environment crate: the caller passes the pairs
-in.
+commands is started through `with_child_environment`: environment cleared, the given pairs set,
+plus `XDG_ACTIVATION_TOKEN` when gpui has one. Unset, the commands run as upstream starts them.
+`src/linux/platform.rs` applies it at the `xdg-open` site and in `run_open_commands` (the
+`open::commands` loop, first command that starts wins, nothing waits) instead of upstream's
+`environment.apply_to` when the setter has been called. The setter is first-call-wins: a later
+call is ignored. `sirio`'s `main` calls it on Linux, right after `sirio_env::install`, with the
+user's environment; the crate takes no dependency on Sirio's environment crate, the caller passes
+the pairs in.
 
-## `gpui_windows` — a bitblt swap chain so translucency can show (ADR 0003)
+### Keeping the standalone lock honest
 
-`vendor/gpui_windows/` is the released `bezel-gpui-windows` 0.3.8 source with exactly one change:
-`create_swap_chain` in `src/directx_renderer.rs` — the swap chain GPUI builds when
-`GPUI_DISABLE_DIRECT_COMPOSITION` is set, which Sirio sets on Windows so the Browser surface's
-WebView2 child HWND has a redirection surface to compose into (ADR 0002) — is a bit-block-transfer
-swap chain (`DXGI_SWAP_EFFECT_DISCARD`, `DXGI_SCALING_STRETCH`, `DXGI_ALPHA_MODE_UNSPECIFIED`)
-instead of upstream's flip-model one. The DWM composes a flip-model HWND swap chain as opaque, so
-upstream's fallback path could never show the acrylic accent `set_background_appearance(Blurred)`
-installs; a bitblt present copies the back buffer, alpha included, into the redirection surface,
-which the DWM does composite per-pixel under an accent policy. Measured both ways on real hardware
-on 2026-09-05 — see `docs/adr/0003-windows-regains-translucency-through-a-bitblt-swap-chain.md`.
-The comment above the changed descriptor in the vendored file says the same in place. Every other
-file is byte-for-byte the released source.
+`vendor/gpui_linux/Cargo.lock` only proves something if it describes the same dependency graph
+`rust/Cargo.lock` ships. For every package the two locks share, their versions must agree,
+otherwise `Scripts/ci-linux.sh`'s vendored-crate stage tests a graph that exists nowhere else.
+To re-sync after `rust/Cargo.lock` moves: `cargo update --manifest-path
+vendor/gpui_linux/Cargo.toml -p <package> --precise <version>` per drifted package.
 
-The manifest follows `gpui_linux`'s conventions (`[workspace]` table, `publish = false`, package
-name kept as `bezel-gpui-windows`, `[lib] name` kept as `gpui_windows`); the released manifest
-already spells every dependency out as a literal registry dependency, so nothing else had to
-change. `bezel-gpui-platform` takes `gpui_windows` as a plain crates.io dependency
-(`package = "bezel-gpui-windows"`), so the single `[patch.crates-io]` entry reaches every consumer,
-exactly as for `gpui_linux`.
+## `gpui_windows` — a bitblt swap chain, additive alpha, and perf spans
 
-Unlike `gpui_linux`, this override carries **no standalone `Cargo.lock` and no CI test stage**: the
-change is one swap-chain descriptor whose effect exists only on a live DWM, and the crate's own
-tests do not cover swap-chain creation. The check that matters is visual (an isolated instance over
-a loud backdrop, with a Browser tab open), and `cargo tree -i bezel-gpui-windows` confirming the
-path source is used with no `patch ... was not used` warning.
+`vendor/gpui_windows/` is `gpui-pre-windows` 0.3.12 plus three changes:
 
-Bumping the pinned `bezel-gpui-windows` version means re-applying that one descriptor change by
-hand — or dropping the override, if upstream's no-DirectComposition path has become
-translucency-capable by then (worth checking first, as for `gpui_linux`).
+1. **A bitblt swap chain so translucency can show (ADR 0003).** `create_swap_chain` in
+   `src/directx_renderer.rs` — the swap chain GPUI builds when `GPUI_DISABLE_DIRECT_COMPOSITION`
+   is set, which Sirio sets on Windows so the Browser surface's WebView2 child HWND has a
+   redirection surface to compose into (ADR 0002) — is a bit-block-transfer swap chain
+   (`DXGI_SWAP_EFFECT_DISCARD`, `DXGI_SCALING_STRETCH`, `DXGI_ALPHA_MODE_UNSPECIFIED`) instead of
+   the flip-model one. The DWM composes a flip-model HWND swap chain as opaque, so upstream's
+   fallback path could never show the acrylic accent `set_background_appearance(Blurred)`
+   installs; a bitblt present copies the back buffer, alpha included, into the redirection
+   surface, which the DWM does composite per-pixel under an accent policy. See
+   `docs/adr/0003-windows-regains-translucency-through-a-bitblt-swap-chain.md`; the comment
+   above the changed descriptor says the same in place.
+2. **`DestBlendAlpha` stays `ONE`.** gpui-pre 0.3.12 changed `DestBlendAlpha` to
+   `INV_SRC_ALPHA` in `create_blend_state` and `create_blend_state_for_path_sprite`, the ordinary
+   "over" operator for alpha. That undoes the additive alpha accumulation Windows translucency was
+   measured with (a panel over the frame veil saturates to alpha 1, so panels are opaque there and
+   the blur lives in the title strip and the gaps: ADR 0003 and `shell_chrome::MaterialStrength`).
+   Both functions set it back to `D3D11_BLEND_ONE`, with a `Sirio-local change` comment. The
+   subpixel text blend state is untouched.
+3. **`sirio_perf` spans.** The window-event handlers (`resize_input`, `mouse_input`, `char_input`,
+   `draw_window`, `force_render`), the renderer (`DirectXRenderer.present`, `.draw`, `.render`)
+   and the vsync loop in `platform.rs` carry `sirio_perf` spans and events, so the Windows
+   perf trace has the engine's frame in it. The crate depends on `sirio_perf` by path
+   (`../../crates/sirio_perf`). Names are content-free `&'static str`s, per
+   `docs/agents/architecture/perf-trace.md`.
+
+The manifest follows the recipe above and has its own `Cargo.lock`. There is no CI test stage for
+this crate: the swap chain's effect exists only on a live DWM, and the crate's tests do not cover
+swap-chain creation. The check that matters is visual (an isolated instance over a loud backdrop,
+with a Browser tab open), plus `cargo tree -i gpui-pre-windows` showing the path source.
+
+## `bezel_theme` — repointed, source pristine
+
+`vendor/bezel_theme/` is `bezel-theme` 0.1.4 with its `src/` byte-for-byte the release. The
+published crate depends on `bezel-gpui`, an engine this workspace no longer builds, so only the
+manifest changed: the `gpui` dependency is `gpui-pre =0.3.12`, and the usual normalization
+(`[workspace]`, `publish = false`, own `Cargo.lock`, `exclude`d from the root workspace) applies.
+`sirio_theme` and `sirio_ui` take it by its published name; the `[patch.crates-io]` entry
+substitutes it.
+
+## `bezel_markdown` — repointed, with four source changes
+
+The manifest change is the same as `bezel_theme`'s: `gpui` is `gpui-pre =0.3.12`, and nothing else
+in the manifest moved. The engine swap touched no source. The source changes below are older and
+unrelated to the engine.
+
+Note that `src/lib.rs` (the crate docs, around line 22) still says `gpui_platform::application`
+installs the HTTP client an image at an `http` URL needs. That is stale: gpui-pre's platform
+installs none. The comment is upstream's and the source is kept as released on purpose;
+`sirio_ui::app_platform::application` is what installs it.
+
+## `reqwest_client` — the HTTP client gpui-pre no longer installs
+
+`gpui-pre-platform`'s `application()` starts an `Application` with an HTTP client that refuses
+every request, where the engine Sirio ran on before installed `ReqwestClient::new()`.
+`vendor/reqwest_client/` (package `sirio-reqwest-client`, version `0.3.8+zed.82aeef`, lib name
+`reqwest_client`) is zed's `reqwest_client` as the bezel project republished it, with its
+`http_client` and `gpui_util` dependencies moved to `gpui-pre-http-client` / `gpui-pre-util`
+`=0.3.12`. It is a workspace member (`rust/Cargo.toml`'s `reqwest_client` workspace dependency
+names it by path), not a patch. `sirio_ui::app_platform::{application, headless}`
+(`rust/crates/sirio_ui/src/app_platform.rs`) wraps `gpui_platform::application()` / `headless()`
+and installs `ReqwestClient::new()` with no user agent, proxy override or extra header; every app,
+example and probe starts through it, so remote images load the same in each. A program that built
+its `Application` straight from `gpui_platform` would fail those fetches silently.
 
 ## `bezel_markdown` — a selection that covers each wrapped row from its first glyph, a bar under wide blocks, and text that follows the interface size
 

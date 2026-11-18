@@ -1028,7 +1028,7 @@ sys.exit(0 if 0 <= one < two else 1)
   # A failed apply and a refusal, drawn with the agent still at work: the card
   # carries the agent warning and the error together (spec 2.2). Both were once
   # one a11y node id in a debug build, which panicked ("Duplicate a11y node id",
-  # bezel-gpui window/a11y.rs); after each capture Sirio must answer.
+  # gpui window/a11y.rs); after each capture Sirio must answer.
   ctl surface update inject --status failed --version 99.1.0 --message "network unreachable"
   expect status apply-failed
   expect error "network unreachable"

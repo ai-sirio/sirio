@@ -243,7 +243,8 @@ done
 # rust/vendor/gpui_linux is `exclude`d from the root workspace (see rust/Cargo.toml) because
 # it carries its own `[workspace]` table -- so none of the `cargo test -p <crate>` calls above,
 # nor a hypothetical `cargo test --workspace`, ever reach it. That crate is where the Wayland
-# XDND slow-provider fix lives (F-CORE-FILE-03A, see rust/vendor/README.md), and until now
+# XDND slow-provider fix and the child environment live (gpui-pre-linux 0.3.12 plus Sirio's
+# patches, see rust/vendor/README.md), and until now
 # nothing in either CI gate ran its regression tests. Run the whole crate, not just the
 # `pending_drop` tests the fix itself added, so a future change to anything else vendored in
 # there is covered too.

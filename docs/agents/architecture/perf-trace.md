@@ -22,6 +22,6 @@ Two separate switches, easily confused: the env var above turns the TSV on in
 any build, while `sirio`'s `perf-native` **cargo feature** additionally compiles
 `native_perf.rs`, which exports GPUI's bounded foreground journal (frames,
 input, task polls) as JSON and pulls in `gpui/profiler` plus a pinned
-`bezel-zed-scheduler`. A default build has no journal at all. `Scripts/perf/`
+`gpui-pre-scheduler`. A default build has no journal at all. `Scripts/perf/`
 holds the harness and report scripts; `docs/perf/` holds the captures, each
 recording its own commands, hashes and bounds.

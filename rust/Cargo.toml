@@ -91,7 +91,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", default-fe
 reqwest_client = { path = "vendor/reqwest_client", package = "sirio-reqwest-client" }
 # Renamed: each package's lib target is a bare word (`theme`, `markdown`, `syntax`), so the
 # extern name carries the `bezel_` prefix and a path reads `bezel_theme::…`, `bezel_markdown::…`,
-# `bezel_syntax::…`. Cf. `gpui = { package = "bezel-gpui" }` above.
+# `bezel_syntax::…`. Cf. `gpui = { package = "gpui-pre" }` above.
 bezel_theme = { version = "=0.1.4", package = "bezel-theme" }
 bezel_markdown = { version = "=0.1.4", package = "bezel-markdown" }
 bezel_syntax = { version = "=0.1.4", package = "bezel-syntax" }
@@ -148,8 +148,8 @@ gpui-pre-linux = { path = "vendor/gpui_linux" }
 # copy presents through a bitblt swap chain instead, and keeps additive alpha blending; see
 # rust/vendor/README.md.
 gpui-pre-windows = { path = "vendor/gpui_windows" }
-# `bezel-theme` 0.1.4 on gpui-pre: the published crate depends on `bezel-gpui`, which this
-# workspace no longer builds. The vendored copy changes only that dependency.
+# `bezel-theme` 0.1.4 on gpui-pre: the published crate depends on `bezel-gpui`, the engine this
+# workspace used to build. The vendored copy changes only that dependency.
 bezel-theme = { path = "vendor/bezel_theme" }
 # Local override that washes the first glyph of every soft-wrapped row of a selection. Upstream
 # 0.1.4 walks a range's rows through `position_for_index`, which places a wrap boundary at the end
