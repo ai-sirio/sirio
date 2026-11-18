@@ -5,7 +5,7 @@ resolver = "2"
 # `cargo test --manifest-path rust/vendor/gpui_linux/Cargo.toml` can run its tests standalone;
 # excluded here so `cargo build/test --workspace` does not also try to treat it as a member
 # (which conflicts with its own `[workspace]` table).
-exclude = ["vendor/gpui_linux", "vendor/gpui_windows"]
+exclude = ["vendor/gpui_linux", "vendor/gpui_pre_linux", "vendor/gpui_windows"]
 members = [
     "vendor/ely-palette",
     "vendor/ely-gpui-component",
