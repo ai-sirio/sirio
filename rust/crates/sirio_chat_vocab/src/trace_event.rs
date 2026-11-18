@@ -49,6 +49,10 @@ pub enum TraceEvent {
     },
     /// A model call's tokens.
     SpanUsage { id: String, tokens: TokenCount },
+    /// A running subagent said something: `id` is the subagent's span, and
+    /// `sentence` the latest sentence of a text block it wrote, never empty.
+    /// Only the subagent's lane shows it, while the lane is open.
+    SpanSaid { id: String, sentence: String },
     /// A permission was asked: `span` is the one it waits on, the root when
     /// `None`.
     WaitStarted {

@@ -101,6 +101,8 @@ pub struct RowSnapshot {
     /// The background task this row stops, while it runs (A3): its Stop is
     /// the row's own button.
     pub stop: Option<String>,
+    /// A running subagent lane's latest sentence, `None` for any other row.
+    pub said: Option<String>,
     /// The connector switch's state, `None` for a row with no switch.
     pub switch: Option<bool>,
     /// Whether the connector switch takes a click now, `None` for a row with no switch.
@@ -149,6 +151,8 @@ pub(super) struct Row {
     pub(super) note: String,
     /// The background task a Stop on this row ends, while it runs.
     pub(super) stop: Option<String>,
+    /// A running subagent lane's latest sentence.
+    pub(super) said: Option<String>,
     /// The switch at the line's end (a connector's).
     pub(super) switch: Option<RowSwitch>,
 }
@@ -190,6 +194,7 @@ impl Row {
             tag_below: false,
             note: String::new(),
             stop: None,
+            said: None,
             switch: None,
         }
     }
@@ -635,6 +640,7 @@ impl Chat {
                             action: row.action,
                             note: row.note,
                             stop: row.stop,
+                            said: row.said,
                             switch: row.switch.as_ref().map(|switch| switch.on),
                             switch_enabled: row.switch.as_ref().map(|switch| switch.enabled),
                         })

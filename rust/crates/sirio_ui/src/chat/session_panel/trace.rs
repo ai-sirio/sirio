@@ -192,6 +192,7 @@ pub(super) fn section(
             action: Some("reveal".to_string()),
             note: lane.now.clone().unwrap_or_default(),
             stop: lane_stop(background, &lane.span),
+            said: lane.said.clone(),
             ..Row::new(
                 &format!("trace/lane/{}", lane.span),
                 lane.name.clone(),
@@ -693,6 +694,13 @@ fn render_lane(
     let color = state_color(theme, lane.state);
     let indent = f32::from(lane.depth) * INDENT;
     let own_waits = !lane.waits.is_empty();
+    // While open, the agent's latest sentence stands where its description
+    // does.
+    let headline = if !open {
+        String::new()
+    } else {
+        lane.said.clone().unwrap_or_else(|| lane.detail.clone())
+    };
     let header = div()
         .debug_selector({
             let selector = format!("trace-lane-header-{}", lane.span);
@@ -720,17 +728,17 @@ fn render_lane(
                 .text_color(theme.ely.fg)
                 .child(lane.name.clone()),
         )
-        .when(open && !lane.detail.is_empty(), |line| {
+        .when(!headline.is_empty(), |line| {
             line.child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_color(theme.ely.fg_subtle)
-                    .child(lane.detail.clone()),
+                    .child(headline.clone()),
             )
         })
-        .when(!(open && !lane.detail.is_empty()), |line| line.child(div().flex_1()))
+        .when(headline.is_empty(), |line| line.child(div().flex_1()))
         .child(
             div()
                 .flex_none()
