@@ -588,7 +588,7 @@ fn main() {
         return;
     };
     print_gaps(options.frame);
-    gpui_platform::application()
+    sirio_ui::app_platform::application()
         .with_assets(sirio_ui::ely::AppAssets)
         .run(move |cx: &mut App| {
             // The debug switch `Scripts/bezel-off-captures.sh` exports: snap every animation to

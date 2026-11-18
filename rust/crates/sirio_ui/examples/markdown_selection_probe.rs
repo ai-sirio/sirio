@@ -49,7 +49,7 @@ impl Render for Probe {
 }
 
 fn main() {
-    gpui_platform::application()
+    sirio_ui::app_platform::application()
         .with_assets(sirio_ui::ely::AppAssets)
         .run(|cx: &mut App| {
             sirio_theme::register_ui_fonts(cx).expect("Sirio fonts");

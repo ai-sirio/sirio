@@ -2916,7 +2916,7 @@ impl Chat {
         let list_state = ListState::new(0, ListAlignment::Top, px(2048.0));
         list_state.set_follow_mode(FollowMode::Tail);
         // F-CHAT-20: scrolling away from the tail mid-stream (a real
-        // GPUI `ScrollWheelEvent`, not this app's code) already flips
+        // GPUI `ScrollEvent`, not this app's code) already flips
         // `FollowMode` off inside `ListState::scroll` — that half needed no
         // fix. But nothing ever turned it back on, so once a user scrolled
         // away the transcript stayed pinned to that spot forever, even after

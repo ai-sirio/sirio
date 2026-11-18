@@ -13,7 +13,7 @@ path = "src/main.rs"
 perf-native = ["gpui/profiler", "dep:perf_scheduler"]
 
 [dependencies]
-perf_scheduler = { package = "bezel-zed-scheduler", version = "=0.3.8", optional = true }
+perf_scheduler = { package = "gpui-pre-scheduler", version = "=0.3.12", optional = true }
 sirio_perf = { path = "../sirio_perf" }
 sirio_env = { path = "../sirio_env" }
 sirio_lsp = { path = "../sirio_lsp" }
@@ -121,7 +121,7 @@ gtk = "0.18.2"
 # gpui starts `xdg-open` for every link it opens; `set_child_environment` gives
 # those children the user's environment (`main.rs`). The same crate gpui_platform
 # builds on, so the one instance serves both; its own features come from there.
-gpui_linux = { package = "bezel-gpui-linux", version = "0.3.8", default-features = false }
+gpui_linux = { package = "gpui-pre-linux", version = "=0.3.12", default-features = false }
 # F-USE-04/F-USE-05/F-WIN-08: the StatusNotifierItem tray (`src/tray.rs`).
 # "blocking" runs the D-Bus service on its own OS thread with a synchronous
 # `spawn()`/`Handle::update()`, so it needs no tokio runtime wired through

@@ -1,5 +1,15 @@
 # `rust/vendor/` — local overrides and Ely chat components
 
+> **Engine swap (gpui-pre 0.3.12).** The workspace builds on `gpui-pre` 0.3.12, not `bezel-gpui`
+> 0.3.8. `gpui_linux/` and `gpui_windows/` are now the `gpui-pre-linux` and `gpui-pre-windows`
+> 0.3.12 sources (patched through `gpui-pre-linux` / `gpui-pre-windows` in `[patch.crates-io]`),
+> with this directory's fixes carried over: the XDND drop and the child environment on Linux, the
+> bitblt swap chain and additive alpha blend on Windows. `bezel_theme/` is `bezel-theme` 0.1.4
+> with only its `gpui` dependency moved to `gpui-pre =0.3.12`, and `bezel_markdown/` the same.
+> `reqwest_client/` is the HTTP client gpui-pre no longer ships; it is a workspace member and
+> `sirio_ui::app_platform` installs it. The sections below still describe the 0.3.8 arrangement
+> where they name `bezel-gpui-*` and are not yet rewritten.
+
 `ely-gpui-component/` is the pinned Ely chat/agent component source, licensed
 MIT OR Apache-2.0 and built as a workspace path dependency. Its
 `LOCAL-CHANGES.md` records provenance, the supported module closure and the

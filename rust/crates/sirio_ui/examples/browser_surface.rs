@@ -1,7 +1,7 @@
 //! Run the B-02 browser surface on a real X11 display.
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use sirio_theme::Theme;
 
 #[path = "../src/browser.rs"]

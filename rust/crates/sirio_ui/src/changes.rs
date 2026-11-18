@@ -8638,7 +8638,7 @@ mod tests {
     }
 
     fn measure_big_diff(cx: &mut TestAppContext, lines: usize) -> DiffFrameCost {
-        use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
+        use gpui::{ScrollDelta, ScrollEvent, TouchPhase, point, size};
         use std::time::Instant;
         cx.update(Theme::init);
         cx.update(crate::ely::init);
@@ -8687,11 +8687,12 @@ mod tests {
         let mut scroll_frames: Vec<f64> = Vec::new();
         for _ in 0..5 {
             let start = Instant::now();
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: list.center(),
                 delta: ScrollDelta::Lines(point(0.0, -3.0)),
                 modifiers: Modifiers::none(),
                 touch_phase: TouchPhase::Moved,
+                source: gpui::ScrollSource::Pointer,
             });
             scroll_dispatch.push(start.elapsed().as_secs_f64() * 1000.0);
             scroll_frames.push(cx.update(|window, cx| {

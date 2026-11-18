@@ -16,7 +16,7 @@ use gpui::{
     App, AppContext, Bounds, Context, Corners, Render, RenderImage, Window, WindowBounds,
     WindowOptions, canvas, div, prelude::*, px, size,
 };
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use image::{Frame, RgbaImage};
 
 /// A solid swatch whose four bytes per pixel are exactly `bytes`, in that

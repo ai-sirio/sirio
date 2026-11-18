@@ -1,14 +1,15 @@
 [workspace]
 resolver = "2"
-# vendor/gpui_linux is a local `[patch.crates-io]` override for the published bezel-gpui-linux
-# (F-CORE-FILE-03A), not a workspace member -- it carries its own `[workspace]` table so
-# `cargo test --manifest-path rust/vendor/gpui_linux/Cargo.toml` can run its tests standalone;
-# excluded here so `cargo build/test --workspace` does not also try to treat it as a member
-# (which conflicts with its own `[workspace]` table).
-exclude = ["vendor/gpui_linux", "vendor/reqwest_client", "vendor/gpui_pre_linux", "vendor/gpui_pre_windows", "vendor/gpui_windows", "vendor/bezel_theme"]
+# vendor/gpui_linux, vendor/gpui_windows and vendor/bezel_theme are local `[patch.crates-io]`
+# overrides (see ../vendor/README.md), not workspace members -- each carries its own `[workspace]`
+# table so `cargo test --manifest-path vendor/<crate>/Cargo.toml` can run its tests standalone;
+# excluded here so `cargo build/test --workspace` does not also try to treat them as members
+# (which conflicts with their own `[workspace]` tables).
+exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/bezel_theme"]
 members = [
     "vendor/ely-palette",
     "vendor/ely-gpui-component",
+    "vendor/reqwest_client",
     "crates/sirio_perf",
     "crates/sirio_env",
     "crates/sirio",
@@ -81,10 +82,13 @@ ely-gpui-component = { path = "vendor/ely-gpui-component", default-features = fa
 # second declaration. Net effect for `x86_64-unknown-linux-gnu`: byte-for-byte the same feature
 # set as before this change. gpui_platform below must enable its own wayland/x11 copies the same
 # way, since they are separate switches from gpui's.
-gpui = { package = "bezel-gpui", version = "=0.3.8", default-features = false }
+gpui = { package = "gpui-pre", version = "=0.3.12", default-features = false }
 # "font-kit" is not Linux-specific (unlike wayland/x11 above) so it stays unconditional here,
 # matching gpui_platform's pre-portability-wave feature set on every platform.
-gpui_platform = { package = "bezel-gpui-platform", version = "=0.3.8", default-features = false, features = ["font-kit"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", default-features = false, features = ["font-kit"] }
+# The HTTP client every Application of this program installs (sirio_ui::app_platform). gpui-pre
+# ships no default client, so the one the previous engine installed is vendored here.
+reqwest_client = { path = "vendor/reqwest_client", package = "sirio-reqwest-client" }
 # Renamed: each package's lib target is a bare word (`theme`, `markdown`, `syntax`), so the
 # extern name carries the `bezel_` prefix and a path reads `bezel_theme::…`, `bezel_markdown::…`,
 # `bezel_syntax::…`. Cf. `gpui = { package = "bezel-gpui" }` above.
@@ -132,22 +136,21 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # provider slower than ~150ms reliably triggers, discarding a real XDND drop with no trace. See
 # rust/vendor/README.md and docs/linux-rewrite/tasks/P133-gpui-xdnd-slow-provider-race.md.
 #
-# `[patch.crates-io]` (not the git-URL form the comment here once described) because
-# gpui/gpui_platform now resolve `bezel-gpui-linux` from crates.io, not from a zed git rev.
-# `gpui_platform` is not patched alongside it: the published `bezel-gpui-platform` takes its own
-# `gpui_linux` dependency as a plain crates.io registry dependency (`package = "bezel-gpui-linux"`,
-# not a path dependency), so this one entry is enough for `[patch.crates-io]` to substitute the
-# vendored tree for every consumer, `bezel-gpui-platform` included -- verified against
-# `bezel-gpui-platform`'s published manifest. See rust/vendor/README.md for the full arrangement.
+# `[patch.crates-io]` because gpui/gpui_platform resolve `gpui-pre-linux` from crates.io. The
+# published `gpui-pre-platform` takes `gpui-pre-linux` as an ordinary registry dependency, so this
+# one entry substitutes the vendored tree for every consumer. See rust/vendor/README.md.
 [patch.crates-io]
-bezel-gpui-linux = { path = "vendor/gpui_linux" }
+gpui-pre-linux = { path = "vendor/gpui_linux" }
 # Local override for Windows translucency: upstream `gpui_windows`'s no-DirectComposition path
 # (the one Sirio forces via GPUI_DISABLE_DIRECT_COMPOSITION so the WebView2 child HWND paints,
 # ADR 0002) creates a flip-model HWND swap chain, which the DWM composes as opaque, so
 # `WindowBackgroundAppearance::Blurred` could never show anything behind the window. The vendored
-# copy presents through a bitblt swap chain instead; its alpha reaches the redirection surface and
-# the acrylic accent policy shows through. One function changed; see rust/vendor/README.md.
-bezel-gpui-windows = { path = "vendor/gpui_windows" }
+# copy presents through a bitblt swap chain instead, and keeps additive alpha blending; see
+# rust/vendor/README.md.
+gpui-pre-windows = { path = "vendor/gpui_windows" }
+# `bezel-theme` 0.1.4 on gpui-pre: the published crate depends on `bezel-gpui`, which this
+# workspace no longer builds. The vendored copy changes only that dependency.
+bezel-theme = { path = "vendor/bezel_theme" }
 # Local override that washes the first glyph of every soft-wrapped row of a selection. Upstream
 # 0.1.4 walks a range's rows through `position_for_index`, which places a wrap boundary at the end
 # of the row above, so each wrapped row's highlight began one glyph late — in a chat response and

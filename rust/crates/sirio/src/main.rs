@@ -7,7 +7,7 @@ use gpui::{
     StatefulInteractiveElement, StyleRefinement, Task, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -24860,10 +24860,11 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let os = cx.platform_info().os;
         let parsed = keys
             .split_whitespace()
             .map(|key| {
-                Keystroke::parse(key)
+                Keystroke::parse_with_os(key, os)
                     .map_err(|error| format!("'{key}' is not a keystroke: {error}"))
             })
             .collect::<Result<Vec<_>, _>>();
@@ -36180,7 +36181,7 @@ done
 
     use gpui::{
         FocusHandle, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
-        ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+        ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, VisualTestContext,
     };
     use sirio_persistence::{AppSettings, AppearanceMode};
     use std::cell::{Cell, RefCell};
@@ -41978,11 +41979,12 @@ done
 
         let over = viewport.center();
         cx.simulate_mouse_move(over, None, Modifiers::none());
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: over,
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 
@@ -49619,11 +49621,12 @@ done
 
         let over = point(px(200.0), px(600.0));
         cx.simulate_mouse_move(over, None, Modifiers::none());
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: over,
             delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 

@@ -162,7 +162,7 @@ impl Chat {
                             .max_h(px(BOX_MAX))
                             .overflow_y_scroll()
                             .track_scroll(&scroll.scroll)
-                            .on_scroll_wheel({
+                            .on_scroll({
                                 let handle = scroll.scroll.clone();
                                 move |event, _, cx| {
                                     let delta_y = event.delta.pixel_delta(px(20.0)).y;

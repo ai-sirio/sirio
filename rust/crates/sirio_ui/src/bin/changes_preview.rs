@@ -7,7 +7,7 @@ use sirio_theme::Theme;
 use sirio_ui::changes::ChangesTab;
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
+    sirio_ui::app_platform::application().run(|cx: &mut App| {
         Theme::init(cx);
         // Evidence for the fonts pass: the families are resolved once at
         // runtime from what is installed, never hard-coded (P16).

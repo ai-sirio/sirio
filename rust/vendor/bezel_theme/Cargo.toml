@@ -2,7 +2,7 @@
 # `[patch.crates-io]` section of ../../Cargo.toml. See ../README.md for what changed and why.
 # Everything below mirrors the released manifest field-for-field except the `[workspace]` table
 # (so this path resolves as an independent workspace root rather than an implicit member of the
-# enclosing one) and `publish = false`. `[package] name` stays `bezel-theme`; `[lib] name` stays `theme`.
+# enclosing one), `publish = false`, and the `gpui` dependency, which is `gpui-pre =0.3.12`. `[package] name` stays `bezel-theme`; `[lib] name` stays `theme`.
 
 [workspace]
 
@@ -46,8 +46,8 @@ name = "theme"
 path = "tests/theme.rs"
 
 [dependencies.gpui]
-version = "0.3.8"
-package = "bezel-gpui"
+version = "=0.3.12"
+package = "gpui-pre"
 
 [dependencies.serde]
 version = "1"

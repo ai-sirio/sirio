@@ -415,7 +415,7 @@ impl Chat {
                     // lascia passare (chaining nativo).
                     if let Some(handle) = output_scrolls.get(&output_id) {
                         let scroll_handle = handle.clone();
-                        well = well.track_scroll(&scroll_handle).on_scroll_wheel(
+                        well = well.track_scroll(&scroll_handle).on_scroll(
                             move |event, _, cx| {
                                 let delta_y = event.delta.pixel_delta(px(20.0)).y;
                                 if tool_output_consumes_scroll(

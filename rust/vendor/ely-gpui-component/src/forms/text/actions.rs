@@ -1,6 +1,6 @@
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, InteractiveElement, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, ScrollWheelEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, ScrollEvent,
     Styled, Window, actions, div, prelude::FluentBuilder,
 };
 
@@ -9,7 +9,7 @@ use super::{
     edit::{self, next_grapheme, prev_grapheme},
     element::{TextElement, content_height},
 };
-use crate::forms::structure::FORM_CONTEXT;
+use crate::{compat::load_key, forms::structure::FORM_CONTEXT};
 
 actions!(
     ely_input,
@@ -65,8 +65,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
         KeyBinding::new("delete", Delete, Some(CONTEXT)),
-        KeyBinding::new(&format!("{word}-backspace"), DeleteWordLeft, Some(CONTEXT)),
-        KeyBinding::new(&format!("{word}-delete"), DeleteWordRight, Some(CONTEXT)),
+        load_key(cx, &format!("{word}-backspace"), DeleteWordLeft, Some(CONTEXT)),
+        load_key(cx, &format!("{word}-delete"), DeleteWordRight, Some(CONTEXT)),
         KeyBinding::new("left", Left, Some(CONTEXT)),
         KeyBinding::new("right", Right, Some(CONTEXT)),
         KeyBinding::new("up", Up, Some(CONTEXT)),
@@ -75,10 +75,11 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, Some(CONTEXT)),
         KeyBinding::new("shift-up", SelectUp, Some(CONTEXT)),
         KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
-        KeyBinding::new(&format!("{word}-left"), WordLeft, Some(CONTEXT)),
-        KeyBinding::new(&format!("{word}-right"), WordRight, Some(CONTEXT)),
-        KeyBinding::new(&format!("{word}-shift-left"), SelectWordLeft, Some(CONTEXT)),
-        KeyBinding::new(
+        load_key(cx, &format!("{word}-left"), WordLeft, Some(CONTEXT)),
+        load_key(cx, &format!("{word}-right"), WordRight, Some(CONTEXT)),
+        load_key(cx, &format!("{word}-shift-left"), SelectWordLeft, Some(CONTEXT)),
+        load_key(
+            cx,
             &format!("{word}-shift-right"),
             SelectWordRight,
             Some(CONTEXT),
@@ -87,19 +88,19 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, Some(CONTEXT)),
         KeyBinding::new("shift-home", SelectHome, Some(CONTEXT)),
         KeyBinding::new("shift-end", SelectEnd, Some(CONTEXT)),
-        KeyBinding::new("secondary-a", SelectAll, Some(CONTEXT)),
-        KeyBinding::new("secondary-c", Copy, Some(CONTEXT)),
-        KeyBinding::new("secondary-x", Cut, Some(CONTEXT)),
-        KeyBinding::new("secondary-z", Undo, Some(CONTEXT)),
-        KeyBinding::new("secondary-shift-z", Redo, Some(CONTEXT)),
+        load_key(cx, "secondary-a", SelectAll, Some(CONTEXT)),
+        load_key(cx, "secondary-c", Copy, Some(CONTEXT)),
+        load_key(cx, "secondary-x", Cut, Some(CONTEXT)),
+        load_key(cx, "secondary-z", Undo, Some(CONTEXT)),
+        load_key(cx, "secondary-shift-z", Redo, Some(CONTEXT)),
         KeyBinding::new("enter", Enter, Some(CONTEXT)),
         KeyBinding::new("shift-enter", Newline, Some(CONTEXT)),
-        KeyBinding::new("secondary-enter", Submit, Some(CONTEXT)),
-        KeyBinding::new("secondary-enter", Submit, Some(FORM_CONTEXT)),
+        load_key(cx, "secondary-enter", Submit, Some(CONTEXT)),
+        load_key(cx, "secondary-enter", Submit, Some(FORM_CONTEXT)),
     ];
     // The browser's paste event reaches the input handler.
     if !cfg!(target_family = "wasm") {
-        bindings.push(KeyBinding::new("secondary-v", Paste, Some(CONTEXT)));
+        bindings.push(load_key(cx, "secondary-v", Paste, Some(CONTEXT)));
     }
     if cfg!(target_os = "macos") {
         bindings.extend([
@@ -418,7 +419,7 @@ impl TextInput {
     /// scroll, it goes on to whatever scrolls behind the field.
     fn scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -489,7 +490,7 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .when(self.rows.is_some(), |root| {
-                root.on_scroll_wheel(cx.listener(Self::scroll_wheel))
+                root.on_scroll(cx.listener(Self::scroll_wheel))
             })
             .child(TextElement::new(cx.entity()))
     }

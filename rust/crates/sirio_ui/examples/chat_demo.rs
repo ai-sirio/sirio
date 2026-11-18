@@ -6,7 +6,7 @@
 //! for driving the demo with cliclick on a busy screen).
 
 use gpui::{App, Bounds, Point, WindowBounds, WindowOptions, prelude::*, px, size};
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use sirio_theme::Theme;
 use sirio_ui::chat::Chat;
 

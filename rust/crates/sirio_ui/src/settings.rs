@@ -7594,11 +7594,12 @@ mod tests {
         // A point over the detail column, clear of the category rail.
         let over = gpui::point(px(CATEGORY_WIDTH + 260.0), px(300.0));
         cx.simulate_mouse_move(over, None, Modifiers::none());
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: over,
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 
@@ -7637,11 +7638,12 @@ mod tests {
             .expect("the top of General is drawn");
         let over = gpui::point(px(CATEGORY_WIDTH + 260.0), px(300.0));
         cx.simulate_mouse_move(over, None, Modifiers::none());
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: over,
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
         let after = cx
