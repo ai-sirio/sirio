@@ -151,7 +151,7 @@ struct MarkdownBody {
     hit: Option<DocHit>,
     /// A body that is not part of the transcript selection but whose file
     /// links still open in Sirio: the chat that handles them.
-    file_links: Option<Entity<Chat>>,
+    file_links: Option<(Entity<Chat>, String)>,
 }
 
 /// Where an assistant response's rendered markdown sits in the transcript's
@@ -293,10 +293,12 @@ impl MarkdownBody {
     }
 
     /// A body outside the transcript selection (a subagent card's text) whose
-    /// file links open through `chat`, as a response's do.
-    fn with_file_links(document: bezel_markdown::Doc, chat: Entity<Chat>) -> Self {
+    /// file links open through `chat`, as a response's do. `key` names this
+    /// body among the others on screen, the same on every frame (a card's
+    /// entry and part index).
+    fn with_file_links(document: bezel_markdown::Doc, chat: Entity<Chat>, key: String) -> Self {
         Self {
-            file_links: Some(chat),
+            file_links: Some((chat, key)),
             ..Self::new(document)
         }
     }
@@ -464,7 +466,7 @@ impl MarkdownBody {
             let (element, hit) = self.build_selectable(selection, window, cx);
             return (element, Some(hit));
         }
-        if let Some(chat) = self.file_links.clone() {
+        if let Some((chat, key)) = self.file_links.clone() {
             let layouts = bezel_markdown::BlockLayouts::default();
             let rendered = bezel_markdown::render_with_selection(
                 &self.document,
@@ -488,35 +490,51 @@ impl MarkdownBody {
             };
             let down_chat = chat.clone();
             let down_link_at = link_at.clone();
+            let down_key = key.clone();
             let out_chat = chat.clone();
+            let out_key = key.clone();
+            // Nothing here stops an event: bezel may arm on a file link, and
+            // its click is a no-op for a `file:` URL. The press record is
+            // this body's own, so another body's release cannot clear it.
+            let selector = key.clone();
             let element = div()
                 .w_full()
-                // A file link is Sirio's: its press is taken in capture, so
-                // bezel's text never arms a click on it and never hands the
-                // `file://` URL to the system opener. Any other press clears
-                // the record and reaches bezel untouched.
+                .debug_selector(move || selector)
                 .capture_any_mouse_down(move |event, _, cx| {
                     if event.button != MouseButton::Left {
                         return;
                     }
                     let pressed = down_link_at(event.position)
                         .filter(|url| file_link_target(url).is_some());
-                    let is_file_link = pressed.is_some();
-                    down_chat.update(cx, |chat, _| chat.card_link_press = pressed);
-                    if is_file_link {
-                        cx.stop_propagation();
-                    }
+                    down_chat.update(cx, |chat, _| match pressed {
+                        Some(url) => chat.card_link_press = Some((down_key.clone(), url)),
+                        None if owns_press(&chat.card_link_press, &down_key) => {
+                            chat.card_link_press = None;
+                        }
+                        None => {}
+                    });
                 })
                 .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-                    out_chat.update(cx, |chat, _| chat.card_link_press = None);
+                    out_chat.update(cx, |chat, _| {
+                        if owns_press(&chat.card_link_press, &out_key) {
+                            chat.card_link_press = None;
+                        }
+                    });
                 })
                 .capture_any_mouse_up(move |event, _, cx| {
                     if event.button != MouseButton::Left {
                         return;
                     }
-                    let pressed = chat.update(cx, |chat, _| chat.card_link_press.take());
                     // A drop (from the OS or inside the app) is not a click.
-                    if cx.has_active_drag() {
+                    let dropped = cx.has_active_drag();
+                    let pressed = chat.update(cx, |chat, _| {
+                        if owns_press(&chat.card_link_press, &key) {
+                            chat.card_link_press.take().map(|(_, url)| url)
+                        } else {
+                            None
+                        }
+                    });
+                    if dropped {
                         return;
                     }
                     let Some(target) = link_at(event.position)
@@ -715,6 +733,11 @@ fn parse_chat_markdown(source: &str) -> bezel_markdown::Doc {
 /// An assistant response's document with the files it names marked as links.
 /// The disk is asked here, while the document is built, and never while it
 /// paints; `memo` answers a candidate already seen in this response.
+/// Whether the card-body press record belongs to the body `key`.
+fn owns_press(press: &Option<(String, String)>, key: &str) -> bool {
+    press.as_ref().is_some_and(|(owner, _)| owner == key)
+}
+
 fn parse_linked_markdown(
     source: &str,
     cwd: &Path,
@@ -2609,9 +2632,10 @@ pub struct Chat {
     /// transcript offset: a release at the same offset is a click, which is
     /// what opens a file link (a release elsewhere ended a drag).
     transcript_press: Option<usize>,
-    /// The link a subagent card's text was last pressed on: a release on the
-    /// same link is a click, and no press (a dropped file) is none.
-    card_link_press: Option<String>,
+    /// The body (its key) and link a subagent card's text was last pressed
+    /// on: a release on the same link of the same body is a click, and no
+    /// press (a dropped file) is none.
+    card_link_press: Option<(String, String)>,
     /// Which candidate paths exist, for the assistant entry being built: one
     /// disk lookup per distinct candidate, not one per streamed chunk. Reset
     /// whenever a new assistant entry starts.
@@ -11639,6 +11663,133 @@ two"
             Some(Entry::SubagentTask { status, .. }) => status.clone(),
             _ => panic!("entry {index} is not a card"),
         }
+    }
+
+    // Ways a card's file link could fail the reader:
+    // - a link in a later Text part is dead because an earlier body cleared
+    //   the shared press record on its own release;
+    // - a press on plain text released over a link opens it;
+    // - a release that ends a drag (or an OS drop) opens it;
+    // - a plain click opens nothing, or the system opener is handed the URL.
+    fn card_with_two_texts(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Chat>, &mut VisualTestContext, Rc<RefCell<Vec<PathBuf>>>, TempDir) {
+        let dir = TempDir::new();
+        for name in ["first.rs", "second.rs"] {
+            std::fs::write(dir.0.join(name), "fn main() {}\n").expect("write fixture");
+        }
+        let (chat, cx) = offline_chat_view(cx);
+        let cwd = dir.0.clone();
+        chat.update(cx, |chat, cx| {
+            chat.agent_cwd = cwd;
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            let text = |t: &str| sirio_chat::SubagentItem::Text(t.into());
+            notice(chat, "a", text("`first.rs` then a long run of plain words after it"), cx);
+            notice(chat, "a", child_started("c1"), cx);
+            notice(chat, "a", text("`second.rs` then a long run of plain words after it"), cx);
+            let at = chat.entries.len() - 1;
+            chat.toggle_subagent_task_expanded(at, cx);
+        });
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let seen = opened.clone();
+        cx.update(|_, app| {
+            app.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                if let ChatEvent::OpenFileAt { path, .. } = event {
+                    seen.borrow_mut().push(path.clone());
+                }
+            })
+            .detach();
+        });
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        refresh_frame(cx);
+        (chat, cx, opened, dir)
+    }
+
+    fn card_event(
+        cx: &mut VisualTestContext,
+        position: gpui::Point<Pixels>,
+        down: bool,
+        button: MouseButton,
+    ) {
+        if down {
+            cx.simulate_event(gpui::MouseDownEvent {
+                position,
+                modifiers: Modifiers::none(),
+                button,
+                click_count: 1,
+                first_mouse: false,
+            });
+        } else {
+            cx.simulate_event(gpui::MouseUpEvent {
+                position,
+                modifiers: Modifiers::none(),
+                button,
+                click_count: 1,
+            });
+        }
+    }
+
+    fn text_part_point(
+        cx: &mut VisualTestContext,
+        part: usize,
+        dx: f32,
+    ) -> gpui::Point<Pixels> {
+        let selector = match part {
+            0 => "subagent-text-0-0",
+            _ => "subagent-text-0-2",
+        };
+        let bounds = cx.debug_bounds(selector).expect("the card's text is drawn");
+        point(bounds.left() + px(dx), bounds.top() + px(8.0))
+    }
+
+    #[gpui::test]
+    async fn a_file_link_in_any_text_part_of_a_card_opens_on_a_click(cx: &mut TestAppContext) {
+        let (_chat, cx, opened, dir) = card_with_two_texts(cx);
+        for (part, name) in [(0, "first.rs"), (2, "second.rs")] {
+            let on_link = text_part_point(cx, part, 4.0);
+            card_event(cx, on_link, true, MouseButton::Left);
+            card_event(cx, on_link, false, MouseButton::Left);
+            cx.run_until_parked();
+            assert_eq!(opened.borrow().last(), Some(&dir.0.join(name)), "part {part}");
+        }
+        assert_eq!(opened.borrow().len(), 2, "one open per click");
+        assert_eq!(cx.cx.opened_url(), None, "the system opener is never handed a file");
+    }
+
+    #[gpui::test]
+    async fn a_press_off_the_link_or_a_drop_on_it_opens_nothing(cx: &mut TestAppContext) {
+        let (_chat, cx, opened, _dir) = card_with_two_texts(cx);
+        let on_link = text_part_point(cx, 2, 4.0);
+        let on_plain = text_part_point(cx, 2, 200.0);
+        // Pressed on plain text, released over the link: a drag's end.
+        card_event(cx, on_plain, true, MouseButton::Left);
+        card_event(cx, on_link, false, MouseButton::Left);
+        // No press at all, as an OS file drop's synthetic release.
+        card_event(cx, on_link, false, MouseButton::Left);
+        // A right press does not arm a later left release either.
+        card_event(cx, on_link, true, MouseButton::Right);
+        card_event(cx, on_link, false, MouseButton::Left);
+        cx.run_until_parked();
+        assert!(opened.borrow().is_empty());
+        assert_eq!(cx.cx.opened_url(), None);
+
+        // A press on the link, then an OS file drop onto it: the drop's
+        // synthetic release is not a click, and neither is the bare drop.
+        for pressed in [true, false] {
+            if pressed {
+                card_event(cx, on_link, true, MouseButton::Left);
+            }
+            cx.simulate_event(gpui::FileDropEvent::Entered {
+                position: on_link,
+                paths: gpui::ExternalPaths(Default::default()),
+            });
+            cx.simulate_event(gpui::FileDropEvent::Submit { position: on_link });
+            cx.simulate_event(gpui::FileDropEvent::Exited);
+            cx.run_until_parked();
+            assert!(opened.borrow().is_empty(), "pressed first: {pressed}");
+        }
+        assert_eq!(cx.cx.opened_url(), None);
     }
 
     #[gpui::test]

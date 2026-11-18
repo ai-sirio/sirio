@@ -656,7 +656,11 @@ impl Chat {
                         .px(px(12.0))
                         .py(px(6.0))
                         .text_size(theme.typography.callout)
-                        .child(MarkdownBody::with_file_links(document, entity.clone()))
+                        .child(MarkdownBody::with_file_links(
+                            document,
+                            entity.clone(),
+                            format!("subagent-text-{task_index}-{child_index}"),
+                        ))
                         .into_any_element(),
                     SubagentPart::Thought { text, open, .. } => {
                         let toggle_entity = entity.clone();
