@@ -683,21 +683,42 @@ Each item is laid out the same way:
     the test checks that the base URL is 127.0.0.1 before it starts the CLI; the PR's Merge
     Danger says so. The new rate-limit copy goes in the PR's release-notes line.
 
-### A10 · Subagent text: designed with Enzo when it comes up
+### A10 · Subagent text
 
-- `--forward-subagent-text` makes the CLI stream subagents' text and thinking. Spec 2026-09-18 §10
-  left it out on purpose: "showing it is a transcript design of its own".
-- Before any plan, a short design conversation settles where the text goes (the Trace lane, a box
-  in the transcript, or both) and how much of it.
+- **Wire.** `--forward-subagent-text` makes the CLI stream subagents' text and thinking. Spec
+  2026-09-18 §10 left it out on purpose: "showing it is a transcript design of its own".
+- **Sirio** (designed with Enzo, 2026-11-18):
+  - **Transcript.** The text goes inside the existing subagent task card, interleaved in arrival
+    order with that subagent's nested tool calls. The card stays folded by default, with its
+    one-line summary.
+  - **Trace.** Each subagent lane shows its latest sentence as a label while it works.
+  - **How much.** All of the text. Thinking shows as a folded block, as it does for the main
+    agent.
+- **Degrade.** A CLI without the flag (the floor among them) behaves as today: Sirio degrades,
+  never refuses.
 
-### A11 · MCP Apps widgets: designed with Enzo when it comes up
+### A11 · MCP Apps widgets
 
-- `mcp_read_resource` `{serverName, uri}`, for `ui://` URIs only, returns HTML from a third party.
-  It is new and gated on `mcp_read_resource_v1`.
-- Tools declare their UI in `mcp_status` (`_meta.ui.resourceUri`, gated on `mcp_tool_ui_meta_v1`).
-- That content cannot be trusted, and MCP Apps (SEP-1865) lets a widget ask its host to call
-  tools. A short design conversation settles both: how the widget is isolated, given that Sirio's
-  web engine hosts pages in child windows, and what the widget may ask for, if anything.
+- **Wire.**
+  - `mcp_read_resource` `{serverName, uri}`, for `ui://` URIs only, returns HTML from a third
+    party. It is new and gated on `mcp_read_resource_v1`.
+  - Tools declare their UI in `mcp_status` (`_meta.ui.resourceUri`, gated on
+    `mcp_tool_ui_meta_v1`).
+  - That content cannot be trusted, and MCP Apps (SEP-1865) lets a widget ask its host to call
+    tools.
+- **Sirio** (designed with Enzo, 2026-11-18):
+  - **Where.** Inline in the transcript, under the tool call that declared the UI, in a wry child
+    window.
+  - **Isolation.** One fresh webview per widget, with no cookies or storage shared with Browser
+    tabs. A strict CSP: no network except the domains the resource declares in `_meta.ui.csp`.
+    Only `ui://` URIs.
+  - **What it may ask.** Tool calls on the same MCP server that served the widget, and nothing
+    else. Every call opens a permission card that shows the tool and its arguments, with no
+    "Always allow", and it asks even when the chat is in bypass-permissions mode. Every other
+    request from the widget is ignored.
+- **Before the PR.** A probe of the MCP Apps protocol (SEP-1865) and a dedicated security review
+  (the critic, focused on the isolation and the bridge), with every finding fixed or dismissed
+  with a reason.
 
 ## Delivery
 
