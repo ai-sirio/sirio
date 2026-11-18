@@ -294,6 +294,7 @@ impl Sidebar {
             Icon::PanelLeftOpen => "panel-left-open",
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
+            Icon::StarFilled => "star-filled",
             Icon::FileTree => "file-tree",
             Icon::Diff => "diff",
             Icon::DiffUnified => "diff-unified",
@@ -778,16 +779,12 @@ impl Sidebar {
                                         sidebar.dispatch_context_action(target, action, window, cx);
                                     });
                                 })
-                                // The primary is the filled glyph, the same one the
+                                // The primary is the filled star, the same one the
                                 // rest-state marker uses; a linked worktree is outline.
                                 .child(if is_primary {
-                                    div()
-                                        .debug_selector(move || {
-                                            format!("sidebar-card-star-filled-{row_id}")
-                                        })
-                                        .text_size(theme.typography.scaled(12.0))
+                                    IconElement::new(Icon::StarFilled, IconSize::XSmall)
+                                        .selector(format!("sidebar-card-star-filled-{row_id}"))
                                         .text_color(star_color)
-                                        .child("★")
                                         .into_any_element()
                                 } else {
                                     EIcon::new(IconName::Star)
@@ -886,9 +883,10 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
                         .flex_none()
                         .group_hover(hover_group.clone(), |style| style.invisible())
-                        .text_size(theme.typography.scaled(10.0))
-                        .text_color(theme.ely.fg_subtle)
-                        .child("★"),
+                        .child(
+                            IconElement::new(Icon::StarFilled, IconSize::XSmall)
+                                .text_color(theme.ely.fg_subtle),
+                        ),
                 )
             })
             .when_some(Self::status_text(&row), |this, status| {

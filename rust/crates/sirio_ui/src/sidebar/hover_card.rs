@@ -28,6 +28,9 @@ pub(super) const OPEN_DELAY: Duration = Duration::from_millis(500);
 pub(super) const LINGER: Duration = Duration::from_millis(200);
 /// Space between the sidebar's right edge and the card.
 pub(super) const GAP: f32 = 4.0;
+/// The panel's own border, which the sidebar's bounds exclude: the gap is
+/// measured from the visible edge, border included.
+pub(super) const PANEL_BORDER: f32 = 1.0;
 /// A sidebar narrower than this never shows the card.
 pub(super) const MIN_SIDEBAR_WIDTH: f32 = 200.0;
 

@@ -3574,7 +3574,7 @@ impl Sidebar {
             return None;
         }
         let row_bounds = self.hover_card.row_bounds?;
-        let sidebar_right = self.sidebar_bounds.get()?.right();
+        let sidebar_right = self.sidebar_bounds.get()?.right() + px(hover_card::PANEL_BORDER);
         let project_name = self
             .rows
             .iter()
@@ -9458,9 +9458,10 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "not yet at 400 ms");
         hover_ms(&mut cx, 110);
         let card = cx.debug_bounds("sidebar-hover-card").expect("open at 510 ms");
-        assert!(
-            card.left() >= px(300.0 + hover_card::GAP),
-            "the card sits 4 px past the sidebar's right edge: {card:?}"
+        assert_eq!(
+            card.left(),
+            px(300.0 + hover_card::PANEL_BORDER + hover_card::GAP),
+            "the card sits 4 px past the sidebar's visible right edge, its border included: {card:?}"
         );
     }
 
