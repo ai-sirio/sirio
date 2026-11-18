@@ -32,7 +32,7 @@ use gpui::{
     App, AppContext, Bounds, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, Styled, Window, WindowBounds, WindowOptions, div, px, rgb, size,
 };
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 
 const POLL: Duration = Duration::from_millis(16);
 const COLS: u16 = 100;
