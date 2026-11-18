@@ -653,6 +653,9 @@ impl Chat {
                         div()
                             .id(("command-output-body", entry_index))
                             .overflow_x_scroll()
+                            // A vertical wheel over the block keeps scrolling the
+                            // transcript instead of being remapped onto it.
+                            .restrict_scroll_to_axis()
                             .whitespace_nowrap()
                             .text_color(theme.ely.fg_muted)
                             .child(Self::render_plain_text(

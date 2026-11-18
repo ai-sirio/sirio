@@ -3083,7 +3083,7 @@ impl Chat {
             // the CLI's, so it is cleaned here, once, for what is drawn,
             // copied and read back.
             SessionNotice::LocalCommandOutput { command, text, .. } => {
-                // `push_entry` leaves a thought open across a notice.
+                // As the `CliNotice` arm does; `push_entry` would settle it too.
                 self.settle_open_thought();
                 Entry::CommandOutput {
                     command: visible_text::visible_text(&command, false),

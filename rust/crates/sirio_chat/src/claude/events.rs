@@ -1375,6 +1375,8 @@ mod tests {
     fn a_report_with_no_text_is_still_an_answer_but_nothing_at_all_is_not() {
         let mut fold = Fold::new();
         let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "");
+        // Guard: holds before the change. A synthetic line with no text drew
+        // nothing, marker or not; only the report-only answer below is new.
         assert_eq!(fold.apply(parse(line.clone())), vec![]);
         assert!(fold.take_notices().is_empty());
         line["usage_report"] = json!({"limits": []});
@@ -1387,6 +1389,8 @@ mod tests {
 
     #[test]
     fn a_model_answer_that_carries_the_marker_is_left_to_the_ordinary_rules() {
+        // Guard: holds before the change. The unknown marker was ignored, so an
+        // unstreamed model answer was already drawn as a chunk.
         let mut fold = Fold::new();
         let line = local_command_line(
             "claude-opus-5",
@@ -1402,6 +1406,7 @@ mod tests {
 
     #[test]
     fn a_subagents_message_is_not_a_local_command_answer() {
+        // Guard: holds before the change. A subagent's line drew nothing.
         let mut fold = Fold::new();
         let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "text");
         line["parent_tool_use_id"] = json!("toolu_parent");
@@ -1411,6 +1416,8 @@ mod tests {
 
     #[test]
     fn a_wrongly_typed_marker_draws_nothing_and_the_line_still_parses() {
+        // Guard: holds before the change. The unknown field was ignored, so the
+        // line parsed and a synthetic one drew nothing.
         for run in [json!("usage"), json!({"command": 5}), json!([]), json!(null)] {
             let line = local_command_line("<synthetic>", run, "text");
             let message = parse(line);
@@ -1453,11 +1460,12 @@ mod tests {
         })));
         assert!(
             !events.iter().any(|e| matches!(e, ChatEvent::AgentMessageChunk(_))),
-            "the failed result repeats the text already drawn: {events:?}"
+            "a failed result repeating the drawn text must add no chunk"
         );
         assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
 
-        // The remembered text ends with its turn: the same words as a later
+        // Guard: holds before the change (every failed result was drawn). The
+        // remembered text ends with its turn: the same words as a later
         // turn's failure are that turn's own error and are drawn.
         let events = fold.apply(parse(json!({
             "type": "result", "subtype": "success", "is_error": true, "result": "the block"
@@ -1467,6 +1475,7 @@ mod tests {
 
     #[test]
     fn a_failing_result_with_other_words_is_still_drawn() {
+        // Guard: holds before the change. Every failed result was drawn.
         let mut fold = Fold::new();
         fold.apply(parse(local_command_line(
             "<synthetic>",

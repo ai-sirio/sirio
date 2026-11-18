@@ -5314,8 +5314,10 @@ scenario_usage_text() {
   local block='Estimated cost:        $0.0000\nTotal duration (API):  0s\nTotal duration (wall): 3s\nTotal code changes:    0 lines added, 0 lines removed\nUsage:                 0 input, 0 output, 0 cache read, 0 cache write'
   send_prompt "/usage"
   notice_turns "the /usage turn ends" 1
-  check_panel "one command-output row holds the CLI's block, and it is not an assistant row" \
-    "$USAGE_ROWS == [('command-output', 'usage', '$block')]"
+  check_panel "one command-output row holds the CLI's block" \
+    "[r for r in $USAGE_ROWS if r[0] == 'command-output'] == [('command-output', 'usage', '$block')]"
+  # Guard: holds before the change (the CLI's synthetic text was never drawn as an assistant row).
+  check_panel "Guard: no assistant row" "not any(r['kind'] == 'assistant' for r in c['transcript'])"
   send_prompt "/context"
   notice_turns "the /context turn ends" 2
   check_panel "/context is a row of its own, in order" \
