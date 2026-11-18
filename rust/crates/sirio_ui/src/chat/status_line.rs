@@ -17,6 +17,10 @@ pub(super) const DEFAULT_NOTIFICATION_MS: u64 = 10_000;
 /// this long after its own delay, it clears itself.
 pub(super) const RETRY_SAFETY_MS: u64 = 30_000;
 
+/// A day: no CLI value comes near it, and it keeps a CLI-supplied duration inside the platform
+/// timer's range.
+pub(crate) const MAX_TIMER_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// How a line is coloured.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Tone {
@@ -221,7 +225,7 @@ impl StatusLine {
         match self.top() {
             Some(top) => json!({
                 "source": "notification",
-                "key": top.key,
+                "key": super::visible_text::visible_text(&top.key, false),
                 "text": top.text,
                 "priority": top.priority_name(),
                 "tone": top.tone.as_str(),

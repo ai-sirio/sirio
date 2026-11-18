@@ -3008,7 +3008,9 @@ impl Chat {
                 let number = self.status_line.set_retry(text);
                 // A retry line the CLI never follows with content or an end
                 // must still go. The number keeps a later retry's line safe.
-                let expiry = retry_delay_ms.saturating_add(status_line::RETRY_SAFETY_MS);
+                let expiry = retry_delay_ms
+                    .saturating_add(status_line::RETRY_SAFETY_MS)
+                    .min(status_line::MAX_TIMER_MS);
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(expiry))
@@ -3032,7 +3034,9 @@ impl Chat {
                 let text = visible_text::visible_text(&text, false);
                 let timer_key = key.clone();
                 let number = self.status_line.hold(key, text, priority, color.as_deref());
-                let kept = timeout_ms.unwrap_or(status_line::DEFAULT_NOTIFICATION_MS);
+                let kept = timeout_ms
+                    .unwrap_or(status_line::DEFAULT_NOTIFICATION_MS)
+                    .min(status_line::MAX_TIMER_MS);
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(kept))
@@ -18855,7 +18859,8 @@ two"
     // - the line is held in state but never drawn (this test reads the painted bounds);
     // - it is drawn below the composer instead of above it;
     // - a notification with no timeout of its own dies early or never goes: the default is 10 s;
-    // - its timer is lost when the chat redraws.
+    // - its timer is lost when the chat redraws;
+    // - a bidi override in its text or its key reaches the snapshot raw instead of shown.
     #[gpui::test]
     async fn the_status_line_is_drawn_above_the_composer(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
@@ -18867,7 +18872,7 @@ two"
         chat.update(cx, |chat, cx| {
             chat.apply_notice(
                 SessionNotice::Notification {
-                    key: "k".into(),
+                    key: format!("k{}", char::from_u32(0x202E).unwrap()),
                     text: format!("Stop hook error {}occurred", char::from_u32(0x202E).unwrap()),
                     priority: Some("immediate".into()),
                     color: None,
@@ -18887,9 +18892,16 @@ two"
             "the line sits above the composer card"
         );
         let snapshot = chat.read_with(cx, |chat, _| chat.status_line.snapshot());
+        let parsed: serde_json::Value = serde_json::from_str(&snapshot).expect("the snapshot is JSON");
+        let text = parsed["text"].as_str().expect("the snapshot has a text");
         assert!(
-            snapshot.contains("\u{27e8}U+202E\u{27e9}") && !snapshot.contains(char::from_u32(0x202E).unwrap()),
+            text.contains("\u{27e8}U+202E\u{27e9}") && !text.contains(char::from_u32(0x202E).unwrap()),
             "the bidi override in the text is shown, not drawn raw"
+        );
+        let key = parsed["key"].as_str().expect("the snapshot has a key");
+        assert!(
+            key.contains("\u{27e8}U+202E\u{27e9}") && !key.contains(char::from_u32(0x202E).unwrap()),
+            "the bidi override in the key is shown, not stored raw in the snapshot"
         );
 
         cx.executor().advance_clock(std::time::Duration::from_secs(9));
@@ -18906,6 +18918,43 @@ two"
         assert!(
             cx.debug_bounds("status-line").is_none(),
             "the default timeout removed it"
+        );
+    }
+
+    // Failure list: a CLI-supplied timeout reaches the platform timer uncapped, so a huge one
+    // wraps or panics instead of holding the line for at most a day.
+    #[gpui::test]
+    async fn a_huge_notification_timeout_is_capped_at_a_day(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            chat.apply_notice(
+                SessionNotice::Notification {
+                    key: "k".into(),
+                    text: "held".into(),
+                    priority: None,
+                    color: None,
+                    timeout_ms: Some(u64::MAX),
+                },
+                cx,
+            );
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(23 * 60 * 60));
+        cx.run_until_parked();
+        assert_ne!(
+            chat.read_with(cx, |chat, _| chat.status_line.snapshot()),
+            "",
+            "the line is still held before the cap"
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(90 * 60 * 1000));
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.status_line.snapshot()),
+            "",
+            "the cap removed it"
         );
     }
 

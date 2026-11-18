@@ -394,7 +394,8 @@ goes through `visible_text`: `text` of a notification as one line, every `conten
 text with newlines kept. Rows and the status line are plain text, never markdown.
 
 **The status line.** One line above the composer, selectable text. It shows a retry, or the best
-live notification. A notification is kept for `timeout_ms`, or 10 s without it. The order is
+live notification. A notification is kept for `timeout_ms`, or 10 s without it; a duration the
+CLI sends (`timeout_ms`, `retry_delay_ms`) is capped at a day. The order is
 `immediate`, `high`, `medium`, `low`, newest first among equals; an unknown or missing priority
 counts as `medium`. A notification with the key of one already held replaces it and restarts its
 timer. The tone is the frame's `color` when that is `error` or `warning`, else plain.
@@ -415,16 +416,19 @@ a newer line.
 fails midway". When a stream breaks midway, the CLI asks again without streaming and sends the
 answer as one `assistant` message with no stream events. Sirio draws text from stream events, so
 that answer used to be invisible. An `assistant` line now draws its text unless one of these
-holds: the line has no id at all; the message's id was streamed; the line is synthetic (the
-exhaustion's sentence); a text delta arrived outside any open message (the fixture's
-`state_text`, which repeats its text in the `assistant` line); a message with no id is open. When
-the last row that turn was a chunk, the text starts with `"\n\n"`, so it is not glued to the cut
-reply.
+holds: the line has no id at all; the line belongs to a subagent (its `parent_tool_use_id` is set:
+it draws nothing, and only its tool calls are remembered); the message's id was streamed; the line
+is synthetic (the exhaustion's sentence); a text delta arrived outside any open message (the
+fixture's `state_text`, which repeats its text in the `assistant` line); a message with no id is
+open. When the last row that turn was a chunk, the text starts with `"\n\n"`, so it is not glued
+to the cut reply.
 
 Known limit: the notice queue is drained on any signal, so a notice can be applied before chunks
 queued ahead of it. A `Retrying` can then be cleared at once. An `Info` row can land above the end
 of the text it follows; the tail of the refused text then opens a row below the `Info` row, and an
-unstreamed answer joins that tail without a `"\n\n"`. The CLI sends a refusal notice after its
+unstreamed answer joins that tail without a `"\n\n"`. A thought still streaming when an `Info`
+row lands is settled (`settle_open_thought` runs before the CLI's notice rows), and the rest of
+the thinking opens a second thought row. The CLI sends a refusal notice after its
 stream ends, which keeps this rare.
 
 **Why Claude Code could not start.** A CLI that fails before the session writes an error `result`
@@ -460,7 +464,15 @@ writes `.claude.json`.
 
 **Proof and limits.** E2E: the `notice_*` and `startup_*` scenarios in `docs/agents/e2e-tests.md`.
 Live (`#[ignore]`, `acp_conformance.rs`): `claude_reports_why_it_could_not_start` and
-`claude_reports_api_retries_and_unstreamed_answers`, last run against CLI 2.1.327.
+`claude_reports_api_retries_and_unstreamed_answers`, last run against CLI 2.1.327. Run them one
+CLI at a time, from `rust/`:
+
+```sh
+TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- \
+  --ignored --nocapture --test-threads=1 \
+  claude_reports_why_it_could_not_start claude_reports_api_retries_and_unstreamed_answers
+```
+
 `session_writes_lost` (sent only on ENOSPC or EDQUOT, as the CLI exits) is not shown; issue #793
 keeps it.
 

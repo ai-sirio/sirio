@@ -75,8 +75,8 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   restore            the column is open, Sirio quits and starts again: it is still open
 #
 # The notice_* scenarios (A7) use Scripts/Tests/stubs/notices/claude, the fixture in its cli_notices mode: the
-# prompt picks the turn (retry twice, retry out, notify, notify short, notify short again, refuse, refuse fallback,
-# inform levels, midstream). SIRIO_FIXTURE_RETRY_GATE holds `retry twice` after its retries until the file exists;
+# prompt picks the turn (the stub's header, Scripts/Tests/stubs/notices/claude, lists them all).
+# SIRIO_FIXTURE_RETRY_GATE holds `retry twice` after its retries until the file exists;
 # SIRIO_FIXTURE_STARTUP makes the CLI fail to start (the start-up scenarios). They are asserted on `statusLine` of
 # `surface.chat.read` (`""` or {source, text, tone, held[, key, priority]}) and on the transcript's rows
 # (`info` and `info-warning` are the CLI's refusal and informational notices).
@@ -646,7 +646,8 @@ done
 # Which claude shim the next launch puts first on the app's PATH: session-panel (the
 # column's own scenarios), session-panel-bypass (the same, the CLI in bypassPermissions), trace (the trace
 # scenarios), file-links (file_links), elicitation (the elicitation scenarios), session-state
-# (session_state_background), background-tasks (the background_* scenarios), notices (the notice_* scenarios) or rename (the rename_* scenarios). A scenario picks its stub by
+# (session_state_background), background-tasks (the background_* scenarios), notices (the notice_*
+# scenarios) or rename (the rename_* scenarios). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
 use_stub() { # session-panel|session-panel-bypass|trace|file-links|elicitation|session-state|background-tasks|rename|permissions|notices

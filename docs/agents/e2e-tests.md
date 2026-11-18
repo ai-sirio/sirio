@@ -419,25 +419,33 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # reload_skills_refused (SIRIO_FIXTURE_SKILLS=refused hides it after an applied reload) and reload_errors
 # (`2 plugins failed to load.`). New fixture variables, passed by launch() and reset per scenario:
 # SIRIO_FIXTURE_RELOAD, SIRIO_FIXTURE_RELOAD_GATE, SIRIO_FIXTURE_SKILLS and SIRIO_FIXTURE_CLI_BUSY_GATE.
-# A7, errors and notices: Scripts/Tests/stubs/notices/claude, the fixture's `cli_notices` mode (the prompt
-# picks the turn: retry twice, retry out, notify, notify short, notify short again, refuse, refuse fallback,
-# inform levels, midstream and more: see the stub's header for the full set; anything else answers ok). Two variables, passed by launch() and reset per
-# scenario: SIRIO_FIXTURE_RETRY_GATE (--fixture-retry-gate, a file that holds `retry twice` after its retries
-# until it exists) and SIRIO_FIXTURE_STARTUP (--fixture-startup=<kind>, a CLI that cannot start). The script
-# runs `unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS` at its top as belt and braces: launch() starts Sirio with
-# `env -i` and an allowlist, so the variable cannot reach the CLI from the script's environment, and the
-# opt-in proof (startup_opt_in) rests on that clean environment: only Sirio's own launch can set it. They read `statusLine` and the transcript rows of `surface.chat.read`.
-# The five notice_* scenarios: notice_retry (`Retrying 2 of 10 in 2 s: overloaded` while the gate holds, empty
-# with the reply drawn once it opens), notice_retry_exhausted (the sentence in one row, no line),
-# notice_notification (the line outlives the turn; immediate over high over low; a same-key one replaced,
-# held 3; each timer clears only its own entry), notice_refusal (info rows between the refused text and the
-# answer; a bidi override shown as text; the levels read info, info, info-warning) and notice_midstream (a cut
-# reply is not glued to the answer after it). The four startup_* scenarios wait for the chat's error row and
-# read the last one: startup_config_invalid (the sentence, File and Backup, the override as text, no ACP),
+# A7, errors and notices: Scripts/Tests/stubs/notices/claude, the fixture's `cli_notices` mode
+# (the prompt picks the turn: retry twice, retry out, notify, notify short, notify short again,
+# refuse, refuse fallback, inform levels, midstream and more: see the stub's header for the full
+# set; anything else answers ok). Two variables, passed by launch() and reset per scenario:
+# SIRIO_FIXTURE_RETRY_GATE (--fixture-retry-gate, a file that holds `retry twice` after its
+# retries until it exists) and SIRIO_FIXTURE_STARTUP (--fixture-startup=<kind>, a CLI that cannot
+# start). The script runs `unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS` at its top as belt and
+# braces: launch() starts Sirio with `env -i` and an allowlist, so the variable cannot reach the
+# CLI from the script's environment, and the opt-in proof (startup_opt_in) rests on that clean
+# environment: only Sirio's own launch can set it. They read `statusLine` and the transcript rows
+# of `surface.chat.read`.
+# The five notice_* scenarios: notice_retry (`Retrying 2 of 10 in 2 s: overloaded` while the gate
+# holds, empty with the reply drawn once it opens), notice_retry_exhausted (the sentence in one
+# row, no line), notice_notification (the line outlives the turn; immediate over high over low; a
+# same-key one replaced, held 3; each timer clears only its own entry), notice_refusal (info rows
+# between the refused text and the answer; a bidi override shown as text; the levels read info,
+# info, info-warning) and notice_midstream (a cut reply is not glued to the answer after it). The
+# four startup_* scenarios wait for the chat's error row and read the last one:
+# startup_config_invalid (the sentence, File and Backup, the override as text, no ACP),
 # startup_opt_in (a reason the CLI writes only with the variable, so Sirio's launch sets it),
-# startup_unknown_reason (`Claude Code could not start (some_future_reason).`) and startup_no_result (`Claude
-# Code exited before it started (agent exited with code 1)` and the stderr tail). All nine run state-only.
-# The live checks are `claude_reports_why_it_could_not_start` and `claude_reports_api_retries_and_unstreamed_answers`.
+# startup_unknown_reason (`Claude Code could not start (some_future_reason).`) and
+# startup_no_result (`Claude Code exited before it started (agent exited with code 1)` and the
+# stderr tail). All nine run state-only.
+# The live checks are `claude_reports_why_it_could_not_start` and
+# `claude_reports_api_retries_and_unstreamed_answers`; run them one CLI at a time, with
+# `--test-threads=1` (the command is in docs/agents/architecture/claude-chat.md, Proof and
+# limits).
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 

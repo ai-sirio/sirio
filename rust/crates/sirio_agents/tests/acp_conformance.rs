@@ -2338,7 +2338,7 @@ fn assert_nothing_left(session: &claude_live::Session) {
 /// session-state test and nothing beyond 127.0.0.1, but launches a real CLI three times, so it
 /// is `#[ignore]`d and stays off CI:
 ///
-///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture claude_reports_why_it_could_not_start
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_reports_why_it_could_not_start
 ///
 /// It SKIPs without a resolvable mise `claude` binary, below 2.1.325 and without `python3`.
 #[test]
@@ -2448,7 +2448,7 @@ fn run_turn(session: &mut claude_live::Session, prompt: &str) -> Vec<serde_json:
 /// uses no credential and nothing beyond 127.0.0.1, but launches a real CLI, so it is
 /// `#[ignore]`d and stays off CI:
 ///
-///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture claude_reports_api_retries_and_unstreamed_answers
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_reports_api_retries_and_unstreamed_answers
 ///
 /// It SKIPs without a resolvable mise `claude` binary, below the claimed floor and without
 /// `python3`.
