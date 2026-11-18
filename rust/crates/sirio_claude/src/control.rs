@@ -25,9 +25,14 @@ impl ControlRequest {
     /// The handshake. `hooks` is an empty object: Sirio registers no
     /// in-process hooks, so the CLI keeps the ones the user's own settings
     /// files declare — the same hooks the terminal pane gets.
+    /// `forwardSubagentText` asks the CLI to forward a subagent's text and
+    /// thinking as lines of their own, for the subagent card.
     #[must_use]
     pub fn initialize(request_id: &str) -> Value {
-        Self::envelope(request_id, json!({"subtype": "initialize", "hooks": {}}))
+        Self::envelope(
+            request_id,
+            json!({"subtype": "initialize", "hooks": {}, "forwardSubagentText": true}),
+        )
     }
 
     /// Ends the turn in flight. The turn still reports its own `result`.

@@ -5,15 +5,17 @@
 //! what the session id turned out to be — so every case can be a unit test
 //! with a JSON literal instead of a subprocess.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
-use sirio_claude::message::{CliMessage, Delta, MessageLifecycle, ResultPayload, SystemPayload};
+use sirio_claude::message::{
+    CliMessage, ContentBlock, Delta, MessageLifecycle, ResultPayload, SystemPayload,
+};
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
 use sirio_chat_vocab::{
     BackgroundTaskEvent, BackgroundTaskRow, ChatEvent, CliState, PlanEntryInfo, SessionNotice,
-    ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
+    SubagentItem, SubagentUpdate, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
 };
 
 /// What a finished turn reported, kept for the caller that asks after the
@@ -58,6 +60,13 @@ pub(crate) struct Fold {
     /// the call's result never reaches the transcript either: a row opened for
     /// one would never settle.
     subagent_calls: HashSet<String>,
+    /// A parent tool-use id a subagent's lines carry, to the card that draws
+    /// them and the label of the agent (`None` for the card's own agent).
+    /// Kept past the turn end: a background agent keeps talking after its
+    /// `result`. A few short strings per call; not reclaimed.
+    subagent_cards: HashMap<String, (String, Option<String>)>,
+    /// The calls a subagent has open, for their completion content.
+    subagent_open: HashMap<String, OpenCall>,
     session_id: Option<String>,
     claude_version: Option<String>,
     current_mode: Option<String>,
@@ -232,12 +241,12 @@ impl Fold {
                 }
             }
             CliMessage::Assistant(assistant) => {
-                if assistant.parent_tool_use_id.is_some() {
-                    // The line draws nothing, but its calls are remembered: a
+                if let Some(parent) = assistant.parent_tool_use_id.as_deref() {
+                    // The line draws no row, but its calls are remembered: a
                     // permission asked for one must not draw a row either.
                     self.subagent_calls
                         .extend(assistant.tool_uses().map(|tool_use| tool_use.id.clone()));
-                    return Vec::new();
+                    return self.subagent_blocks(parent, &assistant.message.content);
                 }
                 let synthetic = assistant.message.model.as_deref() == Some(SYNTHETIC_MODEL);
                 if let Some(model) = assistant.message.model.clone()
@@ -309,6 +318,9 @@ impl Fold {
                         continue;
                     }
                     let info = tools::describe(tool_use);
+                    if is_agent_call(&tool_use.name) {
+                        self.open_card(&tool_use.id, &mut events);
+                    }
                     events.push(started_event(&tool_use.id, &info, "InProgress"));
                     if let Some(entries) = plan_entries(&tool_use.name, &tool_use.input) {
                         events.push(ChatEvent::PlanUpdate { entries });
@@ -324,8 +336,12 @@ impl Fold {
                 events
             }
             CliMessage::User(user) => {
-                if user.parent_tool_use_id.is_some() {
-                    return Vec::new();
+                if let Some(parent) = user.parent_tool_use_id.as_deref() {
+                    return self.subagent_results(
+                        parent,
+                        user.tool_results(),
+                        user.tool_use_result.as_ref(),
+                    );
                 }
                 let mut events = Vec::new();
                 for result in user.tool_results() {
@@ -457,7 +473,11 @@ impl Fold {
             input: input.clone(),
         };
         let info = tools::describe(&tool_use);
-        let event = started_event(tool_use_id, &info, "Pending");
+        let mut events = Vec::new();
+        if is_agent_call(tool_name) {
+            self.open_card(tool_use_id, &mut events);
+        }
+        events.push(started_event(tool_use_id, &info, "Pending"));
         self.open_calls.insert(
             tool_use_id.to_string(),
             OpenCall {
@@ -465,7 +485,125 @@ impl Fold {
                 info,
             },
         );
-        vec![event]
+        events
+    }
+
+    /// A main-thread `Agent`/`Task` call opens the card its subagent's lines
+    /// will fill. The signal rides before the call's own `ToolCallStarted`.
+    fn open_card(&mut self, tool_use_id: &str, events: &mut Vec<ChatEvent>) {
+        self.subagent_cards
+            .insert(tool_use_id.to_string(), (tool_use_id.to_string(), None));
+        self.notices.push(SessionNotice::Subagent(SubagentUpdate {
+            card: tool_use_id.to_string(),
+            agent: None,
+            item: SubagentItem::Opened,
+        }));
+        events.push(ChatEvent::OtherSessionUpdate {
+            kind: "SessionNotice".into(),
+        });
+    }
+
+    /// A subagent's `assistant` line as items of its card. A parent no
+    /// main-thread `Agent` call opened draws nothing.
+    fn subagent_blocks(&mut self, parent: &str, blocks: &[ContentBlock]) -> Vec<ChatEvent> {
+        let Some((card, agent)) = self.subagent_cards.get(parent).cloned() else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        for block in blocks {
+            match block {
+                ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
+                    items.push(SubagentItem::Thinking(thinking.clone()));
+                }
+                ContentBlock::Text { text } if !text.is_empty() => {
+                    items.push(SubagentItem::Text(text.clone()));
+                }
+                ContentBlock::ToolUse(tool_use) => {
+                    let info = tools::describe(tool_use);
+                    if is_agent_call(&tool_use.name) {
+                        let label = tool_use
+                            .input
+                            .get("description")
+                            .and_then(serde_json::Value::as_str)
+                            .map_or_else(|| info.title.clone(), str::to_string);
+                        self.subagent_cards
+                            .insert(tool_use.id.clone(), (card.clone(), Some(label)));
+                    }
+                    items.push(SubagentItem::ToolStarted {
+                        id: tool_use.id.clone(),
+                        title: info.title.clone(),
+                        kind: info.kind.as_str().to_string(),
+                        status: "InProgress".into(),
+                        content: info.content.iter().map(content_info).collect(),
+                        locations: locations(&info),
+                    });
+                    self.subagent_open.insert(
+                        tool_use.id.clone(),
+                        OpenCall {
+                            name: tool_use.name.clone(),
+                            info,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.subagent_items(&card, agent, items)
+    }
+
+    /// Queues items for a card, with one signal for the lot.
+    fn subagent_items(
+        &mut self,
+        card: &str,
+        agent: Option<String>,
+        items: Vec<SubagentItem>,
+    ) -> Vec<ChatEvent> {
+        if items.is_empty() {
+            return Vec::new();
+        }
+        self.notices
+            .extend(items.into_iter().map(|item| {
+                SessionNotice::Subagent(SubagentUpdate {
+                    card: card.to_string(),
+                    agent: agent.clone(),
+                    item,
+                })
+            }));
+        vec![ChatEvent::OtherSessionUpdate {
+            kind: "SessionNotice".into(),
+        }]
+    }
+
+    /// A subagent's `user` line: its calls' results settle their items.
+    fn subagent_results(
+        &mut self,
+        parent: &str,
+        results: Vec<sirio_claude::message::ToolResult>,
+        tool_use_result: Option<&serde_json::Value>,
+    ) -> Vec<ChatEvent> {
+        let Some((card, agent)) = self.subagent_cards.get(parent).cloned() else {
+            return Vec::new();
+        };
+        let items = results
+            .into_iter()
+            .map(|result| {
+                let open = self.subagent_open.remove(&result.tool_use_id);
+                // A nested agent's report is already in the card as text.
+                let content = open
+                    .filter(|open| !is_agent_call(&open.name))
+                    .map(|open| completion_content(&open, &result, tool_use_result));
+                SubagentItem::ToolCompleted {
+                    id: result.tool_use_id,
+                    status: if result.is_error {
+                        "Failed".into()
+                    } else {
+                        "Completed".into()
+                    },
+                    content,
+                }
+            })
+            .collect();
+        self.subagent_items(&card, agent, items)
     }
 
     fn apply_system(&mut self, system: SystemPayload) -> Vec<ChatEvent> {
@@ -748,6 +886,11 @@ fn stop_reason_label(result: &ResultPayload) -> String {
         other => other,
     }
     .to_string()
+}
+
+/// Whether a tool call starts a subagent.
+fn is_agent_call(name: &str) -> bool {
+    matches!(name, "Agent" | "Task")
 }
 
 fn started_event(id: &str, info: &ToolInfo, status: &str) -> ChatEvent {
@@ -1241,9 +1384,8 @@ mod tests {
 
     #[test]
     fn a_subagents_own_output_stays_out_of_the_top_level_transcript() {
-        // Without --forward-subagent-text the CLI does not send subagent
-        // text at all; if a future CLI does, it must not be mistaken for the
-        // main thread's reply. Parity with what the wrapper-backed tab shows.
+        // A subagent's output goes to its card (a notice), never to the top
+        // level; a line whose parent opened no card draws nothing at all.
         let mut fold = Fold::new();
         let events = fold.apply(parse(json!({
             "type": "assistant",
@@ -1255,6 +1397,232 @@ mod tests {
             events.is_empty(),
             "subagent traffic must not draw rows: {events:?}"
         );
+    }
+
+    // Failure list for the subagent card items:
+    // - an item lands in the wrong card;
+    // - a nested call draws a top-level row;
+    // - a grandchild opens a second card;
+    // - a background line after `result` is lost;
+    // - an empty or redacted block draws an empty item;
+    // - `Opened` comes after `ToolCallStarted`;
+    // - a permission-first `Agent` call opens twice;
+    // - a subagent's permission draws a row;
+    // - a nested `Agent` result repeats its report.
+
+    fn agent_call(id: &str, description: &str) -> serde_json::Value {
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_main", "content": [{
+                "type": "tool_use", "id": id, "name": "Agent",
+                "input": {"description": description, "prompt": "go"}
+            }]},
+            "parent_tool_use_id": null
+        })
+    }
+
+    fn child_line(parent: &str, block: serde_json::Value) -> CliMessage {
+        parse(json!({
+            "type": "assistant",
+            "message": {"id": "msg_kid", "content": [block]},
+            "parent_tool_use_id": parent
+        }))
+    }
+
+    fn child_result(parent: &str, id: &str, text: &str) -> CliMessage {
+        parse(json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": id, "content": text, "is_error": false}
+            ]},
+            "parent_tool_use_id": parent
+        }))
+    }
+
+    fn signal() -> ChatEvent {
+        ChatEvent::OtherSessionUpdate {
+            kind: "SessionNotice".into(),
+        }
+    }
+
+    fn updates(notices: Vec<SessionNotice>) -> Vec<SubagentUpdate> {
+        notices
+            .into_iter()
+            .filter_map(|notice| match notice {
+                SessionNotice::Subagent(update) => Some(update),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_agent_call_opens_its_card_before_its_row() {
+        let mut fold = Fold::new();
+        let events = fold.apply(parse(agent_call("toolu_a", "Look around")));
+        assert!(matches!(
+            events.as_slice(),
+            [ChatEvent::OtherSessionUpdate { kind }, ChatEvent::ToolCallStarted { id, .. }]
+                if kind == "SessionNotice" && id == "toolu_a"
+        ));
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::Subagent(SubagentUpdate {
+                card: "toolu_a".into(),
+                agent: None,
+                item: SubagentItem::Opened,
+            })]
+        );
+
+        // The permission asked first: the card opens there, once.
+        let mut fold = Fold::new();
+        let input = json!({"description": "Look around", "prompt": "go"});
+        let events = fold.start_from_permission("Agent", "toolu_b", &input);
+        assert!(matches!(
+            events.as_slice(),
+            [ChatEvent::OtherSessionUpdate { .. }, ChatEvent::ToolCallStarted { id, .. }]
+                if id == "toolu_b"
+        ));
+        fold.apply(parse(agent_call("toolu_b", "Look around")));
+        let opened = updates(fold.take_notices());
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].item, SubagentItem::Opened);
+    }
+
+    #[test]
+    fn a_subagents_blocks_become_items_in_order() {
+        let mut fold = Fold::new();
+        fold.apply(parse(agent_call("toolu_a", "Look around")));
+        fold.take_notices();
+        let mut events = Vec::new();
+        for block in [
+            json!({"type": "thinking", "thinking": "Let me look first.", "signature": "SIG"}),
+            json!({"type": "text", "text": "I will look. First I read the file."}),
+            json!({"type": "tool_use", "id": "toolu_r", "name": "Read",
+                   "input": {"file_path": "/repo/a.rs"}}),
+        ] {
+            events.extend(fold.apply(child_line("toolu_a", block)));
+        }
+        events.extend(fold.apply(child_result("toolu_a", "toolu_r", "fn main() {}")));
+        assert!(
+            events.iter().all(|event| *event == signal()),
+            "a subagent's output must reach the card only: {events:?}"
+        );
+        let items = updates(fold.take_notices());
+        assert!(items.iter().all(|u| u.card == "toolu_a" && u.agent.is_none()));
+        assert!(matches!(
+            items.iter().map(|u| &u.item).collect::<Vec<_>>().as_slice(),
+            [
+                SubagentItem::Thinking(thought),
+                SubagentItem::Text(text),
+                SubagentItem::ToolStarted { id, title, kind, status, .. },
+                SubagentItem::ToolCompleted { id: done, status: end, content: Some(_) },
+            ] if thought == "Let me look first."
+                && text == "I will look. First I read the file."
+                && id == "toolu_r" && done == "toolu_r"
+                && title == "/repo/a.rs" && kind == "Read"
+                && status == "InProgress" && end == "Completed"
+        ));
+    }
+
+    #[test]
+    fn a_subagents_own_subagent_goes_into_the_outer_card() {
+        let mut fold = Fold::new();
+        fold.apply(parse(agent_call("toolu_a", "Look around")));
+        fold.take_notices();
+        let events = fold.apply(child_line(
+            "toolu_a",
+            json!({"type": "tool_use", "id": "toolu_g", "name": "Agent",
+                   "input": {"description": "Check one thing", "prompt": "check"}}),
+        ));
+        assert_eq!(events, vec![signal()]);
+        fold.apply(child_line("toolu_g", json!({"type": "text", "text": "Checked."})));
+        fold.apply(child_result("toolu_a", "toolu_g", "the long report"));
+        let items = updates(fold.take_notices());
+        assert!(matches!(
+            items.as_slice(),
+            [
+                SubagentUpdate { card, agent: None, item: SubagentItem::ToolStarted { id, .. } },
+                SubagentUpdate { card: c2, agent: Some(label), item: SubagentItem::Text(t) },
+                SubagentUpdate {
+                    card: c3,
+                    agent: None,
+                    item: SubagentItem::ToolCompleted { id: done, content: None, .. },
+                },
+            ] if card == "toolu_a" && c2 == "toolu_a" && c3 == "toolu_a"
+                && id == "toolu_g" && done == "toolu_g"
+                && label == "Check one thing" && t == "Checked."
+        ));
+    }
+
+    #[test]
+    fn two_agents_lines_go_to_their_own_cards() {
+        let mut fold = Fold::new();
+        fold.apply(parse(agent_call("toolu_a", "One")));
+        fold.apply(parse(agent_call("toolu_b", "Two")));
+        fold.take_notices();
+        for (parent, text) in [("toolu_a", "a1"), ("toolu_b", "b1"), ("toolu_a", "a2")] {
+            fold.apply(child_line(parent, json!({"type": "text", "text": text})));
+        }
+        let seen: Vec<(String, SubagentItem)> = updates(fold.take_notices())
+            .into_iter()
+            .map(|u| (u.card, u.item))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("toolu_a".to_string(), SubagentItem::Text("a1".into())),
+                ("toolu_b".to_string(), SubagentItem::Text("b1".into())),
+                ("toolu_a".to_string(), SubagentItem::Text("a2".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_agents_lines_after_the_result_reach_its_card() {
+        let mut fold = Fold::new();
+        fold.apply(parse(agent_call("toolu_a", "In the background")));
+        fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "stop_reason": "end_turn", "session_id": "s", "result": "ok"
+        })));
+        fold.apply(parse(json!({
+            "type": "assistant",
+            "message": {"id": "msg_next", "content": [{"type": "text", "text": "next turn"}]},
+            "parent_tool_use_id": null
+        })));
+        fold.take_notices();
+        fold.apply(child_line("toolu_a", json!({"type": "text", "text": "late"})));
+        let items = updates(fold.take_notices());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].card, "toolu_a");
+        assert_eq!(items[0].item, SubagentItem::Text("late".into()));
+    }
+
+    #[test]
+    fn lines_of_an_unknown_parent_draw_nothing() {
+        let mut fold = Fold::new();
+        let text = json!({"type": "text", "text": "x"});
+        let mut events = fold.apply(child_line("toolu_nobody", text));
+        events.extend(fold.apply(child_result("toolu_nobody", "toolu_r", "x")));
+        assert_eq!(events, vec![]);
+        assert_eq!(fold.take_notices(), vec![]);
+    }
+
+    #[test]
+    fn empty_and_redacted_blocks_draw_nothing() {
+        let mut fold = Fold::new();
+        fold.apply(parse(agent_call("toolu_a", "Look around")));
+        fold.take_notices();
+        let mut events = Vec::new();
+        for block in [
+            json!({"type": "thinking", "thinking": "", "signature": "SIG"}),
+            json!({"type": "text", "text": ""}),
+            json!({"type": "redacted_thinking", "data": "opaque"}),
+        ] {
+            events.extend(fold.apply(child_line("toolu_a", block)));
+        }
+        assert_eq!(events, vec![]);
+        assert_eq!(fold.take_notices(), vec![]);
     }
 
     #[test]

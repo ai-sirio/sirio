@@ -1358,6 +1358,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 }
                                 _ => Vec::new(),
                             };
+                            // The card an `Agent` call opens waits behind the signal
+                            // its row events carry, as on the line branch.
+                            shared.push_notices(fold.take_notices());
                             for event in row_events {
                                 let _ = event_tx.send(event).await;
                             }

@@ -3126,6 +3126,9 @@ impl Chat {
                     },
                 }
             }
+            // A subagent's card is drawn by a later step; until then its
+            // items add no row.
+            SessionNotice::Subagent(_) => return,
         };
         self.push_entry(entry);
     }

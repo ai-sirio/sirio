@@ -626,7 +626,7 @@ pub enum BackgroundTaskEvent {
 /// signal is an [`ChatEvent::OtherSessionUpdate`] named `SessionNotice`,
 /// and the surface drains the queue when it sees one — which keeps the
 /// notices in stream order with the rows around them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SessionNotice {
     /// The context window was compacted and part of the conversation is
     /// no longer in it.
@@ -696,5 +696,45 @@ pub enum SessionNotice {
         /// The structured twin of the text (`usage_report`), raw: this crate
         /// does not know the CLI's types.
         report: Option<serde_json::Value>,
+    },
+    /// One step of a subagent's work, for its card.
+    Subagent(SubagentUpdate),
+}
+
+/// One step of a subagent's work, for the card of the main-thread `Agent`
+/// (or `Task`) call that started it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubagentUpdate {
+    /// The card's id: the outermost main-thread `Agent` call's tool-use id.
+    pub card: String,
+    /// The `description` of the subagent's own subagent that did this;
+    /// `None` for the card's own agent.
+    pub agent: Option<String>,
+    pub item: SubagentItem,
+}
+
+/// What a subagent did, as one item of its card.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SubagentItem {
+    /// `card` is a subagent call: draw it as a card. Sent before that call's
+    /// `ToolCallStarted`.
+    Opened,
+    Text(String),
+    Thinking(String),
+    /// A call the subagent made (an `Agent` call of its own included).
+    ToolStarted {
+        id: String,
+        title: String,
+        kind: String,
+        status: String,
+        content: Vec<ToolCallContentInfo>,
+        locations: Vec<ToolCallLocationInfo>,
+    },
+    /// That call settled (`Completed` or `Failed`). `content` is `None` for a
+    /// nested `Agent`/`Task` call: its report is already in the card as text.
+    ToolCompleted {
+        id: String,
+        status: String,
+        content: Option<Vec<ToolCallContentInfo>>,
     },
 }
