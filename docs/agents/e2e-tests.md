@@ -830,18 +830,19 @@ Scripts/Tests/test-ide-bridge-e2e.sh --xvfb --live   # -> prints "IDE BRIDGE LIV
 # A remote image in the Markdown Preview, in the real app: a .md whose image is a 64x64 PNG of
 # one colour, served over loopback by python3 -m http.server, opened in Preview on a private
 # Xvfb. The PID-matched capture must hold that colour in a block of at least 32x32, and the
-# server's log exactly one GET of the image, answered 200 (an engine without an HTTP client
+# server's log at least one GET of the image, one answered 200 (an engine without an HTTP client
 # draws nothing there). --mutate missing-image names an image the server lacks: the run must
 # FAIL, the proof it can go red. --xvfb | --display :N, --out-dir DIR.
-Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN REMOTE IMAGE E2E OK (block <n>x<n>, 1 GET, display <d>)"
+Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN REMOTE IMAGE E2E OK (block <n>x<n>, <n> GET, display <d>)"
 
 # The environment of an opened link: the app starts through a fake AppImage mount's AppRun on a
 # private Xvfb with both WAYLAND_DISPLAY and a DISPLAY set (so it forces X11 for itself), a
 # Claude chat on the file-links stub draws a web link, and a real click on it reaches an
 # xdg-open stub (first on the login PATH of the private ~/.profile) that dumps its environment.
 # The dump must name no mount entry in PATH, LD_LIBRARY_PATH or XDG_DATA_DIRS, carry no APPIMAGE,
-# APPDIR, GTK_THEME or SIRIO_LAUNCH_ENV, keep the user's WAYLAND_DISPLAY and put the login
-# PATH first. Removing gpui_linux::set_child_environment from main.rs (by hand, then rebuild) must turn
+# APPDIR, GTK_THEME or SIRIO_LAUNCH_ENV, keep the user's WAYLAND_DISPLAY, and list the login PATH entries before the launch PATH's. Every
+# failed assertion is printed. One click covers the engine's only spawn site Sirio reaches, `cx.open_url`
+# (open_uri_internal); nothing calls reveal_path or open_with_system, so those two cannot be tested. Removing gpui_linux::set_child_environment from main.rs (by hand, then rebuild) must turn
 # it red on a mount entry. Linux only. --xvfb | --display :N (2400x1200 or larger), --out-dir DIR.
 Scripts/Tests/test-child-env-e2e.sh --xvfb   # -> prints "CHILD ENV E2E OK (display <d>, dump <path>)"
 

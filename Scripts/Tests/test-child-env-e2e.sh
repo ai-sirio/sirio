@@ -22,6 +22,14 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #     itself: with both WAYLAND_DISPLAY and a DISPLAY set the app forces X11 by default
 #     (`display_backend.rs`, `SIRIO_FORCE_X11` unset), and a link must not lose the user's
 #     Wayland session because Sirio runs on X11.
+# Spawn sites: the vendored engine (rust/vendor/gpui_linux/src/linux/platform.rs) applies the
+# child environment at three places: open_uri_internal (:755, `open::commands`, reached by every
+# `cx.open_url`, which is what a web link click calls), reveal_path_internal (:811) and
+# open_with_system (:533, `xdg-open`). Only the first is reachable from Sirio: nothing in
+# rust/crates or the vendored Ely calls `reveal_path` or `open_with_system` (the file views'
+# "Reveal in file manager" runs its own `sirio_env::command("xdg-open")`, sirio_ui/src/editor.rs:1288),
+# so this one click covers every spawn the app can start through the engine. A re-applied
+# set_child_environment that misses the two unreachable sites cannot be seen by any E2E.
 # With `set_child_environment` removed from main.rs the script must go red on a mount entry;
 # that mutation is made by hand (rebuild, run, restore), not by a flag.
 #
@@ -175,8 +183,8 @@ git -C "$REPO" commit -q -m first
 cat >"$LOGIN_BIN/xdg-open" <<STUB
 #!/bin/sh
 /usr/bin/env -0 >"$RUN/xdg-open.env.part"
-mv "$RUN/xdg-open.env.part" "$RUN/xdg-open.env"
 printf 'xdg-open %s\n' "\$*" >>"$RUN/xdg-open.log"
+mv "$RUN/xdg-open.env.part" "$RUN/xdg-open.env"
 exit 0
 STUB
 chmod +x "$LOGIN_BIN/xdg-open"
@@ -460,17 +468,30 @@ echo "OK: the click reached the xdg-open stub, and its environment was dumped"
 # ---------------------------------------------------------------- the dump
 
 name="xdg-open dump"
-env_under "$DUMP" PATH "$MOUNT" "$MOUNT_REAL" || fail "$name: PATH holds a mount entry"
-env_under "$DUMP" LD_LIBRARY_PATH "$MOUNT" "$MOUNT_REAL" || fail "$name: LD_LIBRARY_PATH holds a mount entry"
-env_under "$DUMP" XDG_DATA_DIRS "$MOUNT" "$MOUNT_REAL" || fail "$name: XDG_DATA_DIRS holds a mount entry"
+FAILED=()
+check() { # description command...: a failed check is recorded, every one is run
+  local description=$1
+  shift
+  "$@" >/dev/null 2>&1 || FAILED+=("$name: $description")
+}
+absent() { [ "$(env_get "$DUMP" "$1")" = __ABSENT__ ]; }
+is_value() { [ "$(env_get "$DUMP" "$1")" = "$2" ]; }
+check "PATH holds a mount entry" env_under "$DUMP" PATH "$MOUNT" "$MOUNT_REAL"
+check "LD_LIBRARY_PATH holds a mount entry" env_under "$DUMP" LD_LIBRARY_PATH "$MOUNT" "$MOUNT_REAL"
+check "XDG_DATA_DIRS holds a mount entry" env_under "$DUMP" XDG_DATA_DIRS "$MOUNT" "$MOUNT_REAL"
 for var in APPIMAGE APPDIR GTK_THEME SIRIO_LAUNCH_ENV; do
-  [ "$(env_get "$DUMP" "$var")" = __ABSENT__ ] || fail "$name carries $var"
+  check "carries $var" absent "$var"
 done
-[ "$(env_get "$DUMP" WAYLAND_DISPLAY)" = wayland-test ] || fail "$name: WAYLAND_DISPLAY is '$(env_get "$DUMP" WAYLAND_DISPLAY)', not the user's wayland-test"
+check "WAYLAND_DISPLAY is '$(env_get "$DUMP" WAYLAND_DISPLAY)', not the user's wayland-test" is_value WAYLAND_DISPLAY wayland-test
 # The launch PATH lists the file-links stubs before the login directory; the user environment
 # puts the login shell's entries first, so the login directory leads the stubs in the dump.
-env_before "$DUMP" PATH "$LOGIN_BIN" "$STUBS" || fail "$name: the login shell's PATH entries do not come before the launch PATH's"
-[ "$(env_get "$DUMP" HOME)" = "$HOME_DIR" ] || fail "$name: HOME is not the world's"
+check "the login shell's PATH entries do not come before the launch PATH's" env_before "$DUMP" PATH "$LOGIN_BIN" "$STUBS"
+check "HOME is not the world's" is_value HOME "$HOME_DIR"
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  for failure in "${FAILED[@]}"; do echo "FAIL: $failure" >&2; done
+  echo "FAIL: ${#FAILED[@]} assertion(s) on the opener's environment failed" >&2
+  exit 1
+fi
 echo "OK: the opener's environment has no mount entry in PATH, LD_LIBRARY_PATH or XDG_DATA_DIRS; no APPIMAGE, APPDIR, GTK_THEME or SIRIO_LAUNCH_ENV; the user's WAYLAND_DISPLAY and login PATH"
 
 echo "CHILD ENV E2E OK (display $DISPLAY_TARGET, dump $OUT_DIR/xdg-open.env)"
