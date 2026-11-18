@@ -3381,7 +3381,8 @@ impl Chat {
     }
 
     /// Ends a native card: its status, its time, and the calls still running.
-    fn close_card(&mut self, card: &str, status: &str) {
+    /// Says whether a card was there to end.
+    fn close_card(&mut self, card: &str, status: &str) -> bool {
         let measured = self.tool_duration_on(card, status);
         if let Some(index) = self.subagent_task_position(card)
             && let Some(Entry::SubagentTask {
@@ -3397,7 +3398,9 @@ impl Chat {
             }
             settle_running_calls(parts);
             self.remeasure_entry(index);
+            return true;
         }
+        false
     }
 
     /// The connection a held card's task ran under is gone, and its end will
@@ -3406,10 +3409,13 @@ impl Chat {
         let mut cards: Vec<String> = self.background_cards.drain().map(|(_, c)| c).collect();
         cards.sort();
         cards.dedup();
+        let mut changed = false;
         for card in &cards {
-            self.close_card(card, "Cancelled");
+            changed |= self.close_card(card, "Cancelled");
         }
-        if !cards.is_empty() {
+        // A transcript that no card changed is not this chat's to write: it
+        // may be a history session opened since.
+        if changed {
             self.persist_settled_transcript();
         }
     }
@@ -3438,8 +3444,9 @@ impl Chat {
                 } else {
                     "Failed"
                 };
-                self.close_card(&card, ended);
-                self.persist_settled_transcript();
+                if self.close_card(&card, ended) {
+                    self.persist_settled_transcript();
+                }
             }
             _ => {}
         }
@@ -21416,6 +21423,37 @@ two"
             chat
         });
         chat
+    }
+
+    /// A reset with no held card, and an end for a task no card holds, change
+    /// no card and write nothing: the entries may be a history session's.
+    #[gpui::test]
+    async fn a_reset_or_end_with_no_held_card_writes_nothing(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let chat = chat_with_a_past_session(cx, &dir, &["an older question"]);
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("this session".into(), Vec::new(), Vec::new(), cx);
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            // A task held for a card this transcript does not have.
+            chat.background_cards.insert("gone".into(), "elsewhere".into());
+            chat.reset_background_tasks(cx);
+            chat.background_cards.insert("gone".into(), "elsewhere".into());
+            chat.handle_event(
+                sirio_chat::ChatEvent::BackgroundTask(sirio_chat::BackgroundTaskEvent::Ended {
+                    task_id: "gone".into(),
+                    status: "completed".into(),
+                }),
+                cx,
+            );
+            assert_eq!(card_status(chat, 1), "InProgress", "no card was held");
+        });
+        let path = dir.0.join("history.sqlite");
+        let db = AppDatabase::open(&path).unwrap();
+        assert!(
+            db.load_chat_transcript("current-chat").unwrap().is_none(),
+            "nothing was written for the tab"
+        );
     }
 
     #[gpui::test]
