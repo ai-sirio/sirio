@@ -699,6 +699,9 @@ impl Sidebar {
         // (it goes invisible, keeping its box), so they sit at one x on every
         // card whatever its status, and the seat is the same width on all of
         // them -- the primary holds an empty place where the cross would be.
+        // The first card's star records where it is drawn for the debug
+        // layout read, hidden or not: a canvas prepaints either way.
+        let star_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card_star.clone());
         let (slot_bloom, tail_bloom) = if is_worktree {
             (status_bloom, None)
         } else {
@@ -749,6 +752,18 @@ impl Sidebar {
                                 .hover(|style| style.bg(theme.ely.hover))
                                 .invisible()
                                 .group_hover(hover_group.clone(), |style| style.visible())
+                                .when_some(star_probe, |this, cell| {
+                                    this.child(
+                                        gpui::canvas(
+                                            move |bounds, _, _| cell.set(Some(bounds)),
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size_full(),
+                                    )
+                                })
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
                                     star_entity.update(cx, |sidebar, cx| {

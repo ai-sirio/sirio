@@ -663,17 +663,88 @@ impl WorktreePrompt {
 struct ProbeRects {
     first_section: std::cell::Cell<Option<usize>>,
     first_card: std::cell::Cell<Option<usize>>,
-    section: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
-    card: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    section: ProbeCell,
+    card: ProbeCell,
+    card_star: ProbeCell,
+    /// The chrome the sidebar draws itself: cleared at the top of every
+    /// render and refilled by the paint, so a part that is not drawn reads
+    /// `None`.
+    title: ProbeCell,
+    bell: ProbeCell,
+    search: ProbeCell,
+    new_chat: ProbeCell,
+    section_header: ProbeCell,
+    filter: ProbeCell,
+    bell_menu: ProbeCell,
+    hover_card: ProbeCell,
+}
+
+/// Where one part of the sidebar was last painted.
+type ProbeCell = std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>;
+
+/// A child that records its parent's painted bounds into `cell`. It spans the
+/// parent, so the parent's box is what is recorded.
+fn probe_canvas(cell: &ProbeCell) -> impl IntoElement {
+    let cell = cell.clone();
+    gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+}
+
+/// The painted bounds of the sidebar's parts, for the debug layout read. Each
+/// is `None` while that part is not drawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SidebarProbe {
+    /// The first project row (31 px), not the section header.
+    pub section: Option<Bounds<Pixels>>,
+    pub card: Option<Bounds<Pixels>>,
+    pub card_star: Option<Bounds<Pixels>>,
+    pub title: Option<Bounds<Pixels>>,
+    pub bell: Option<Bounds<Pixels>>,
+    pub search: Option<Bounds<Pixels>>,
+    pub new_chat: Option<Bounds<Pixels>>,
+    pub section_header: Option<Bounds<Pixels>>,
+    pub filter: Option<Bounds<Pixels>>,
+    pub bell_menu: Option<Bounds<Pixels>>,
+    pub hover_card: Option<Bounds<Pixels>>,
+}
+
+/// What the debug attention read reports about the sidebar's shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarShellState {
+    pub list_focused: bool,
+    pub filter_shown: bool,
+    /// The worktree path the open hover card is about.
+    pub hover_card_worktree: Option<PathBuf>,
+    /// The bell's dot: "error", "needs-input" or "unread".
+    pub bell: Option<&'static str>,
 }
 
 impl ProbeRects {
+    fn clear_chrome(&self) {
+        for cell in [
+            &self.title,
+            &self.bell,
+            &self.search,
+            &self.new_chat,
+            &self.section_header,
+            &self.filter,
+            &self.bell_menu,
+            &self.hover_card,
+        ] {
+            cell.set(None);
+        }
+    }
+
     fn follow(&self, section: Option<usize>, card: Option<usize>) {
         if self.first_section.replace(section) != section {
             self.section.set(None);
         }
         if self.first_card.replace(card) != card {
             self.card.set(None);
+            self.card_star.set(None);
         }
     }
 }
@@ -836,8 +907,42 @@ impl Sidebar {
     /// painted, for the debug layout read. Both are `None` outside the
     /// Projects view, and a row that stopped being the first one is
     /// forgotten when the sidebar next renders.
-    pub fn probe_bounds(&self) -> (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>) {
-        (self.probe.section.get(), self.probe.card.get())
+    pub fn probe_bounds(&self) -> SidebarProbe {
+        let probe = &self.probe;
+        SidebarProbe {
+            section: probe.section.get(),
+            card: probe.card.get(),
+            card_star: probe.card_star.get(),
+            title: probe.title.get(),
+            bell: probe.bell.get(),
+            search: probe.search.get(),
+            new_chat: probe.new_chat.get(),
+            section_header: probe.section_header.get(),
+            filter: probe.filter.get(),
+            bell_menu: probe.bell_menu.get(),
+            hover_card: probe.hover_card.get(),
+        }
+    }
+
+    /// The shell's state for the debug attention read.
+    pub fn shell_state(&self, window: &Window) -> SidebarShellState {
+        let open = sessions::session_list(&self.rows, &[], "").open;
+        let hover_card_worktree = self
+            .hover_card
+            .row_id
+            .filter(|_| self.hover_card.shown)
+            .and_then(|id| self.rows.iter().find(|row| row.id == id))
+            .and_then(|row| row.path.clone());
+        SidebarShellState {
+            list_focused: self.tree_focus.is_focused(window),
+            filter_shown: self.filter_shown,
+            hover_card_worktree,
+            bell: sessions::bell_signal(&open).map(|reason| match reason {
+                sessions::BellReason::Error => "error",
+                sessions::BellReason::NeedsInput => "needs-input",
+                sessions::BellReason::Unread => "unread",
+            }),
+        }
     }
 
     /// Restores a view without reporting it (the host already knows).
@@ -3490,6 +3595,7 @@ impl Sidebar {
         let body = div()
             .id("sidebar-hover-card")
             .debug_selector(|| "sidebar-hover-card".to_owned())
+            .child(probe_canvas(&self.probe.hover_card))
             .occlude()
             .on_hover(move |hovered, _, cx| {
                 entity.update(cx, |sidebar, cx| sidebar.hover_card_pointer(*hovered, cx));
@@ -3948,6 +4054,7 @@ impl Sidebar {
                 div()
                     .id("sidebar-title")
                     .debug_selector(|| "sidebar-title".to_owned())
+                    .child(probe_canvas(&self.probe.title))
                     .h(px(28.0))
                     .px(px(6.0))
                     .flex()
@@ -3984,6 +4091,7 @@ impl Sidebar {
                 div()
                     .id("sidebar-search")
                     .debug_selector(|| "sidebar-search".to_owned())
+                    .child(probe_canvas(&self.probe.search))
                     .flex_none()
                     .child(
                         EIconButton::new("sidebar-search-button", IconName::Search)
@@ -4038,6 +4146,7 @@ impl Sidebar {
                 div()
                     .id("sidebar-new-chat")
                     .debug_selector(|| "sidebar-new-chat".to_owned())
+                    .child(probe_canvas(&self.probe.new_chat))
                     .size_full()
                     .px(px(6.0))
                     .flex()
@@ -4099,6 +4208,7 @@ impl Sidebar {
                 .collect::<Vec<_>>();
             Self::render_bell_menu(
                 &self.bell_menu,
+                &self.probe.bell_menu,
                 cx.entity(),
                 rows,
                 self.bell_opened_at_ms,
@@ -4112,6 +4222,7 @@ impl Sidebar {
         div()
             .id("sidebar-bell")
             .debug_selector(|| "sidebar-bell".to_owned())
+            .child(probe_canvas(&self.probe.bell))
             .relative()
             .flex_none()
             .on_mouse_down(
@@ -4132,6 +4243,7 @@ impl Sidebar {
 
     fn render_bell_menu(
         popup: &Popup<()>,
+        bell_menu_probe: &ProbeCell,
         entity: gpui::Entity<Self>,
         entries: Vec<(sessions::BellReason, sessions::SessionRow)>,
         opened_at_ms: i64,
@@ -4142,6 +4254,7 @@ impl Sidebar {
         let outside = entity.clone();
         let mut card = menu_card("sidebar-bell-menu", cx)
             .debug_selector(|| "sidebar-bell-menu".to_owned())
+            .child(probe_canvas(bell_menu_probe))
             .w(px(280.0))
             .max_h(max_height)
             .overflow_y_scroll()
@@ -4553,6 +4666,7 @@ impl Render for Sidebar {
         }
         let rows = self.visible_rows();
         let view = self.view;
+        self.probe.clear_chrome();
         self.probe.follow(
             (view == SidebarView::Projects)
                 .then(|| rows.iter().find(|row| row.kind == RowKind::Project).map(|row| row.id))
@@ -4564,6 +4678,8 @@ impl Render for Sidebar {
         let first_section_probe = self.probe.first_section.get();
         let first_card_probe = self.probe.first_card.get();
         let section_probe = self.probe.section.clone();
+        let filter_probe = self.probe.filter.clone();
+        let section_header_probe = self.probe.section_header.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
         let sticky_section = self.sticky_section(&rows);
         // Read off `self` here: the closure that draws the sticky header
@@ -4926,6 +5042,7 @@ impl Render for Sidebar {
                 div()
                     .id("filter-field")
                     .debug_selector(|| "filter-field".to_string())
+                    .child(probe_canvas(&filter_probe))
                     .track_focus(&filter_focus)
                     .relative()
                     .mt(px(6.0))
@@ -5029,6 +5146,7 @@ impl Render for Sidebar {
                 div()
                     .id("sidebar-section-header")
                     .debug_selector(|| "sidebar-section-header".to_owned())
+                    .child(probe_canvas(&section_header_probe))
                     .group("sidebar-section-header")
                     .flex_none()
                     .h(px(28.0))
@@ -8993,7 +9111,7 @@ mod tests {
     async fn the_zed_card_still_spans_the_panel(cx: &mut TestAppContext) {
         let (window, mut cx) = new_chat_fixture(cx, true);
         let tree = cx.debug_bounds("sidebar-tree").expect("the list is drawn");
-        let (_, card) = window.update(&mut cx, |s, _, _| s.probe_bounds()).unwrap();
+        let card = window.update(&mut cx, |s, _, _| s.probe_bounds()).unwrap().card;
         let card = card.expect("the first card is probed");
         assert_eq!(card.left(), tree.left(), "the card starts at the list's edge");
         assert_eq!(card.right(), tree.right(), "the card ends at the list's edge");
@@ -9344,6 +9462,46 @@ mod tests {
             card.left() >= px(300.0 + hover_card::GAP),
             "the card sits 4 px past the sidebar's right edge: {card:?}"
         );
+    }
+
+    #[gpui::test]
+    async fn probe_rects_report_the_new_chrome(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let probe = |cx: &mut VisualTestContext| window.update(cx, |s, _, _| s.probe_bounds()).unwrap();
+        let rects = probe(&mut cx);
+        assert!(rects.title.is_some(), "the title is probed");
+        assert!(rects.bell.is_some(), "the bell is probed");
+        assert!(rects.search.is_some(), "the search button is probed");
+        assert!(rects.new_chat.is_some(), "the New Chat row is probed");
+        let header = rects.section_header.expect("the section header is probed");
+        assert_eq!(header.size.height, px(28.0), "the header is 28 px");
+        let project = rects.section.expect("the first project row is probed");
+        assert_eq!(project.size.height, px(31.0), "the project row is 31 px, not the header");
+        assert!(rects.card.is_some(), "the first card is probed");
+        assert!(rects.card_star.is_some(), "the card's star is probed even while it is invisible");
+        assert!(rects.filter.is_none(), "the filter field is absent while hidden");
+        assert!(rects.bell_menu.is_none(), "the bell menu is absent while closed");
+        assert!(rects.hover_card.is_none(), "no hover card before the pointer rests");
+
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 400);
+        assert!(probe(&mut cx).hover_card.is_none(), "not yet at 400 ms");
+        hover_ms(&mut cx, 110);
+        assert!(probe(&mut cx).hover_card.is_some(), "open at 510 ms");
+        let state = window.update(&mut cx, |s, w, _| s.shell_state(w)).unwrap();
+        assert!(state.hover_card_worktree.is_some(), "the state names the hovered worktree");
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        assert!(probe(&mut cx).hover_card.is_none(), "the rect goes with the card");
+
+        click_control(&mut cx, "sidebar-search");
+        assert!(probe(&mut cx).filter.is_some(), "the filter field is probed once shown");
+        assert!(window.update(&mut cx, |s, w, _| s.shell_state(w)).unwrap().filter_shown);
+        click_control(&mut cx, "sidebar-bell");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(probe(&mut cx).bell_menu.is_some(), "the open bell menu is probed");
     }
 
     #[gpui::test]

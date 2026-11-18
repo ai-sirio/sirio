@@ -6927,7 +6927,7 @@ impl SirioWorkspace {
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::Attention { act, reply } => {
-                                    let _ = reply.send(workspace.control_attention(act, cx));
+                                    let _ = reply.send(workspace.control_attention(act, window, cx));
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -16015,10 +16015,11 @@ impl SirioWorkspace {
     fn control_attention(
         &mut self,
         act: AttentionAct,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         match act {
-            AttentionAct::Read => Ok(self.control_attention_read(cx)),
+            AttentionAct::Read => Ok(self.control_attention_read(window, cx)),
             AttentionAct::Focus(focus) => {
                 #[cfg(debug_assertions)]
                 {
@@ -16044,7 +16045,7 @@ impl SirioWorkspace {
     /// `projects` is one object per project header as the tree draws it (name,
     /// `expanded`, and the `unreadCount` its folded badge is drawn from), and `tray`
     /// one per roster entry with the label the tray menu would show.
-    fn control_attention_read(&self, cx: &App) -> Vec<(String, String)> {
+    fn control_attention_read(&self, window: &Window, cx: &App) -> Vec<(String, String)> {
         let status_word = |status: Option<AgentStatus>| match status {
             Some(_) => serde_json::json!(agent_status_word(status)),
             None => serde_json::Value::Null,
@@ -16146,7 +16147,7 @@ impl SirioWorkspace {
             .collect();
         #[cfg(not(debug_assertions))]
         let posted: Vec<serde_json::Value> = Vec::new();
-        vec![
+        let mut read = vec![
             (
                 "windowActive".to_string(),
                 self.effective_window_active().to_string(),
@@ -16171,7 +16172,25 @@ impl SirioWorkspace {
                 "tray".to_string(),
                 serde_json::Value::Array(tray).to_string(),
             ),
-        ]
+        ];
+        // The sidebar shell's state, for the E2E: gated like `shellRects`, so a
+        // release build never reports it.
+        if cfg!(debug_assertions) {
+            let shell = self.sidebar.read(cx).shell_state(window);
+            read.push((
+                "sidebar".to_string(),
+                serde_json::json!({
+                    "listFocused": shell.list_focused,
+                    "filterShown": shell.filter_shown,
+                    "hoverCardRow": shell
+                        .hover_card_worktree
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    "bell": shell.bell,
+                })
+                .to_string(),
+            ));
+        }
+        read
     }
 
     /// Opens the session with this persistence id: selects its worktree and
@@ -23725,10 +23744,10 @@ impl SirioWorkspace {
             // re-shown still holds the rects of before it was hidden.
             let sidebar_drawn = rects.left.get().is_some();
             let right_drawn = rects.right.get().is_some();
-            let (sidebar_section, sidebar_card) = if sidebar_drawn {
+            let sidebar_probe = if sidebar_drawn {
                 self.sidebar.read(cx).probe_bounds()
             } else {
-                (None, None)
+                Default::default()
             };
             let right_panel = self.right_panel.read(cx);
             let (right_header, right_header_icon) = if right_drawn {
@@ -23754,8 +23773,17 @@ impl SirioWorkspace {
                     "status": rects.status.get().map(rect),
                     "rightHeader": right_header.map(rect),
                     "rightHeaderLastIcon": right_header_icon.map(rect),
-                    "sidebarSection": sidebar_section.map(rect),
-                    "sidebarCard": sidebar_card.map(rect),
+                    "sidebarTitle": sidebar_probe.title.map(rect),
+                    "sidebarBell": sidebar_probe.bell.map(rect),
+                    "sidebarSearch": sidebar_probe.search.map(rect),
+                    "sidebarNewChat": sidebar_probe.new_chat.map(rect),
+                    "sidebarSectionHeader": sidebar_probe.section_header.map(rect),
+                    "sidebarSection": sidebar_probe.section.map(rect),
+                    "sidebarCard": sidebar_probe.card.map(rect),
+                    "sidebarCardStar": sidebar_probe.card_star.map(rect),
+                    "sidebarHoverCard": sidebar_probe.hover_card.map(rect),
+                    "sidebarBellMenu": sidebar_probe.bell_menu.map(rect),
+                    "sidebarFilter": sidebar_probe.filter.map(rect),
                     "dividerHandle": rects.divider_handle.get().map(rect),
                 })
                 .to_string(),
