@@ -636,7 +636,8 @@ Each item is laid out the same way:
     account's profile and was not seen. The floor's event has no `limitScope`.
   - **The notice.** Today it shows neither the status nor the reset (`Usage limit reached
     (five_hour)`, with the raw window token), and it says the same for `allowed_warning`, which is
-    false. Sirio now writes one line per change of status or window, and `allowed` stays silent:
+    false. Sirio now writes one line per change of status, window or scope (the CLI sends a new
+    event for each scope: run `run-q4-gw-d`), and `allowed` stays silent:
     - `allowed_warning`: `Approaching the <window> usage limit: <n>% used, resets at <time>.`
     - `rejected`: `<Window> usage limit reached, resets at <time>.` With `limitScope` it adds
       which budget ran out, in the CLI's own words: `your individual spend limit` (`service`),
