@@ -87,7 +87,7 @@ fn totals_line(totals: &SessionTotals) -> Option<String> {
             parts.push(format!("{added} lines added, {removed} removed"));
         }
         (Some(added), None) => parts.push(format!("{added} lines added")),
-        (None, Some(removed)) => parts.push(format!("{removed} removed")),
+        (None, Some(removed)) => parts.push(format!("{removed} lines removed")),
         (None, None) => {}
     }
     joined(&parts).map(|line| format!("This chat: {line}"))

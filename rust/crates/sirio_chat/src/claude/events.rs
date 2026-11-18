@@ -268,7 +268,12 @@ impl Fold {
                         .usage_report
                         .clone()
                         .map(serde_json::Value::Object);
-                    if !text.is_empty() || report.is_some() {
+                    // An empty text is an answer only when the card can read
+                    // the report; otherwise the row would be a label over nothing.
+                    let readable = report
+                        .as_ref()
+                        .is_some_and(|report| sirio_claude::UsageReport::parse(report).is_some());
+                    if !text.is_empty() || readable {
                         self.local_command_text = Some(text.clone()).filter(|t| !t.is_empty());
                         self.notices.push(SessionNotice::LocalCommandOutput {
                             command: assistant
@@ -1375,19 +1380,26 @@ mod tests {
     }
 
     #[test]
-    fn a_report_with_no_text_is_still_an_answer_but_nothing_at_all_is_not() {
+    fn a_report_with_no_text_is_an_answer_only_when_the_card_can_read_it() {
         let mut fold = Fold::new();
         let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "");
         // Guard: holds before the change. A synthetic line with no text drew
         // nothing, marker or not; only the report-only answer below is new.
         assert_eq!(fold.apply(parse(line.clone())), vec![]);
         assert!(fold.take_notices().is_empty());
+        // An object the card cannot read (it names neither `session` nor
+        // `rate_limits`) over no text would be a bare label over nothing.
         line["usage_report"] = json!({"limits": []});
-        assert_eq!(fold.apply(parse(line)), output_signal());
-        assert!(matches!(
-            fold.take_notices().as_slice(),
-            [SessionNotice::LocalCommandOutput { text, report: Some(_), .. }] if text.is_empty()
-        ));
+        assert_eq!(fold.apply(parse(line.clone())), vec![]);
+        assert!(fold.take_notices().is_empty());
+        for readable in [json!({"rate_limits": null}), json!({"session": {}})] {
+            line["usage_report"] = readable;
+            assert_eq!(fold.apply(parse(line.clone())), output_signal());
+            assert!(matches!(
+                fold.take_notices().as_slice(),
+                [SessionNotice::LocalCommandOutput { text, report: Some(_), .. }] if text.is_empty()
+            ));
+        }
     }
 
     #[test]

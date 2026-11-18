@@ -292,6 +292,7 @@ fn read_row(value: &Value) -> Option<LimitRow> {
             .and_then(|scope| scope.get(part))
             .and_then(|part| part.get("display_name"))
             .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
             .map(str::to_string)
     };
     Some(LimitRow {
@@ -539,6 +540,15 @@ mod usage_report_tests {
         .expect("a report");
         let names: Vec<Option<&str>> = rows(&report).iter().map(|row| row.scope_name.as_deref()).collect();
         assert_eq!(names, [Some("M"), Some("S"), Some("S"), None]);
+
+        // An empty name is no name: the fallback still applies.
+        let report = UsageReport::parse(&json!({"rate_limits": {"limits": [
+            {"scope": {"model": {"display_name": ""}, "surface": {"display_name": "Web"}}},
+            {"scope": {"model": {"display_name": ""}, "surface": {"display_name": ""}}}
+        ]}}))
+        .expect("a report");
+        let names: Vec<Option<&str>> = rows(&report).iter().map(|row| row.scope_name.as_deref()).collect();
+        assert_eq!(names, [Some("Web"), None]);
 
         // A surface that is not an object, or has no string name, gives no name.
         let report = UsageReport::parse(&json!({"rate_limits": {"limits": [

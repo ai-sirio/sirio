@@ -95,7 +95,7 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      overage refusal with its scope; the CLI's own refusal text is still one assistant row
 #   usage_text         (SIRIO_FIXTURE_USAGE) a local command's answer (`/usage`, `/context`) is one command-output row
 #                      holding the CLI's text, never an assistant row, also when the command's `result` fails and
-#                      repeats the text
+#                      repeats the text, and a control or bidi character in the plain text is shown as text
 #   usage_floor        (SIRIO_FIXTURE_USAGE) a CLI that writes no marker for `/usage` (the floor's) adds only the turn
 #                      row, ends the turn and still answers the next prompt
 #   usage_card         (SIRIO_FIXTURE_USAGE, SIRIO_E2E_TZ=UTC) a `/usage` that carries the CLI's `usage_report` is drawn as
@@ -105,6 +105,7 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   usage_unavailable  (SIRIO_FIXTURE_USAGE) a malformed report (`rate_limits` null or a number, `limits` empty or a
 #                      string) reads as unavailable or none reported, a row with no `percent` shows no `%`, and a
 #                      row's missing parts leave no stray `·`, an empty row no line and a group of such rows no heading
+#                      (totals with only removed lines read `2 lines removed`)
 #   startup_*          (SIRIO_FIXTURE_STARTUP) the chat's error row is the CLI's own start-up text, with no ACP in it:
 #     startup_config_invalid  the sentence, the file and its backup, and the override shown as text
 #     startup_opt_in     a reason the CLI reports only when Sirio's launch sets CLAUDE_CODE_STARTUP_FAILURE_RESULTS
@@ -5336,6 +5337,13 @@ scenario_usage_text() {
   notice_turns "the failing /usage turn ends" 3
   check_panel "a failing command is drawn once, never again as an assistant row" \
     "$USAGE_ROWS == [('command-output', 'usage', '$block'), ('command-output', 'context', 'Context: 1k of 200k tokens'), ('command-output', 'usage', '$block')]"
+  # Guard: holds before the change (the text goes through `visible_text`). The plain answer is what every
+  # non-subscriber sees; a hidden character in it is shown as text, never live. Built at run time.
+  usage_options "$(python3 -c 'import json; print(json.dumps({"text": "a" + chr(0x202E) + "b" + chr(7) + "c"}))')"
+  send_prompt "/usage"
+  notice_turns "the hostile-text /usage turn ends" 4
+  check_panel "Guard: a hidden character in the plain answer is shown as text, never live" \
+    "[r[2] for r in $USAGE_ROWS if r[0] == 'command-output'][-1] == 'a⟨U+202E⟩b⟨U+0007⟩c' and not any(chr(0x202E) in r[2] or chr(7) in r[2] for r in $USAGE_ROWS)"
   echo "OK: usage_text: a local command's answer is one command-output row, not an assistant row"
   stop_app
 }
@@ -5419,7 +5427,7 @@ PY
   stop_app
 }
 
-# A malformed report never crashes and never reads 0% (A9 review focus 4): seven answers, each its own row.
+# A malformed report never crashes and never reads 0% (A9 review focus 4): eight answers, each its own row.
 scenario_usage_unavailable() {
   SIRIO_FIXTURE_USAGE="$RUN_DIR/usage_unavailable-usage.json"
   usage_options '{}'
@@ -5432,14 +5440,15 @@ scenario_usage_unavailable() {
     '{"rate_limits": 7}' \
     '{"rate_limits": {"limits": [{"kind": "session", "group": "session", "severity": "normal", "is_active": true}]}}' \
     '{"rate_limits": {"limits": [{"kind": 3, "percent": 50}, {}]}}' \
-    '{"rate_limits": {"limits": [{"group": "weekly"}]}}'; do
+    '{"rate_limits": {"limits": [{"group": "weekly"}]}}' \
+    '{"session": {"total_lines_removed": 2}, "rate_limits": null}'; do
     n=$((n + 1))
     usage_options "{\"report\": $report}"
     send_prompt "/usage"
     notice_turns "the /usage turn $n ends" "$n"
   done
   check_panel "each malformed report reads as unavailable or none reported, and a row with no percent shows no %" \
-    "[r['card'] for r in c['transcript'] if r['kind'] == 'command-output'] == ['Plan limits: unavailable', 'Plan limits: none reported', 'Plan limits: unavailable', 'Plan limits: unavailable', 'Session\nCurrent session', '50%', 'Plan limits: none reported']"
+    "[r['card'] for r in c['transcript'] if r['kind'] == 'command-output'] == ['Plan limits: unavailable', 'Plan limits: none reported', 'Plan limits: unavailable', 'Plan limits: unavailable', 'Session\nCurrent session', '50%', 'Plan limits: none reported', 'This chat: 2 lines removed\nPlan limits: unavailable']"
   echo "OK: usage_unavailable: a malformed report is unavailable, never 0%"
   stop_app
 }

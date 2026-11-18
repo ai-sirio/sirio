@@ -2151,6 +2151,7 @@ def cli_inform(content, level):
 # `--fixture-usage=<file>`: JSON `{"marker": bool, "report": <value>, "fails": bool}` for the local
 # commands `/usage` and `/context`, re-read on every one. A missing key means: `marker` true, no
 # `usage_report` field written, `fails` false. `"report": null` writes `usage_report: null`.
+# An optional `"text"` replaces the command's answer text (default: the block below).
 USAGE_PATH = flag_value("fixture-usage")
 USAGE_TEXT = ("Estimated cost:        $0.0000\nTotal duration (API):  0s\n"
               "Total duration (wall): 3s\n"
@@ -2168,7 +2169,7 @@ def cli_local_command(command):
         with open(USAGE_PATH, encoding="utf-8") as handle:
             options = json.load(handle)
     marker = options.get("marker", True)
-    body = USAGE_TEXT if command == "usage" else CONTEXT_TEXT
+    body = options.get("text", USAGE_TEXT if command == "usage" else CONTEXT_TEXT)
     assistant = {"type": "assistant",
                  "message": {"id": trace_uuid(), "type": "message", "role": "assistant",
                              "model": "<synthetic>", "content": [{"type": "text", "text": body}],
