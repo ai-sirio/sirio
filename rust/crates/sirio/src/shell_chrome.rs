@@ -22,7 +22,7 @@ pub(crate) fn resolve_material(
 /// macOS: native. Windows: through the acrylic accent policy GPUI sets for
 /// `WindowBackgroundAppearance::Blurred` -- but only because Sirio vendors
 /// `gpui_windows` with a bitblt swap chain on the no-DirectComposition path it
-/// forces for the Browser surface (ADR 0002, ADR 0003). Upstream's flip-model
+/// forces for the Browser surface (ADR 0003). Upstream's flip-model
 /// HWND swap chain there is composed opaque, which is why Windows was off this
 /// list between #144 and ADR 0003: claiming blur would have left the setting
 /// looking honoured while nothing changed on screen. Linux never claimed it.

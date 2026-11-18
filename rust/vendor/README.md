@@ -28,10 +28,18 @@ paths.
 | `reqwest_client/` | `sirio-reqwest-client` | zed's `reqwest_client`, republished by bezel | workspace member |
 | `ely-palette/`, `ely-gpui-component/` | as above | Ely sources | workspace members |
 
-macOS builds on the upstream `gpui-pre-macos` / `gpui-pre-apple` 0.3.12, unpatched, so there is no `gpui_macos/`
-here. That is an accepted difference, not an oversight: its Metal destination-alpha blend changed against bezel's 0.3.8, it has no backdrop-blur pass,
-and its shadow shader lost the `inset == 2` mode (it still draws inset shadows otherwise). Sirio
-uses none of these. If a Mac shows a regression, vendor `gpui-pre-apple` (and `gpui-pre-macos` if it must change) the way `gpui_windows/` is vendored.
+macOS builds on the upstream `gpui-pre-macos` / `gpui-pre-apple` 0.3.12, unpatched, so there is no
+`gpui_macos/` here. The coordinator accepted that for this step, with one open item: against
+bezel's `gpui-apple` 0.3.8 the Metal destination-alpha blend changed (`One` became
+`OneMinusSourceAlpha` on two of the three pipelines), the same change `gpui_windows/` undoes on
+Windows. A blend factor applies to every draw, and Sirio requests `Blurred` on macOS
+(`rust/crates/sirio/src/shell_chrome.rs`), so framebuffer alpha reaches the screen: the blurred
+window's look may differ. That is a hand check on a Mac owed before release (it is listed in the
+PR's Merge Danger), not something verified here. If a Mac shows a regression, the follow-up is to
+vendor `gpui-pre-apple` (and `gpui-pre-macos` if it must change) the way `gpui_windows/` is
+vendored and restore the blend. Two other differences do not touch Sirio: there is no
+backdrop-blur pass, and the shadow shader lost the `inset == 2` mode. A search of `rust/crates`,
+`vendor/ely-gpui-component` and `vendor/ely-palette` finds no use of either.
 
 `gpui_platform` is not patched. `gpui-pre-platform` takes `gpui-pre-linux` and `gpui-pre-windows`
 as ordinary registry dependencies, so one `[patch.crates-io]` entry per backend substitutes the
@@ -43,9 +51,12 @@ Every `[patch.crates-io]` package here follows the same recipe, and re-vendoring
 repeating it:
 
 - **Compare against the published crate, not against history.** Sirio's changes are whatever
-  differs from the released `.crate` (`~/.cargo/registry/src/*/<name>-<version>/` after a build, or
-  a `.crate` downloaded from the registry): `diff -r` it against `rust/vendor/<dir>`, ignoring the
-  normalized manifest and `Cargo.lock`. The branch history that vendored the gpui crates did start
+  differs from the released `.crate`. A patched package is never fetched by a build, so download it:
+  `curl -LO https://static.crates.io/crates/<name>/<name>-<version>.crate`, untar it into an empty
+  directory, and `diff -r` it against `rust/vendor/<dir>`. Read the manifest diff too: it holds real
+  Sirio changes (`gpui_windows`'s `sirio_perf` path dependency, the `gpui-pre =0.3.12` repointing of
+  `bezel_theme` and `bezel_markdown`, `bezel_theme`'s only change). `Cargo.lock` is ours; `.cargo-ok`,
+  `Cargo.toml.orig` and `.cargo_vcs_info.json` in the unpacked crate are packaging noise. The branch history that vendored the gpui crates did start
   each with a pristine commit (`06bc49ac6` for `gpui-pre-linux`, `70cb0ad06` for `gpui-pre-windows`,
   under `gpui_pre_linux` / `gpui_pre_windows`, the old directory names), but a squash merge to
   `main` erases such commits, so do not rely on one. `bezel_markdown` never had a pristine commit:
@@ -207,7 +218,7 @@ unrelated to the engine.
 
 Note that `src/lib.rs` (the crate docs, around line 22) still says `gpui_platform::application`
 installs the HTTP client an image at an `http` URL needs. That is stale: gpui-pre's platform
-installs none. The comment is upstream's and the source is kept as released on purpose;
+installs none. Only that comment is left as released, on purpose (the source changes below are the other edits);
 `sirio_ui::app_platform::application` is what installs it.
 
 `vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with four changes. The first:
