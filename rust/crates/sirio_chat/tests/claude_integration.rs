@@ -2537,3 +2537,264 @@ fn rules_success_without_state_is_an_error() {
     client.shutdown().expect("clean shutdown");
     let _ = std::fs::remove_file(path);
 }
+
+// ---------------------------------------------------------------------------
+// The connector switch and the plugin and skill reloads.
+//
+// Ways this can fail:
+//   - `refuse_if_busy` is sent without the capability, or is missing with it;
+//   - `hold_on_cache_impact` is sent on a "Reload anyway", or is missing on
+//     the first reload;
+//   - a toggle success with no body reads as an error;
+//   - a busy answer is told from its text rather than its `error_code`;
+//   - a refusal is not `ReloadError::Refused`;
+//   - a held answer replaces the slash list;
+//   - an applied answer does not replace it;
+//   - a floor answer without `held` is not applied;
+//   - `reload_skills` does not lead to the new list;
+//   - a toggle refusal loses the CLI's sentence;
+//   - `mcp_status` after an off toggle does not read `Disabled`.
+// ---------------------------------------------------------------------------
+
+/// A `session_panel` fixture with its control log in a directory of its own,
+/// so a test reads only what it sent. `finish` removes the directory.
+fn reload_session(
+    tag: &str,
+    extra: &[&str],
+) -> (ClaudeClient, sirio_chat::EventStream, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("sirio-reload-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a directory for the control log");
+    let log = dir.join("control.log");
+    let mut args = vec![
+        FIXTURE.to_string(),
+        "session_panel".to_string(),
+        format!("--fixture-control-log={}", log.display()),
+    ];
+    args.extend(extra.iter().map(|flag| (*flag).to_string()));
+    let (client, events) =
+        ClaudeClient::launch(ClaudeLaunch::fixture(PathBuf::from("python3"), args), dir)
+            .expect("fixture claude should complete its handshake");
+    (client, events, log)
+}
+
+/// Shuts the session down and removes its directory, best effort.
+fn finish(mut client: ClaudeClient, log: &std::path::Path) {
+    client.shutdown().expect("clean shutdown");
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// What the fixture heard for one verb, as the CLI would have read it.
+fn control_requests(log: &std::path::Path, subtype: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|request| request["subtype"] == subtype)
+        .collect()
+}
+
+/// Every slash list that reaches the stream until it has been quiet for
+/// 400 ms. An applied or held `reload_plugins` publishes its list before it
+/// answers, so a drain after the call misses none of that call's lists; a
+/// list that follows its answer (`commands_changed`) needs `wait_for_list`.
+fn slash_lists(events: &sirio_chat::EventStream) -> Vec<Vec<String>> {
+    let mut lists = Vec::new();
+    while let Some(event) = next_event_within(events, Duration::from_millis(400)) {
+        if let ChatEvent::AvailableCommands(commands) = event {
+            lists.push(commands.into_iter().map(|command| command.name).collect());
+        }
+    }
+    lists
+}
+
+/// The first slash list `want` accepts, waiting up to 5 s between events.
+fn wait_for_list(
+    events: &sirio_chat::EventStream,
+    want: impl Fn(&[String]) -> bool,
+) -> Option<Vec<String>> {
+    while let Some(event) = next_event_within(events, Duration::from_secs(5)) {
+        if let ChatEvent::AvailableCommands(commands) = event {
+            let names: Vec<String> = commands.into_iter().map(|command| command.name).collect();
+            if want(&names) {
+                return Some(names);
+            }
+        }
+    }
+    None
+}
+
+fn offers(list: &[String], name: &str) -> bool {
+    list.iter().any(|offered| offered == name)
+}
+
+#[test]
+fn a_toggle_reaches_the_cli_and_the_status_reads_disabled() {
+    use sirio_claude::McpState;
+
+    let (client, _events, log) = reload_session("toggle", &[]);
+    client
+        .mcp_control()
+        .toggle("codegraph", false)
+        .expect("a success with no body is a success");
+    let servers = client.refresh_mcp_status().expect("the CLI answers");
+    let codegraph = servers
+        .iter()
+        .find(|server| server.name == "codegraph")
+        .expect("the server is listed");
+    assert_eq!(codegraph.status, McpState::Disabled);
+    let toggles = control_requests(&log, "mcp_toggle");
+    assert_eq!(toggles.len(), 1);
+    assert_eq!(toggles[0]["enabled"], false);
+    finish(client, &log);
+}
+
+#[test]
+fn a_refused_toggle_carries_the_refusal() {
+    let (client, _events, log) = reload_session("toggle-refused", &["--fixture-toggle=refused"]);
+    let error = client
+        .mcp_control()
+        .toggle("codegraph", false)
+        .expect_err("the CLI refuses the verb");
+    assert!(sirio_chat::is_refusal(&format!("{error:#}")));
+    finish(client, &log);
+}
+
+#[test]
+fn a_reload_asks_to_refuse_if_busy_only_with_the_capability() {
+    let (client, _events, log) = reload_session("busy-flag", &[]);
+    client.reload_control().plugins(true).expect("the reload applies");
+    let sent = control_requests(&log, "reload_plugins");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["hold_on_cache_impact"], true);
+    assert_eq!(sent[0]["refuse_if_busy"], true);
+    finish(client, &log);
+
+    let (floor, _events, log) = reload_session("busy-flag-floor", &["--fixture-floor"]);
+    floor.reload_control().plugins(true).expect("the reload applies");
+    let sent = control_requests(&log, "reload_plugins");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["hold_on_cache_impact"], true);
+    assert!(sent[0].get("refuse_if_busy").is_none());
+    finish(floor, &log);
+
+    let (again, _events, log) = reload_session("anyway", &[]);
+    again.reload_control().plugins(false).expect("the reload applies");
+    let sent = control_requests(&log, "reload_plugins");
+    assert!(sent[0].get("hold_on_cache_impact").is_none());
+    finish(again, &log);
+}
+
+#[test]
+fn a_floor_reload_without_held_is_applied() {
+    let (client, events, log) = reload_session("floor", &["--fixture-floor"]);
+    let reloaded = client
+        .reload_control()
+        .plugins(true)
+        .expect("the reload applies");
+    assert!(!reloaded.held);
+    assert!(
+        wait_for_list(&events, |list| offers(list, "pa:hello")).is_some(),
+        "an applied reload must replace the slash list"
+    );
+    finish(client, &log);
+}
+
+#[test]
+fn a_held_reload_reports_the_impact_and_keeps_the_commands() {
+    let (client, events, log) = reload_session("held", &["--fixture-reload=held"]);
+    // The handshake's own list is out of the way before the reload asks.
+    assert!(!slash_lists(&events).is_empty(), "the handshake lists commands");
+    let reload = client.reload_control();
+    let held = reload.plugins(true).expect("a held answer is a success");
+    assert!(held.held);
+    assert!(held.impact.servers_added.len() == 2, "two servers would be added");
+    assert!(
+        held.impact.servers_added[0] == "plugin:pa:m",
+        "the first added name is kept whole"
+    );
+    assert!(
+        held.impact.servers_added[1] == "plugin:pa:\u{202e}x",
+        "the second added name keeps its override"
+    );
+    assert!(
+        held.impact.servers_removed == ["old-server"],
+        "the removed name is kept"
+    );
+    assert_eq!(held.impact.lsp_tool_change.as_deref(), Some("may-add"));
+    assert!(
+        slash_lists(&events).is_empty(),
+        "a held reload must publish no slash list"
+    );
+
+    let applied = reload.plugins(false).expect("without the hold it applies");
+    assert!(!applied.held);
+    assert!(
+        wait_for_list(&events, |list| offers(list, "pa:hello")).is_some(),
+        "the applied reload replaces the slash list"
+    );
+    finish(client, &log);
+}
+
+#[test]
+fn a_busy_reload_is_told_by_its_error_code() {
+    use sirio_chat::ReloadError;
+
+    let (client, _events, log) = reload_session("busy", &["--fixture-reload=busy"]);
+    assert_eq!(
+        client.reload_control().plugins(true).err(),
+        Some(ReloadError::Busy)
+    );
+    finish(client, &log);
+
+    let (text, _events, log) = reload_session("busy-text", &["--fixture-reload=busy-text"]);
+    let error = text
+        .reload_control()
+        .plugins(true)
+        .expect_err("the same words with no code are a plain failure");
+    assert!(matches!(error, ReloadError::Failed(_)));
+    finish(text, &log);
+}
+
+#[test]
+fn a_refused_reload_is_a_refusal() {
+    use sirio_chat::ReloadError;
+
+    // The current CLI sends a code with the refusal; the floor sends none.
+    for (tag, extra) in [
+        ("refused", vec!["--fixture-reload=refused"]),
+        ("refused-floor", vec!["--fixture-reload=refused", "--fixture-floor"]),
+    ] {
+        let (client, _events, log) = reload_session(tag, &extra);
+        assert_eq!(
+            client.reload_control().plugins(true).err(),
+            Some(ReloadError::Refused)
+        );
+        finish(client, &log);
+    }
+}
+
+#[test]
+fn a_refused_skills_reload_is_a_refusal() {
+    use sirio_chat::ReloadError;
+
+    let (client, _events, log) = reload_session("skills-refused", &["--fixture-skills=refused"]);
+    let reload = client.reload_control();
+    reload.plugins(true).expect("the reload applies");
+    assert_eq!(reload.skills().err(), Some(ReloadError::Refused));
+    finish(client, &log);
+}
+
+#[test]
+fn reload_skills_brings_the_new_skill_into_the_slash_list() {
+    let (client, events, log) = reload_session("skills", &[]);
+    let reload = client.reload_control();
+    reload.plugins(true).expect("the reload applies");
+    reload.skills().expect("the skills reload");
+    let list = wait_for_list(&events, |list| offers(list, "lateskill"))
+        .expect("the new skill reaches the slash list");
+    assert!(offers(&list, "pa:hello"));
+    finish(client, &log);
+}

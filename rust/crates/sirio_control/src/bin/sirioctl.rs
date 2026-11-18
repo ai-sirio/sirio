@@ -176,7 +176,7 @@ fn usage() {
          \x20 panel show <id>                   show a session in a tab (app only)\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title, and `dirty`: the tabs whose close asks first, every tab with a live terminal among them\n\
          \x20 surface layout read               whether the right pane is drawn, each half's tabs, the right panel's view\n\
-         \x20 surface chat panel <surfaceId> open|close|toggle <key>|activate <key>  (debug builds) drive a chat's session panel\n\
+         \x20 surface chat panel <surfaceId> open|close|toggle <key>|activate <key>|switch <key> on|off  (debug builds) drive a chat's session panel\n\
          \x20 surface trace read <surfaceId>     whether the chat has a Trace tab, and the turn and spans it shows\n\
          \x20 surface open-list open --entry show|chat|terminal|browser|changes|open-file|project-settings|other-agents|agent:<id>  (debug builds) click that row of the Open list\n\
          \x20 surface terminal open [--cmd c | --agent a [--prompt p]]  (debug builds) open an app terminal tab running c, or agent a (with p as its first message)\n\
@@ -1170,14 +1170,25 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             let verb = parsed
                 .positional
                 .get(3)
-                .ok_or_else(|| "Missing open|close|toggle <key>|activate <key>".to_string())?;
+                .ok_or_else(|| {
+                    "Missing open|close|toggle <key>|activate <key>|switch <key> on|off".to_string()
+                })?;
             let key = parsed.positional.get(4).map(String::as_str);
-            if matches!(verb.as_str(), "toggle" | "activate") && key.is_none() {
+            if matches!(verb.as_str(), "toggle" | "activate" | "switch") && key.is_none() {
                 return Err(format!("Missing key for {verb}"));
             }
+            let on = if verb == "switch" {
+                match parsed.positional.get(5).map(String::as_str) {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    _ => return Err("Missing on|off for switch".to_string()),
+                }
+            } else {
+                None
+            };
             require_ok(
                 socket,
-                &sirio_control::protocol::request::chat_panel(surface_id, verb, key),
+                &sirio_control::protocol::request::chat_panel(surface_id, verb, key, on),
             )
         }
         ("trace", "read") => {

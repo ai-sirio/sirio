@@ -17,6 +17,7 @@ pub mod launch;
 pub mod mcp;
 pub mod message;
 pub mod permissions;
+pub mod reload;
 pub mod tools;
 pub mod usage;
 pub mod version;
@@ -42,6 +43,7 @@ pub use message::{
     TaskUsage, ToolResult, ToolUse, UserMessage, UserPayload,
 };
 pub use permissions::{PermissionRule, PermissionRules, SettingsError, parse_permission_rules};
+pub use reload::{CacheImpact, PluginsReloaded, parse_plugins_reload};
 pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe, diff_from_result};
 pub use usage::{ContextUsageReport, PlanUsage, RateLimitWindow, RewindOutcome};
 pub use version::{ClaudeVersion, MIN_CLAUDE_VERSION};

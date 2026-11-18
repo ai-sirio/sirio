@@ -7,10 +7,11 @@
 //! `McpControl` handle inside `background_spawn`, one task per server so a
 //! second action on a server replaces the first.
 
-use super::{Row, Section, Tone};
+use super::{Row, RowSwitch, Section, Tone};
 use crate::chat::Chat;
+use crate::chat::visible_text::visible_text;
 use gpui::{AppContext as _, Context as GpuiContext, Task};
-use sirio_chat::{McpControl, McpOrigin, McpServer, McpState};
+use sirio_chat::{McpControl, McpOrigin, McpServer, McpState, is_refusal};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -39,6 +40,8 @@ enum Busy {
     SigningIn,
     /// The sign-in page is open and the poll is watching.
     Waiting,
+    /// `mcp_toggle` has not answered yet, asked to turn the server `on` or off.
+    Switching { on: bool },
 }
 
 impl Busy {
@@ -47,6 +50,7 @@ impl Busy {
             Self::Reconnecting => "reconnecting…",
             Self::SigningIn => "signing in…",
             Self::Waiting => "waiting for sign-in…",
+            Self::Switching { .. } => "switching…",
         }
     }
 
@@ -56,6 +60,7 @@ impl Busy {
             Self::Reconnecting => "reconnecting…",
             Self::SigningIn => "signing in…",
             Self::Waiting => "waiting…",
+            Self::Switching { .. } => "switching…",
         }
     }
 }
@@ -102,6 +107,8 @@ pub(super) struct Connectors {
     /// task. One at a time: it ends on its own, or with the column.
     backoff_running: bool,
     backoff_task: Option<Task<()>>,
+    /// The CLI refused `mcp_toggle`: no row has a switch until a new client.
+    switches_retired: bool,
 }
 
 impl Connectors {
@@ -113,6 +120,11 @@ impl Connectors {
     fn next_stamp(&mut self) -> u64 {
         self.stamp += 1;
         self.stamp
+    }
+
+    /// Whether a list of servers has been read, so the card has more than its placeholder.
+    pub(super) fn is_read(&self) -> bool {
+        self.servers.is_some()
     }
 
     fn has_starting(&self) -> bool {
@@ -150,6 +162,21 @@ impl Connectors {
                 .any(|server| &server.name == name && server.status == McpState::NeedsAuth)
         });
         self.servers = Some(servers);
+    }
+
+    /// What a server's switch reads: on unless `mcp_status` says disabled, or the
+    /// state a toggle in flight was asked for.
+    fn switched_on(&self, server: &McpServer) -> bool {
+        match self.busy.get(&server.name) {
+            Some(Busy::Switching { on }) => *on,
+            _ => server.status != McpState::Disabled,
+        }
+    }
+
+    /// Whether the switch takes a click: not while a call about the server is open, bar the
+    /// sign-in wait, which a switch ends.
+    fn switch_enabled(&self, server: &McpServer) -> bool {
+        matches!(self.busy.get(&server.name), None | Some(Busy::Waiting))
     }
 
     fn action(&self, server: &McpServer) -> Option<Action> {
@@ -283,7 +310,7 @@ pub(super) fn section(
                     connectors
                         .failures
                         .get(&server.name)
-                        .map(|(failure, _)| failure.clone())
+                        .map(|(failure, _)| visible_text(failure, false))
                         .unwrap_or_default(),
                 ),
             };
@@ -297,7 +324,11 @@ pub(super) fn section(
                 show_action: true,
                 short: connectors.busy.get(&server.name).map(|busy| busy.short().to_string()),
                 note,
-                ..Row::new(&server_key(server), server.name.clone(), &detail)
+                switch: (!connectors.switches_retired).then(|| RowSwitch {
+                    on: connectors.switched_on(server),
+                    enabled: connectors.switch_enabled(server),
+                }),
+                ..Row::new(&server_key(server), visible_text(&server.name, false), &detail)
             });
         }
     }
@@ -463,6 +494,107 @@ impl Chat {
         connectors.tasks.insert(name, task);
         cx.notify();
         Ok(())
+    }
+
+    /// Turns a server on or off, from its switch or the debug verb. The CLI saves the
+    /// choice in its own settings; this only reads the state back from `mcp_status`.
+    pub(in crate::chat) fn switch_connector(
+        &mut self,
+        key: &str,
+        on: bool,
+        cx: &mut GpuiContext<Self>,
+    ) -> Result<(), String> {
+        let connectors = &self.session_panel.connectors;
+        if connectors.switches_retired {
+            return Err("this Claude Code does not switch connectors".to_string());
+        }
+        let Some(server) = connectors
+            .servers
+            .iter()
+            .flatten()
+            .find(|server| server_key(server) == key)
+        else {
+            return Err(format!("no connector has key {key}"));
+        };
+        if !connectors.switch_enabled(server) {
+            return Err("a call about this connector is still open".to_string());
+        }
+        if connectors.switched_on(server) == on {
+            return Ok(());
+        }
+        let name = server.name.clone();
+        let Some(control) = self.client.as_ref().and_then(|client| client.mcp_control()) else {
+            return Err("this session has no connectors".to_string());
+        };
+        let connectors = &mut self.session_panel.connectors;
+        connectors.failures.remove(&name);
+        connectors.busy.insert(name.clone(), Busy::Switching { on });
+        // Replacing a server's task drops a sign-in poll that was watching it.
+        let task = Self::switch_connector_task(name.clone(), on, control, cx);
+        connectors.tasks.insert(name, task);
+        cx.notify();
+        Ok(())
+    }
+
+    fn switch_connector_task(
+        name: String,
+        on: bool,
+        control: McpControl,
+        cx: &mut GpuiContext<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let asked = name.clone();
+            let again = control.clone();
+            let outcome = cx
+                .background_spawn(async move { control.toggle(&asked, on) })
+                .await;
+            let answer = cx
+                .background_spawn(async move { again.refresh_status() })
+                .await;
+            let _ = this.update(cx, |chat, cx| {
+                chat.session_panel.connectors.busy.remove(&name);
+                let connectors = &mut chat.session_panel.connectors;
+                match (&outcome, &answer) {
+                    (Err(error), _) => {
+                        let text = format!("{error:#}");
+                        if is_refusal(&text) {
+                            connectors.switches_retired = true;
+                        } else {
+                            connectors.fail(name, text);
+                        }
+                    }
+                    // Claude Code has saved the setting, but the row cannot show it.
+                    (Ok(_), Err(error)) => connectors.fail(
+                        name,
+                        format!("Switched, but the new state could not be read: {error:#}"),
+                    ),
+                    (Ok(_), Ok(_)) => {}
+                }
+                chat.connectors_changed(answer, cx);
+            });
+        })
+    }
+
+    /// Takes the list an action asked for after it, whatever the action's own outcome was:
+    /// it does not retire the sentence the action may have just earned, and a server it left
+    /// starting is watched.
+    pub(super) fn connectors_changed(
+        &mut self,
+        list: anyhow::Result<Vec<McpServer>>,
+        cx: &mut GpuiContext<Self>,
+    ) {
+        if let Ok(list) = list {
+            let connectors = &mut self.session_panel.connectors;
+            connectors.set_servers(list);
+            // A loop already running belongs to an older ask and has spent some of its
+            // delays: a server this list leaves starting gets the whole cycle again.
+            // Dropping the task is safe, `stop_backoff` clears the flag the task would.
+            if connectors.has_starting() {
+                connectors.stop_backoff();
+            }
+        }
+        cx.notify();
+        self.watch_starting_connectors(cx);
     }
 
     fn reconnect_connector(
@@ -698,6 +830,7 @@ mod tests {
                 NOTION,
                 "connectors/user",
                 CODEGRAPH,
+                "connectors.reload",
             ]
         );
         assert_eq!(
@@ -885,10 +1018,14 @@ mod tests {
         };
         let line = bounds(cx, format!("session-row-{NOTION}"));
         let name = bounds(cx, format!("session-row-label-{NOTION}"));
-        // The dot says the state; the line holds the name and the action,
-        // so the name keeps most of it.
+        // The dot says the state; the line holds the name, the action and the
+        // switch. The name keeps at least half of what those two leave it, so the
+        // bound moves with each platform's text and checkbox widths.
+        let action = bounds(cx, format!("session-row-end-{NOTION}"));
+        let switch = bounds(cx, format!("session-row-switch-{NOTION}"));
+        let room = line.size.width - action.size.width - switch.size.width;
         assert!(
-            name.size.width >= line.size.width * 0.5,
+            name.size.width >= room * 0.5,
             "the name {name:?} is squeezed in the line {line:?}"
         );
         // What each line draws at its end: the action when there is one,

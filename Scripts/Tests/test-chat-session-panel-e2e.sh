@@ -31,6 +31,39 @@ set -euo pipefail
 #                      CLAUDE.md row opening a file tab
 #   connectors         a failed server reconnecting to connected, a server that needs
 #                      sign-in waiting for it (the opened URL is looked for in a browser stub)
+#   connector_switch   (A6) every server row has a switch read only from mcp_status: switching codegraph off
+#                      reads disabled with no action, on reads starting then failed again, a repeat sends
+#                      nothing, Notion off loses its Sign in, and no mcp_authenticate is sent; exactly one
+#                      mcp_toggle per switch whose requested state differed from the shown one
+#   connector_switch_in_flight  (SIRIO_FIXTURE_TOGGLE_GATE) a row reads switching… while its toggle is open,
+#                      a second flip fails and sends nothing, and the row reads disabled once it answers
+#   connector_switch_waiting    a server waiting for its sign-in is switched off: the sign-in poll is dropped
+#                      (exactly one mcp_status after the mcp_toggle line, the switch's own)
+#   connector_switch_refused    (SIRIO_FIXTURE_TOGGLE=refused) a refused mcp_toggle hides every switch and
+#                      leaves the rows and their notes as they were
+#   connector_switch_missing    (SIRIO_FIXTURE_TOGGLE=missing) a failed toggle puts the CLI's sentence under
+#                      the row, and the switch keeps the state mcp_status reported
+#   connector_switch_unread     (SIRIO_FIXTURE_TOGGLE=unread) the toggle applies but the mcp_status after it fails: the row
+#                      carries a note that the switch was saved and the new state could not be read
+#   connector_switch_click      (framed, 2200x1000) a real X click at the switch's drawn bounds toggles that
+#                      server and starts no sign-in; a capture of the card and one with the pointer on the switch
+#   reload_plugins_and_skills  (A6) the Connectors card's `Plugins and skills` row, Reload: reload_plugins with the hold and
+#                      refuse_if_busy, then reload_skills; the row is back to Reload and the plugin server joins the card
+#   reload_floor       (SIRIO_FIXTURE_FLOOR=1) the hold without refuse_if_busy; an answer with no `held` is applied
+#   reload_held        (SIRIO_FIXTURE_RELOAD=held) the cost warning (names shown, a bidi override as text) and Reload
+#                      anyway; no skills until the second request, which has no hold
+#   reload_held_then_busy  (SIRIO_FIXTURE_RESULT_GATE) a held reload, a turn, Reload anyway: the warning and the busy
+#                      note, nothing sent; the turn's end leaves the warning alone
+#   reload_busy_refusal  (SIRIO_FIXTURE_RELOAD=busy) the CLI's busy refusal is the busy note; no skills
+#   reload_busy_cli    (SIRIO_FIXTURE_CLI_BUSY_GATE) a turn the CLI started is busy: the note, nothing sent; its end
+#                      clears the note and a Reload goes out
+#   reload_busy_turn   (SIRIO_FIXTURE_RESULT_GATE) a streaming turn is busy: the note, nothing sent; its end clears it
+#   reload_busy_before_skills  (SIRIO_FIXTURE_RELOAD_GATE, SIRIO_FIXTURE_RESULT_GATE) a turn that begins while
+#                      reload_plugins is open stops the skills: the busy note, no reload_skills
+#   reload_in_flight   (SIRIO_FIXTURE_RELOAD_GATE) the row reads reloading… with no action; a second activate fails
+#   reload_refused     (SIRIO_FIXTURE_RELOAD=refused) a refused reload_plugins hides the row; no skills
+#   reload_skills_refused  (SIRIO_FIXTURE_SKILLS=refused) a refused reload_skills after an applied reload hides the row
+#   reload_errors      (SIRIO_FIXTURE_RELOAD=errors) an applied reload with load errors says how many plugins failed
 #   change_request     the branch's pull request as a card, its row opening the tab
 #   rate_limit_shared  a forge host paused by the right panel's list is paused for the card
 #                      too: the row says so and the forge sees no read of it during the pause
@@ -294,7 +327,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
-ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
+ALL_SCENARIOS=(environment default_folds context connectors connector_switch connector_switch_in_flight
+  connector_switch_waiting connector_switch_refused connector_switch_missing connector_switch_unread connector_switch_click
+  reload_plugins_and_skills reload_floor reload_held reload_held_then_busy reload_busy_refusal reload_busy_cli
+  reload_busy_turn reload_busy_before_skills reload_in_flight reload_refused reload_skills_refused reload_errors
+  change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
@@ -338,10 +375,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize background_tail_card background_tail_tab background_stop_click background_lane_stop "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize background_tail_card background_tail_tab background_stop_click background_lane_stop connector_switch_click "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize background_stop_click "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize background_stop_click connector_switch_click "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -867,6 +904,23 @@ elif command == "stop-button-xy":
             print(f"FAIL: stop-button-xy: the Stop button of {task_id} was never drawn", file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
+elif command == "switch-button-xy":
+    # switch-button-xy SURFACE SECONDS KEY: wait for the Connectors card to have drawn the switch of
+    # the row KEY and print the window pixel at its centre as "x y".
+    surface, seconds, key = sys.argv[2], float(sys.argv[3]), sys.argv[4]
+    deadline = time.time() + seconds
+    while True:
+        try:
+            box = state(surface)[0].get("switchButtons", {}).get(key)
+            if box:
+                print(f"{round(box[0] + box[2] / 2)} {round(box[1] + box[3] / 2)}")
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print("FAIL: switch-button-xy: the switch was never drawn", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
 elif command == "composer-menu":
     # composer-menu SURFACE SECONDS REASON: wait for the overflow menu the compact row opens
     # (`picker` is `overflow` and `menu` the rows its render built), and assert them: Fast is
@@ -1124,6 +1178,9 @@ capture() { # name
 #                  --fixture-permission-fields / -permission-rules / -rules-log / -rules-gate / -result-gate flag:
 #                  the JSON merged into every can_use_tool, the rules the CLI lists, the log of rules requests,
 #                  the file that holds the rules answers and the file that holds the turn's result (permission_*)
+#   SIRIO_FIXTURE_RELOAD, SIRIO_FIXTURE_RELOAD_GATE, SIRIO_FIXTURE_SKILLS, SIRIO_FIXTURE_CLI_BUSY_GATE  the session-panel stub's
+#                  reload kind, the file that holds every reload_plugins answer, refused for reload_skills, and the file
+#                  that holds the CLI's running state (reload_*)
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
 #                  every control request to (composer_keys reads them)
@@ -1161,6 +1218,9 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_PERMISSION_FIELDS=${SIRIO_FIXTURE_PERMISSION_FIELDS:-}" "SIRIO_FIXTURE_PERMISSION_RULES=${SIRIO_FIXTURE_PERMISSION_RULES:-}"
     "SIRIO_FIXTURE_RULES_LOG=${SIRIO_FIXTURE_RULES_LOG:-}" "SIRIO_FIXTURE_RULES_GATE=${SIRIO_FIXTURE_RULES_GATE:-}"
     "SIRIO_FIXTURE_RESULT_GATE=${SIRIO_FIXTURE_RESULT_GATE:-}"
+    "SIRIO_FIXTURE_TOGGLE=${SIRIO_FIXTURE_TOGGLE:-}" "SIRIO_FIXTURE_TOGGLE_GATE=${SIRIO_FIXTURE_TOGGLE_GATE:-}"
+    "SIRIO_FIXTURE_RELOAD=${SIRIO_FIXTURE_RELOAD:-}" "SIRIO_FIXTURE_RELOAD_GATE=${SIRIO_FIXTURE_RELOAD_GATE:-}"
+    "SIRIO_FIXTURE_SKILLS=${SIRIO_FIXTURE_SKILLS:-}" "SIRIO_FIXTURE_CLI_BUSY_GATE=${SIRIO_FIXTURE_CLI_BUSY_GATE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -1573,6 +1633,485 @@ scenario_connectors() {
   else
     echo "NOTE: the sign-in URL was not observed through the BROWSER/xdg-open stubs (gpui opens URLs through the desktop portal when it can); the row's waiting state is what is asserted"
   fi
+  stop_app
+}
+
+# ---- the connector_switch* scenarios (A6) ---------------------------------------------
+# How many control requests of one subtype the CLI heard after a mark taken with control_log_lines.
+control_since() { # mark subtype
+  python3 -c '
+import json, sys
+mark, count = int(sys.argv[2]), 0
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+for line in lines[mark:]:
+    if json.loads(line).get("subtype") == sys.argv[3]:
+        count += 1
+print(count)' "$RUN_DIR/fixture-control.log" "$1" "$2"
+}
+# How many requests of SUBTYPE came after the first request of FIRST after the mark: with FIRST the
+# toggle, whatever follows it was asked for by the switch itself or by something that outlived it.
+control_after_first() { # mark first-subtype subtype
+  python3 -c '
+import json, sys
+mark, count, seen = int(sys.argv[2]), 0, False
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+for line in lines[mark:]:
+    subtype = json.loads(line).get("subtype")
+    if seen and subtype == sys.argv[4]:
+        count += 1
+    if subtype == sys.argv[3]:
+        seen = True
+print(count)' "$RUN_DIR/fixture-control.log" "$1" "$2" "$3"
+}
+# expect_since MARK SUBTYPE COUNT LABEL: exactly COUNT such requests came after the mark.
+expect_since() {
+  local got
+  got=$(control_since "$1" "$2")
+  [ "$got" = "$3" ] || fail "$4: the CLI heard $got $2 requests after the mark, not $3"
+}
+# The Connectors card of a fresh Sirio, unfolded, with both servers read.
+switch_chat() { # name
+  chat_app "$1"
+  open_column
+  unfold_cards connectors
+  wait_panel "the user server failed and the claude.ai server needs sign-in" \
+    "R('connectors', '$CODEGRAPH') and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION') and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
+}
+CODEGRAPH="connectors/user/codegraph"
+NOTION="connectors/claude.ai/claude.ai Notion"
+
+scenario_connector_switch() {
+  switch_chat connector_switch
+  wait_panel "both server rows read switch on" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$NOTION')['switch'] is True"
+  local mark
+  mark=$(control_log_lines)
+  echo "step: the user server off"
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the user server reads switch off, disabled, with no action" \
+    "R('connectors', '$CODEGRAPH')['switch'] is False and R('connectors', '$CODEGRAPH')['detail'] == 'disabled' and R('connectors', '$CODEGRAPH')['action'] is None"
+  echo "step: the user server on: it starts, and the backoff finds it failed again"
+  panel_ctl switch "$CODEGRAPH" on >/dev/null
+  wait_panel "the user server reads switch on and starting" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$CODEGRAPH')['detail'] == 'starting'" 10
+  wait_panel "the user server reads failed again within the backoff" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$CODEGRAPH')['detail'] == 'failed'" 5
+  echo "step: the user server on again: the state is shown already, so nothing is sent"
+  panel_ctl switch "$CODEGRAPH" on >/dev/null || fail "a switch to the state shown was refused"
+  echo "step: the claude.ai server off"
+  panel_ctl switch "$NOTION" off >/dev/null
+  wait_panel "the claude.ai server reads switch off, disabled, and has lost its Sign in" \
+    "R('connectors', '$NOTION')['switch'] is False and R('connectors', '$NOTION')['detail'] == 'disabled' and R('connectors', '$NOTION')['action'] is None"
+  sleep 1
+  expect_since "$mark" mcp_toggle 3 "two toggles for the user server and one for the claude.ai server"
+  expect_since "$mark" mcp_authenticate 0 "no sign-in"
+  echo "OK: connector_switch: a switch is read from mcp_status, a repeat sends nothing, three toggles and no sign-in"
+  stop_app
+}
+
+scenario_connector_switch_in_flight() {
+  SIRIO_FIXTURE_TOGGLE_GATE="$RUN_DIR/toggle-gate"
+  rm -f "$SIRIO_FIXTURE_TOGGLE_GATE"
+  switch_chat connector_switch_in_flight
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the user server reads switching… with its switch off" \
+    "R('connectors', '$CODEGRAPH')['detail'] == 'switching…' and R('connectors', '$CODEGRAPH')['switch'] is False"
+  check_panel "the switch takes no click while the toggle is open" \
+    "R('connectors', '$CODEGRAPH')['switchEnabled'] is False"
+  if panel_ctl switch "$CODEGRAPH" on >/dev/null 2>&1; then
+    fail "a second flip of a server whose toggle is open was accepted"
+  fi
+  sleep 1
+  expect_since "$mark" mcp_toggle 1 "the second flip sent nothing"
+  : >"$SIRIO_FIXTURE_TOGGLE_GATE"
+  wait_panel "the user server reads disabled once the CLI answers" \
+    "R('connectors', '$CODEGRAPH')['detail'] == 'disabled' and R('connectors', '$CODEGRAPH')['switch'] is False" 15
+  check_panel "the switch takes a click again" "R('connectors', '$CODEGRAPH')['switchEnabled'] is True"
+  expect_since "$mark" mcp_toggle 1 "one toggle in all"
+  echo "OK: connector_switch_in_flight: switching… while the toggle is open, a second flip failed and sent nothing"
+  stop_app
+}
+
+scenario_connector_switch_waiting() {
+  switch_chat connector_switch_waiting
+  panel_ctl activate "$NOTION" >/dev/null
+  wait_panel "the sign-in server waits for the sign-in" "R('connectors', '$NOTION')['detail'] == 'waiting for sign-in…'"
+  local mark after
+  mark=$(control_log_lines)
+  panel_ctl switch "$NOTION" off >/dev/null
+  wait_panel "the sign-in server reads disabled" "R('connectors', '$NOTION')['detail'] == 'disabled' and R('connectors', '$NOTION')['switch'] is False"
+  echo "step: past the sign-in poll's 3 s step"
+  sleep 4
+  expect_since "$mark" mcp_toggle 1 "one toggle"
+  # The switch replaces the server's task before its toggle is written, so after the toggle line
+  # the only mcp_status is the switch's own refresh; a second is a poll that survived.
+  after=$(control_after_first "$mark" mcp_toggle mcp_status)
+  [ "$after" = 1 ] || fail "the CLI heard $after mcp_status requests after the toggle, not 1 (a poll survived, or the refresh is missing)"
+  echo "OK: connector_switch_waiting: switching a waiting server off dropped its sign-in poll"
+  stop_app
+}
+
+scenario_connector_switch_refused() {
+  SIRIO_FIXTURE_TOGGLE=refused
+  switch_chat connector_switch_refused
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "every server row has lost its switch" \
+    "[r for r in rows('connectors') if r['depth'] == 1] and all(r['switch'] is None for r in rows('connectors') if r['depth'] == 1)"
+  check_panel "the details are unchanged and no row has a note" \
+    "R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in' and all(r['note'] == '' for r in rows('connectors'))"
+  expect_since "$mark" mcp_toggle 1 "one refused toggle"
+  echo "OK: connector_switch_refused: a refused mcp_toggle hides every switch and changes nothing else"
+  stop_app
+}
+
+scenario_connector_switch_missing() {
+  SIRIO_FIXTURE_TOGGLE=missing
+  switch_chat connector_switch_missing
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the row carries the CLI's sentence" "'Server not found' in R('connectors', '$CODEGRAPH')['note']"
+  check_panel "the switch still reads on and the row still reads failed" \
+    "R('connectors', '$CODEGRAPH')['switch'] is True and R('connectors', '$CODEGRAPH')['detail'] == 'failed'"
+  expect_since "$mark" mcp_toggle 1 "one failed toggle"
+  echo "OK: connector_switch_missing: a failed toggle is a note and the switch keeps the state mcp_status gave"
+  stop_app
+}
+
+scenario_connector_switch_unread() {
+  SIRIO_FIXTURE_TOGGLE=unread
+  switch_chat connector_switch_unread
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl switch "$CODEGRAPH" off >/dev/null
+  wait_panel "the row says the switch was saved and the state could not be read" \
+    "R('connectors', '$CODEGRAPH')['note'].startswith('Switched, but the new state could not be read')" 15
+  sleep 1
+  expect_since "$mark" mcp_toggle 1 "one toggle"
+  echo "OK: connector_switch_unread: a switch whose follow-up read failed says so on its row"
+  stop_app
+}
+
+scenario_connector_switch_click() {
+  stub_openers_lead_login_path connector_switch_click
+  switch_chat connector_switch_click
+  fold_cards environment
+  local xy lines mark
+  xy=$(E2E switch-button-xy "$SURFACE" 15 "$NOTION") || fail "the claude.ai server switch was never drawn"
+  capture connector-switches
+  echo "step: the pointer on the switch, for its tooltip"
+  local origin x y
+  origin=$(window_origin)
+  x=$(( ${xy% *} + ${origin% *} ))
+  y=$(( ${xy#* } + ${origin#* } ))
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mousemove "$x" "$y" || fail "xdotool could not move to the switch"
+  sleep 2
+  capture connector-switch-hover
+  lines=$(wc -l <"$RUN_DIR/browser.log" 2>/dev/null) || lines=0
+  mark=$(control_log_lines)
+  xy=$(E2E switch-button-xy "$SURFACE" 15 "$NOTION") || fail "the switch was never drawn after the captures"
+  echo "step: a real click on the switch, drawn at window pixel $xy"
+  click_at_window "$xy"
+  wait_panel "the claude.ai server reads switch off and disabled" \
+    "R('connectors', '$NOTION')['switch'] is False and R('connectors', '$NOTION')['detail'] == 'disabled'" 15
+  sleep 1
+  expect_since "$mark" mcp_toggle 1 "one toggle for the click"
+  expect_since "$mark" mcp_authenticate 0 "the click started no sign-in"
+  [ "$(( $(wc -l <"$RUN_DIR/browser.log" 2>/dev/null || echo 0) ))" = "$((lines))" ] || fail "the click opened a page in the browser stub"
+  echo "OK: connector_switch_click: a real click on the switch toggled that server and started no sign-in"
+  stop_app
+}
+
+# ---- the reload_* scenarios (A6) ------------------------------------------------------
+RELOAD="connectors.reload"
+PLUGIN_SERVER="connectors/plugins/plugin:pa:m"
+BUSY_NOTE="Claude is busy with a turn. Try again when it ends."
+# The held note for the fixture's impact, as python source. The second name carries a bidi override,
+# which the note shows as U+202E between angle brackets (written here as escapes); it never carries it raw.
+HELD_NOTE='"Reloading now changes Claude\x27s tools, which resets the prompt cache: the next turn costs more. Adds: plugin:pa:m, plugin:pa:⟨U+202E⟩x. Removes: old-server. May add the LSP tool."'
+# The nth reload_plugins after a mark, as "hold=<v> busy=<v>": the two flags' values, "absent" for a key
+# the request does not carry.
+reload_flags() { # mark n
+  python3 -c '
+import json, sys
+mark, nth, seen = int(sys.argv[2]), int(sys.argv[3]), 0
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+for line in lines[mark:]:
+    request = json.loads(line)
+    if request.get("subtype") == "reload_plugins":
+        seen += 1
+        if seen == nth:
+            def show(key):
+                return json.dumps(request[key]) if key in request else "absent"
+            print("hold=%s busy=%s" % (show("hold_on_cache_impact"), show("refuse_if_busy")))
+            break
+else:
+    print("none")' "$RUN_DIR/fixture-control.log" "$1" "$2"
+}
+# Waits until COUNT such requests came after the mark (the CLI answers a request a moment after the host sends it).
+wait_since() { # mark subtype count label
+  local i got
+  for i in $(seq 1 100); do
+    got=$(control_since "$1" "$2")
+    [ "$got" = "$3" ] && return 0
+    sleep 0.2
+  done
+  fail "$4: the CLI heard $got $2 requests after the mark, not $3"
+}
+reload_chat() { # name
+  switch_chat "$1"
+  wait_panel "the reload row reads Reload" "R('connectors', '$RELOAD') and R('connectors', '$RELOAD')['label'] == 'Plugins and skills' and R('connectors', '$RELOAD')['action'] == 'Reload' and R('connectors', '$RELOAD')['note'] == ''" 10
+}
+reload_idle_row() { # label
+  wait_panel "$1" "R('connectors', '$RELOAD') and R('connectors', '$RELOAD')['action'] == 'Reload' and R('connectors', '$RELOAD')['note'] == ''" 20
+}
+reload_no_toggle() { # mark
+  expect_since "$1" mcp_toggle 0 "a reload sent no toggle"
+}
+
+scenario_reload_plugins_and_skills() {
+  reload_chat reload_plugins_and_skills
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the plugin server is listed under Plugins" "R('connectors', '$PLUGIN_SERVER') is not None and R('connectors', 'connectors/plugins') is not None" 20
+  reload_idle_row "the row is back to Reload with no note"
+  wait_panel "the plugin server reads connected once the backoff has asked again" "R('connectors', '$PLUGIN_SERVER')['detail'] == 'connected'" 30
+  expect_since "$mark" reload_plugins 1 "one plugin reload"
+  expect_since "$mark" reload_skills 1 "one skill reload"
+  [ "$(control_after_first "$mark" reload_plugins reload_skills)" = 1 ] || fail "reload_skills did not follow reload_plugins"
+  [ "$(reload_flags "$mark" 1)" = "hold=true busy=true" ] || fail "the first reload_plugins did not carry both flags: $(reload_flags "$mark" 1)"
+  reload_no_toggle "$mark"
+  echo "OK: reload_plugins_and_skills: plugins with the hold and the busy refusal, then skills; the plugin server joined the card"
+  stop_app
+}
+
+scenario_reload_floor() {
+  SIRIO_FIXTURE_FLOOR=1
+  reload_chat reload_floor
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_since "$mark" reload_skills 1 "the floor's applied answer led to the skills"
+  reload_idle_row "the row is back to Reload with no note"
+  expect_since "$mark" reload_plugins 1 "one plugin reload"
+  [ "$(control_after_first "$mark" reload_plugins reload_skills)" = 1 ] || fail "reload_skills did not follow reload_plugins"
+  [ "$(reload_flags "$mark" 1)" = "hold=true busy=absent" ] || fail "the floor's reload_plugins carried the wrong flags: $(reload_flags "$mark" 1)"
+  reload_no_toggle "$mark"
+  echo "OK: reload_floor: the hold without the busy refusal, and an answer with no held key is applied"
+  stop_app
+}
+
+scenario_reload_held() {
+  SIRIO_FIXTURE_RELOAD=held
+  reload_chat reload_held
+  local mark
+  mark=$(control_log_lines)
+  echo "step: the first Reload is held"
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the note is the cost warning and the action is Reload anyway" \
+    "R('connectors', '$RELOAD')['note'] == $HELD_NOTE and R('connectors', '$RELOAD')['action'] == 'Reload anyway'" 20
+  check_panel "the note shows the bidi override as text and never carries it" \
+    "'\u202e' not in R('connectors', '$RELOAD')['note'] and 'U+202E' in R('connectors', '$RELOAD')['note']"
+  fold_cards environment
+  capture reload-held
+  sleep 1
+  expect_since "$mark" reload_skills 0 "a held answer sends no skill reload"
+  echo "step: Reload anyway"
+  panel_ctl activate "$RELOAD" >/dev/null
+  reload_idle_row "the note is empty and the action is Reload"
+  wait_panel "the plugin server's row label shows the bidi override as text" \
+    "any(r['label'] == 'plugin:pa:⟨U+202E⟩x' for r in rows('connectors'))" 15
+  expect_since "$mark" reload_plugins 2 "the held one and the one anyway"
+  [ "$(reload_flags "$mark" 1)" = "hold=true busy=true" ] || fail "the first reload_plugins did not carry the hold: $(reload_flags "$mark" 1)"
+  [ "$(reload_flags "$mark" 2)" = "hold=absent busy=true" ] || fail "Reload anyway still carried the hold: $(reload_flags "$mark" 2)"
+  wait_since "$mark" reload_skills 1 "Reload anyway led to the skills"
+  [ "$(control_after_first "$mark" reload_plugins reload_skills)" = 1 ] || fail "reload_skills did not follow reload_plugins"
+  reload_no_toggle "$mark"
+  echo "OK: reload_held: the cost warning and Reload anyway; the second request has no hold and is followed by the skills"
+  stop_app
+}
+
+scenario_reload_held_then_busy() {
+  SIRIO_FIXTURE_RELOAD=held
+  SIRIO_FIXTURE_RESULT_GATE="$RUN_DIR/reload_held_then_busy-gate"
+  rm -f "$SIRIO_FIXTURE_RESULT_GATE"
+  reload_chat reload_held_then_busy
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the reload is held" "R('connectors', '$RELOAD')['note'] == $HELD_NOTE and R('connectors', '$RELOAD')['action'] == 'Reload anyway'" 20
+  send_prompt hello
+  wait_panel "the turn streams" 'c["status"] == "streaming"' 30
+  panel_ctl activate "$RELOAD" >/dev/null || fail "a Reload anyway during a turn was refused rather than noted"
+  wait_panel "the note is the cost warning, then the busy note" "R('connectors', '$RELOAD')['note'] == $HELD_NOTE + ' ' + '$BUSY_NOTE'" 10
+  sleep 1
+  expect_since "$mark" reload_plugins 1 "the busy click sent no second reload"
+  : >"$SIRIO_FIXTURE_RESULT_GATE"
+  wait_panel "the turn is over and the note is the cost warning alone, still offering Reload anyway" \
+    "c['status'] != 'streaming' and R('connectors', '$RELOAD')['note'] == $HELD_NOTE and R('connectors', '$RELOAD')['action'] == 'Reload anyway'" 30
+  expect_since "$mark" reload_skills 0 "no skill reload while held"
+  reload_no_toggle "$mark"
+  echo "OK: reload_held_then_busy: a turn adds the busy note to the warning, and its end takes it away"
+  stop_app
+}
+
+scenario_reload_busy_refusal() {
+  SIRIO_FIXTURE_RELOAD=busy
+  reload_chat reload_busy_refusal
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the note is the busy note and the action stays Reload" "R('connectors', '$RELOAD')['note'] == '$BUSY_NOTE' and R('connectors', '$RELOAD')['action'] == 'Reload'" 20
+  sleep 1
+  expect_since "$mark" reload_plugins 1 "one plugin reload, refused as busy"
+  expect_since "$mark" reload_skills 0 "a busy refusal sends no skill reload"
+  reload_no_toggle "$mark"
+  echo "OK: reload_busy_refusal: the CLI's busy refusal is the busy note and sends nothing more"
+  stop_app
+}
+
+scenario_reload_busy_cli() {
+  SIRIO_FIXTURE_CLI_BUSY_GATE="$RUN_DIR/reload_busy_cli-gate"
+  rm -f "$SIRIO_FIXTURE_CLI_BUSY_GATE"
+  reload_chat reload_busy_cli
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the note is the busy note" "R('connectors', '$RELOAD')['note'] == '$BUSY_NOTE'" 10
+  sleep 1
+  expect_since "$mark" reload_plugins 0 "a turn the CLI started sent no reload"
+  : >"$SIRIO_FIXTURE_CLI_BUSY_GATE"
+  wait_panel "the note clears when the CLI goes idle" "R('connectors', '$RELOAD')['note'] == ''" 20
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_since "$mark" reload_plugins 1 "the reload after the CLI went idle"
+  reload_idle_row "the row is back to Reload"
+  reload_no_toggle "$mark"
+  echo "OK: reload_busy_cli: a turn the CLI started is busy; its end clears the note and the reload goes out"
+  stop_app
+}
+
+scenario_reload_busy_turn() {
+  SIRIO_FIXTURE_RESULT_GATE="$RUN_DIR/reload_busy_turn-gate"
+  rm -f "$SIRIO_FIXTURE_RESULT_GATE"
+  reload_chat reload_busy_turn
+  local mark
+  mark=$(control_log_lines)
+  send_prompt hello
+  wait_panel "the turn streams" 'c["status"] == "streaming"' 30
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the note is the busy note" "R('connectors', '$RELOAD')['note'] == '$BUSY_NOTE'" 10
+  sleep 1
+  expect_since "$mark" reload_plugins 0 "a turn's reload sent nothing"
+  : >"$SIRIO_FIXTURE_RESULT_GATE"
+  wait_panel "the turn is over and the note clears" "c['status'] != 'streaming' and R('connectors', '$RELOAD')['note'] == ''" 30
+  reload_no_toggle "$mark"
+  echo "OK: reload_busy_turn: a streaming turn is busy; its end clears the note"
+  stop_app
+}
+
+scenario_reload_busy_before_skills() {
+  SIRIO_FIXTURE_RELOAD_GATE="$RUN_DIR/reload_busy_before_skills-plugins-gate"
+  SIRIO_FIXTURE_RESULT_GATE="$RUN_DIR/reload_busy_before_skills-result-gate"
+  rm -f "$SIRIO_FIXTURE_RELOAD_GATE" "$SIRIO_FIXTURE_RESULT_GATE"
+  reload_chat reload_busy_before_skills
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_since "$mark" reload_plugins 1 "the plugin reload is at its gate"
+  send_prompt hello
+  wait_panel "the turn streams" 'c["status"] == "streaming"' 30
+  : >"$SIRIO_FIXTURE_RELOAD_GATE"
+  wait_panel "the note is the busy note" "R('connectors', '$RELOAD')['note'] == '$BUSY_NOTE'" 20
+  sleep 1
+  expect_since "$mark" reload_skills 0 "a turn that began during the reload stopped the skills"
+  : >"$SIRIO_FIXTURE_RESULT_GATE"
+  wait_panel "the turn is over and the note clears" "c['status'] != 'streaming' and R('connectors', '$RELOAD')['note'] == ''" 30
+  reload_no_toggle "$mark"
+  echo "OK: reload_busy_before_skills: the busy gate is read again before the skills"
+  stop_app
+}
+
+scenario_reload_in_flight() {
+  SIRIO_FIXTURE_RELOAD_GATE="$RUN_DIR/reload_in_flight-gate"
+  rm -f "$SIRIO_FIXTURE_RELOAD_GATE"
+  reload_chat reload_in_flight
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the row reads reloading… with no action" "R('connectors', '$RELOAD')['detail'] == 'reloading…' and R('connectors', '$RELOAD')['action'] is None" 10
+  if panel_ctl activate "$RELOAD" >/dev/null 2>&1; then
+    fail "a second Reload while one runs was accepted"
+  fi
+  sleep 1
+  expect_since "$mark" reload_plugins 1 "the second Reload sent nothing"
+  : >"$SIRIO_FIXTURE_RELOAD_GATE"
+  reload_idle_row "the row is back to Reload"
+  expect_since "$mark" reload_plugins 1 "one plugin reload in all"
+  reload_no_toggle "$mark"
+  echo "OK: reload_in_flight: reloading… while the call is open, a second Reload failed and sent nothing"
+  stop_app
+}
+
+scenario_reload_refused() {
+  SIRIO_FIXTURE_RELOAD=refused
+  reload_chat reload_refused
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the reload row is gone" "R('connectors', '$RELOAD') is None" 20
+  check_panel "the server rows are unchanged" \
+    "sorted(r['key'] for r in rows('connectors') if r['depth'] == 1) == sorted(['$CODEGRAPH', '$NOTION']) and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
+  sleep 1
+  expect_since "$mark" reload_plugins 1 "one refused plugin reload"
+  expect_since "$mark" reload_skills 0 "a refusal sends no skill reload"
+  reload_no_toggle "$mark"
+  echo "OK: reload_refused: a refused reload_plugins hides the row and changes nothing else"
+  stop_app
+}
+
+scenario_reload_skills_refused() {
+  SIRIO_FIXTURE_SKILLS=refused
+  reload_chat reload_skills_refused
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_since "$mark" reload_skills 1 "the applied plugin reload led to the skills"
+  wait_panel "the reload row is gone" "R('connectors', '$RELOAD') is None" 20
+  expect_since "$mark" reload_plugins 1 "one plugin reload"
+  [ "$(control_after_first "$mark" reload_plugins reload_skills)" = 1 ] || fail "reload_skills did not follow reload_plugins"
+  check_panel "the server rows are unchanged but for the plugin's" \
+    "set(r['key'] for r in rows('connectors') if r['depth'] == 1) - set(['$PLUGIN_SERVER', 'connectors/plugins/plugin:pa:\u202ex']) == set(['$CODEGRAPH', '$NOTION']) and R('connectors', '$CODEGRAPH')['detail'] == 'failed' and R('connectors', '$NOTION')['detail'] == 'needs sign-in'"
+  sleep 1
+  expect_since "$mark" reload_skills 1 "a refused skill reload is not sent again"
+  reload_no_toggle "$mark"
+  echo "OK: reload_skills_refused: a refused reload_skills hides the row after the plugins applied"
+  stop_app
+}
+
+scenario_reload_errors() {
+  SIRIO_FIXTURE_RELOAD=errors
+  reload_chat reload_errors
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_panel "the note counts the plugins that failed to load" "R('connectors', '$RELOAD')['note'] == '2 plugins failed to load.'" 20
+  check_panel "the action is Reload" "R('connectors', '$RELOAD')['action'] == 'Reload'"
+  reload_no_toggle "$mark"
+  echo "OK: reload_errors: an applied reload with plugin load errors says how many"
   stop_app
 }
 
@@ -4248,6 +4787,12 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_RULES_LOG=""
   SIRIO_FIXTURE_RULES_GATE=""
   SIRIO_FIXTURE_RESULT_GATE=""
+  SIRIO_FIXTURE_TOGGLE=""
+  SIRIO_FIXTURE_TOGGLE_GATE=""
+  SIRIO_FIXTURE_RELOAD=""
+  SIRIO_FIXTURE_RELOAD_GATE=""
+  SIRIO_FIXTURE_SKILLS=""
+  SIRIO_FIXTURE_CLI_BUSY_GATE=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))

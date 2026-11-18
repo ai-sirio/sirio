@@ -84,8 +84,9 @@ starts folded, and which cards are folded does not survive a relaunch. Its cards
 (project, the chat's own directory, the branch read live), Context (what fills the window,
 folded by origin, from `get_context_usage` through `sirio_claude::context`; asked once on open
 when no report exists yet), Connectors (the session's MCP servers by origin, with Sign in and
-Reconnect, from `sirio_claude::mcp` and `sirio_chat::McpControl`, whose calls wait for the CLI
-and so run off the GPUI thread), Permissions (below), Trace (below) and Change request (the
+Reconnect and a switch on every server row, from `sirio_claude::mcp` and `sirio_chat::McpControl`,
+whose calls wait for the CLI and so run off the GPUI thread; the switch is below), Permissions
+(below), Trace (below) and Change request (the
 branch's pull or merge request through the forge source, sharing the right panel's per-host
 rate-limit pause, and read
 only once the card is unfolded and a frame paints the column, so a chat in a background tab asks
@@ -94,9 +95,55 @@ whether the Change request card is drawn at all; it reads local git config and t
 file and never runs `gh` or `glab`, and a forge you are not signed in to shows a muted "Not
 signed in to <host>" row rather than hiding the card. Connectors is Claude-native only and other
 agents get a total-only Context. The debug-only `surface.chat.panel`
-(`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
-it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
+(`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>|switch <key> on|off`)
+drives it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
 JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
+The connector switch (A6): every server row ends with an Ely `Checkbox`, whatever the server's
+origin, and its tooltip reads `Saved in Claude Code's settings for this folder`. A click sends
+`mcp_toggle` through `McpControl::toggle`, then reads `mcp_status` again; the debug action `switch`
+(`surface.chat.panel` with `action: "switch"`, `key`, and `on` of `"true"` or `"false"`) does the same.
+Sirio sends `mcp_toggle` only for that click or that action, never on connect, restore, reconnect,
+reload, retry or a new session. The switch's state is read only from `mcp_status`: a server reading
+`disabled` is off, so a row's `switch` in the `sessionPanel` JSON is `true`, `false` or, once the
+switches are hidden, `null`, and `switchEnabled` says whether the switch takes a click (`false` while a call
+about the server is open, bar the sign-in wait, which a switch ends; `null` with no switch); while a toggle is open the row reads `switching…` and shows the state
+asked for, and a second flip of that server fails and sends nothing. A switch to the state the row
+already shows sends nothing. The saved state is Claude Code's: it writes it per folder, in its own
+settings, and a sibling worktree, being another folder, does not share it. For a user or project
+server this was seen on a live run; for claude.ai and plugin servers it rests on a read of the
+2.1.326 binary, not a live run. Sirio never reads or writes `.claude.json` or any other
+Claude Code settings file; it learns the state only from the CLI's `mcp_status`. Flipping a
+server off drops its sign-in poll, and a toggle that fails leaves the CLI's sentence under the row
+while the switch keeps what `mcp_status` last said; a toggle that succeeds but whose follow-up read fails
+says `Switched, but the new state could not be read: <error>` under the row. Row labels and these notes
+go through `visible_text`. A CLI that refuses `mcp_toggle`
+(`sirio_chat::is_refusal`) hides every switch until the next connection (`switches_retired`). The
+switch sits in a wrapper that stops a mouse-down, so a click on it never reaches the row's own
+Sign in or Reconnect; its element id is a hash of the row key, never the key or the row's index, since
+Ely logs a checkbox's id on every click. `switchButtons` in the `sessionPanel` JSON holds each
+switch's drawn bounds, as `stopButtons` does for Stop.
+The reload row (A6): the Connectors card ends with a row `Plugins and skills` whose action is
+`Reload` (`session_panel/reload.rs`, key `connectors.reload`), drawn only once the card has read the
+servers (`Connectors::is_read`); the debug `activate` follows the same condition. While no turn runs it sends
+`reload_plugins` and then, only if that applied, `reload_skills`; the slash list takes the `commands` of
+the `reload_plugins` answer (`replace_commands`, then `AvailableCommands`), and a changed skill list
+arrives as `commands_changed`; the card reads `mcp_status` again afterwards. The first `reload_plugins` carries `hold_on_cache_impact: true`,
+so a reload that would reset the prompt cache is held: nothing is reloaded, no `reload_skills` is sent,
+the row's note gives the cost warning with the servers the reload would add or remove and the LSP tool
+change (names go through `visible_text`), and the action becomes `Reload anyway`, which sends the
+request without the hold. `refuse_if_busy: true` is added only when the CLI's `initialize` answer lists
+`reload_plugins_refuse_if_busy_v1`; a flag that is not sent is absent, never `false`. The chat is busy
+while `is_streaming()` or while `cli_state()` (never `deciding_cli_state()`, so a turn the CLI started
+counts) is `running` or `requires_action`: the row then sends nothing and says
+`Claude is busy with a turn. Try again when it ends.`, which a turn's end or the CLI going idle clears.
+The gate is read again after `reload_plugins` and before `reload_skills`, and the CLI's own busy
+refusal is recognised by its `error_code` (`reload_plugins_busy`), never its text. A reload that
+applied with load errors says `<n> plugins failed to load.`; any other failure says `Reload failed:`
+and the CLI's sentence. A second Reload while one runs fails and sends nothing, the row reading
+`reloading…`. A refusal of either verb (`sirio_chat::is_refusal`) hides the row until the next
+connection. On the 2.1.257 floor the row stays: it has both verbs and refuses only `reload_output_styles`,
+which is never sent. The floor has no capabilities, so `refuse_if_busy` is not sent there, and it ignores the
+hold and sends no `held` key, which reads as applied.
 `surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full`,
 `compact`, `narrow` or `minimal`, the `band`, `root`, `send`, `chips`, `overflowButton`, `field` (the text field's box, its vertical padding
 included) and `edge` (the strip along the composer's top that a drag resizes by) boxes as `[x, y, w, h]`,

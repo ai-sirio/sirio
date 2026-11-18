@@ -24,7 +24,8 @@ use sirio_chat_child::{
     terminate_and_reap_blocking,
 };
 use sirio_claude::{
-    ContextBreakdown, McpAuthStart, McpServer, PermissionRules, RewindOutcome, TaskOutput,
+    ContextBreakdown, McpAuthStart, McpServer, PermissionRules, PluginsReloaded, RewindOutcome,
+    TaskOutput,
 };
 
 pub use permission::source_words;
@@ -524,6 +525,14 @@ impl ClaudeClient {
         }
     }
 
+    /// A handle that reloads plugins and skills from another thread.
+    #[must_use]
+    pub fn reload_control(&self) -> ReloadControl {
+        ReloadControl {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+
     /// A handle that makes the three connector calls from another thread.
     /// The client itself is not `Clone`, and the calls block.
     #[must_use]
@@ -567,6 +576,72 @@ impl RulesControl {
     }
 }
 
+/// Why a plugin or skill reload did not happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReloadError {
+    /// The CLI does not have the verb.
+    Refused,
+    /// The CLI is in a turn and was asked to refuse then
+    /// (`error_code: reload_plugins_busy`).
+    Busy,
+    /// Any other failure, with the CLI's own sentence or Sirio's.
+    Failed(String),
+}
+
+/// The plugin and skill reloads of one session, detached from the client
+/// like [`McpControl`]. Blocking, so none belongs on a UI thread.
+#[derive(Clone)]
+pub struct ReloadControl {
+    command_tx: async_channel::Sender<worker::Command>,
+}
+
+impl std::fmt::Debug for ReloadControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReloadControl").finish_non_exhaustive()
+    }
+}
+
+impl ReloadControl {
+    /// Reloads plugins. With `hold` the CLI leaves the session alone and
+    /// says what would change when the reload would reset its prompt cache.
+    /// Blocking, bounded at 30 s.
+    pub fn plugins(&self, hold: bool) -> Result<PluginsReloaded, ReloadError> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::ReloadPlugins {
+                hold,
+                reply: reply_tx,
+            })
+            .map_err(|_| reload_not_running())?;
+        wait_for_reload(&reply_rx)
+    }
+
+    /// Reloads the skills on disk. Blocking, bounded at 30 s.
+    pub fn skills(&self) -> Result<(), ReloadError> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::ReloadSkills { reply: reply_tx })
+            .map_err(|_| reload_not_running())?;
+        wait_for_reload(&reply_rx)
+    }
+}
+
+fn reload_not_running() -> ReloadError {
+    ReloadError::Failed("the Claude worker is not running".to_string())
+}
+
+fn wait_for_reload<T>(
+    reply_rx: &mpsc::Receiver<Result<T, ReloadError>>,
+) -> Result<T, ReloadError> {
+    match reply_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(answer) => answer,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(ReloadError::Failed(
+            "Claude Code did not answer in 30 s".to_string(),
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(reload_not_running()),
+    }
+}
+
 /// The connector calls of one session, detached from the client so a caller
 /// can make them off its own thread. Every call blocks until the CLI answers
 /// or its bound ends, so none belongs on a UI thread. A handle outliving its
@@ -604,6 +679,21 @@ impl McpControl {
             })
             .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
         wait_for_reply(&reply_rx, "mcp_reconnect", Duration::from_secs(30))
+    }
+
+    /// Switches a server on or off. Blocking, bounded at 30 s; a refusal
+    /// carries the CLI's own sentence. The CLI saves the choice in its own
+    /// settings for the folder.
+    pub fn toggle(&self, server: &str, enabled: bool) -> Result<()> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::McpToggle {
+                server: server.to_string(),
+                enabled,
+                reply: reply_tx,
+            })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
+        wait_for_reply(&reply_rx, "mcp_toggle", Duration::from_secs(30))
     }
 
     /// Starts a server's sign-in and returns the page to open. Blocking,

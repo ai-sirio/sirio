@@ -1135,16 +1135,25 @@ pub mod request {
         )
     }
 
-    /// Debug-only `surface.chat.panel {surfaceId, action, key?}`: does to a
+    /// Debug-only `surface.chat.panel {surfaceId, action, key?, on?}`: does to a
     /// chat's session panel what the button and the card titles do. `action`
-    /// is `open`, `close`, `toggle` or `activate`; the last two name a `key`.
-    pub fn chat_panel(surface_id: &str, action: &str, key: Option<&str>) -> ControlRequest {
+    /// is `open`, `close`, `toggle`, `activate` or `switch`; the last three name
+    /// a `key`, and `switch` also says `on`, sent as `"true"` or `"false"`.
+    pub fn chat_panel(
+        surface_id: &str,
+        action: &str,
+        key: Option<&str>,
+        on: Option<bool>,
+    ) -> ControlRequest {
         let mut params = BTreeMap::from([
             ("surfaceId".to_string(), surface_id.to_string()),
             ("action".to_string(), action.to_string()),
         ]);
         if let Some(key) = key {
             params.insert("key".to_string(), key.to_string());
+        }
+        if let Some(on) = on {
+            params.insert("on".to_string(), on.to_string());
         }
         request("surface.chat.panel", params)
     }

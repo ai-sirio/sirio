@@ -315,19 +315,19 @@ impl Session {
     /// Launches `claude` for a new chat session under `root` (a private HOME and work
     /// directory) with the eliciting MCP server and the fake model API.
     pub fn start(claude: &Path, python: &Path, root: &Path) -> Self {
-        Self::launch(claude, python, root, FAKE_API, true, None, None)
+        Self::launch(claude, python, root, FAKE_API, true, None, None, false, true)
     }
 
     /// Launches `claude` for a new chat session under `root` against the fake API of the
     /// session-state test (`fake_state_api.py`), with no MCP server.
     pub fn start_state(claude: &Path, python: &Path, root: &Path) -> Self {
-        Self::launch(claude, python, root, STATE_API, false, None, None)
+        Self::launch(claude, python, root, STATE_API, false, None, None, false, true)
     }
 
     /// Launches `claude` for a new chat session under `root` against the fake API of the
     /// background-task test (`fake_tasks_api.py`), with no MCP server.
     pub fn start_tasks(claude: &Path, python: &Path, root: &Path) -> Self {
-        Self::launch(claude, python, root, TASKS_API, false, None, None)
+        Self::launch(claude, python, root, TASKS_API, false, None, None, false, true)
     }
 
     /// Launches `claude` against the session-state fake API with `user` as the config dir's
@@ -341,9 +341,29 @@ impl Session {
         user: &Value,
         project: Option<&Value>,
     ) -> Self {
-        Self::launch(claude, python, root, STATE_API, false, Some(user), project)
+        Self::launch(
+            claude,
+            python,
+            root,
+            STATE_API,
+            false,
+            Some(user),
+            project,
+            false,
+            true,
+        )
     }
 
+    /// Launches `claude` against the session-state fake API with the eliciting MCP server
+    /// registered as the user-scope stdio server `probe` in the config dir's `.claude.json`,
+    /// the way Sirio launches (no `--mcp-config`). With `fresh: false` the root, home, config
+    /// dir and work dir are reused as the last session left them: nothing is wiped or written.
+    /// The second session gets another session id (group `8001`).
+    pub fn start_with_user_mcp(claude: &Path, python: &Path, root: &Path, fresh: bool) -> Self {
+        Self::launch(claude, python, root, STATE_API, false, None, None, true, fresh)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         claude: &Path,
         python: &Path,
@@ -352,17 +372,29 @@ impl Session {
         with_mcp: bool,
         user_settings: Option<&Value>,
         project_settings: Option<&Value>,
+        user_mcp: bool,
+        fresh: bool,
     ) -> Self {
-        let _ = std::fs::remove_dir_all(root);
+        if fresh {
+            let _ = std::fs::remove_dir_all(root);
+        }
         let home = root.join("home");
         let work = root.join("work");
         let config_dir = config_dir_of(&home);
+        // Each session group keeps its own logs, so a reused root does not lose the first one.
+        let group = if fresh { "8000" } else { "8001" };
+        if !fresh {
+            assert!(
+                config_dir.join(".claude.json").is_file(),
+                "a reused root has the config of a previous session"
+            );
+        }
         for dir in [&home, &work, &config_dir] {
             std::fs::create_dir_all(dir).unwrap();
         }
 
         let port = free_port();
-        let api_log = std::fs::File::create(root.join("api.log")).unwrap();
+        let api_log = std::fs::File::create(root.join(format!("api-{group}.log"))).unwrap();
         let mut api_command = Command::new(python);
         api_command
             .args(["-I", api_script, &port.to_string()])
@@ -381,37 +413,47 @@ impl Session {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Claude remembers an approved key by its last 20 characters.
-        let key_tail = &FAKE_KEY[FAKE_KEY.len() - 20..];
-        let work_text = work.display().to_string();
-        let global = format!(
-            r#"{{"hasCompletedOnboarding":true,"theme":"dark","hasSeenAutoDefaultNotice":true,"hasResetAutoModeOptInForDefaultOffer":true,"customApiKeyResponses":{{"approved":["{key_tail}"],"rejected":[]}},
-"projects":{{{work_text:?}:{{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}}}}"#
-        );
-        std::fs::write(home.join(".claude.json"), &global).unwrap();
-        std::fs::write(config_dir.join(".claude.json"), &global).unwrap();
-        let user_text = user_settings.map_or_else(|| "{}".to_string(), Value::to_string);
-        std::fs::write(config_dir.join("settings.json"), user_text).unwrap();
-        if let Some(project) = project_settings {
-            let init = Command::new(git().expect("the caller checked git_available"))
-                .args(["init", "-q"])
-                .current_dir(&work)
-                .env_clear()
-                .env("PATH", ISOLATED_PATH)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("HOME", &home)
-                .status()
-                .expect("git init runs");
-            assert!(init.success(), "git init failed in the work directory");
-            std::fs::create_dir_all(work.join(".claude")).unwrap();
-            std::fs::write(work.join(".claude/settings.json"), project.to_string()).unwrap();
-        }
-
         let mcp_log = root.join("mcp.log");
+        if fresh {
+            // Claude remembers an approved key by its last 20 characters.
+            let key_tail = &FAKE_KEY[FAKE_KEY.len() - 20..];
+            let work_text = work.display().to_string();
+            let global = format!(
+                r#"{{"hasCompletedOnboarding":true,"theme":"dark","hasSeenAutoDefaultNotice":true,"hasResetAutoModeOptInForDefaultOffer":true,"customApiKeyResponses":{{"approved":["{key_tail}"],"rejected":[]}},
+"projects":{{{work_text:?}:{{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}}}}"#
+            );
+            std::fs::write(home.join(".claude.json"), &global).unwrap();
+            let config_json = if user_mcp {
+                let mut config: Value = serde_json::from_str(&global).unwrap();
+                config["mcpServers"] = serde_json::json!({"probe": {
+                    "type": "stdio", "command": python.display().to_string(),
+                    "args": ["-I", ELICIT_MCP, mcp_log.display().to_string()]}});
+                config.to_string()
+            } else {
+                global.clone()
+            };
+            std::fs::write(config_dir.join(".claude.json"), config_json).unwrap();
+            let user_text = user_settings.map_or_else(|| "{}".to_string(), Value::to_string);
+            std::fs::write(config_dir.join("settings.json"), user_text).unwrap();
+            if let Some(project) = project_settings {
+                let init = Command::new(git().expect("the caller checked git_available"))
+                    .args(["init", "-q"])
+                    .current_dir(&work)
+                    .env_clear()
+                    .env("PATH", ISOLATED_PATH)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("HOME", &home)
+                    .status()
+                    .expect("git init runs");
+                assert!(init.success(), "git init failed in the work directory");
+                std::fs::create_dir_all(work.join(".claude")).unwrap();
+                std::fs::write(work.join(".claude/settings.json"), project.to_string()).unwrap();
+            }
+        }
         let mcp = serde_json::json!({"mcpServers": {"elic": {
             "type": "stdio", "command": python.display().to_string(),
             "args": ["-I", ELICIT_MCP, mcp_log.display().to_string()]}}});
-        let session_id = format!("00000000-0000-4000-8000-{:012x}", u64::from(port));
+        let session_id = format!("00000000-0000-4000-{group}-{:012x}", u64::from(port));
         let line = sirio_claude::LaunchLine::chat(sirio_claude::ChatSession::New(&session_id));
         let mut command = Command::new(claude);
         command.args(&line.args).current_dir(&work);
@@ -431,7 +473,7 @@ impl Session {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(std::fs::File::create(root.join("stderr.log")).unwrap());
+            .stderr(std::fs::File::create(root.join(format!("stderr-{group}.log"))).unwrap());
         let sweep = HomeSweep(home);
         let mut child = Reaper(command.spawn().expect("claude launches"));
         let stdin = child.0.stdin.take().expect("a piped stdin");

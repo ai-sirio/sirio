@@ -3685,6 +3685,7 @@ impl Chat {
                 self.surface_mcp_warnings();
                 self.push_entry(Entry::TurnFooter(label));
                 self.streaming = false;
+                self.reload_idle(cx);
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
                 self.ask_session_permissions(cx);
@@ -3827,6 +3828,9 @@ impl Chat {
                         _ => false,
                     };
                     self.cli_state = Some(state);
+                    if state == sirio_chat::CliState::Idle {
+                        self.reload_idle(cx);
+                    }
                     // The CLI can start working after the turn ended, when no
                     // title tick runs.
                     if !self.trace.is_running()
