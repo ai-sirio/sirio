@@ -550,21 +550,21 @@ TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- 
 keeps it.
 
 **Usage and limits (A9).** Three things: the rate-limit notice, a local command's output and the
-`/usage` card. Wire facts come from the A9 probe (`.superpowers/probe-a9/FINDINGS.md`) and the
-spec's A9 Deviations block in `docs/superpowers/specs/2026-11-15-claude-protocol-parity-design.md`.
+`/usage` card. Wire facts are in the spec's A9 Deviations block,
+`docs/superpowers/specs/2026-11-15-claude-protocol-parity-design.md`.
 
 **The rate-limit notice.** The CLI sends `rate_limit_event` only to a claude.ai subscriber or a
 gateway sign-in (never to an API-key session), after the answer and before `result`, and only when
 the state changes. `RateLimitPush::parse` (`sirio_claude::message`) reads `status`, `rateLimitType`
-(the window), `resetsAt` (epoch seconds), `limitScope`, and the fill: the top-level `utilization`
-(a 0-1 fraction) or else the named window's entry under `unifiedWindows`. The fill goes through
-`sirio_claude::whole_percent`: `(value + 1e-9).floor()`, clamped to 0-100, so `0.57` reads 57. An
-empty token counts as absent. The fold (`claude/events.rs`, `CliMessage::RateLimit`) makes a
-`SessionNotice::RateLimited` for every status except `allowed` and an empty one. The dedup key is
-`(status, window, scope)`: a repeat adds no line, a change of any of the three does, and an
-`allowed` push clears the key, so the same warning is shown again after the plan had room. Known
-limit: a warning on a second window leaves the event's top level unchanged (the second window shows
-only under `unifiedWindows`), so it has the same key and adds no line.
+(the window), `resetsAt` (epoch seconds), `limitScope`, and the fill: the top-level `utilization` (a
+0-1 fraction) or else the named window's entry under `unifiedWindows`. The fill goes through
+`sirio_claude::whole_percent`: `(utilization × 100 + 1e-9).floor()`, clamped to 0-100, so `0.57`
+reads 57. An empty token counts as absent. The fold (`claude/events.rs`, `CliMessage::RateLimit`)
+makes a `SessionNotice::RateLimited` for every status except `allowed` and an empty one. The dedup
+key is `(status, window, scope)`: a repeat adds no line, a change of any of the three does, and an
+`allowed` or empty push clears the key, so the same warning is shown again after the plan had room.
+Known limit: a warning on a second window leaves the event's top level unchanged (the second window
+shows only under `unifiedWindows`), so it has the same key and adds no line.
 
 `sirio_ui::chat::limit_notice` writes the sentence. A part with no value is left out.
 
@@ -587,7 +587,8 @@ persisted, as before. The CLI's own refusal sentence in a failed `result` is sti
 row, unchanged.
 
 **A local command's output.** `/usage` and `/context` are answered by the CLI itself, with no model
-call. From 2.1.301 the answer is a top-level synthetic `assistant` line (`model: "<synthetic>"`)
+call. The answer, already in 2.1.301 (the oldest version probed above the floor; 2.1.258-2.1.300
+were not probed), is a top-level synthetic `assistant` line (`model: "<synthetic>"`)
 that carries `local_command_run: {command, args}`, then a `result` with `num_turns: 0` and
 `local_command`. The fold draws a synthetic line only when it is top level and carries the marker;
 it then pushes `SessionNotice::LocalCommandOutput {command, text, report}` and the next chunk opens
@@ -613,15 +614,18 @@ drawn in the code font under the command's name, each line unwrapped; a long one
 field, so a field the CLI changed costs that part and not the card. It is `None` unless the report
 is an object that has `session` or `rate_limits`; the row then falls back to the text. `rate_limits`
 or `limits` absent, null or of a wrong type reads as unavailable; `limits: []` reads as none
-reported. A row that is not an object is dropped, and a field of a wrong type is absent, never zero.
-`usage_card.rs` builds the card once as lines, and the drawing, the copy and the read row all come
-from them. A part with no value is left out, and a row with no part at all is dropped:
+reported. A row that is not an object is dropped, and a field of a wrong type is absent, never zero,
+except the booleans: a missing or wrongly typed `is_enabled` or `is_active` reads `false`, so an
+`extra_usage` with no boolean draws `Extra usage: off`. `usage_card.rs` builds the card once as
+lines, and the drawing, the copy and the read row all come from them. A part with no value is left
+out, and a row with no part at all is dropped:
 
 - `This chat: $1.50 · API 1m 5s · total 1h 2m · 10 lines added, 2 removed`, then one line per
   model: `{model}: 1k in · 3k out · 50k cache read · 700 cache write`.
 - The plan's rows under one heading per group, in the order the groups first appear (`Session`,
   `Weekly`, any other group as sent). A heading shows only over rows that were drawn. A row reads
-  `{name} · {p}% · resets at {time} · warning`, the last part only for `warning` and `critical`.
+  `{name} · {p}% · resets at {time} · {severity}`, the last part only for `warning` and `critical`,
+  as the word the CLI sent.
   The name is the scope's `display_name`, else `Current session` (`session`), `All models`
   (`weekly_all`), or the `kind` as sent. The percent uses `whole_percent`. The reset uses the same
   time format as the notice.
@@ -642,21 +646,27 @@ in both nextest skip lists. Run one CLI at a time, from `rust/`:
 
 ```sh
 TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- \
-  --ignored --nocapture --test-threads=1 claude_answers_usage_locally
+  --ignored --nocapture --test-threads=1 \
+  claude_answers_usage_locally claude_reports_rate_limits_through_a_gateway
 ```
+
+A run counts only when it prints `claude reports <version>` and no `SKIP:` line (a SKIP passes, and
+the version SKIP prints `claude reports ...` first). The two fake-API tests use a scratch HOME and
+`CLAUDE_CONFIG_DIR` and no network.
 
 - `claude_answers_usage_locally` (needs 2.1.301): against `fake_limits_api.py`, `/usage` gives the
   marker and a `result` with `num_turns: 0` and `local_command: usage`, and the API logs no
   request; a following `say hi` logs one, so "none" is not a logger that never writes.
 - `claude_reports_rate_limits_through_a_gateway` (needs 2.1.327): the same fake API sends
-  `anthropic-ratelimit-unified-*` headers. A warning on the five-hour window reads 92 percent
-  with the written reset, and an overage refusal carries `limitScope: group_pool` and an error
-  `result`. The CLI emits the event only under subscriber or gateway auth, so the token is an
-  unsigned JWT with `aud: claude-gateway`, built at run time. It lives only in the CLI's
-  environment and the test's `TMPDIR`, and is never printed or written. Before any CLI that
-  carries it starts, `ANTHROPIC_BASE_URL` is read from the finished command and must be
-  `http://127.0.0.1:<port>`, checked as a host, not a prefix (`http://127.0.0.1:1@example.com/`
-  is refused). `the_gateway_base_url_guard_checks_the_host` covers that check and starts no CLI.
+  `anthropic-ratelimit-unified-*` headers. A warning on the five-hour window reads 92 percent with
+  the written reset, and an overage refusal carries `limitScope: group_pool` and an error `result`.
+  The CLI emits the event only under subscriber or gateway auth, so the token is an unsigned JWT
+  with `aud: claude-gateway`, built at run time. It lives only in the CLI's environment, touches
+  nothing outside the test's `TMPDIR` and is never printed. Before any CLI that carries it starts,
+  `ANTHROPIC_BASE_URL` is read from the finished command and must be `http://127.0.0.1:`, a port,
+  then the end of the URL or `/` (`:8080/v1` passes), so it checks the host, not a prefix
+  (`http://127.0.0.1:1@example.com/` is refused). `the_gateway_base_url_guard_checks_the_host`
+  covers that check and starts no CLI.
 - `claude_usage_report_on_account` is run by hand by Enzo; never CI, never an agent. It is the
   only test that touches a real account. It SKIPs unless `SIRIO_LIVE_CLAUDE_ACCOUNT=1`:
 

@@ -489,8 +489,9 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # (passed to Sirio as TZ). limit_notice and usage_card set SIRIO_E2E_TZ=UTC and put every reset 3
 # or 4 days ahead, so a time reads `%a %H:%M` whenever the run happens, and compute the expected
 # text in UTC with a fixed English day list. The same-day and far-date formats are covered by the
-# unit test of `rate_limit_sentence`. The fixture files are written by Python (json.dumps), so a
-# hidden character is only ever built at run time.
+# unit test `reset_time_formats`. The fixture files of limit_notice and usage_card are written by
+# Python (json.dump), so a hidden character is only ever built at run time; the other three write
+# theirs with printf.
 # The capture: a framed run on a private Xvfb of 2400x1200 (--display :N), frames/usage-card.png
 # and frames/usage-text.png:
 #   Scripts/Tests/test-chat-session-panel-e2e.sh --display :N --only usage_card,usage_text

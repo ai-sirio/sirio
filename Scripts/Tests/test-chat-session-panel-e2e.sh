@@ -5269,7 +5269,7 @@ scenario_notice_midstream() {
 }
 
 # The rate-limit rows (A9): every reset is 3 or 4 days off, so `{T}` is `%a %H:%M` whenever this runs. The unit
-# test of `rate_limit_sentence` covers the same-day and far-date formats. Guard: the CLI's own refusal text is one
+# test `reset_time_formats` covers the same-day and far-date formats. Guard: the CLI's own refusal text is one
 # assistant row (true before A9).
 scenario_limit_notice() {
   SIRIO_E2E_TZ=UTC
