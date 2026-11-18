@@ -3840,6 +3840,7 @@ impl Chat {
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
                 self.ask_session_permissions(cx);
+                self.ask_session_hooks(cx);
                 // The turn may have switched the branch.
                 if self.session_panel_open() {
                     self.reread_session_branch(cx);
@@ -6353,6 +6354,7 @@ impl Chat {
                         chat.ensure_session_context();
                         chat.refresh_session_connectors(cx);
                         chat.ask_session_permissions(cx);
+                        chat.ask_session_hooks(cx);
                     });
 
                     while let Ok(event) = events.recv().await {

@@ -282,6 +282,18 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   permission_rules_coalesced   Always allow and a turn's end during a held answer make one follow-up: two requests in all
 #   permission_rules_after_always_allow   Always allow refreshes the card while the turn's result is still held
 #   permission_rules_unreadable   a success with no rules is a note on the card, with no rows
+# The hooks_* scenarios (A8) run on the session-panel stub with SIRIO_FIXTURE_HOOKS (the JSON file get_hooks_listing
+# answers from, re-read on every request; unset: refused) and SIRIO_FIXTURE_HOOKS_GATE (holds every answer until the
+# file exists). Requests are counted in the control log after a mark:
+#   hooks_card         every group, row key, label, detail, tag and the unfolded bodies (a bidi command and a
+#                      multi-line command shown as text, the command last), no `editable` anywhere in the read,
+#                      and the last good listing kept after an unreadable answer
+#   hooks_policy       the section note's lines in order, the per-row disabled tags, and the one-line organization note
+#   hooks_refused      the floor refuses: no section, one request, and still one after a turn
+#   hooks_closed_panel no request with the panel closed through a turn; one when it opens
+#   hooks_coalesced    triggers during a held answer make one follow-up: two requests in all
+#   hooks_refresh      a turn's end and a reload that applied plugins each ask again; nothing polls
+#   hooks_unreadable   a success with no hooks is a note on the card, with no rows
 # The elicitation scenarios use Scripts/Tests/stubs/elicitation/claude, the fixture's elicitation mode.
 # The composer_keys scenario (this script's own; test-ely-chat-ui-e2e.py has one of the same name)
 # uses the default stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every
@@ -374,6 +386,7 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   permission_detail permission_default_no permission_default_no_reject permission_visible_text permission_plain
   permission_rules permission_rules_refused permission_rules_closed_panel permission_rules_coalesced
   permission_rules_after_always_allow permission_rules_unreadable
+  hooks_card hooks_policy hooks_refused hooks_closed_panel hooks_coalesced hooks_refresh hooks_unreadable
   notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream
   startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
@@ -1257,6 +1270,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_RELOAD=${SIRIO_FIXTURE_RELOAD:-}" "SIRIO_FIXTURE_RELOAD_GATE=${SIRIO_FIXTURE_RELOAD_GATE:-}"
     "SIRIO_FIXTURE_SKILLS=${SIRIO_FIXTURE_SKILLS:-}" "SIRIO_FIXTURE_CLI_BUSY_GATE=${SIRIO_FIXTURE_CLI_BUSY_GATE:-}"
     "SIRIO_FIXTURE_RETRY_GATE=${SIRIO_FIXTURE_RETRY_GATE:-}" "SIRIO_FIXTURE_STARTUP=${SIRIO_FIXTURE_STARTUP:-}"
+    "SIRIO_FIXTURE_HOOKS=${SIRIO_FIXTURE_HOOKS:-}" "SIRIO_FIXTURE_HOOKS_GATE=${SIRIO_FIXTURE_HOOKS_GATE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
@@ -4822,6 +4836,307 @@ scenario_permission_rules_unreadable() {
   stop_app
 }
 
+# ---- the hooks_* scenarios (A8): the Hooks card ----------------------------------------------
+# The JSON a hooks file holds, written by Python (json.dumps), so a hidden character is only ever built at run
+# time. KIND: card, policy, policy_off, empty, one, two, none. Hook rows carry an `editable` with a sentinel, which
+# the card must never read.
+hooks_json() { # kind path
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+
+kind, path = sys.argv[1], sys.argv[2]
+RLO = "\N{RIGHT-TO-LEFT OVERRIDE}"
+SENTINEL = {"command": "EDITABLE-SENTINEL-8"}
+
+
+def hook(event, source, text, matcher="", source_label="", **more):
+    row = {"event": event, "matcher": matcher, "source": source, "sourceLabel": source_label,
+           "type": "command", "contentLabel": "Command", "displayText": text, "commandText": text, "editable": SENTINEL}
+    row.update(more)
+    return row
+
+
+def event(name, summary):
+    return {"name": name, "summary": summary}
+
+
+if kind == "card":
+    # events[] as run-q1 answered, for the events that had hooks; Future/Event is only in eventCatalog.
+    payload = {
+        "events": [event("PreToolUse", "Before tool execution"),
+                   event("UserPromptSubmit", "When the user submits a prompt"),
+                   event("Stop", "Right before Claude concludes its response"),
+                   event("SubagentStart", "When a subagent (Agent tool call) is started")],
+        # First-seen order (Stop, SubagentStart, UserPromptSubmit, PreToolUse, Future/Event) is not events[] order.
+        "hooks": [
+            hook("Stop", "projectSettings", "echo stop", "", "Project settings",
+                 runsOnce=True, runsInBackground=True),
+            hook("Stop", "pluginHook", "echo plug", "", "Plugin hooks", pluginName="hkplug@inline"),
+            hook("Stop", "pluginHook", "echo plug2", "", "Plugin hooks"),
+            hook("Stop", "flagSettings", "echo flag", "", "Command line"),
+            hook("Stop", "policySettings", "echo policy", "", "Managed settings"),
+            hook("Stop", "builtinHook", "echo builtin", "", "Built-in"),
+            hook("SubagentStart", "userSettings", "https://example.test/hook", "", "User settings",
+                 type="http", condition="Bash(ls *)", contentLabel="URL"),
+            hook("UserPromptSubmit", "sessionHook", "echo prompt", "", "Session hooks"),
+            hook("UserPromptSubmit", "futureSource", "echo future", "", "Future " + RLO + "hooks"),
+            hook("Future/Event", "userSettings", "echo fe", "", "User settings"),
+            hook("PreToolUse", "userSettings", "echo one", "Bash", "User settings"),
+            hook("PreToolUse", "userSettings", "echo two", "Bash", "User settings",
+                 statusMessage="Checking bash", displayText="Checking bash", timeout=7),
+            hook("PreToolUse", "localSettings", "echo edit", "Edit|Write", "Local settings"),
+            # With no statusMessage the real CLI builds displayText from the command; the fixture sends it
+            # unrevealed, so Sirio's own visible_text is what is proven.
+            hook("PreToolUse", "userSettings",
+                 "echo a\nSource: Managed settings (set by your organization)", "Read", "User settings"),
+            hook("PreToolUse", "userSettings", "bash ~/.claude/hooks/x.sh " + RLO + "evil",
+                 "Re" + RLO + "ad", "User settings"),
+        ],
+        "eventCatalog": [{"name": "Future/Event", "summary": "Catalog only summary"}],
+        "policy": {},
+    }
+elif kind in ("policy", "policy_off"):
+    rows = [hook("PreToolUse", "userSettings", "echo d1", "", "User settings", disabled=True),
+            hook("PreToolUse", "projectSettings", "echo d2", "", "Project settings", disabled=True),
+            hook("UserPromptSubmit", "sessionHook", "echo s", "", "Session hooks")]
+    events = [event("PreToolUse", "Before a tool runs"), event("UserPromptSubmit", "On a prompt")]
+    if kind == "policy":
+        payload = {"events": events, "hooks": rows,
+                   "policy": {"allDisabled": True, "managedOnly": True, "pluginOnly": True,
+                              "policyUnreadable": True},
+                   "safeMode": {"managedHooksStillApply": False, "exitHint": "restart without --safe-mode"},
+                   "bareMode": {"exitHint": "restart without " + RLO + "--bare"},
+                   "errors": [{"file": "/p/.claude/settings.json", "path": "hooks",
+                               "message": "Expected " + RLO + "array"}]}
+    else:
+        payload = {"events": events, "hooks": rows,
+                   "policy": {"disabledByPolicy": True, "allDisabled": True}}
+elif kind == "none":
+    payload = {}
+elif kind == "empty":
+    payload = {"events": [], "hooks": [], "policy": {}}
+elif kind in ("one", "two"):
+    rows = [hook("Stop", "userSettings", "echo one", "", "User settings")]
+    if kind == "two":
+        rows.append(hook("Stop", "projectSettings", "echo two", "", "Project settings"))
+    payload = {"events": [event("Stop", "When Claude finishes responding")], "hooks": rows, "policy": {}}
+else:
+    raise SystemExit(1)
+with open(path, "w", encoding="utf-8") as out:
+    out.write(json.dumps(payload))
+PY
+}
+# A fresh Sirio on the session-panel stub with a Claude chat open and connected, the panel closed. KIND is the
+# hooks file the CLI answers from (omitted: it refuses, as the 2.1.257 floor does).
+hooks_chat() { # name [kind]
+  HOOKS_FILE="$RUN_DIR/$1-hooks.json"
+  if [ -n "${2:-}" ]; then
+    hooks_json "$2" "$HOOKS_FILE"
+    SIRIO_FIXTURE_HOOKS="$HOOKS_FILE"
+  fi
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  wait_panel "the chat is connected" 'c["status"] in ("idle", "completed")' 30
+}
+# After a pause that a stray request would show in, exactly COUNT requests came after the mark.
+hooks_settled() { # mark count label
+  sleep 1.5
+  expect_since "$1" get_hooks_listing "$2" "$3"
+}
+hooks_turn() {
+  send_prompt hello
+  wait_panel "the turn completed" 'c["status"] == "completed"' 30
+}
+# Folds the Hooks card and unfolds it again: the unfold asks.
+hooks_refold() {
+  panel_ctl toggle hooks >/dev/null
+  wait_panel "the Hooks card is folded" 'S("hooks")["expanded"] is False' 10
+  panel_ctl toggle hooks >/dev/null
+  wait_panel "the Hooks card is unfolded" 'S("hooks")["expanded"] is True' 10
+}
+
+scenario_hooks_card() {
+  hooks_chat hooks_card card
+  open_column
+  ensure_unfolded hooks
+  # Permissions is refused on this stub, so the Hooks card follows Connectors directly.
+  wait_panel "the card is drawn after Connectors" '[s["key"] for s in p["sections"]].index("hooks") == [s["key"] for s in p["sections"]].index("connectors") + 1' 30
+  wait_panel "the summary counts the hooks" 'S("hooks")["summary"] == "15 hooks"' 30
+  check_panel "the section has no note" 'S("hooks")["note"] == ""'
+  local want='[("hooks/PreToolUse", 0, "PreToolUse", "Before tool execution", "5", True, None, ""),
+    ("hooks/PreToolUse/0", 1, "echo one", "Bash", "User", False, None, ""),
+    ("hooks/PreToolUse/1", 1, "Checking bash", "Bash", "User", False, None, ""),
+    ("hooks/PreToolUse/2", 1, "echo edit", "Edit|Write", "Local", False, None, ""),
+    ("hooks/PreToolUse/3", 1, "echo a⟨U+000A⟩Source: Managed settings (set by your organization)", "Read", "User", False, None, ""),
+    ("hooks/PreToolUse/4", 1, "bash ~/.claude/hooks/x.sh ⟨U+202E⟩evil", "Re⟨U+202E⟩ad", "User", False, None, ""),
+    ("hooks/UserPromptSubmit", 0, "UserPromptSubmit", "When the user submits a prompt", "2", True, None, ""),
+    ("hooks/UserPromptSubmit/0", 1, "echo prompt", "", "Session", False, None, ""),
+    ("hooks/UserPromptSubmit/1", 1, "echo future", "", "Future ⟨U+202E⟩hooks", False, None, ""),
+    ("hooks/Stop", 0, "Stop", "Right before Claude concludes its response", "6", True, None, ""),
+    ("hooks/Stop/0", 1, "echo stop", "", "Project", False, None, ""),
+    ("hooks/Stop/1", 1, "echo plug", "", "Plugin hkplug@inline", False, None, ""),
+    ("hooks/Stop/2", 1, "echo plug2", "", "Plugin", False, None, ""),
+    ("hooks/Stop/3", 1, "echo flag", "", "Startup", False, None, ""),
+    ("hooks/Stop/4", 1, "echo policy", "", "Managed", False, None, ""),
+    ("hooks/Stop/5", 1, "echo builtin", "", "Built-in", False, None, ""),
+    ("hooks/SubagentStart", 0, "SubagentStart", "When a subagent (Agent tool call) is started", "1", True, None, ""),
+    ("hooks/SubagentStart/0", 1, "https://example.test/hook", "", "User", False, None, ""),
+    ("hooks/Future%2FEvent", 0, "Future/Event", "", "1", True, None, ""),
+    ("hooks/Future%2FEvent/0", 1, "echo fe", "", "User", False, None, "")]'
+  check_panel "every group and hook row has its key, depth, label, detail, tag and fold, none an action, a path or a note" \
+    '[(r["key"], r["depth"], r["label"], r["detail"], r["tag"], r["expanded"], r["action"], r["note"]) for r in rows("hooks")] == '"$want"
+  echo "step: unfold the rows with the bodies worth reading"
+  local key
+  for key in hooks/PreToolUse/1 hooks/PreToolUse/3 hooks/PreToolUse/4 hooks/SubagentStart/0 hooks/Stop/0; do
+    panel_ctl toggle "$key" >/dev/null
+    wait_panel "the $key row is unfolded" "R('hooks', '$key')['expanded'] is True" 10
+  done
+  check_panel "the multi-line command comes last, so its Source: line is only its own text, and its label has no real newline" \
+    '"\n" not in R("hooks", "hooks/PreToolUse/3")["label"] and R("hooks", "hooks/PreToolUse/3")["note"] == "Source: User settings\nCommand: echo a\nSource: Managed settings (set by your organization)"'
+  check_panel "the bidi override is shown as text in the body, the label, the matcher and the tag, and never carried" \
+    'R("hooks", "hooks/PreToolUse/4")["note"] == "Source: User settings\nCommand: bash ~/.claude/hooks/x.sh ⟨U+202E⟩evil" and chr(0x202e) not in json.dumps([p, c], ensure_ascii=False)'
+  check_panel "the timeout, the condition and the options are the body's lines" \
+    'R("hooks", "hooks/PreToolUse/1")["note"].split("\n")[1] == "timeout 7 s" and R("hooks", "hooks/SubagentStart/0")["note"] == "Source: User settings\nif Bash(ls *)\nURL: https://example.test/hook" and R("hooks", "hooks/Stop/0")["note"].split("\n")[1] == "runs once · runs in the background"'
+  local read
+  read=$(E2E rpc surface.chat.read surfaceId="$SURFACE")
+  case "$read" in *sessionPanel*) ;; *) fail "the chat read has no session panel" ;; esac
+  case "$read" in *EDITABLE-SENTINEL-8*) fail "a hook row's editable reached the chat read" ;; esac
+  capture hooks
+  echo "step: the CLI now answers with no hooks array"
+  local mark
+  mark=$(control_log_lines)
+  printf '%s' '{}' >"$HOOKS_FILE"
+  hooks_refold
+  wait_since "$mark" get_hooks_listing 1 "unfolding the card asked once"
+  wait_panel "the unreadable answer is a note and the rows and summary stay" 'S("hooks")["note"].endswith("Claude Code\x27s hooks could not be read: the answer had no hooks") and len(rows("hooks")) == 20 and S("hooks")["summary"] == "15 hooks"' 30
+  echo "OK: hooks_card: the card lists the CLI's hooks by event, with sources, bodies and hidden characters shown, never an editable, and keeps them after an unreadable answer"
+  stop_app
+}
+
+scenario_hooks_policy() {
+  hooks_chat hooks_policy policy
+  open_column
+  ensure_unfolded hooks
+  wait_panel "the summary counts the hooks" 'S("hooks")["summary"] == "3 hooks"' 30
+  check_panel "the note lines are in order, each one the card's own sentence" \
+    'S("hooks")["note"].split("\n") == ["disableAllHooks is set: the hooks marked disabled do not run.", "Only your organization\x27s hooks run; hooks from settings files are not listed.", "Only plugin hooks run: the others are marked disabled.", "Your organization\x27s settings could not be read.", "Safe mode: the hooks marked disabled do not run. To leave it, restart without --safe-mode.", "Bare mode: the hooks marked disabled do not run. To leave it, restart without ⟨U+202E⟩--bare.", "Skipped /p/.claude/settings.json: Expected ⟨U+202E⟩array"] and chr(0x202e) not in json.dumps([p, c], ensure_ascii=False)'
+  check_panel "the disabled rows say so in their tags and the session row is untagged" \
+    '[(r["label"], r["tag"]) for r in rows("hooks") if r["depth"] == 1] == [("echo d1", "User · disabled"), ("echo d2", "Project · disabled"), ("echo s", "Session")]'
+  echo "step: only the organization's switch is on"
+  local mark
+  mark=$(control_log_lines)
+  hooks_json policy_off "$HOOKS_FILE"
+  hooks_refold
+  wait_since "$mark" get_hooks_listing 1 "unfolding the card asked once"
+  wait_panel "the note is the one organization line" 'S("hooks")["note"] == "Your organization turned hooks off: the hooks marked disabled do not run."' 30
+  echo "OK: hooks_policy: the policy, safe mode, bare mode and error lines in order, and disabled tags per row"
+  stop_app
+}
+
+scenario_hooks_refused() {
+  # The chat's client exists only after the handshake: with the panel open before it, the panel-open trigger
+  # finds no client and only the connection-ready trigger can ask.
+  SIRIO_FIXTURE_HANDSHAKE_GATE="$RUN_DIR/hooks_refused-handshake"
+  rm -f "$SIRIO_FIXTURE_HANDSHAKE_GATE"
+  HOOKS_FILE="$RUN_DIR/hooks_refused-hooks.json"
+  launch hooks_refused
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  panel_ctl open >/dev/null
+  wait_panel "the column is open before the connection" 'p["open"] and c["status"] not in ("idle", "completed")' 10
+  local mark
+  mark=$(control_log_lines)
+  : >"$SIRIO_FIXTURE_HANDSHAKE_GATE"
+  wait_panel "the chat is connected" 'c["status"] in ("idle", "completed")' 30
+  wait_since "$mark" get_hooks_listing 1 "the connection asked once"
+  hooks_settled "$mark" 1 "the refusal was the only request"
+  check_panel "a refusal leaves no card" 'S("hooks") is None'
+  hooks_turn
+  hooks_settled "$mark" 1 "a turn after a refusal asks nothing: the card is retired"
+  check_panel "still no card" 'S("hooks") is None'
+  echo "OK: hooks_refused: the connection asked once, a refusal hid the card for the connection and nothing asked again"
+  stop_app
+}
+
+scenario_hooks_closed_panel() {
+  hooks_chat hooks_closed_panel one
+  local mark
+  mark=$(control_log_lines)
+  hooks_turn
+  hooks_settled "$mark" 0 "a turn with the panel closed asks nothing"
+  # Guard: sections are empty while the panel is closed, so this cannot fail on its own.
+  check_panel "no card" 'S("hooks") is None'
+  panel_ctl open >/dev/null
+  wait_since "$mark" get_hooks_listing 1 "opening the panel asks once"
+  wait_panel "the card shows before it is unfolded" 'S("hooks") is not None and S("hooks")["expanded"] is False and S("hooks")["summary"] == "1 hook"' 30
+  # Guard: nothing here can fail on its own; it is the idle open panel that a poll would show in.
+  sleep 3
+  expect_since "$mark" get_hooks_listing 1 "an open, idle panel asks nothing more"
+  echo "OK: hooks_closed_panel: the card asks only while the panel is open, and only on its triggers"
+  stop_app
+}
+
+scenario_hooks_coalesced() {
+  SIRIO_FIXTURE_HOOKS_GATE="$RUN_DIR/hooks_coalesced-gate"
+  rm -f "$SIRIO_FIXTURE_HOOKS_GATE"
+  hooks_chat hooks_coalesced one
+  local mark
+  mark=$(control_log_lines)
+  panel_ctl open >/dev/null
+  wait_since "$mark" get_hooks_listing 1 "the first ask is held by the CLI"
+  # The card is not drawn before its first answer, so it cannot be unfolded yet: reopening the panel and a
+  # turn's end are the two triggers.
+  panel_ctl close >/dev/null
+  wait_panel "the panel is closed" 'not p["open"]' 10
+  panel_ctl open >/dev/null
+  hooks_turn
+  hooks_settled "$mark" 1 "the reopening and the turn's end sent nothing while one ask was open"
+  : >"$SIRIO_FIXTURE_HOOKS_GATE"
+  wait_panel "the held answer drew the card" 'S("hooks") is not None and S("hooks")["summary"] == "1 hook"' 30
+  wait_since "$mark" get_hooks_listing 2 "the triggers made one follow-up, not two"
+  hooks_settled "$mark" 2 "and no more"
+  echo "OK: hooks_coalesced: triggers during an ask made a single follow-up"
+  stop_app
+}
+
+scenario_hooks_refresh() {
+  hooks_json empty "$RUN_DIR/hooks_refresh-hooks.json"
+  SIRIO_FIXTURE_HOOKS="$RUN_DIR/hooks_refresh-hooks.json"
+  HOOKS_FILE="$SIRIO_FIXTURE_HOOKS"
+  reload_chat hooks_refresh
+  ensure_unfolded hooks
+  wait_panel "a readable empty listing says so and has no rows" 'S("hooks")["summary"] == "No hooks" and S("hooks")["rows"] == []' 30
+  local mark
+  sleep 1.5
+  mark=$(control_log_lines)
+  hooks_json one "$HOOKS_FILE"
+  hooks_turn
+  wait_since "$mark" get_hooks_listing 1 "a turn's end asked once"
+  wait_panel "the new hook shows" 'S("hooks")["summary"] == "1 hook"' 30
+  hooks_settled "$mark" 1 "and nothing more"
+  echo "step: reload the plugins; no turn"
+  mark=$(control_log_lines)
+  local turns
+  turns=$(wc -l <"$RUN_DIR/fixture-user.log" 2>/dev/null || echo 0)
+  hooks_json two "$HOOKS_FILE"
+  panel_ctl activate "$RELOAD" >/dev/null
+  wait_since "$mark" get_hooks_listing 1 "an applied reload asked once"
+  wait_panel "the second hook shows" 'S("hooks")["summary"] == "2 hooks"' 30
+  hooks_settled "$mark" 1 "and nothing more"
+  [ "$(wc -l <"$RUN_DIR/fixture-user.log" 2>/dev/null || echo 0)" = "$turns" ] || fail "the reload took a turn"
+  echo "OK: hooks_refresh: a turn's end and an applied reload each asked again, and nothing else did"
+  stop_app
+}
+
+scenario_hooks_unreadable() {
+  hooks_chat hooks_unreadable none
+  panel_ctl open >/dev/null
+  wait_panel "the card is there with the reason and no rows" 'S("hooks") is not None and S("hooks")["summary"] == "" and S("hooks")["note"] == "Claude Code\x27s hooks could not be read: the answer had no hooks" and S("hooks")["rows"] == []' 30
+  echo "OK: hooks_unreadable: a success with no hooks is a note, not an empty list"
+  stop_app
+}
+
 # ---- the notice_* scenarios (A7) -----------------------------------------------------
 # A fresh Sirio on the notices stub with a Claude chat open and its CLI connected.
 notices_chat() { # name
@@ -4998,6 +5313,8 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_CLI_BUSY_GATE=""
   SIRIO_FIXTURE_RETRY_GATE=""
   SIRIO_FIXTURE_STARTUP=""
+  SIRIO_FIXTURE_HOOKS=""
+  SIRIO_FIXTURE_HOOKS_GATE=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))
