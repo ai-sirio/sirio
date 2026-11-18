@@ -375,7 +375,7 @@ impl Chat {
             Entry::SubagentTask {
                 title,
                 status,
-                tool_calls,
+                parts,
                 expanded,
                 ..
             } => Self::render_subagent_task(
@@ -383,7 +383,7 @@ impl Chat {
                 id.clone(),
                 title,
                 status,
-                tool_calls,
+                parts,
                 expanded,
                 theme,
                 &bezel_theme,

@@ -693,8 +693,10 @@ mod tests {
                 id: "toolu_a1".into(),
                 title: "Reviewer".into(),
                 status: "Running".into(),
-                tool_calls: Vec::new(),
+                parts: Vec::new(),
                 expanded: false,
+                by_parent: false,
+                duration_ms: None,
             });
             let agent = chat.entries.len() - 1;
             push_answers(chat, 60);

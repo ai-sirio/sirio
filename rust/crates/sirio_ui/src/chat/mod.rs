@@ -947,6 +947,29 @@ struct SubagentToolCall {
     locations: Vec<ToolCallLocationInfo>,
     expanded: bool,
     duration_ms: Option<u64>,
+    /// The subagent that made the call, when it is not the card's own.
+    agent: Option<String>,
+}
+
+/// One piece of a subagent card, in the order it happened.
+#[derive(Clone, Debug)]
+enum SubagentPart {
+    /// What the subagent was asked to do.
+    Prompt { text: String },
+    /// A call the subagent made.
+    Call(SubagentToolCall),
+    /// What the subagent said.
+    Text {
+        agent: Option<String>,
+        text: String,
+        document: bezel_markdown::Doc,
+    },
+    /// What the subagent thought; `open` is the reader's say, folded at first.
+    Thought {
+        agent: Option<String>,
+        text: String,
+        open: bool,
+    },
 }
 
 /// One rendered element of the transcript.
@@ -1003,12 +1026,17 @@ enum Entry {
     /// the child agent's work. ACP v1/v2 carry no parent-child relation, so
     /// this is deliberately a conservative presentation grouping based on
     /// the parent tool's title/input and its in-progress lifetime.
+    ///
+    /// A native Claude card (`by_parent`) is not a guess: its parts came from
+    /// the CLI tagged with this card's id, and its status is the subagent's.
     SubagentTask {
         id: String,
         title: String,
         status: String,
-        tool_calls: Vec<SubagentToolCall>,
+        parts: Vec<SubagentPart>,
         expanded: bool,
+        by_parent: bool,
+        duration_ms: Option<u64>,
     },
     /// A question the agent put to the user, answered in place (F-CHAT-25).
     /// `resolved` is the recorded answer once one is chosen or typed;
@@ -1213,15 +1241,14 @@ impl Entry {
             Self::SubagentTask {
                 title,
                 status,
-                tool_calls,
+                parts,
                 ..
             } => {
                 let mut lines = vec![format!("Subagent: {title}\n{status}")];
-                lines.extend(
-                    tool_calls
-                        .iter()
-                        .map(|call| format!("{}\n{}", call.title, call.status)),
-                );
+                lines.extend(parts.iter().filter_map(|part| match part {
+                    SubagentPart::Call(call) => Some(format!("{}\n{}", call.title, call.status)),
+                    _ => None,
+                }));
                 lines.join("\n")
             }
             Self::Permission {
@@ -1386,17 +1413,24 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                 .collect(),
             duration_ms: *duration_ms,
         }),
-        // A subagent task carries neither a tool kind nor file locations, so
-        // it stores what it has and restores exactly as it did before #168.
+        // An ACP card carries neither a tool kind nor file locations, so it
+        // stores what it has and restores exactly as it did before #168. A
+        // native card is stored as the `Think` call it was, with its time:
+        // the stored row has no content, so what it said is not kept.
         Entry::SubagentTask {
-            id, title, status, ..
+            id,
+            title,
+            status,
+            by_parent,
+            duration_ms,
+            ..
         } => Some(ChatEntry::ToolCall {
             id: id.clone(),
             title: title.clone(),
             status: status.clone(),
-            kind: None,
+            kind: by_parent.then(|| "Think".to_string()),
             locations: Vec::new(),
-            duration_ms: None,
+            duration_ms: if *by_parent { *duration_ms } else { None },
         }),
         Entry::Permission {
             request_id,
@@ -1496,6 +1530,51 @@ fn thousands(tokens: u64) -> String {
     )]
     let thousands = (tokens as f64 / 1_000.0).round() as u64;
     format!("{thousands}k")
+}
+
+/// The text items of a call's content, one per line.
+fn content_text(content: &[ToolCallContentInfo]) -> String {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            ToolCallContentInfo::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A call's content with the CLI's text cleaned for what is drawn.
+fn clean_content(content: Vec<ToolCallContentInfo>) -> Vec<ToolCallContentInfo> {
+    content
+        .into_iter()
+        .map(|item| match item {
+            ToolCallContentInfo::Text(text) => {
+                ToolCallContentInfo::Text(visible_text::visible_text(&text, true))
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// A text part from text that is already clean.
+fn text_part(agent: Option<String>, text: String) -> SubagentPart {
+    SubagentPart::Text {
+        agent,
+        document: parse_chat_markdown(&text),
+        text,
+    }
+}
+
+/// A card that ended leaves no call of its own looking at work.
+fn settle_running_calls(parts: &mut [SubagentPart]) {
+    for part in parts {
+        if let SubagentPart::Call(call) = part
+            && !is_terminal_tool_status(&call.status)
+        {
+            call.status = "Cancelled".into();
+        }
+    }
 }
 
 fn is_terminal_tool_status(status: &str) -> bool {
@@ -2482,6 +2561,14 @@ pub struct Chat {
     /// that status; a call that never settles simply leaves its start here
     /// until the chat is dropped.
     tool_started: HashMap<String, std::time::Instant>,
+    /// What a native subagent card's items did before the card was drawn,
+    /// by card id. The CLI's line that opens a card reaches the chat before
+    /// the call's own start does, so a card `Opened` named has an entry here
+    /// until its call arrives, and the items that came first wait in it.
+    pending_subagents: HashMap<String, Vec<sirio_chat::SubagentUpdate>>,
+    /// The card a background task belongs to, by task id: such a card goes on
+    /// working after its call returned, until the task ends.
+    background_cards: HashMap<String, String>,
     /// Per-entry scroll state for open thought bodies, keyed by entry index.
     /// Not persisted; created the first time a thought's body is drawn,
     /// cleared with the entries.
@@ -2887,6 +2974,8 @@ impl Chat {
             copied_target: None,
             edit_summaries: BTreeMap::new(),
             tool_started: HashMap::new(),
+            pending_subagents: HashMap::new(),
+            background_cards: HashMap::new(),
             thought_scroll: HashMap::new(),
             tool_output_scroll: HashMap::new(),
             persistence: None,
@@ -3126,11 +3215,204 @@ impl Chat {
                     },
                 }
             }
-            // A subagent's card is drawn by a later step; until then its
-            // items add no row.
-            SessionNotice::Subagent(_) => return,
+            // A subagent's work goes into its card, or waits for it; it is
+            // never a row of its own, and it leaves an open thought alone.
+            SessionNotice::Subagent(update) => {
+                self.apply_subagent_notice(update);
+                cx.notify();
+                return;
+            }
         };
         self.push_entry(entry);
+    }
+
+    /// Whether this chat talks to Claude Code itself, whose subagent cards
+    /// come tagged by the CLI rather than guessed from a call's title.
+    fn is_native_claude(&self) -> bool {
+        matches!(self.client, Some(ChatClient::Claude(_)))
+    }
+
+    /// One item of a native subagent's work. It goes into the card with that
+    /// id, or waits for the card when one was announced and is not drawn
+    /// yet; for a card nobody announced it is dropped.
+    fn apply_subagent_notice(&mut self, update: sirio_chat::SubagentUpdate) {
+        let position = self.subagent_task_position(&update.card);
+        if matches!(update.item, sirio_chat::SubagentItem::Opened) {
+            if position.is_some() {
+                return;
+            }
+            let row = self.entries.iter().rposition(
+                |entry| matches!(entry, Entry::ToolCall { id, .. } if *id == update.card),
+            );
+            match row {
+                // The call was drawn as a row before the CLI said what it is.
+                Some(index) => self.turn_row_into_card(index),
+                None => {
+                    self.pending_subagents.entry(update.card).or_default();
+                }
+            }
+        } else if let Some(index) = position {
+            self.apply_subagent_update(index, update);
+        } else if let Some(waiting) = self.pending_subagents.get_mut(&update.card) {
+            waiting.push(update);
+        }
+    }
+
+    /// A plain call row becomes the native card of that call, in place.
+    fn turn_row_into_card(&mut self, index: usize) {
+        let Some(Entry::ToolCall {
+            id,
+            title,
+            status,
+            content,
+            duration_ms,
+            ..
+        }) = self.entries.get(index)
+        else {
+            return;
+        };
+        let prompt = visible_text::visible_text(&content_text(content), true);
+        let card = Entry::SubagentTask {
+            id: id.clone(),
+            title: visible_text::visible_text(title, false),
+            status: status.clone(),
+            parts: if prompt.is_empty() {
+                Vec::new()
+            } else {
+                vec![SubagentPart::Prompt { text: prompt }]
+            },
+            expanded: false,
+            by_parent: true,
+            duration_ms: *duration_ms,
+        };
+        self.entries[index] = card;
+        self.remeasure_entry(index);
+    }
+
+    /// Puts one item into the card at `index`. What the CLI wrote is cleaned
+    /// here, once, for what is drawn, copied and read back.
+    fn apply_subagent_update(&mut self, index: usize, update: sirio_chat::SubagentUpdate) {
+        use sirio_chat::SubagentItem;
+        let agent = update
+            .agent
+            .map(|agent| visible_text::visible_text(&agent, false));
+        let part = match update.item {
+            SubagentItem::Opened => return,
+            SubagentItem::Text(text) => {
+                let text = visible_text::visible_text(&text, true);
+                if text.is_empty() {
+                    return;
+                }
+                text_part(agent, text)
+            }
+            SubagentItem::Thinking(text) => {
+                let text = visible_text::visible_text(&text, true);
+                if text.is_empty() {
+                    return;
+                }
+                SubagentPart::Thought {
+                    agent,
+                    text,
+                    open: false,
+                }
+            }
+            SubagentItem::ToolStarted {
+                id,
+                title,
+                kind,
+                status,
+                content,
+                locations,
+            } => {
+                let known = matches!(
+                    self.entries.get(index),
+                    Some(Entry::SubagentTask { parts, .. })
+                        if parts.iter().any(
+                            |part| matches!(part, SubagentPart::Call(call) if call.id == id)
+                        )
+                );
+                if known {
+                    return;
+                }
+                self.note_tool_started(&id);
+                let duration_ms = self.tool_duration_on(&id, &status);
+                SubagentPart::Call(SubagentToolCall {
+                    id,
+                    title: visible_text::visible_text(&title, false),
+                    status,
+                    kind,
+                    content: clean_content(content),
+                    locations,
+                    expanded: false,
+                    duration_ms,
+                    agent,
+                })
+            }
+            SubagentItem::ToolCompleted {
+                id,
+                status,
+                content,
+            } => {
+                let measured = self.tool_duration_on(&id, &status);
+                if let Some(Entry::SubagentTask { parts, .. }) = self.entries.get_mut(index)
+                    && let Some(call) = parts.iter_mut().find_map(|part| match part {
+                        SubagentPart::Call(call) if call.id == id => Some(call),
+                        _ => None,
+                    })
+                {
+                    call.status = status;
+                    // An empty content is nothing, not an erasure.
+                    if let Some(content) = content.filter(|content| !content.is_empty()) {
+                        call.content = clean_content(content);
+                    }
+                    if measured.is_some() {
+                        call.duration_ms = measured;
+                    }
+                    self.remeasure_entry(index);
+                }
+                return;
+            }
+        };
+        if let Some(Entry::SubagentTask { parts, .. }) = self.entries.get_mut(index) {
+            parts.push(part);
+            self.remeasure_entry(index);
+        }
+    }
+
+    /// A background task that a native card started keeps the card at work
+    /// until the task ends; a task that ended settles it.
+    fn apply_background_card(&mut self, event: &sirio_chat::BackgroundTaskEvent) {
+        match event {
+            sirio_chat::BackgroundTaskEvent::Started {
+                task_id,
+                tool_use_id: Some(card),
+                ..
+            } if self.subagent_task_position(card).is_some() => {
+                self.background_cards.insert(task_id.clone(), card.clone());
+            }
+            sirio_chat::BackgroundTaskEvent::Ended { task_id, status } => {
+                let Some(card) = self.background_cards.remove(task_id) else {
+                    return;
+                };
+                // A second end of the same task finds nothing and does nothing.
+                if let Some(index) = self.subagent_task_position(&card)
+                    && let Some(Entry::SubagentTask {
+                        status: card_status,
+                        parts,
+                        ..
+                    }) = self.entries.get_mut(index)
+                {
+                    *card_status = if status == "completed" {
+                        "Completed".into()
+                    } else {
+                        "Failed".into()
+                    };
+                    settle_running_calls(parts);
+                    self.remeasure_entry(index);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Add one transcript row and keep the virtualizer's index tree in sync.
@@ -3211,13 +3493,13 @@ impl Chat {
             .enumerate()
             .rev()
             .find_map(|(task_index, entry)| {
-                let Entry::SubagentTask { tool_calls, .. } = entry else {
+                let Entry::SubagentTask { parts, .. } = entry else {
                     return None;
                 };
-                tool_calls
+                parts
                     .iter()
-                    .position(|call| call.id == id)
-                    .map(|child_index| (task_index, child_index))
+                    .position(|part| matches!(part, SubagentPart::Call(call) if call.id == id))
+                    .map(|part_index| (task_index, part_index))
             })
     }
 
@@ -3240,17 +3522,20 @@ impl Chat {
         cx.notify();
     }
 
-    /// Flips one nested tool call without changing the parent task card.
-    fn toggle_subagent_tool_call_expanded(
+    /// Flips one part of a task card without changing the card itself: a
+    /// call's `expanded`, or a thought's `open`.
+    fn toggle_subagent_part_expanded(
         &mut self,
         task_index: usize,
-        child_index: usize,
+        part_index: usize,
         cx: &mut Context<Self>,
     ) {
-        if let Some(Entry::SubagentTask { tool_calls, .. }) = self.entries.get_mut(task_index)
-            && let Some(call) = tool_calls.get_mut(child_index)
-        {
-            call.expanded = !call.expanded;
+        if let Some(Entry::SubagentTask { parts, .. }) = self.entries.get_mut(task_index) {
+            match parts.get_mut(part_index) {
+                Some(SubagentPart::Call(call)) => call.expanded = !call.expanded,
+                Some(SubagentPart::Thought { open, .. }) => *open = !*open,
+                _ => return,
+            }
             self.remeasure_entry(task_index);
         }
         cx.notify();
@@ -3457,25 +3742,49 @@ impl Chat {
                 self.maybe_follow_location(&locations, cx);
                 self.note_tool_started(&id);
                 let duration_ms = self.tool_duration_on(&id, &status);
-                if is_subagent_tool_call(&title, raw_input.as_deref()) {
+                let native = self.is_native_claude();
+                if let Some(items) = self.pending_subagents.remove(&id) {
+                    // A native card: its items came first, and so did the
+                    // prompt, which is the call's own text.
+                    let mut parts = Vec::new();
+                    let prompt = visible_text::visible_text(&content_text(&content), true);
+                    if !prompt.is_empty() {
+                        parts.push(SubagentPart::Prompt { text: prompt });
+                    }
+                    self.push_entry(Entry::SubagentTask {
+                        id,
+                        title: visible_text::visible_text(&title, false),
+                        status,
+                        parts,
+                        expanded: false,
+                        by_parent: true,
+                        duration_ms,
+                    });
+                    let index = self.entries.len() - 1;
+                    for update in items {
+                        self.apply_subagent_update(index, update);
+                    }
+                } else if !native && is_subagent_tool_call(&title, raw_input.as_deref()) {
                     self.push_entry(Entry::SubagentTask {
                         id,
                         title,
                         status,
-                        tool_calls: Vec::new(),
+                        parts: Vec::new(),
                         expanded: false,
+                        by_parent: false,
+                        duration_ms: None,
                     });
                 } else if let Some(index) = self.entries.iter().rposition(|entry| {
                     matches!(
                         entry,
-                        Entry::SubagentTask { status, .. }
+                        Entry::SubagentTask { status, by_parent: false, .. }
                             if !is_terminal_tool_status(status)
                     )
                 }) {
-                    if let Some(Entry::SubagentTask { tool_calls, .. }) =
+                    if let Some(Entry::SubagentTask { parts, .. }) =
                         self.entries.get_mut(index)
                     {
-                        tool_calls.push(SubagentToolCall {
+                        parts.push(SubagentPart::Call(SubagentToolCall {
                             id,
                             title,
                             status,
@@ -3484,7 +3793,8 @@ impl Chat {
                             locations,
                             expanded: false,
                             duration_ms,
-                        });
+                            agent: None,
+                        }));
                         self.remeasure_entry(index);
                     }
                 } else {
@@ -3522,11 +3832,16 @@ impl Chat {
                     if let Some(Entry::SubagentTask {
                         title: existing_title,
                         status: existing_status,
+                        by_parent,
                         ..
                     }) = self.entries.get_mut(task_index)
                     {
                         if let Some(title) = title {
-                            *existing_title = title;
+                            *existing_title = if *by_parent {
+                                visible_text::visible_text(&title, false)
+                            } else {
+                                title
+                            };
                         }
                         if let Some(status) = status {
                             *existing_status = status;
@@ -3534,9 +3849,9 @@ impl Chat {
                         self.remeasure_entry(task_index);
                     }
                 } else if let Some((task_index, child_index)) = self.nested_tool_call_position(&id) {
-                    if let Some(Entry::SubagentTask { tool_calls, .. }) =
+                    if let Some(Entry::SubagentTask { parts, .. }) =
                         self.entries.get_mut(task_index)
-                        && let Some(call) = tool_calls.get_mut(child_index)
+                        && let Some(SubagentPart::Call(call)) = parts.get_mut(child_index)
                     {
                         if let Some(title) = title {
                             call.title = title;
@@ -3616,16 +3931,47 @@ impl Chat {
                 }
                 let measured = self.tool_duration_on(&id, &status);
                 if let Some(task_index) = self.subagent_task_position(&id) {
-                    if let Some(Entry::SubagentTask { status: existing_status, .. }) =
-                        self.entries.get_mut(task_index)
+                    let held = self.background_cards.values().any(|card| *card == id);
+                    let error = visible_text::visible_text(
+                        &content.as_deref().map(content_text).unwrap_or_default(),
+                        true,
+                    );
+                    if let Some(Entry::SubagentTask {
+                        status: existing_status,
+                        parts,
+                        by_parent,
+                        duration_ms,
+                        ..
+                    }) = self.entries.get_mut(task_index)
                     {
-                        *existing_status = status;
+                        if measured.is_some() {
+                            *duration_ms = measured;
+                        }
+                        // A card whose task still runs is not done: its call
+                        // only returned the news that the task began.
+                        if !(*by_parent && held) {
+                            if *by_parent && is_terminal_tool_status(&status) {
+                                settle_running_calls(parts);
+                            }
+                            // The call's own text is never drawn, but an
+                            // error is all a failed card has to say.
+                            if *by_parent
+                                && status.eq_ignore_ascii_case("failed")
+                                && !error.is_empty()
+                                && !parts
+                                    .iter()
+                                    .any(|part| matches!(part, SubagentPart::Text { .. }))
+                            {
+                                parts.push(text_part(None, error));
+                            }
+                            *existing_status = status;
+                        }
                         self.remeasure_entry(task_index);
                     }
                 } else if let Some((task_index, child_index)) = self.nested_tool_call_position(&id) {
-                    if let Some(Entry::SubagentTask { tool_calls, .. }) =
+                    if let Some(Entry::SubagentTask { parts, .. }) =
                         self.entries.get_mut(task_index)
-                        && let Some(call) = tool_calls.get_mut(child_index)
+                        && let Some(SubagentPart::Call(call)) = parts.get_mut(child_index)
                     {
                         call.status = status;
                         if let Some(kind) = kind {
@@ -4073,6 +4419,7 @@ impl Chat {
                 return;
             }
             sirio_chat::ChatEvent::BackgroundTask(event) => {
+                self.apply_background_card(&event);
                 self.apply_background_event(event, cx);
             }
             sirio_chat::ChatEvent::SessionRenamed { title, error } => {
@@ -8646,8 +8993,10 @@ pub(crate) mod testing {
             id: id.into(),
             title: title.into(),
             status: "Completed".into(),
-            tool_calls: Vec::new(),
+            parts: Vec::new(),
             expanded: false,
+            by_parent: false,
+            duration_ms: None,
         });
         chat.entries.len() - 1
     }
@@ -10946,10 +11295,10 @@ two"
                 matches!(
                     entry,
                     Entry::SubagentTask {
-                        tool_calls,
+                        parts,
                         status,
                         ..
-                    } if status == "Completed" && !tool_calls.is_empty()
+                    } if status == "Completed" && !parts.is_empty()
                 )
             })
         });
@@ -11000,12 +11349,267 @@ two"
             chat.read_with(&cx.cx, |chat, _| {
                 matches!(
                     chat.entries.get(1),
-                    Some(Entry::SubagentTask { tool_calls, .. })
-                        if tool_calls.first().is_some_and(|call| call.expanded)
+                    Some(Entry::SubagentTask { parts, .. })
+                        if matches!(parts.first(), Some(SubagentPart::Call(call)) if call.expanded)
                 )
             }),
             "the nested tool call expands independently"
         );
+    }
+
+    // Ways a native subagent card can fail, and a test for each below:
+    // - items that came before the card's `ToolCallStarted` are lost;
+    // - a native child attaches by position, not by its card;
+    // - a main call beside an open native card goes into it;
+    // - a late `Opened` leaves a plain row;
+    // - an item for an unknown card panics or draws a row;
+    // - a background card says Completed while it works;
+    // - a card ends with children still running;
+    // - the ACP card stops grouping (the test above);
+    // - a native `Bash` titled "spawn" becomes a card.
+
+
+    fn notice(chat: &mut Chat, card: &str, item: sirio_chat::SubagentItem, cx: &mut Context<Chat>) {
+        chat.apply_notice(
+            sirio_chat::SessionNotice::Subagent(sirio_chat::SubagentUpdate {
+                card: card.into(),
+                agent: None,
+                item,
+            }),
+            cx,
+        );
+    }
+
+    fn started(id: &str, title: &str, prompt: Option<&str>) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::ToolCallStarted {
+            id: id.into(),
+            title: title.into(),
+            status: "InProgress".into(),
+            kind: "Think".into(),
+            content: prompt
+                .map(|text| vec![ToolCallContentInfo::Text(text.into())])
+                .unwrap_or_default(),
+            locations: vec![],
+            raw_input: None,
+            raw_output: None,
+        }
+    }
+
+    fn completed(
+        id: &str,
+        status: &str,
+        content: Option<Vec<ToolCallContentInfo>>,
+    ) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::ToolCallCompleted {
+            id: id.into(),
+            status: status.into(),
+            kind: None,
+            content,
+            locations: None,
+            raw_input: None,
+            raw_output: None,
+        }
+    }
+
+    fn child_started(id: &str) -> sirio_chat::SubagentItem {
+        sirio_chat::SubagentItem::ToolStarted {
+            id: id.into(),
+            title: "ls".into(),
+            kind: "Execute".into(),
+            status: "InProgress".into(),
+            content: vec![],
+            locations: vec![],
+        }
+    }
+
+    fn card_parts(chat: &Chat, index: usize) -> &[SubagentPart] {
+        match chat.entries.get(index) {
+            Some(Entry::SubagentTask { parts, .. }) => parts,
+            _ => panic!("entry {index} is not a card"),
+        }
+    }
+
+    fn card_status(chat: &Chat, index: usize) -> String {
+        match chat.entries.get(index) {
+            Some(Entry::SubagentTask { status, .. }) => status.clone(),
+            _ => panic!("entry {index} is not a card"),
+        }
+    }
+
+    #[gpui::test]
+    async fn items_before_the_card_are_kept(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            notice(chat, "a", sirio_chat::SubagentItem::Text("Hi.".into()), cx);
+            notice(chat, "a", sirio_chat::SubagentItem::Thinking("Hm.".into()), cx);
+            assert!(chat.entries.is_empty(), "nothing is drawn before the card");
+            chat.handle_event(started("a", "Explore", Some("Go.")), cx);
+            let Some(Entry::SubagentTask {
+                by_parent,
+                expanded,
+                parts,
+                ..
+            }) = chat.entries.last()
+            else {
+                panic!("the call became a card");
+            };
+            assert!(*by_parent && !*expanded);
+            assert!(matches!(parts.as_slice(), [
+                SubagentPart::Prompt { text: p },
+                SubagentPart::Text { text: t, .. },
+                SubagentPart::Thought { text: h, open: false, .. },
+            ] if p == "Go." && t == "Hi." && h == "Hm."));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_native_child_goes_to_its_own_card_not_the_latest(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            for card in ["a", "b"] {
+                notice(chat, card, sirio_chat::SubagentItem::Opened, cx);
+                chat.handle_event(started(card, "Explore", None), cx);
+            }
+            notice(chat, "a", child_started("c1"), cx);
+            assert!(matches!(card_parts(chat, 0), [SubagentPart::Call(call)] if call.id == "c1"));
+            assert!(card_parts(chat, 1).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_main_call_beside_an_open_native_card_stays_top_level(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            chat.handle_event(started("ls", "ls", None), cx);
+            assert!(matches!(chat.entries.last(), Some(Entry::ToolCall { id, .. }) if id == "ls"));
+            assert!(card_parts(chat, 0).is_empty());
+            let before = chat.entries.len();
+            notice(chat, "missing", sirio_chat::SubagentItem::Text("x".into()), cx);
+            assert_eq!(chat.entries.len(), before, "an unknown card adds no row");
+            assert!(card_parts(chat, 0).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_late_open_turns_the_row_into_a_card(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(started("a", "Explore", Some("Go.")), cx);
+            assert!(matches!(chat.entries.last(), Some(Entry::ToolCall { .. })));
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            notice(chat, "a", sirio_chat::SubagentItem::Text("Hi.".into()), cx);
+            assert_eq!(chat.entries.len(), 1, "turned in place");
+            assert!(matches!(card_parts(chat, 0), [
+                SubagentPart::Prompt { text: p },
+                SubagentPart::Text { text: t, .. },
+            ] if p == "Go." && t == "Hi."));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_background_card_runs_until_its_task_ends(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            notice(chat, "a", child_started("c1"), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::BackgroundTask(sirio_chat::BackgroundTaskEvent::Started {
+                    task_id: "t".into(),
+                    tool_use_id: Some("a".into()),
+                    task_type: None,
+                    description: "Explore".into(),
+                }),
+                cx,
+            );
+            chat.handle_event(completed("a", "Completed", None), cx);
+            assert_eq!(card_status(chat, 0), "InProgress");
+            notice(chat, "a", sirio_chat::SubagentItem::Text("Later.".into()), cx);
+            assert!(matches!(card_parts(chat, 0).last(), Some(SubagentPart::Text { .. })));
+            chat.handle_event(
+                sirio_chat::ChatEvent::BackgroundTask(sirio_chat::BackgroundTaskEvent::Ended {
+                    task_id: "t".into(),
+                    status: "completed".into(),
+                }),
+                cx,
+            );
+            assert_eq!(card_status(chat, 0), "Completed");
+            assert!(card_parts(chat, 0).iter().any(|part| matches!(
+                part,
+                SubagentPart::Call(call) if call.id == "c1" && call.status == "Cancelled"
+            )));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_card_shows_its_error(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            chat.handle_event(
+                completed(
+                    "a",
+                    "Failed",
+                    Some(vec![ToolCallContentInfo::Text("Agent type not found".into())]),
+                ),
+                cx,
+            );
+            assert!(matches!(card_parts(chat, 0), [
+                SubagentPart::Text { text, .. }
+            ] if text == "Agent type not found"));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_card_never_draws_its_own_result(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            notice(chat, "a", sirio_chat::SubagentItem::Text("Done.".into()), cx);
+            chat.handle_event(
+                completed("a", "Completed", Some(vec![ToolCallContentInfo::Text("Done.".into())])),
+                cx,
+            );
+            assert_eq!(card_parts(chat, 0).len(), 1);
+            assert_eq!(card_status(chat, 0), "Completed");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_native_bash_titled_spawn_stays_a_row(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("control.jsonl");
+        let (chat, cx) = claude_chat_logging_controls(cx, "effort_ladder", &log);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(started("b", "spawn the server", None), cx);
+            assert!(matches!(chat.entries.last(), Some(Entry::ToolCall { id, .. }) if id == "b"));
+        });
+    }
+
+    #[gpui::test]
+    async fn text_from_the_cli_is_cleaned_before_the_card_keeps_it(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        // Built at run time: no literal bidi character in the source.
+        let bidi = char::from_u32(0x202E).unwrap();
+        chat.update(cx, |chat, cx| {
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            notice(chat, "a", sirio_chat::SubagentItem::Text(format!("a{bidi}b")), cx);
+            chat.handle_event(started("a", "Ex\u{1b}[31mplore", Some(&format!("p{bidi}q"))), cx);
+            let Some(Entry::SubagentTask { title, parts, .. }) = chat.entries.last() else {
+                panic!("a card");
+            };
+            let shown = format!("{title}{}", parts.iter().map(|part| match part {
+                SubagentPart::Prompt { text } | SubagentPart::Text { text, .. } => text.as_str(),
+                _ => "",
+            }).collect::<String>());
+            assert!(!shown.contains(bidi) && !shown.contains('\u{1b}'));
+        });
     }
 
     /// F-CHAT-23: a permission request with no renderable choice is not
@@ -20470,13 +21074,16 @@ two"
             locations: vec![],
             expanded: false,
             duration_ms: None,
+            agent: None,
         };
-        let task = |id: &str, tool_calls: Vec<SubagentToolCall>| Entry::SubagentTask {
+        let task = |id: &str, calls: Vec<SubagentToolCall>| Entry::SubagentTask {
             id: id.into(),
             title: "Explore".into(),
             status: "Completed".into(),
-            tool_calls,
+            parts: calls.into_iter().map(SubagentPart::Call).collect(),
             expanded: false,
+            by_parent: false,
+            duration_ms: None,
         };
         let (chat, cx) = offline_chat_view(cx);
         let (container, agent) = chat.update(cx, |chat, cx| {

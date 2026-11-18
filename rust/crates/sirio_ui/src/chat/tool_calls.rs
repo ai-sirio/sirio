@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use super::{
     Chat, DIFF_PREVIEW_MAX_LINES, DiffPreviewContext, DiffPreviewSelection, EditSummaryState,
-    Entry, SubagentToolCall, TranscriptInteraction, diff_preview_lines, project_tool_content,
+    Entry, SubagentPart, TranscriptInteraction, diff_preview_lines, project_tool_content,
     tool_call_plain_text,
 };
 use sirio_chat::{ToolCallContentInfo, ToolCallLocationInfo};
@@ -196,8 +196,11 @@ impl Chat {
                     }
                 }
             }
-            Entry::SubagentTask { tool_calls, .. } => {
-                for (child_index, call) in tool_calls.iter().enumerate() {
+            Entry::SubagentTask { parts, .. } => {
+                for (child_index, part) in parts.iter().enumerate() {
+                    let SubagentPart::Call(call) = part else {
+                        continue;
+                    };
                     let mut ordinal = 0usize;
                     let mut diff_ordinal = 0usize;
                     for item in &call.content {
@@ -290,11 +293,11 @@ impl Chat {
             .expanded(expanded, move |desired, _, cx| toggle_entity.update(cx, |chat, cx| {
                 let current = match nested {
                     None => matches!(chat.entries.get(entry_index), Some(Entry::ToolCall { expanded: true, .. })),
-                    Some((task, child)) => matches!(chat.entries.get(task), Some(Entry::SubagentTask { tool_calls, .. }) if tool_calls.get(child).is_some_and(|call| call.expanded)),
+                    Some((task, child)) => matches!(chat.entries.get(task), Some(Entry::SubagentTask { parts, .. }) if matches!(parts.get(child), Some(SubagentPart::Call(call)) if call.expanded)),
                 };
                 if current != desired { match nested {
                     None => chat.toggle_tool_call_expanded(entry_index, cx),
-                    Some((task, child)) => chat.toggle_subagent_tool_call_expanded(task, child, cx),
+                    Some((task, child)) => chat.toggle_subagent_part_expanded(task, child, cx),
                 } }
             }));
         if let Some(ms) = duration_ms {
@@ -579,7 +582,7 @@ impl Chat {
         row_id: ElementId,
         title: String,
         status: String,
-        tool_calls: Vec<SubagentToolCall>,
+        parts: Vec<SubagentPart>,
         expanded: bool,
         theme: &Theme,
         bezel_theme: &bezel_theme::Theme,
@@ -594,12 +597,22 @@ impl Chat {
                 if matches!(chat.entries.get(task_index), Some(Entry::SubagentTask { expanded, .. }) if *expanded != desired) { chat.toggle_subagent_task_expanded(task_index, cx); }
             }));
         if expanded {
-            for (child_index, call) in tool_calls.into_iter().enumerate() {
+            // The calls only; Task 3 draws the other parts.
+            let calls = parts
+                .into_iter()
+                .enumerate()
+                .filter_map(|(child_index, part)| match part {
+                    SubagentPart::Call(call) => Some((child_index, call)),
+                    _ => None,
+                });
+            let mut first = true;
+            for (child_index, call) in calls {
+                let is_first = std::mem::take(&mut first);
                 group = group.child(Self::render_tool_row(
                     task_index,
                     (row_id.clone(), format!("child-{child_index}")).into(),
                     Some((task_index, child_index)),
-                    child_index == 0,
+                    is_first,
                     &call.title,
                     &call.status,
                     &call.kind,
