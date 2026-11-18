@@ -283,13 +283,15 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   permission_rules_after_always_allow   Always allow refreshes the card while the turn's result is still held
 #   permission_rules_unreadable   a success with no rules is a note on the card, with no rows
 # The hooks_* scenarios (A8) run on the session-panel stub with SIRIO_FIXTURE_HOOKS (the JSON file get_hooks_listing
-# answers from, re-read on every request; unset: refused) and SIRIO_FIXTURE_HOOKS_GATE (holds every answer until the
-# file exists). Requests are counted in the control log after a mark:
+# answers from, re-read on every request; unset: refused), SIRIO_FIXTURE_HOOKS_GATE (holds every answer until the
+# file exists) and SIRIO_FIXTURE_HANDSHAKE_GATE (holds the handshake, for hooks_refused). Requests are counted in
+# the control log after a mark:
 #   hooks_card         every group, row key, label, detail, tag and the unfolded bodies (a bidi command and a
 #                      multi-line command shown as text, the command last), no `editable` anywhere in the read,
 #                      and the last good listing kept after an unreadable answer
 #   hooks_policy       the section note's lines in order, the per-row disabled tags, and the one-line organization note
-#   hooks_refused      the floor refuses: no section, one request, and still one after a turn
+#   hooks_refused      the panel opens during a held handshake, so only the connection-ready trigger asks; the floor
+#                      refuses: no section, one request, and still one after a turn
 #   hooks_closed_panel no request with the panel closed through a turn; one when it opens
 #   hooks_coalesced    triggers during a held answer make one follow-up: two requests in all
 #   hooks_refresh      a turn's end and a reload that applied plugins each ask again; nothing polls
@@ -1218,7 +1220,8 @@ capture() { # name
 #   SIRIO_FIXTURE_REQUEST_LOG  the file the background-tasks stub appends every control request to
 #   SIRIO_FIXTURE_TITLE_STORE, SIRIO_FIXTURE_RENAME_ERROR, SIRIO_FIXTURE_HANDSHAKE_GATE, SIRIO_FIXTURE_RENAME_GATE
 #                  the rename stub's CLI title file, the error it answers every rename with, the file that holds its
-#                  handshake and the file that holds every rename's answer (rename_*)
+#                  handshake (the session-panel stub forwards SIRIO_FIXTURE_HANDSHAKE_GATE too, for hooks_refused) and
+#                  the file that holds every rename's answer (rename_*)
 #   SIRIO_FIXTURE_PERMISSION_FIELDS, SIRIO_FIXTURE_PERMISSION_RULES, SIRIO_FIXTURE_RULES_LOG, SIRIO_FIXTURE_RULES_GATE,
 #                  SIRIO_FIXTURE_RESULT_GATE  the permissions stub's files, each handed to the fixture as its
 #                  --fixture-permission-fields / -permission-rules / -rules-log / -rules-gate / -result-gate flag:
@@ -1227,6 +1230,8 @@ capture() { # name
 #   SIRIO_FIXTURE_RELOAD, SIRIO_FIXTURE_RELOAD_GATE, SIRIO_FIXTURE_SKILLS, SIRIO_FIXTURE_CLI_BUSY_GATE  the session-panel stub's
 #                  reload kind, the file that holds every reload_plugins answer, refused for reload_skills, and the file
 #                  that holds the CLI's running state (reload_*)
+#   SIRIO_FIXTURE_HOOKS, SIRIO_FIXTURE_HOOKS_GATE  the session-panel stub's file whose JSON answers get_hooks_listing,
+#                  and the file that holds every one of those answers (hooks_*)
 #   SIRIO_FIXTURE_RETRY_GATE, SIRIO_FIXTURE_STARTUP  the notices stub's file that holds `retry twice` after its retries,
 #                  and the kind of start-up failure the CLI reports (notice_*)
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
@@ -4867,7 +4872,7 @@ if kind == "card":
                    event("UserPromptSubmit", "When the user submits a prompt"),
                    event("Stop", "Right before Claude concludes its response"),
                    event("SubagentStart", "When a subagent (Agent tool call) is started")],
-        # First-seen order (Stop, SubagentStart, UserPromptSubmit, PreToolUse, Future/Event) is not events[] order.
+        # First-seen order (Stop, SubagentStart, UserPromptSubmit, Future/Event, PreToolUse) is not events[] order.
         "hooks": [
             hook("Stop", "projectSettings", "echo stop", "", "Project settings",
                  runsOnce=True, runsInBackground=True),
@@ -4984,11 +4989,11 @@ scenario_hooks_card() {
     ("hooks/SubagentStart/0", 1, "https://example.test/hook", "", "User", False, None, ""),
     ("hooks/Future%2FEvent", 0, "Future/Event", "", "1", True, None, ""),
     ("hooks/Future%2FEvent/0", 1, "echo fe", "", "User", False, None, "")]'
-  check_panel "every group and hook row has its key, depth, label, detail, tag and fold, none an action, a path or a note" \
+  check_panel "every group and hook row has its key, depth, label, detail, tag and fold, none an action or a note" \
     '[(r["key"], r["depth"], r["label"], r["detail"], r["tag"], r["expanded"], r["action"], r["note"]) for r in rows("hooks")] == '"$want"
   echo "step: unfold the rows with the bodies worth reading"
   local key
-  for key in hooks/PreToolUse/1 hooks/PreToolUse/3 hooks/PreToolUse/4 hooks/SubagentStart/0 hooks/Stop/0; do
+  for key in hooks/PreToolUse/1 hooks/PreToolUse/3 hooks/PreToolUse/4 hooks/UserPromptSubmit/1 hooks/SubagentStart/0 hooks/Stop/0; do
     panel_ctl toggle "$key" >/dev/null
     wait_panel "the $key row is unfolded" "R('hooks', '$key')['expanded'] is True" 10
   done
@@ -4996,6 +5001,10 @@ scenario_hooks_card() {
     '"\n" not in R("hooks", "hooks/PreToolUse/3")["label"] and R("hooks", "hooks/PreToolUse/3")["note"] == "Source: User settings\nCommand: echo a\nSource: Managed settings (set by your organization)"'
   check_panel "the bidi override is shown as text in the body, the label, the matcher and the tag, and never carried" \
     'R("hooks", "hooks/PreToolUse/4")["note"] == "Source: User settings\nCommand: bash ~/.claude/hooks/x.sh ⟨U+202E⟩evil" and chr(0x202e) not in json.dumps([p, c], ensure_ascii=False)'
+  check_panel "a hostile source label is shown as text in the body, which ends with the command" \
+    'R("hooks", "hooks/UserPromptSubmit/1")["note"] == "Source: Future ⟨U+202E⟩hooks\nCommand: echo future"'
+  check_panel "the body shows the command, not the display text, last" \
+    'R("hooks", "hooks/PreToolUse/1")["note"].endswith("Command: echo two")'
   check_panel "the timeout, the condition and the options are the body's lines" \
     'R("hooks", "hooks/PreToolUse/1")["note"].split("\n")[1] == "timeout 7 s" and R("hooks", "hooks/SubagentStart/0")["note"] == "Source: User settings\nif Bash(ls *)\nURL: https://example.test/hook" and R("hooks", "hooks/Stop/0")["note"].split("\n")[1] == "runs once · runs in the background"'
   local read
@@ -5039,7 +5048,6 @@ scenario_hooks_refused() {
   # finds no client and only the connection-ready trigger can ask.
   SIRIO_FIXTURE_HANDSHAKE_GATE="$RUN_DIR/hooks_refused-handshake"
   rm -f "$SIRIO_FIXTURE_HANDSHAKE_GATE"
-  HOOKS_FILE="$RUN_DIR/hooks_refused-hooks.json"
   launch hooks_refused
   ctl project add "$PRIMARY" >/dev/null
   open_chat

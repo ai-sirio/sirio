@@ -198,6 +198,77 @@ before the first answer, after a refusal and with no rules control.
   a real answer on a configured `CLAUDE_CONFIG_DIR`; below 2.1.325 it accepts a refusal or a
   parse, and it has run only on 2.1.326.
 
+**The Hooks card (A8)** lists the hooks Claude Code loaded for the session, as the terminal's
+`/hooks` menu does, from `get_hooks_listing` (`sirio_claude::hooks`). It is read-only and is drawn
+only for native Claude, where the client has hooks control (`HooksControl`, a detached handle like
+`RulesControl`); an ACP chat has none. It starts folded, right after Permissions. The section is
+absent before the first answer, after a refusal and with no hooks control.
+- **What is read.** `events`, `hooks`, `policy`, `safeMode`, `bareMode` and `errors`. `eventCatalog`
+  is not: it feeds an add-hook form, and the card edits nothing. A row's `editable`, its raw
+  configuration with the characters unescaped, is never read: it is not in the reader's type, so it
+  cannot reach `surface.chat.read`. A row with neither `displayText` nor `commandText`, or with no
+  `event`, is dropped; a field of the wrong JSON type counts as absent.
+- **Rows.** One group per event, with its hook count as the tag and the CLI's `summary` of the event
+  as the detail; each group folds on its own and starts open (row keys `hooks/PreToolUse`,
+  `hooks/PreToolUse/0`, ...; a `/` in an event name is `%2F` in the key; no row has an action).
+  Groups follow `events[]`, which lists only events with hooks, in lifecycle order; an event it does
+  not list gets its group after them, in first-seen order. A hook row shows `displayText` (the
+  status message when the hook has one) with its matcher as the detail, starts closed, and unfolds
+  to a body.
+- **Source words.** The tag is `User`, `Project`, `Local`, `Startup` (`--settings`), `Plugin <name>`
+  (`Plugin` with no name), `Session`, `Managed` or `Built-in`, from `source`; an unknown source
+  shows its `sourceLabel`, or the raw `source` when that is empty. ` · disabled` follows when the
+  CLI marks the row disabled. The section's summary is `No hooks`, `1 hook` or `<n> hooks`, and
+  empty when only an error is held.
+- **Body.** Up to three parts, each only when there is something to say: `Source: <label>`, the
+  row's `sourceLabel`, not the tag's word; the options in one line (`if <condition>`,
+  `timeout <n> s`, `runs once`, `runs in the background`, joined by ` · `); and the command, under
+  the CLI's own label (`Command`, `Prompt`, `URL`, `MCP tool`, `Script`, `Script file`,
+  `Definition`), or with no label when it is empty. The command comes last and is the only
+  multi-line part, so its own text cannot pose as a line above it. Only `commandText` goes in the
+  body: `displayText` may be a status message. Every CLI string goes through `visible_text`, so a
+  bidi override shows as `⟨U+202E⟩`, never carried.
+- **Notes.** The card's note is one line per condition. None claims every hook is off, and the
+  lines about disabled hooks (`disabledByPolicy`, `disableAllHooks`, `pluginOnly`, safe mode and
+  bare mode) point at the rows marked disabled, since disabled is the CLI's mark on a row and
+  Sirio computes none. `disabledByPolicy` says `Your organization turned hooks off: ...`, and when
+  it is set the `allDisabled` flag adds nothing; otherwise it says `disableAllHooks is set` (the
+  settings key that sets the flag; a fixture's `policy` uses `allDisabled`). `managedOnly` says
+  hooks from settings files are not listed (a plugin row stays, marked disabled), `pluginOnly` says
+  the others are marked disabled, and `policyUnreadable` says the organization's settings could not
+  be read. Safe mode and bare mode each add a line with the CLI's `exitHint`, and safe mode adds
+  that the organization's hooks still run when `managedHooksStillApply`. Each skipped settings file
+  is `Skipped <file>: <message>`.
+- **Triggers.** The ask runs only while the panel is open, and the section's state is that of the
+  current client: it is cleared with each new one. The triggers are opening the panel, restoring
+  it open, unfolding the card, a connection becoming ready, a turn's end and a plugin reload that
+  applied. The turn's end matters because a skill's own hooks appear as `Session` hooks only once
+  the skill ran. The reload matters because a plugin's hooks change only after `reload_plugins`.
+  The restore trigger is not exercised by an E2E.
+- **No polling.** The CLI sends no event when hooks change. A settings edit shows in the listing
+  about a second later with no message, and a plugin's hooks only after a reload. So the card never
+  polls, and the known limit is an edit made while the open panel sits idle: it shows at the next
+  trigger. The CLI answers at any time, mid-turn included.
+- **Coalescing.** As for Permissions: one ask at a time, a single follow-up however many triggers
+  come, `background_spawn`, bounded at 10 s (`Claude Code did not answer in 10 s`).
+- **Refusal and error.** A refusal (`is_refusal`, the 2.1.257 floor's `Unsupported control request
+  subtype: get_hooks_listing`) retires the card until the next connection. Any other failure,
+  including an answer with no `hooks` array, keeps the last good listing and adds `Claude Code's
+  hooks could not be read: <error>`; with no listing yet, the note stands alone. An unreadable
+  answer is never shown as "no hooks". A new connection drops the open ask, so an old answer never
+  lands.
+- **The fixture's default.** With no `--fixture-hooks` file the fixture refuses the request as the
+  floor does, so a scenario that wants a card must name a file. The chat's client exists only after
+  the handshake, so a panel opened before the connection can only be asked by the connection-ready
+  trigger; `hooks_refused` holds the handshake (`--fixture-handshake-gate`) to prove that one.
+- **Live.** `claude_lists_hooks` (`sirio_agents/tests/acp_conformance.rs`, `#[ignore]`) lists a
+  user and a project hook on a configured `CLAUDE_CONFIG_DIR` against the fake API, checks the
+  rows, events and policy, and that no hook command ran. It SKIPs on a host with managed settings
+  and below 2.1.325 accepts a refusal or a parse. Run it with:
+
+      TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance \
+          claude_lists_hooks -- --ignored --nocapture --test-threads=1
+
 **The Trace card** shows what the native Claude transport reports of the chat's latest turn, and
 only once the chat has received a `TraceEvent`, which no ACP client ever sends. Folded it is one
 line (`Live · 34s`, `Waiting for you · 46s`, `Done · 14s · $0.31`, `Interrupted · 12s`,
