@@ -1557,15 +1557,6 @@ fn clean_content(content: Vec<ToolCallContentInfo>) -> Vec<ToolCallContentInfo> 
         .collect()
 }
 
-/// A text part from text that is already clean.
-fn text_part(agent: Option<String>, text: String) -> SubagentPart {
-    SubagentPart::Text {
-        agent,
-        document: parse_chat_markdown(&text),
-        text,
-    }
-}
-
 /// A card that ended leaves no call of its own looking at work.
 fn settle_running_calls(parts: &mut [SubagentPart]) {
     for part in parts {
@@ -3258,6 +3249,16 @@ impl Chat {
         }
     }
 
+    /// A text part from text that is already clean; the files it names are
+    /// links, as in the assistant's own reply.
+    fn text_part(&mut self, agent: Option<String>, text: String) -> SubagentPart {
+        SubagentPart::Text {
+            agent,
+            document: parse_linked_markdown(&text, &self.agent_cwd, &mut self.file_link_memo),
+            text,
+        }
+    }
+
     /// A plain call row becomes the native card of that call, in place.
     fn turn_row_into_card(&mut self, index: usize) {
         let Some(Entry::ToolCall {
@@ -3303,7 +3304,7 @@ impl Chat {
                 if text.is_empty() {
                     return;
                 }
-                text_part(agent, text)
+                self.text_part(agent, text)
             }
             SubagentItem::Thinking(text) => {
                 let text = visible_text::visible_text(&text, true);
@@ -3379,6 +3380,40 @@ impl Chat {
         }
     }
 
+    /// Ends a native card: its status, its time, and the calls still running.
+    fn close_card(&mut self, card: &str, status: &str) {
+        let measured = self.tool_duration_on(card, status);
+        if let Some(index) = self.subagent_task_position(card)
+            && let Some(Entry::SubagentTask {
+                status: card_status,
+                parts,
+                duration_ms,
+                ..
+            }) = self.entries.get_mut(index)
+        {
+            *card_status = status.into();
+            if measured.is_some() {
+                *duration_ms = measured;
+            }
+            settle_running_calls(parts);
+            self.remeasure_entry(index);
+        }
+    }
+
+    /// The connection a held card's task ran under is gone, and its end will
+    /// never be told: the card stops where it is.
+    pub(super) fn end_held_cards(&mut self) {
+        let mut cards: Vec<String> = self.background_cards.drain().map(|(_, c)| c).collect();
+        cards.sort();
+        cards.dedup();
+        for card in &cards {
+            self.close_card(card, "Cancelled");
+        }
+        if !cards.is_empty() {
+            self.persist_settled_transcript();
+        }
+    }
+
     /// A background task that a native card started keeps the card at work
     /// until the task ends; a task that ended settles it.
     fn apply_background_card(&mut self, event: &sirio_chat::BackgroundTaskEvent) {
@@ -3394,22 +3429,17 @@ impl Chat {
                 let Some(card) = self.background_cards.remove(task_id) else {
                     return;
                 };
-                // A second end of the same task finds nothing and does nothing.
-                if let Some(index) = self.subagent_task_position(&card)
-                    && let Some(Entry::SubagentTask {
-                        status: card_status,
-                        parts,
-                        ..
-                    }) = self.entries.get_mut(index)
-                {
-                    *card_status = if status == "completed" {
-                        "Completed".into()
-                    } else {
-                        "Failed".into()
-                    };
-                    settle_running_calls(parts);
-                    self.remeasure_entry(index);
+                // Another task of the same card may still run.
+                if self.background_cards.values().any(|held| *held == card) {
+                    return;
                 }
+                let ended = if status == "completed" {
+                    "Completed"
+                } else {
+                    "Failed"
+                };
+                self.close_card(&card, ended);
+                self.persist_settled_transcript();
             }
             _ => {}
         }
@@ -3520,6 +3550,15 @@ impl Chat {
             self.remeasure_entry(index);
         }
         cx.notify();
+    }
+
+    /// Whether the call at `part_index` of the card at `task_index` is open.
+    fn nested_call_expanded(&self, task_index: usize, part_index: usize) -> bool {
+        matches!(
+            self.entries.get(task_index),
+            Some(Entry::SubagentTask { parts, .. })
+                if matches!(parts.get(part_index), Some(SubagentPart::Call(call)) if call.expanded)
+        )
     }
 
     /// Flips one part of a task card without changing the card itself: a
@@ -3929,41 +3968,54 @@ impl Chat {
                 if let Some(locations) = &locations {
                     self.maybe_follow_location(locations, cx);
                 }
-                let measured = self.tool_duration_on(&id, &status);
-                if let Some(task_index) = self.subagent_task_position(&id) {
-                    let held = self.background_cards.values().any(|card| *card == id);
+                let card = self.subagent_task_position(&id);
+                let held = card.is_some() && self.background_cards.values().any(|c| *c == id);
+                // A held card's clock runs on until its task ends.
+                let measured = if held {
+                    None
+                } else {
+                    self.tool_duration_on(&id, &status)
+                };
+                if let Some(task_index) = card {
                     let error = visible_text::visible_text(
                         &content.as_deref().map(content_text).unwrap_or_default(),
                         true,
                     );
+                    let by_parent = matches!(
+                        self.entries.get(task_index),
+                        Some(Entry::SubagentTask { by_parent: true, .. })
+                    );
+                    // The call's own text is never drawn, but an error is all
+                    // a failed card has to say.
+                    let needs_error = by_parent
+                        && !held
+                        && status.eq_ignore_ascii_case("failed")
+                        && !error.is_empty()
+                        && !matches!(
+                            self.entries.get(task_index),
+                            Some(Entry::SubagentTask { parts, .. })
+                                if parts
+                                    .iter()
+                                    .any(|part| matches!(part, SubagentPart::Text { .. }))
+                        );
+                    let error_part = needs_error.then(|| self.text_part(None, error));
                     if let Some(Entry::SubagentTask {
                         status: existing_status,
                         parts,
-                        by_parent,
                         duration_ms,
                         ..
                     }) = self.entries.get_mut(task_index)
                     {
-                        if measured.is_some() {
+                        if by_parent && measured.is_some() {
                             *duration_ms = measured;
                         }
                         // A card whose task still runs is not done: its call
                         // only returned the news that the task began.
-                        if !(*by_parent && held) {
-                            if *by_parent && is_terminal_tool_status(&status) {
+                        if !held {
+                            if by_parent && is_terminal_tool_status(&status) {
                                 settle_running_calls(parts);
                             }
-                            // The call's own text is never drawn, but an
-                            // error is all a failed card has to say.
-                            if *by_parent
-                                && status.eq_ignore_ascii_case("failed")
-                                && !error.is_empty()
-                                && !parts
-                                    .iter()
-                                    .any(|part| matches!(part, SubagentPart::Text { .. }))
-                            {
-                                parts.push(text_part(None, error));
-                            }
+                            parts.extend(error_part);
                             *existing_status = status;
                         }
                         self.remeasure_entry(task_index);
@@ -11366,7 +11418,11 @@ two"
     // - a background card says Completed while it works;
     // - a card ends with children still running;
     // - the ACP card stops grouping (the test above);
-    // - a native `Bash` titled "spawn" becomes a card.
+    // - a native `Bash` titled "spawn" becomes a card;
+    // - the call's own result text is drawn in its card;
+    // - the CLI's control or bidi characters reach what the card draws;
+    // - a card whose connection ended keeps working, its children "running";
+    // - a held card carries the launch's duration, or an ACP card gets a duration.
 
 
     fn notice(chat: &mut Chat, card: &str, item: sirio_chat::SubagentItem, cx: &mut Context<Chat>) {
@@ -11537,10 +11593,44 @@ two"
                 cx,
             );
             assert_eq!(card_status(chat, 0), "Completed");
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::SubagentTask { duration_ms: Some(_), .. })
+            ), "the end of the task measures the card");
             assert!(card_parts(chat, 0).iter().any(|part| matches!(
                 part,
                 SubagentPart::Call(call) if call.id == "c1" && call.status == "Cancelled"
             )));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_reset_connection_ends_a_held_card(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            notice(chat, "a", child_started("c1"), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::BackgroundTask(sirio_chat::BackgroundTaskEvent::Started {
+                    task_id: "t".into(),
+                    tool_use_id: Some("a".into()),
+                    task_type: None,
+                    description: "Explore".into(),
+                }),
+                cx,
+            );
+            chat.handle_event(completed("a", "Completed", None), cx);
+            assert_eq!(card_status(chat, 0), "InProgress");
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::SubagentTask { duration_ms: None, .. })
+            ), "a held card has no duration yet");
+            chat.reset_background_tasks(cx);
+            assert_eq!(card_status(chat, 0), "Cancelled");
+            assert!(matches!(card_parts(chat, 0), [SubagentPart::Call(call)]
+                if call.status == "Cancelled"));
+            assert!(chat.background_cards.is_empty());
         });
     }
 

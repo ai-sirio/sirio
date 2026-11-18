@@ -293,7 +293,7 @@ impl Chat {
             .expanded(expanded, move |desired, _, cx| toggle_entity.update(cx, |chat, cx| {
                 let current = match nested {
                     None => matches!(chat.entries.get(entry_index), Some(Entry::ToolCall { expanded: true, .. })),
-                    Some((task, child)) => matches!(chat.entries.get(task), Some(Entry::SubagentTask { parts, .. }) if matches!(parts.get(child), Some(SubagentPart::Call(call)) if call.expanded)),
+                    Some((task, child)) => chat.nested_call_expanded(task, child),
                 };
                 if current != desired { match nested {
                     None => chat.toggle_tool_call_expanded(entry_index, cx),
