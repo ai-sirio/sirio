@@ -857,6 +857,11 @@ fn text_element(
 ///
 /// Takes a [`Flat`] rather than a [`Text`] because a table has to shape every
 /// cell to measure the columns before it can paint one.
+/// Whether `url` has the `file` scheme, in any letter case.
+fn is_file_url(url: &str) -> bool {
+    url.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+}
+
 fn painted_text(
     flat: Flat,
     len: usize,
@@ -888,7 +893,9 @@ fn painted_text(
         let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.into_iter().unzip();
         InteractiveText::new(ElementId::named_usize("md-text", ix), styled)
             .on_click(ranges, move |clicked, _window, cx| {
-                if let Some(url) = urls.get(clicked) {
+                // A `file:` link is the host's to open (or not); the system
+                // opener would hand it to whatever owns the file type.
+                if let Some(url) = urls.get(clicked).filter(|url| !is_file_url(url)) {
                     cx.open_url(url);
                 }
             })
