@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 use sirio_chat::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 
+use crate::chat::visible_text::visible_text;
+
 mod view;
 
 pub use view::{
@@ -580,8 +582,10 @@ impl Turn {
                 at,
                 measured_ms,
             } => self.end_span(&id, outcome, at, measured_ms.map(Duration::from_millis)),
-            // Each sentence replaces the last; an empty one says nothing.
+            // Each sentence replaces the last; an empty one says nothing. The
+            // CLI's text is made visible here, once, before it is stored.
             TraceEvent::SpanSaid { id, sentence } => {
+                let sentence = visible_text(&sentence, false);
                 let Some(span) = self.span_mut(&id) else {
                     return false;
                 };
@@ -961,7 +965,12 @@ mod tests {
         );
         assert!(lanes[0].said.is_none(), "the root has no sentence");
         let y = lane(&lanes, "toolu_y").said.clone().unwrap_or_default();
+        let marker = visible_text(&hidden.to_string(), false);
         assert!(!y.contains(hidden), "a hidden character is shown, not kept");
+        assert!(
+            y == format!("Run {marker}it."),
+            "the hidden character shows as its marker, nothing is deleted"
+        );
 
         end(&mut store, &c, "toolu_x", 600);
         let lanes = lanes_of(&store, c.at(700));

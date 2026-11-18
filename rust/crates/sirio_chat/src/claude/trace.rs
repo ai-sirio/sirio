@@ -84,6 +84,8 @@ struct Agent {
     /// block, and a tool call. A text-only latest message is the report.
     text_in_message: bool,
     tool_in_message: bool,
+    /// The id of the message those two flags describe.
+    latest_call: Option<String>,
 }
 
 /// A subagent's model call that has not ended: its message may send more
@@ -568,36 +570,51 @@ impl TraceFold {
                 }
             }
             None => {
-                if self
+                let seen = self
                     .agent_calls
                     .insert(call.clone(), agent_id.to_string())
-                    .is_some()
-                {
+                    .is_some();
+                // A line of a message whose call already ended (a second,
+                // parallel tool call) neither reopens it nor restarts it.
+                if seen && agent.latest_call.as_deref() != Some(call.as_str()) {
                     return;
                 }
-                agent.text_in_message = false;
-                agent.tool_in_message = false;
-                agent.open_call = Some(OpenCall {
-                    id: call.clone(),
-                    last: at,
-                    usage: tokens,
-                });
-                events.push(call_started(
-                    call,
-                    Some(agent_id.to_string()),
-                    message.model.clone(),
-                    started,
-                ));
+                if !seen {
+                    agent.text_in_message = false;
+                    agent.tool_in_message = false;
+                    agent.latest_call = Some(call.clone());
+                    agent.open_call = Some(OpenCall {
+                        id: call.clone(),
+                        last: at,
+                        usage: tokens,
+                    });
+                    events.push(call_started(
+                        call,
+                        Some(agent_id.to_string()),
+                        message.model.clone(),
+                        started,
+                    ));
+                }
             }
         }
+        let mut asks_for_tool = false;
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } if !text.trim().is_empty() => {
                     agent.text_in_message = true;
                 }
-                ContentBlock::ToolUse(_) => agent.tool_in_message = true,
+                ContentBlock::ToolUse(_) => {
+                    agent.tool_in_message = true;
+                    asks_for_tool = true;
+                }
                 _ => {}
             }
+        }
+        // A message that asks for a tool is complete (tool calls come last):
+        // the call ends here, and the tool, its waits and any nested agent
+        // start from this line.
+        if asks_for_tool {
+            self.end_open_call(agent_id, events);
         }
     }
 
@@ -655,6 +672,7 @@ impl TraceFold {
                 open_call: None,
                 text_in_message: false,
                 tool_in_message: false,
+                latest_call: None,
             };
             (SpanKind::Subagent, name, detail, Some(agent))
         } else {
@@ -2043,13 +2061,11 @@ mod tests {
                 ),
                 clock.at(3_010)
             ),
-            vec![tool(
-                "toolu_B",
-                Some("toolu_X"),
-                "Bash",
-                "ls",
-                clock.at(3_010)
-            )]
+            vec![
+                usage("msg_sub", 102, 8),
+                span_ended("msg_sub", SpanOutcome::Done, clock.at(3_010), None),
+                tool("toolu_B", Some("toolu_X"), "Bash", "ls", clock.at(3_010)),
+            ]
         );
     }
 
@@ -2143,6 +2159,13 @@ mod tests {
             fold.line(&parse(SUBAGENT_ASSISTANT), clock.at(6_785)),
             vec![
                 llm("msg_011CgG43YcaswnMdLpDH97Lj", Some(AGENT), clock.at(4_903)),
+                usage("msg_011CgG43YcaswnMdLpDH97Lj", 19_689, 8),
+                span_ended(
+                    "msg_011CgG43YcaswnMdLpDH97Lj",
+                    SpanOutcome::Done,
+                    clock.at(6_785),
+                    None
+                ),
                 tool(BASH, Some(AGENT), "Bash", "ls", clock.at(6_785)),
             ]
         );
@@ -2151,16 +2174,7 @@ mod tests {
                 &tool_result(Some(AGENT), BASH, false, "README.md\nsrc"),
                 clock.at(6_849)
             ),
-            vec![
-                usage("msg_011CgG43YcaswnMdLpDH97Lj", 19_689, 8),
-                span_ended(
-                    "msg_011CgG43YcaswnMdLpDH97Lj",
-                    SpanOutcome::Done,
-                    clock.at(6_785),
-                    None
-                ),
-                span_ended(BASH, SpanOutcome::Done, clock.at(6_849), None),
-            ]
+            vec![span_ended(BASH, SpanOutcome::Done, clock.at(6_849), None)]
         );
         // The next call runs from that tool's result: not from the previous
         // call's end (6 785) and not from the start (4 903).
@@ -2179,6 +2193,8 @@ mod tests {
             ),
             vec![
                 llm("msg_next", Some(AGENT), clock.at(6_849)),
+                usage("msg_next", 102, 8),
+                span_ended("msg_next", SpanOutcome::Done, clock.at(7_935), None),
                 tool(
                     "toolu_R",
                     Some(AGENT),
@@ -2331,8 +2347,9 @@ mod tests {
     // Ways it could fail: a message of one-line-per-block is cut at its
     // first line (the call ends before the tool_use line); the call starts
     // at a later line instead of the agent's edge; the call ends twice, or
-    // at the tool_result instead of the message's last line; the usage is
-    // lost or emitted early.
+    // at the tool_result instead of its message's last line; the call
+    // ends before the tool_use line, so the thinking and text lines after
+    // are lost; the usage is lost or emitted early.
     #[test]
     fn a_subagents_call_ends_at_its_messages_last_line() {
         let clock = Clock::new();
@@ -2343,23 +2360,33 @@ mod tests {
         let lines = [
             (assistant(Some(AGENT), "msg_2", vec![thinking("Hmm.")]), 7_000),
             (assistant(Some(AGENT), "msg_2", vec![text("I read it.")]), 7_500),
-            (
-                assistant(
-                    Some(AGENT),
-                    "msg_2",
-                    vec![tool_use("toolu_R", "Read", json!({"file_path": "/r/x"}))],
-                ),
-                8_000,
-            ),
         ];
         for (line, ms) in lines {
             let events = fold.line(&line, clock.at(ms));
             assert!(
                 ends_of(&events, "msg_2").is_empty(),
-                "the call is still open while its message goes on"
+                "the call is still open while the model writes"
             );
             all.extend(events);
         }
+        // The tool_use line is the message's last: the call ends with it.
+        let events = fold.line(
+            &assistant(
+                Some(AGENT),
+                "msg_2",
+                vec![tool_use("toolu_R", "Read", json!({"file_path": "/r/x"}))],
+            ),
+            clock.at(8_000),
+        );
+        assert!(
+            ends_of(&events, "msg_2") == vec![clock.at(8_000)],
+            "the call ends once, at the tool_use line"
+        );
+        assert!(
+            events.contains(&usage("msg_2", 102, 8)),
+            "the call's usage comes with its end"
+        );
+        all.extend(events);
         assert!(
             starts_of(&all, "msg_2") == vec![clock.at(6_849)],
             "one call, started at the agent's edge"
@@ -2369,12 +2396,60 @@ mod tests {
             clock.at(9_000),
         );
         assert!(
-            ends_of(&events, "msg_2") == vec![clock.at(8_000)],
-            "the call ends once, at its message's last line"
+            ends_of(&events, "msg_2").is_empty(),
+            "the tool result does not end the call a second time"
+        );
+    }
+
+    // Ways it could fail: the call stays open through a long tool (drawn
+    // running beside it, then snapped back); a second tool_use line of the
+    // same message reopens or restarts the call, or adds a second call; the
+    // second tool_use is dropped with its span; the second line's lateness
+    // moves the call's end.
+    #[test]
+    fn a_call_ends_at_its_tool_use_line_not_at_the_tool_result() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        run_capture_prefix(&mut fold, &clock);
+        let first = fold.line(
+            &assistant(
+                Some(AGENT),
+                "msg_6",
+                vec![tool_use("toolu_A", "Read", json!({"file_path": "/r/a"}))],
+            ),
+            clock.at(7_000),
         );
         assert!(
-            events.contains(&usage("msg_2", 102, 8)),
-            "the call's usage comes with its end"
+            ends_of(&first, "msg_6") == vec![clock.at(7_000)],
+            "the call ends with its first tool_use line"
+        );
+        let second = fold.line(
+            &assistant(
+                Some(AGENT),
+                "msg_6",
+                vec![tool_use("toolu_B", "Read", json!({"file_path": "/r/b"}))],
+            ),
+            clock.at(7_050),
+        );
+        assert!(
+            starts_of(&second, "msg_6").is_empty() && ends_of(&second, "msg_6").is_empty(),
+            "a parallel tool line adds no call"
+        );
+        assert!(
+            starts_of(&second, "toolu_B") == vec![clock.at(7_050)],
+            "it still opens its tool"
+        );
+        // A long tool: nothing about the call is said when it returns.
+        let late = fold.line(
+            &tool_result(Some(AGENT), "toolu_A", false, "a"),
+            clock.at(60_000),
+        );
+        assert!(
+            ends_of(&late, "msg_6").is_empty() && !late.iter().any(|event| matches!(
+                event,
+                TraceEvent::SpanUsage { id, .. } if id == "msg_6"
+            )),
+            "the call is already over"
         );
     }
 
@@ -2645,21 +2720,18 @@ mod tests {
             ),
             vec![
                 llm("msg_late", Some(AGENT), clock.at(400)),
+                usage("msg_late", 102, 8),
+                span_ended("msg_late", SpanOutcome::Done, clock.at(5_000), None),
                 tool("toolu_late", Some(AGENT), "Bash", "ls", clock.at(5_000)),
             ]
         );
-        // The call ends at its message's last line, when its tool result
-        // shows the message is over.
+        // The call ended with its tool_use line; the result ends the tool.
         assert_eq!(
             fold.line(
                 &tool_result(Some(AGENT), "toolu_late", false, "README.md"),
                 clock.at(5_200)
             ),
-            vec![
-                usage("msg_late", 102, 8),
-                span_ended("msg_late", SpanOutcome::Done, clock.at(5_000), None),
-                span_ended("toolu_late", SpanOutcome::Done, clock.at(5_200), None),
-            ]
+            vec![span_ended("toolu_late", SpanOutcome::Done, clock.at(5_200), None)]
         );
     }
 
@@ -3291,8 +3363,6 @@ mod tests {
         assert_eq!(
             fold.line(&parse(AGENT_RESULT), clock.at(9_428)),
             vec![
-                usage("msg_next", 102, 8),
-                span_ended("msg_next", SpanOutcome::Done, clock.at(7_935), None),
                 span_ended(
                     "toolu_open",
                     SpanOutcome::Interrupted,
@@ -3477,8 +3547,6 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                usage("m1", 102, 8),
-                span_ended("m1", SpanOutcome::Done, clock.at(222), None),
                 TraceEvent::WaitEnded {
                     request_id: 7,
                     at: clock.at(260)

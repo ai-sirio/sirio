@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 
 use sirio_chat::{SpanKind, SpanOutcome, TokenCount, TurnOutcome};
 
-use crate::chat::visible_text::visible_text;
-
 use super::{ROOT, ROOT_NAME, Span, SpanEnd, Spend, Turn, TurnEnd};
 
 /// What an axis is divided by, smallest first, in seconds: 1, 2, 5, 10, 15
@@ -327,11 +325,7 @@ impl Turn {
                     calls: shape.lanes[slot(lane)].calls.len(),
                     duration: span.duration(now),
                     now: self.now_row(lane, &shape, now),
-                    said: span
-                        .said
-                        .as_deref()
-                        .filter(|_| span.end.is_none())
-                        .map(|said| visible_text(said, false)),
+                    said: span.said.clone().filter(|_| span.end.is_none()),
                     waits: self.waits_of(lane, &shape),
                     segments: self.segments_of(lane, &shape, now),
                     start,
