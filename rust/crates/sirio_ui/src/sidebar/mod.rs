@@ -425,6 +425,9 @@ struct OpenContextMenu {
     remote_tracking: RemoteTracking,
     /// Whether New Chat is expanded into its agents.
     chat_picker_open: bool,
+    /// The target is git's main checkout: its removals are listed but
+    /// disabled, whatever the Primary marker says.
+    is_main: bool,
 }
 
 /// Whether a worktree's branch tracks a remote branch — resolved off the
@@ -656,16 +659,25 @@ impl WorktreePrompt {
 }
 
 /// The bounds the debug layout read reports for the sidebar, from the latest
-/// paint: the first project section header and the first worktree card.
-/// `first_*` name the rows that may write, so a row that scrolled into the
-/// sticky header or moved down the list cannot leave its rect behind.
+/// paint: the shell's own parts, the first project row (with its `+` and
+/// three dots), the first worktree card (with its star) and the first
+/// removable one (with its cross). `first_*` name the rows that may write, so
+/// a row that scrolled into the sticky header or moved down the list cannot
+/// leave its rect behind.
 #[derive(Default)]
 struct ProbeRects {
     first_section: std::cell::Cell<Option<usize>>,
     first_card: std::cell::Cell<Option<usize>>,
+    /// The first worktree card a person can remove (not the Primary, not git's
+    /// main checkout): the card whose cross `card_remove` records.
+    first_removable: std::cell::Cell<Option<usize>>,
     section: ProbeCell,
+    /// The first project row's `+` and three dots.
+    section_add: ProbeCell,
+    section_menu: ProbeCell,
     card: ProbeCell,
     card_star: ProbeCell,
+    card_remove: ProbeCell,
     /// The chrome the sidebar draws itself: cleared at the top of every
     /// render and refilled by the paint, so a part that is not drawn reads
     /// `None`.
@@ -674,6 +686,9 @@ struct ProbeRects {
     search: ProbeCell,
     new_chat: ProbeCell,
     section_header: ProbeCell,
+    /// The section header's expand all and collapse all buttons.
+    header_expand_all: ProbeCell,
+    header_collapse_all: ProbeCell,
     filter: ProbeCell,
     bell_menu: ProbeCell,
     hover_card: ProbeCell,
@@ -699,8 +714,17 @@ fn probe_canvas(cell: &ProbeCell) -> impl IntoElement {
 pub struct SidebarProbe {
     /// The first project row (31 px), not the section header.
     pub section: Option<Bounds<Pixels>>,
+    /// The first project row's `+` and three dots (hover-only, so drawn or
+    /// not they are always located).
+    pub section_add: Option<Bounds<Pixels>>,
+    pub section_menu: Option<Bounds<Pixels>>,
     pub card: Option<Bounds<Pixels>>,
     pub card_star: Option<Bounds<Pixels>>,
+    /// The cross of the first card that can be removed.
+    pub card_remove: Option<Bounds<Pixels>>,
+    /// The section header's expand all and collapse all buttons.
+    pub header_expand_all: Option<Bounds<Pixels>>,
+    pub header_collapse_all: Option<Bounds<Pixels>>,
     pub title: Option<Bounds<Pixels>>,
     pub bell: Option<Bounds<Pixels>>,
     pub search: Option<Bounds<Pixels>>,
@@ -730,6 +754,8 @@ impl ProbeRects {
             &self.search,
             &self.new_chat,
             &self.section_header,
+            &self.header_expand_all,
+            &self.header_collapse_all,
             &self.filter,
             &self.bell_menu,
             &self.hover_card,
@@ -738,13 +764,18 @@ impl ProbeRects {
         }
     }
 
-    fn follow(&self, section: Option<usize>, card: Option<usize>) {
+    fn follow(&self, section: Option<usize>, card: Option<usize>, removable: Option<usize>) {
         if self.first_section.replace(section) != section {
             self.section.set(None);
+            self.section_add.set(None);
+            self.section_menu.set(None);
         }
         if self.first_card.replace(card) != card {
             self.card.set(None);
             self.card_star.set(None);
+        }
+        if self.first_removable.replace(removable) != removable {
+            self.card_remove.set(None);
         }
     }
 }
@@ -786,7 +817,7 @@ pub struct Sidebar {
     view_menu: Popup<()>,
     /// The header bell's list of sessions that want the user.
     bell_menu: Popup<()>,
-    /// The New Chat row's list of agents for the selected worktree.
+    /// The New Chat row's list of agents for the current worktree.
     new_chat_menu: Popup<SidebarContextTarget>,
     /// The worktree New Chat aims at, by path: the last one the host or a
     /// click selected. Selecting a project row leaves it alone.
@@ -903,16 +934,22 @@ impl Sidebar {
         self.view
     }
 
-    /// The first project section header and the first worktree card as last
-    /// painted, for the debug layout read. Both are `None` outside the
-    /// Projects view, and a row that stopped being the first one is
-    /// forgotten when the sidebar next renders.
+    /// The sidebar's parts as last painted, for the debug layout read. The
+    /// row-bound ones (the first project row and its buttons, the first card,
+    /// its star, the first removable card's cross) are `None` outside the
+    /// Projects view, and a row that stopped being the first one is forgotten
+    /// when the sidebar next renders.
     pub fn probe_bounds(&self) -> SidebarProbe {
         let probe = &self.probe;
         SidebarProbe {
             section: probe.section.get(),
+            section_add: probe.section_add.get(),
+            section_menu: probe.section_menu.get(),
             card: probe.card.get(),
             card_star: probe.card_star.get(),
+            card_remove: probe.card_remove.get(),
+            header_expand_all: probe.header_expand_all.get(),
+            header_collapse_all: probe.header_collapse_all.get(),
             title: probe.title.get(),
             bell: probe.bell.get(),
             search: probe.search.get(),
@@ -963,7 +1000,7 @@ impl Sidebar {
     fn choose_view(&mut self, view: SidebarView, window: &mut Window, cx: &mut Context<Self>) {
         if self.view == view {
             self.close_view_menu(cx);
-            self.tree_focus.focus(window, cx);
+            self.focus_list(window, cx);
             return;
         }
         self.view = view;
@@ -971,7 +1008,7 @@ impl Sidebar {
         self.filter.clear();
         self.filter_shown = false;
         // The title menu took focus; the list is the sensible home.
-        self.tree_focus.focus(window, cx);
+        self.focus_list(window, cx);
         self.view_menu.close();
         if view == SidebarView::Sessions {
             self.set_clock(sessions::unix_now_ms(), cx);
@@ -1755,6 +1792,7 @@ impl Sidebar {
                     RemoteTracking::Untracked
                 },
                 chat_picker_open: false,
+                is_main: self.is_main_checkout(row_id),
             });
             self.worktree_close_menu.close();
             self.context_menu_focus.focus(window, cx);
@@ -2154,7 +2192,7 @@ impl Sidebar {
     }
 
     /// The row id of the current worktree, the one New Chat opens in: the
-    /// remembered one when it is still listed, else the selected worktree.
+    /// remembered one when it is still listed, else the one the host marks selected.
     fn current_worktree_row(&self) -> Option<usize> {
         let remembered = self.current_worktree.as_deref();
         self.rows
@@ -2532,8 +2570,29 @@ impl Sidebar {
     fn hide_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.filter.clear();
         self.filter_shown = false;
-        self.tree_focus.focus(window, cx);
+        self.focus_list(window, cx);
         cx.notify();
+    }
+
+    /// Hands focus to the list as a new visit: the keyboard's place on a pill
+    /// and an armed delete belong to the visit before, and would otherwise sit
+    /// ready for a Backspace that closes a tab nobody is pointing at. Every
+    /// path that gives the list focus from somewhere else goes through here,
+    /// the host's Settings-close hand-back included.
+    pub fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pill_cursor = None;
+        self.armed_delete = None;
+        self.tree_focus.focus(window, cx);
+    }
+
+    /// Gives focus back after something else had it (Settings closing): to the
+    /// filter field when it is open, else to the list as a new visit.
+    pub fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_shown {
+            self.filter_focus.focus(window, cx);
+        } else {
+            self.focus_list(window, cx);
+        }
     }
 
     fn on_filter_key(
@@ -2967,6 +3026,25 @@ impl Sidebar {
         }
     }
 
+    /// Whether `row` is git's main checkout of the project whose row sits at
+    /// `project_path`. The catalog roots a git project at its main checkout, so
+    /// a worktree at that very path is the one `git worktree remove` refuses
+    /// (and whose deletion would destroy the repository). This is independent
+    /// of the Primary marker, which one click on a star moves or clears.
+    fn is_main_checkout_of(project_path: Option<&Path>, row: &SidebarRow) -> bool {
+        row.kind == RowKind::Worktree && row.path.is_some() && row.path.as_deref() == project_path
+    }
+
+    fn is_main_checkout(&self, row_id: usize) -> bool {
+        let Some(project_index) = self.enclosing_project_index(row_id) else {
+            return false;
+        };
+        self.rows
+            .iter()
+            .find(|row| row.id == row_id)
+            .is_some_and(|row| Self::is_main_checkout_of(self.rows[project_index].path.as_deref(), row))
+    }
+
     /// Opens the branch-name prompt for the project whose New Worktree row
     /// was clicked.
     fn begin_worktree_prompt(
@@ -3185,10 +3263,12 @@ impl Sidebar {
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
+            .filter(|_| !self.is_main_checkout(row_id))
             .map(|row| row.title.clone())
         else {
-            // #372: the primary checkout is not removable — the hover-x is
-            // not drawn for it, so reaching here means a stale row id.
+            // #372: neither the primary nor git's main checkout is removable —
+            // the hover-x is not drawn for them, so reaching here means a
+            // stale row id.
             return;
         };
         self.worktree_close_menu.open(OpenWorktreeCloseMenu {
@@ -3259,6 +3339,7 @@ impl Sidebar {
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
+            .filter(|_| !self.is_main_checkout(row_id))
             .map(|row| row.title.clone())
         else {
             return;
@@ -3362,9 +3443,10 @@ impl Sidebar {
         else {
             return;
         };
-        // #372: defensive — the primary checkout must never reach
+        // #372: defensive — the primary checkout, and git's main checkout
+        // whatever the Primary marker says, must never reach
         // `git worktree remove`; see `open_worktree_close_menu`.
-        if is_primary {
+        if is_primary || self.is_main_checkout(row_id) {
             return;
         }
         let project_id = self
@@ -3575,6 +3657,12 @@ impl Sidebar {
         }
         let row_bounds = self.hover_card.row_bounds?;
         let sidebar_right = self.sidebar_bounds.get()?.right() + px(hover_card::PANEL_BORDER);
+        // A window too narrow to hold the card beside the sidebar would put it
+        // over the row's own star and cross and eat their clicks: no card.
+        if !hover_card::fits(sidebar_right, window.viewport_size().width) {
+            self.hover_card.dismiss();
+            return None;
+        }
         let project_name = self
             .rows
             .iter()
@@ -3583,7 +3671,7 @@ impl Sidebar {
             .last()
             .map(|project| project.title.clone())
             .unwrap_or_default();
-        let origin = hover_card::card_origin(row_bounds, sidebar_right, window.viewport_size().width);
+        let origin = hover_card::card_origin(row_bounds, sidebar_right);
         let card = hover_card::render_card(
             row,
             &project_name,
@@ -3880,6 +3968,7 @@ impl Sidebar {
         let closing = popup.closing_since();
         let remote_tracking = menu.remote_tracking.clone();
         let chat_picker_open = menu.chat_picker_open;
+        let is_main = menu.is_main;
         let target = menu.target;
         let position = menu.position;
         // The hover-x's closure menu is 280px for the same pair of removals;
@@ -3894,7 +3983,12 @@ impl Sidebar {
                 "sidebar-context-item-{}",
                 Self::context_action_selector(item.action)
             );
-            let enabled = item.enabled;
+            let removes = matches!(
+                item.action,
+                SidebarContextAction::RemoveWorktree
+                    | SidebarContextAction::RemoveWorktreeAndRemoteBranch
+            );
+            let enabled = item.enabled && !(is_main && removes);
             let action = item.action;
             let item_target = target.clone();
             let item_entity = entity.clone();
@@ -4104,7 +4198,7 @@ impl Sidebar {
     }
 
     /// The 31 px New Chat row under the header: opens the agents that can
-    /// launch a chat in the selected worktree. Without a selected worktree it
+    /// launch a chat in the current worktree. Without a current worktree it
     /// is muted, opens nothing and says why in its tooltip.
     fn render_new_chat(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let enabled = self.new_chat_target().is_some();
@@ -4225,9 +4319,17 @@ impl Sidebar {
             .child(probe_canvas(&self.probe.bell))
             .relative()
             .flex_none()
+            // The icon button prevents the default of its mouse-down, so it
+            // never takes focus: without this, focus would stay in whatever
+            // held it (a terminal running an agent) and Escape, which the
+            // root's capture only sees along the sidebar's own dispatch path,
+            // would reach that instead of closing the popover.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.bell_menu.note_trigger_press()),
+                cx.listener(|this, _, window, cx| {
+                    this.bell_menu.note_trigger_press();
+                    this.context_menu_focus.focus(window, cx);
+                }),
             )
             .child(button)
             .child({
@@ -4667,6 +4769,24 @@ impl Render for Sidebar {
         let rows = self.visible_rows();
         let view = self.view;
         self.probe.clear_chrome();
+        // The first card whose cross is drawn, and each worktree's project row
+        // path (the rows come project first), for git's main checkout.
+        let mut removable_ids = std::collections::HashSet::new();
+        let mut first_removable = None;
+        {
+            let mut project_path: Option<&Path> = None;
+            for row in &rows {
+                if row.kind == RowKind::Project {
+                    project_path = row.path.as_deref();
+                } else if row.kind == RowKind::Worktree
+                    && !row.is_primary
+                    && !Self::is_main_checkout_of(project_path, row)
+                {
+                    removable_ids.insert(row.id);
+                    first_removable.get_or_insert(row.id);
+                }
+            }
+        }
         self.probe.follow(
             (view == SidebarView::Projects)
                 .then(|| rows.iter().find(|row| row.kind == RowKind::Project).map(|row| row.id))
@@ -4674,10 +4794,17 @@ impl Render for Sidebar {
             (view == SidebarView::Projects)
                 .then(|| rows.iter().find(|row| row.kind == RowKind::Worktree).map(|row| row.id))
                 .flatten(),
+            (view == SidebarView::Projects).then_some(first_removable).flatten(),
         );
         let first_section_probe = self.probe.first_section.get();
         let first_card_probe = self.probe.first_card.get();
-        let section_probe = self.probe.section.clone();
+        let section_probes = section::SectionProbes {
+            row: self.probe.section.clone(),
+            add: self.probe.section_add.clone(),
+            menu: self.probe.section_menu.clone(),
+        };
+        let expand_all_probe = self.probe.header_expand_all.clone();
+        let collapse_all_probe = self.probe.header_collapse_all.clone();
         let filter_probe = self.probe.filter.clone();
         let section_header_probe = self.probe.section_header.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
@@ -4790,7 +4917,7 @@ impl Render for Sidebar {
                 if row.kind == RowKind::Project {
                     let worktree_count = self.worktree_count(row.id);
                     let probe =
-                        (first_section_probe == Some(row.id)).then(|| section_probe.clone());
+                        (first_section_probe == Some(row.id)).then(|| section_probes.clone());
                     rendered_rows.push(
                         section::render_section(row, worktree_count, entity.clone(), theme, probe)
                             .into_any_element(),
@@ -4809,6 +4936,8 @@ impl Render for Sidebar {
                     project_id,
                     project_icon,
                     first_card: first_card_probe == Some(row.id),
+                    removable: removable_ids.contains(&row.id),
+                    first_removable: first_removable == Some(row.id),
                     row,
                 };
                 let row_id = inputs.row.id;
@@ -5187,6 +5316,7 @@ impl Render for Sidebar {
                                         "Expand all projects",
                                         &theme,
                                     )
+                                    .child(probe_canvas(&expand_all_probe))
                                     .opacity(0.0)
                                     .group_hover("sidebar-section-header", |style| style.opacity(1.0))
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -5200,6 +5330,7 @@ impl Render for Sidebar {
                                         "Collapse all projects",
                                         &theme,
                                     )
+                                    .child(probe_canvas(&collapse_all_probe))
                                     .opacity(0.0)
                                     .group_hover("sidebar-section-header", |style| style.opacity(1.0))
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -5691,10 +5822,9 @@ pub(super) mod tests_support {
 mod tests {
     use super::*;
 
-    /// Opens the New Worktree prompt the way a user does. The section
-    /// project row's `+` is hover-revealed (`group_hover`), and gpui lays an
-    /// invisible element out — so `debug_bounds` finds it — but does not
-    /// hit-test it, so the header has to be hovered before the click.
+    /// Opens the New Worktree prompt the way a user does. The project row's
+    /// `+` is drawn only under the pointer (`group_hover` raising its opacity
+    /// from 0), so the row is hovered before the click, as a hand does.
     fn click_section_add(cx: &mut VisualTestContext) {
         let header = cx
             .debug_bounds("sidebar-section-0")
@@ -5703,7 +5833,7 @@ mod tests {
         cx.run_until_parked();
         let add = cx
             .debug_bounds("sidebar-section-add-0")
-            .expect("the section add control is rendered once the header is hovered");
+            .expect("the section add control is located once the row is hovered");
         cx.simulate_click(add.center(), Modifiers::none());
         cx.run_until_parked();
     }
@@ -9651,6 +9781,201 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "a filter that drops the row closes it");
+    }
+
+    /// The card sits 4 px past the sidebar; a window too narrow to hold it there
+    /// without overlapping the row would put it over the row's own star and
+    /// close button and eat their clicks, so it does not open.
+    #[gpui::test]
+    async fn the_hover_card_stays_off_in_a_window_too_narrow_to_hold_it_beside_the_sidebar(
+        cx: &mut TestAppContext,
+    ) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        cx.simulate_resize(gpui::size(px(500.0), px(800.0)));
+        cx.run_until_parked();
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 600);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "no card in a 500 px window");
+        // The control: the same pointer opens it once the window is wide enough.
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        cx.run_until_parked();
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+    }
+
+    /// The bell's button never takes focus (an Ely icon button prevents the
+    /// default of its mouse-down), so Escape would reach whatever held focus:
+    /// a terminal running an agent. Opening the bell must move focus into the
+    /// sidebar, where Escape closes the popover.
+    #[gpui::test]
+    async fn opening_the_bell_takes_focus_so_escape_closes_it_instead_of_reaching_a_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let outside = cx.update(|window, cx| {
+            let handle = cx.focus_handle();
+            window.focus(&handle, cx);
+            handle
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| outside.is_focused(window)));
+        let button = cx.debug_bounds("sidebar-bell").expect("the bell is drawn");
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(window.update(&mut cx, |s, _, _| s.bell_menu.is_open()).unwrap(), "the bell opened");
+        assert!(
+            !cx.update(|window, _| outside.is_focused(window)),
+            "focus left the outside holder for the sidebar"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(!window.update(&mut cx, |s, _, _| s.bell_menu.is_open()).unwrap(), "Escape closed it");
+    }
+
+    /// A pill the keyboard is on belongs to one visit to the list: closing
+    /// Settings, or Escape in the filter, hands focus back to the list, and a
+    /// Backspace there must not close a tab nobody is pointing at.
+    #[gpui::test]
+    async fn a_pill_cursor_does_not_survive_focus_leaving_and_returning_to_the_list(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.focus_row_with_pills(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.pill_cursor).unwrap(), Some(0));
+        // Focus leaves for the filter and comes back by its Escape path.
+        window.update(&mut cx, |s, window, cx| s.show_filter(window, cx)).unwrap();
+        cx.run_until_parked();
+        window.update(&mut cx, |s, window, cx| s.hide_filter(window, cx)).unwrap();
+        cx.run_until_parked();
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert!(
+            !events.borrow().iter().any(|event| matches!(event, SidebarEvent::CloseTab(_))),
+            "no tab closes on a stale pill: {:?}",
+            events.borrow()
+        );
+    }
+
+    /// Git's main checkout can never be removed, whatever the app's Primary
+    /// marker says: `git worktree remove` refuses it and the remote branch
+    /// deletion that precedes it would still go through. Unsetting the Primary
+    /// on it (one click on its star) must not turn its cross on.
+    #[gpui::test]
+    async fn the_main_checkout_offers_no_removal_even_when_it_is_not_the_primary(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let root = PathBuf::from("/tmp/main-checkout-project");
+        let window = cx.add_window({
+            let root = root.clone();
+            move |_window, cx| {
+                Sidebar::from_projects(
+                    vec![SidebarProject {
+                        id: "p".to_string(),
+                        name: "Project".to_string(),
+                        is_git: true,
+                        root_path: root.clone(),
+                        worktrees: vec![
+                            SidebarWorktree {
+                                branch: "main".into(),
+                                path: root.clone(),
+                                is_primary: false,
+                                comment: None,
+                            },
+                            SidebarWorktree {
+                                branch: "feature".into(),
+                                path: root.join("feature"),
+                                is_primary: true,
+                                comment: None,
+                            },
+                            SidebarWorktree {
+                                branch: "plain".into(),
+                                path: root.join("plain"),
+                                is_primary: false,
+                                comment: None,
+                            },
+                        ],
+                    }],
+                    cx,
+                )
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let id_of = |cx: &VisualTestContext, title: &str| {
+            sidebar.read_with(cx, |s, _| {
+                s.rows.iter().find(|row| row.title == title).map(|row| row.id).expect("row")
+            })
+        };
+        let (main, plain) = (id_of(&cx, "main"), id_of(&cx, "plain"));
+
+        // The control: an ordinary worktree shows its cross under the pointer.
+        hover_card(&mut cx, plain);
+        assert!(cx.debug_bounds(Box::leak(format!("remove-worktree-{plain}").into_boxed_str())).is_some());
+        pointer_away(&mut cx);
+
+        hover_card(&mut cx, main);
+        assert!(
+            cx.debug_bounds(Box::leak(format!("remove-worktree-{main}").into_boxed_str())).is_none(),
+            "the main checkout has no cross"
+        );
+        pointer_away(&mut cx);
+
+        // And its context menu cannot start a removal.
+        let row = cx
+            .debug_bounds(Box::leak(format!("sidebar-row-{main}").into_boxed_str()))
+            .expect("the main row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        for selector in [
+            "sidebar-context-item-remove-worktree-context",
+            "sidebar-context-item-remove-worktree-and-remote-context",
+        ] {
+            if let Some(item) = cx.debug_bounds(selector) {
+                cx.simulate_click(item.center(), Modifiers::none());
+                cx.run_until_parked();
+                assert!(!cx.has_pending_prompt(), "{selector} must not ask to remove the main checkout");
+                // A click that was ignored leaves the menu open; reopen is not needed.
+            }
+        }
+        sidebar.update(&mut cx, |s, cx| s.remove_worktree_row(main, None, cx));
+        cx.run_until_parked();
+        assert!(
+            sidebar.read_with(&cx, |s, _| s.rows.iter().any(|row| row.id == main)),
+            "the removal guard holds below the UI"
+        );
     }
 
     #[gpui::test]

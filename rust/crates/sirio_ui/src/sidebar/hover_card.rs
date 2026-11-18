@@ -34,18 +34,19 @@ pub(super) const PANEL_BORDER: f32 = 1.0;
 /// A sidebar narrower than this never shows the card.
 pub(super) const MIN_SIDEBAR_WIDTH: f32 = 200.0;
 
+/// Whether the window is wide enough to hold the card beside the sidebar. A
+/// narrower one would push the card left over the row it is about, covering
+/// its star and cross and taking their clicks, so the card does not open.
+pub(super) fn fits(sidebar_right: Pixels, window_width: Pixels) -> bool {
+    sidebar_right + px(GAP) + px(HOVER_CARD_WIDTH) <= window_width
+}
+
 /// Where the card's top-left corner goes: past the sidebar's right edge, level
 /// with the row, never above the window. Its bottom edge is the anchored
-/// layer's to fit, once the card's real height is laid out.
-pub(super) fn card_origin(
-    row: Bounds<Pixels>,
-    sidebar_right: Pixels,
-    window_width: Pixels,
-) -> Point<Pixels> {
-    let x = (sidebar_right + px(GAP))
-        .min(window_width - px(HOVER_CARD_WIDTH))
-        .max(px(0.0));
-    point(x, row.origin.y.max(px(0.0)))
+/// layer's to fit, once the card's real height is laid out. Callers check
+/// [`fits`] first.
+pub(super) fn card_origin(row: Bounds<Pixels>, sidebar_right: Pixels) -> Point<Pixels> {
+    point(sidebar_right + px(GAP), row.origin.y.max(px(0.0)))
 }
 
 /// What the hover card is doing: which worktree card it is about, where that
@@ -299,8 +300,8 @@ mod tests {
         Bounds::new(point(px(8.0), px(y)), size(px(284.0), px(53.0)))
     }
 
-    fn origin(row_y: f32, window_w: f32) -> Point<Pixels> {
-        card_origin(row_at(row_y), px(300.0), px(window_w))
+    fn origin(row_y: f32) -> Point<Pixels> {
+        card_origin(row_at(row_y), px(300.0))
     }
 
     fn pill(kind: TabKind, status: Option<ActivityStatus>, unread: bool) -> SidebarPill {
@@ -339,21 +340,11 @@ mod tests {
 
     #[test]
     fn the_card_sits_beside_the_sidebar_at_the_row_top() {
-        assert_eq!(origin(250.0, 1200.0), point(px(304.0), px(250.0)));
-    }
-
-    #[test]
-    fn a_card_that_would_cross_the_right_edge_is_pulled_left() {
-        assert_eq!(origin(250.0, 500.0).x, px(210.0));
+        assert_eq!(origin(250.0), point(px(304.0), px(250.0)));
     }
 
     #[test]
     fn a_row_partly_above_the_window_clamps_to_zero() {
-        assert_eq!(origin(-20.0, 1200.0).y, px(0.0));
-    }
-
-    #[test]
-    fn a_window_narrower_than_the_card_starts_it_at_the_left_edge() {
-        assert_eq!(origin(250.0, 200.0).x, px(0.0));
+        assert_eq!(origin(-20.0).y, px(0.0));
     }
 }

@@ -23779,8 +23779,13 @@ impl SirioWorkspace {
                     "sidebarNewChat": sidebar_probe.new_chat.map(rect),
                     "sidebarSectionHeader": sidebar_probe.section_header.map(rect),
                     "sidebarSection": sidebar_probe.section.map(rect),
+                    "sidebarSectionAdd": sidebar_probe.section_add.map(rect),
+                    "sidebarSectionMenu": sidebar_probe.section_menu.map(rect),
+                    "sidebarHeaderExpandAll": sidebar_probe.header_expand_all.map(rect),
+                    "sidebarHeaderCollapseAll": sidebar_probe.header_collapse_all.map(rect),
                     "sidebarCard": sidebar_probe.card.map(rect),
                     "sidebarCardStar": sidebar_probe.card_star.map(rect),
+                    "sidebarCardRemove": sidebar_probe.card_remove.map(rect),
                     "sidebarHoverCard": sidebar_probe.hover_card.map(rect),
                     "sidebarBellMenu": sidebar_probe.bell_menu.map(rect),
                     "sidebarFilter": sidebar_probe.filter.map(rect),
@@ -29948,13 +29953,19 @@ impl Render for SirioWorkspace {
         // working without an extra click.
         if self.restore_focus_pending {
             self.restore_focus_pending = false;
-            let focus = if self.sidebar_visible {
-                self.sidebar.focus_handle(cx)
+            if self.sidebar_visible {
+                // Through the sidebar, so the list's pill cursor from before
+                // Settings opened does not wait for a Backspace.
+                let sidebar = self.sidebar.clone();
+                window.on_next_frame(move |window, cx| {
+                    sidebar.update(cx, |sidebar, cx| sidebar.restore_focus(window, cx));
+                });
             } else {
-                self.active_pane_focus_handle(cx)
-                    .unwrap_or_else(|| self.root_focus.clone())
-            };
-            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+                let focus = self
+                    .active_pane_focus_handle(cx)
+                    .unwrap_or_else(|| self.root_focus.clone());
+                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+            }
         }
 
         // The peek drew its tab's view for the first time in this frame; focus

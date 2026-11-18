@@ -5,16 +5,25 @@
 use super::*;
 use gpui::SharedString;
 
-/// Height of a section header. Shorter than a row on purpose: it is a label,
-/// not something you select.
+/// Height of a project row: the same 31 px as the New Chat row above the
+/// list. (The Projects / Sessions header over the list is 28.)
 pub(super) const SECTION_HEIGHT: f32 = 31.0;
+
+/// Where the first project row, its `+` and its three dots paint, for the
+/// debug layout read. Clones share the cells.
+#[derive(Clone)]
+pub(super) struct SectionProbes {
+    pub(super) row: ProbeCell,
+    pub(super) add: ProbeCell,
+    pub(super) menu: ProbeCell,
+}
 
 pub(super) fn render_section(
     row: SidebarRow,
     _worktree_count: usize,
     entity: gpui::Entity<Sidebar>,
     theme: Theme,
-    probe: Option<std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>>,
+    probes: Option<SectionProbes>,
 ) -> impl IntoElement {
     let row_id = row.id;
     let expanded = row.expanded;
@@ -47,7 +56,7 @@ pub(super) fn render_section(
         .text_color(theme.ely.fg_muted)
         .cursor_pointer()
         // Keep the old project-row selector as a compatibility probe for
-        // existing sidebar tests while the project itself is now a header.
+        // existing sidebar tests: the project row is the fold control, drawn as a folder.
         .child(
             div()
                 .debug_selector(move || format!("sidebar-row-{row_id}"))
@@ -56,7 +65,7 @@ pub(super) fn render_section(
         )
         // Reaches over the header's two hairlines: an absolute child spans
         // the padding box, and the header's bounds are what the person sees.
-        .when_some(probe, |this, cell| {
+        .when_some(probes.clone().map(|probes| probes.row), |this, cell| {
             this.child(
                 gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
                     .absolute()
@@ -168,6 +177,9 @@ pub(super) fn render_section(
                 .group_hover(group.clone(), |style| style.opacity(1.0))
                 .hover(|style| style.bg(theme.ely.hover))
                 .child(IconElement::new(Icon::Plus, IconSize::XSmall))
+                .when_some(probes.clone().map(|probes| probes.add), |this, cell| {
+                    this.child(probe_canvas(&cell))
+                })
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     add_entity.update(cx, |sidebar, cx| {
@@ -189,7 +201,10 @@ pub(super) fn render_section(
                 .group_hover(group, |style| style.opacity(1.0))
                 .hover(|style| style.bg(theme.ely.hover))
                 .text_color(theme.ely.fg_muted)
-                .child("⋯")
+                .child(EIcon::new(IconName::Ellipsis).size(EIconSize::Sm).color(theme.ely.fg_muted))
+                .when_some(probes.map(|probes| probes.menu), |this, cell| {
+                    this.child(probe_canvas(&cell))
+                })
                 .on_click(move |event, window, cx| {
                     cx.stop_propagation();
                     menu_click_entity.update(cx, |sidebar, cx| {
@@ -346,18 +361,6 @@ mod tests {
 
         assert!(cx.debug_bounds("sidebar-section-folder-open-0").is_some());
         assert!(cx.debug_bounds("sidebar-section-folder-closed-0").is_none());
-    }
-
-    #[gpui::test]
-    async fn the_worktree_count_is_gone(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(crate::ely::init);
-        let window = cx.add_window(|_window, cx| sidebar_with_one_project(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("sidebar-section-count-0").is_none());
-        assert!(cx.debug_bounds("sidebar-section-collapse-0").is_none());
     }
 
     fn sidebar_with_many_worktrees(cx: &mut Context<Sidebar>) -> Sidebar {

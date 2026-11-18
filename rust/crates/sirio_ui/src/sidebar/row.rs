@@ -82,6 +82,12 @@ pub(super) struct RowInputs {
     /// measures. An input so a row that becomes the first re-renders, even
     /// when it is mounted cached, and paints its probe.
     pub(super) first_card: bool,
+    /// Whether the card may be removed: neither the Primary nor git's main
+    /// checkout. Drawn as a cross under the pointer, never otherwise.
+    pub(super) removable: bool,
+    /// Whether this is the first removable card, whose cross the debug layout
+    /// read measures.
+    pub(super) first_removable: bool,
 }
 
 /// One sidebar row as its own view. It owns nothing but its inputs; every
@@ -110,6 +116,8 @@ impl Render for RowView {
             inputs.project_icon,
             inputs.drag,
             inputs.first_card,
+            inputs.removable,
+            inputs.first_removable,
             self.sidebar.clone(),
             theme,
             window,
@@ -489,6 +497,8 @@ impl Sidebar {
         project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
         first_card: bool,
+        removable: bool,
+        first_removable: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
         window: &mut Window,
@@ -504,8 +514,9 @@ impl Sidebar {
         let is_project = kind == RowKind::Project;
         let is_worktree = kind == RowKind::Worktree;
         // #372: the primary checkout offers no hover-x — like its disabled
-        // context-menu item, it cannot be `git worktree remove`d.
-        let is_removable_worktree = is_worktree && !row.is_primary;
+        // context-menu item, it cannot be `git worktree remove`d. Nor does
+        // git's main checkout, whatever the Primary marker says (`removable`).
+        let is_removable_worktree = is_worktree && !row.is_primary && removable;
         // Zed's row rhythm (34 / 53): a worktree row is always a two-line
         // card (13px title over a 12.5px context line). Project rows draw
         // through `render_section` at `SECTION_HEIGHT`, so no single-line
@@ -703,6 +714,8 @@ impl Sidebar {
         // The first card's star records where it is drawn for the debug
         // layout read, hidden or not: a canvas prepaints either way.
         let star_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card_star.clone());
+        let remove_probe =
+            (is_worktree && first_removable).then(|| entity.read(cx).probe.card_remove.clone());
         let (slot_bloom, tail_bloom) = if is_worktree {
             (status_bloom, None)
         } else {
@@ -808,6 +821,18 @@ impl Sidebar {
                                 .hover(|style| style.bg(theme.ely.hover))
                                 .invisible()
                                 .group_hover(hover_group.clone(), |style| style.visible())
+                                .when_some(remove_probe, |this, cell| {
+                                    this.child(
+                                        gpui::canvas(
+                                            move |bounds, _, _| cell.set(Some(bounds)),
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size_full(),
+                                    )
+                                })
                                 .on_click(move |event, window, cx| {
                                     cx.stop_propagation();
                                     remove_entity.update(cx, |sidebar, cx| {
