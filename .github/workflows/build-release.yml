@@ -525,7 +525,11 @@ jobs:
 
   windows:
     needs: macos
-    runs-on: windows-latest
+    # Pinned, like the macOS job. windows-latest is windows-2025-vs2026, whose
+    # image 20261116 ships an MSVC STL that refuses any Clang below 22
+    # (yvals_core.h STL1000); Zig 0.15.2's clang builds libghostty-vt's simdutf
+    # against those headers and fails. windows-2022 carries Visual Studio 2022.
+    runs-on: windows-2022
     permissions:
       contents: read
     timeout-minutes: 60
@@ -601,7 +605,7 @@ jobs:
           # The .iss is generated beside the binaries: ISCC resolves its
           # relative Source: paths against the script's own directory, and the
           # script's OutputBaseFilename lands SirioSetup-<version>.exe there
-          # too. The setup is compiled with the ISCC.exe the windows-latest
+          # too. The setup is compiled with the ISCC.exe the windows-2022
           # runner image ships -- no extra install step.
           bash Scripts/build-inno.sh "$VERSION" "$STAGING/Sirio.iss"
           "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "$STAGING/Sirio.iss"

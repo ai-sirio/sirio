@@ -180,7 +180,14 @@ grep -q "stapler staple"                       "$BUILD" || fail "no stapling ste
 
 # The Windows release is an Inno Setup installer, not a zip: the .iss is
 # generated from the identity source, compiled with the ISCC.exe that ships
-# with the windows-latest runner image, and uploaded as SirioSetup-<version>.exe.
+# with the windows-2022 runner image, and uploaded as SirioSetup-<version>.exe.
+# The job pins windows-2022: windows-latest moved to Visual Studio 2026, whose
+# STL refuses the clang in Zig 0.15.2 (STL1000), so libghostty-vt cannot build.
+grep -q "runs-on: windows-2022" "$BUILD" \
+  || fail "the windows job must pin windows-2022: the VS 2026 STL refuses Zig 0.15.2's clang"
+if grep -qE '^\s*runs-on:.*windows-latest' "$BUILD"; then
+  fail "windows-latest must not be used for the release build: it carries the VS 2026 STL"
+fi
 grep -q "Scripts/build-inno.sh" "$BUILD" || fail "the windows job must generate the .iss from the identity source"
 grep -q "ISCC.exe"              "$BUILD" || fail "the windows job must compile the .iss with ISCC"
 grep -q "SirioSetup-"           "$BUILD" || fail "no SirioSetup-<version>.exe artifact name"
