@@ -33,7 +33,7 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 use crate::linux::{
     Backend, DisplayConnection, HeadlessConnection, LinuxDispatcher, PriorityQueueCalloopReceiver,
-    select_backend,
+    child_environment_is_set, select_backend, with_child_environment,
 };
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
@@ -955,7 +955,9 @@ impl Platform for LinuxPlatform {
             .spawn(async move {
                 let mut command = new_std_command("xdg-open");
                 command.arg(path);
-                if let Some(environment) = environment {
+                if child_environment_is_set() {
+                    command = with_child_environment(command, None);
+                } else if let Some(environment) = environment {
                     environment.apply_to(&mut command);
                 }
                 #[allow(
@@ -1185,9 +1187,13 @@ async fn run_open_commands(
     environment: &GraphicalEnvironment,
 ) -> bool {
     for mut command in open::commands(target) {
-        environment.apply_to(&mut command);
-        if let Some(token) = activation_token {
-            command.env("XDG_ACTIVATION_TOKEN", token);
+        if child_environment_is_set() {
+            command = with_child_environment(command, activation_token);
+        } else {
+            environment.apply_to(&mut command);
+            if let Some(token) = activation_token {
+                command.env("XDG_ACTIVATION_TOKEN", token);
+            }
         }
         let program = format!("{:?}", command.get_program());
         match smol::process::Command::from(command).spawn() {

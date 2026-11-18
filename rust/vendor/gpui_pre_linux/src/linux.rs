@@ -32,6 +32,40 @@ use std::rc::Rc;
 
 use gpui::WindowingModes;
 
+/// The environment every opener gpui starts (`xdg-open`, the desktop's file and link
+/// launchers) runs with, once the app has set it. Unset, they run as upstream starts them.
+static CHILD_ENVIRONMENT: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+
+/// Sets the environment gpui's openers run with: each is started with its inherited
+/// environment cleared and exactly these pairs given instead (plus `XDG_ACTIVATION_TOKEN`
+/// when gpui has one). Set once, before the first link is opened; a later call is ignored.
+pub fn set_child_environment(env: Vec<(String, String)>) {
+    let _ = CHILD_ENVIRONMENT.set(env);
+}
+
+/// Whether [`set_child_environment`] has been called.
+pub(crate) fn child_environment_is_set() -> bool {
+    CHILD_ENVIRONMENT.get().is_some()
+}
+
+/// Gives `command` the environment [`set_child_environment`] set, if any: its inherited
+/// environment is replaced by exactly those pairs, plus `XDG_ACTIVATION_TOKEN` if given.
+/// Unset, `command` is returned untouched.
+pub(crate) fn with_child_environment(
+    mut command: std::process::Command,
+    activation_token: Option<&str>,
+) -> std::process::Command {
+    if let Some(env) = CHILD_ENVIRONMENT.get() {
+        command
+            .env_clear()
+            .envs(env.iter().map(|(key, value)| (key, value)));
+        if let Some(token) = activation_token {
+            command.env("XDG_ACTIVATION_TOKEN", token);
+        }
+    }
+    command
+}
+
 /// Returns the default platform implementation for the current OS.
 ///
 /// A windowed platform connects to the display server the process environment names, or starts
