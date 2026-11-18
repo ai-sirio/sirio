@@ -22,6 +22,7 @@ const FAKE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_eli
 const ELICIT_MCP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/elicit_mcp.py");
 const STATE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_state_api.py");
 const TASKS_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_tasks_api.py");
+const SUBAGENT_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_subagent_api.py");
 const LIMITS_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_limits_api.py");
 
 /// The real binary of the newest installed mise `claude`, never the `latest` link or the
@@ -361,6 +362,12 @@ impl Session {
     /// background-task test (`fake_tasks_api.py`), with no MCP server.
     pub fn start_tasks(claude: &Path, python: &Path, root: &Path) -> Self {
         Self::launch(claude, python, root, TASKS_API, false, None, None, false, true)
+    }
+
+    /// Launches `claude` for a new chat session under `root` against the fake API of the
+    /// subagent-text test (`fake_subagent_api.py`), with no MCP server.
+    pub fn start_subagent(claude: &Path, python: &Path, root: &Path) -> Self {
+        Self::launch(claude, python, root, SUBAGENT_API, false, None, None, false, true)
     }
 
     /// Launches `claude` against the rate-limit fake API (`fake_limits_api.py`), which answers

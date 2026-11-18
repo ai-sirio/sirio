@@ -249,7 +249,23 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # turn stays Live, its cost "at least" until they end, the CLI-started turns after them
 # charged to it and never drawn, and a prompt written while one runs), the Trace tab across
 # a worktree switch, a relaunch and its chat's close, the frames the trace asks for (SIRIO_PERF_TRACE) and real X
-# clicks and keys on the tab. The file_links scenario uses Scripts/Tests/stubs/file-links/claude,
+# clicks and keys on the tab.
+# A10, subagent text: two more trace scenarios, subagent_text and subagent_text_floor, on the same
+# stub. Its `subagent_text` prompt runs a foreground subagent that asks for a permission and a
+# background one that writes after the turn's result. subagent_text asserts, on `surface.chat.read`
+# and `surface.trace.read`: the Agent call is a folded card titled by its description (no plain
+# row); the card's items in arrival order (the prompt first, the thought, the text, the calls);
+# the lane's latest sentence; a grandchild's line marked with its name in the outer card; no
+# hand-back frame anywhere; a background card that fills after the result and after a second turn
+# began, and is Completed once its task ends; the end notice as before. subagent_text_floor does
+# the same under SIRIO_FIXTURE_FLOOR=1 (the 2.1.257 floor: no line or ask names its agent). They
+# write subagent-text.json and subagent-text-floor.json (the cards' final items, the first
+# turn's lanes, a `mode` field of "forward" or "floor").
+# The live check is `claude_forwards_a_subagents_text_under_sirios_initialize` (#[ignore],
+# acp_conformance): the real CLI against tests/live/fake_subagent_api.py (127.0.0.1) forwards the
+# subagent's text on stdout under Sirio's own `initialize`, for a foreground `Agent` call and one
+# that omits `run_in_background`, within 60 s.
+# The file_links scenario uses Scripts/Tests/stubs/file-links/claude,
 # the fixture's file_links mode: one answer holding paths that exist in the worktree, ones that do
 # not, a version, a fenced path and a web link, then real X clicks and drags on it, asserted on
 # `transcriptLinks` of `surface.chat.read`, `surface.editor.state`, `surface tabs read` and the

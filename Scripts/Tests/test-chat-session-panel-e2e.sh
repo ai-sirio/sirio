@@ -149,6 +149,13 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      or a third tab selected in its place, with the worktree parked or after the turn
 #   trace_keys         real X input on the Trace tab: a click on a row and Enter on the selected row
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
+#   subagent_text      (A10) a foreground subagent's prompt, thought, text and calls are drawn in
+#                      its folded card (the Agent call has no plain row), its lane says its latest
+#                      sentence, a grandchild's line is marked in the outer card, and a background
+#                      agent's lines after the result fill its own card until its task ends;
+#                      writes subagent-text.json (a `mode` field, "forward")
+#   subagent_text_floor  the same under SIRIO_FIXTURE_FLOOR=1 (the 2.1.257 floor: no line or ask
+#                      names its agent); writes subagent-text-floor.json (`mode` "floor")
 #   unread_parked_chat a turn that ends while its worktree is not selected marks the chat unread and posts
 #                      one notification naming its branch; showing the worktree clears the mark
 #                      and the tray's roster lists the worktree with a leading dot until it is shown, in every
@@ -1247,7 +1254,8 @@ capture() { # name
 #   SIRIO_FIXTURE_GATE  the file session_state_background touches to release the fixture's held steps
 #   SIRIO_FIXTURE_STOP_DELAY  seconds the background-tasks stub waits before it answers a stop_task (default 1;
 #                        background_stop_click sets 5 so that a framed run's slow frames cannot skip `stopping`)
-#   SIRIO_FIXTURE_FLOOR  1 makes the background-tasks stub the 2.1.257 floor (background_shell_floor)
+#   SIRIO_FIXTURE_FLOOR  1 makes the background-tasks stub and the trace stub the 2.1.257 floor
+#                        (background_shell_floor, subagent_text_floor)
 #   SIRIO_FIXTURE_REQUEST_LOG  the file the background-tasks stub appends every control request to
 #   SIRIO_FIXTURE_TITLE_STORE, SIRIO_FIXTURE_RENAME_ERROR, SIRIO_FIXTURE_HANDSHAKE_GATE, SIRIO_FIXTURE_RENAME_GATE
 #                  the rename stub's CLI title file, the error it answers every rename with, the file that holds its

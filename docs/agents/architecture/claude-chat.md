@@ -308,6 +308,70 @@ still, and asks for nothing when nothing paints it or when the turn has ended an
 show it as Live or Waiting (the paragraph below). Only the card follows that headline: the Trace
 tab's loop still stops once its turn has ended, whatever the CLI says. A folded card's title ticks once a second while it
 is painted and reads Live or Waiting.
+
+**A subagent's text is switched on by the `initialize` key, never by the flag.** This is the
+spec's A10 deviation "The switch is the `initialize` key". The CLI forwards a subagent's text and
+thinking on stdout under three switches: the flag `--forward-subagent-text`, the env var
+`CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` and the `initialize` key `forwardSubagentText`, which
+overrides the other two. Every CLI tested honours the flag and the key, the 2.1.257 floor
+included, but a CLI that does not know a flag exits (`error: unknown option`), so Sirio never
+passes the flag. `sirio_claude::ControlRequest::initialize` sends `forwardSubagentText: true` in
+every native `initialize`, and a CLI below the floor is not native, so no native CLI is without
+the feature. What it costs: with the key on, the CLI asks the API for a foreground subagent's
+thinking with `display: "updates"` instead of `"omitted"` (the floor drops the field, as it does
+for the main agent). The API docs say billing does not depend on `display`, so the cost is
+unchanged, but a foreground subagent may answer a little slower. The live test
+`claude_forwards_a_subagents_text_under_sirios_initialize` (`sirio_agents/tests/acp_conformance.rs`,
+`#[ignore]`, against `tests/live/fake_subagent_api.py`) sends Sirio's own `initialize` to the real
+CLI and checks, for a foreground `Agent` call and one that omits `run_in_background`, that an
+`assistant` line with the call's id as `parent_tool_use_id` carries the subagent's text within
+60 s. Run it with:
+
+      TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance \
+          claude_forwards_a_subagents_text_under_sirios_initialize -- --ignored --exact \
+          --nocapture --test-threads=1
+
+**The subagent card** is how a native chat draws what a subagent does (the spec's A10 deviation
+"The card is new on the native path"; ACP's card, found by title, is unchanged). A native
+`Agent` or `Task` call is drawn as a card, folded, titled by its `description`, with the
+one-line summary, on every native CLI, in place of the plain `Agent` row. The call opens its
+card, or its permission ask does if that comes first, and a row already drawn becomes the card
+in place (`turn_row_into_card`). Lines are attached to a card by
+`parent_tool_use_id`, never by position and never by `agent_id`, which the floor omits; a line
+whose parent opened no card is dropped. Items that arrive before the card is drawn wait for it
+(`pending_subagents`) and land in arrival order. Its items are, in order:
+- the prompt (the `Agent` call's own `prompt`), first;
+- the subagent's thinking, a block that starts folded, in the main agent's shape (text and
+  signature, whole);
+- its text, all of it, drawn as markdown with the file paths it names as links;
+- its tool calls, each with its result, interleaved in arrival order.
+
+A subagent never streams partials: each `assistant` line is one content block, and the lines of
+one message share a message id. The final report arrives three times: as the last forwarded text,
+inside the `Agent` `tool_result` (in a hand-back frame) and, for a background agent, as
+`task_notification.summary`. The card draws the forwarded text once and never the `tool_result`'s
+(a failed card is the exception: its error is all it has to say, so that is drawn). A background
+agent's end notice, with its summary at the foot of the transcript, stays as it is. A subagent's
+own subagent has its `Agent` call as a nested row in its parent's card, and its lines go into
+the outermost card in arrival order, each marked with its agent's name: no card nests in a card.
+A background agent forwards its text and thinking on every version, with or without the key,
+after the turn's `result` and among `task_*` lines. Its card fills in place and stays running
+until its task ends (the first terminal `task_updated` or `task_notification`), so the link from
+an agent to its card outlives the turn, even behind a later turn. None of this is persisted: a
+restored chat shows the `Agent` row and the card's content is gone.
+
+A file path a subagent's text names is a link that opens in Sirio's editor only on a left click,
+with the press and the release on the same link; the card never stops an event, so a drop still
+lands. The vendored `bezel_markdown` never hands a `file:` URL to the system opener (a fourth
+local patch): see `rust/vendor/README.md`.
+
+The Trace labels a running subagent's lane with the latest sentence of its latest text, never
+its thinking, cleaned through `visible_text`, and only while the lane is open. The Trace already
+counts one model call per message id, so the forwarded blocks of one message add no calls. The
+floor limit: a permission ask with no `agent_id` that reaches Sirio before its subagent's first
+line still draws a top-level row, as before A10. The `subagent_text` and `subagent_text_floor`
+E2E scenarios cover the card on a CLI with and without `agent_id` (`docs/agents/e2e-tests.md`).
+
 **The CLI's own session state** is the second source of a chat's status, next to the turns Sirio
 derives. Sirio launches the CLI with `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`, which makes it write
 `system` / `session_state_changed` lines (`running`, `idle`, `requires_action`; an unknown value is
@@ -489,7 +553,8 @@ fails midway". When a stream breaks midway, the CLI asks again without streaming
 answer as one `assistant` message with no stream events. Sirio draws text from stream events, so
 that answer used to be invisible. An `assistant` line now draws its text unless one of these
 holds: the line has no id at all; the line belongs to a subagent (its `parent_tool_use_id` is set:
-it draws nothing, and only its tool calls are remembered); the message's id was streamed; the line
+it draws nothing at the top level; its text, thinking and tool calls go into its card, and a
+line whose parent opened no card draws nothing at all); the message's id was streamed; the line
 is synthetic (the exhaustion's sentence; a top-level synthetic line that carries
 `local_command_run` is a command's output instead, drawn as its own row: see A9 below); a text
 delta arrived outside any open message (the fixture's `state_text`, which repeats its text in the
