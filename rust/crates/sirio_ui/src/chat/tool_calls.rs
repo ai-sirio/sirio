@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 use super::{
     Chat, DIFF_PREVIEW_MAX_LINES, DiffPreviewContext, DiffPreviewSelection, EditSummaryState,
-    Entry, SubagentPart, TranscriptInteraction, diff_preview_lines, project_tool_content,
-    tool_call_plain_text,
+    Entry, MarkdownBody, SubagentPart, TranscriptInteraction, diff_preview_lines,
+    project_tool_content, tool_call_plain_text,
 };
 use sirio_chat::{ToolCallContentInfo, ToolCallLocationInfo};
 use sirio_theme::Theme;
@@ -597,37 +597,108 @@ impl Chat {
                 if matches!(chat.entries.get(task_index), Some(Entry::SubagentTask { expanded, .. }) if *expanded != desired) { chat.toggle_subagent_task_expanded(task_index, cx); }
             }));
         if expanded {
-            // The calls only; Task 3 draws the other parts.
-            let calls = parts
-                .into_iter()
-                .enumerate()
-                .filter_map(|(child_index, part)| match part {
-                    SubagentPart::Call(call) => Some((child_index, call)),
-                    _ => None,
-                });
+            let mut previous_agent: Option<String> = None;
             let mut first = true;
-            for (child_index, call) in calls {
+            for (child_index, part) in parts.into_iter().enumerate() {
+                let agent = match &part {
+                    SubagentPart::Prompt { .. } => None,
+                    SubagentPart::Call(call) => call.agent.clone(),
+                    SubagentPart::Text { agent, .. } | SubagentPart::Thought { agent, .. } => {
+                        agent.clone()
+                    }
+                };
+                if agent != previous_agent
+                    && let Some(name) = &agent
+                {
+                    group = group.child(
+                        div()
+                            .px(px(12.0))
+                            .pt(px(6.0))
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.ely.fg_subtle)
+                            .child(SharedString::from(name.clone()))
+                            .into_any_element(),
+                    );
+                }
+                previous_agent = agent;
+                let part_id: ElementId = (row_id.clone(), format!("child-{child_index}")).into();
                 let is_first = std::mem::take(&mut first);
-                group = group.child(Self::render_tool_row(
-                    task_index,
-                    (row_id.clone(), format!("child-{child_index}")).into(),
-                    Some((task_index, child_index)),
-                    is_first,
-                    &call.title,
-                    &call.status,
-                    &call.kind,
-                    call.duration_ms,
-                    call.content,
-                    call.locations,
-                    call.expanded,
-                    None,
-                    0,
-                    None,
-                    theme,
-                    bezel_theme,
-                    entity.clone(),
-                    output_scrolls,
-                ));
+                group = group.child(match part {
+                    SubagentPart::Prompt { text } => div()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .text_size(theme.typography.callout)
+                        .text_color(theme.ely.fg_muted)
+                        .child(SharedString::from(text))
+                        .into_any_element(),
+                    SubagentPart::Call(call) => Self::render_tool_row(
+                        task_index,
+                        part_id,
+                        Some((task_index, child_index)),
+                        is_first,
+                        &call.title,
+                        &call.status,
+                        &call.kind,
+                        call.duration_ms,
+                        call.content,
+                        call.locations,
+                        call.expanded,
+                        None,
+                        0,
+                        None,
+                        theme,
+                        bezel_theme,
+                        entity.clone(),
+                        output_scrolls,
+                    ),
+                    SubagentPart::Text { document, .. } => div()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .text_size(theme.typography.callout)
+                        .child(MarkdownBody::new(document))
+                        .into_any_element(),
+                    SubagentPart::Thought { text, open, .. } => {
+                        let toggle_entity = entity.clone();
+                        let mut block = ely_gpui_component::chat::ThinkingBlock::new(
+                            part_id,
+                            "Thought",
+                            false,
+                            std::time::Duration::ZERO,
+                        )
+                        .header_selector(format!(
+                            "subagent-thought-toggle-{task_index}-{child_index}"
+                        ))
+                        .expanded(open, move |desired, _, cx| {
+                            toggle_entity.update(cx, |chat, cx| {
+                                if let Some(Entry::SubagentTask { parts, .. }) =
+                                    chat.entries.get(task_index)
+                                    && matches!(
+                                        parts.get(child_index),
+                                        Some(SubagentPart::Thought { open, .. })
+                                            if *open != desired
+                                    )
+                                {
+                                    chat.toggle_subagent_part_expanded(task_index, child_index, cx);
+                                }
+                            })
+                        });
+                        if open {
+                            block = block.body(
+                                div()
+                                    .ml(px(10.0))
+                                    .pl(px(12.0))
+                                    .pr(px(14.0))
+                                    .border_l_1()
+                                    .border_color(bezel_theme.border)
+                                    .text_size(theme.typography.callout)
+                                    .text_color(theme.ely.fg_muted.opacity(0.7))
+                                    .child(SharedString::from(text))
+                                    .into_any_element(),
+                            );
+                        }
+                        block.into_any_element()
+                    }
+                });
             }
         }
         Self::run_box(bezel_theme)

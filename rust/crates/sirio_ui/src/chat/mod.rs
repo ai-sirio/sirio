@@ -1245,9 +1245,12 @@ impl Entry {
                 ..
             } => {
                 let mut lines = vec![format!("Subagent: {title}\n{status}")];
-                lines.extend(parts.iter().filter_map(|part| match part {
-                    SubagentPart::Call(call) => Some(format!("{}\n{}", call.title, call.status)),
-                    _ => None,
+                lines.extend(parts.iter().map(|part| match part {
+                    SubagentPart::Prompt { text } => text.clone(),
+                    SubagentPart::Call(call) => format!("{}\n{}", call.title, call.status),
+                    SubagentPart::Text { text, .. } | SubagentPart::Thought { text, .. } => {
+                        text.clone()
+                    }
                 }));
                 lines.join("\n")
             }
@@ -7792,6 +7795,40 @@ impl Chat {
     }
 }
 
+/// One part of a subagent card as the read row lists it.
+fn subagent_part_item(part: &SubagentPart) -> serde_json::Value {
+    let mut item = serde_json::Map::new();
+    let agent = match part {
+        SubagentPart::Prompt { text } => {
+            item.insert("kind".into(), "prompt".into());
+            item.insert("text".into(), text.clone().into());
+            None
+        }
+        SubagentPart::Call(call) => {
+            item.insert("kind".into(), "tool".into());
+            item.insert("text".into(), call.title.clone().into());
+            item.insert("id".into(), call.id.clone().into());
+            item.insert("status".into(), call.status.clone().into());
+            call.agent.as_ref()
+        }
+        SubagentPart::Text { agent, text, .. } => {
+            item.insert("kind".into(), "text".into());
+            item.insert("text".into(), text.clone().into());
+            agent.as_ref()
+        }
+        SubagentPart::Thought { agent, text, open } => {
+            item.insert("kind".into(), "thought".into());
+            item.insert("text".into(), text.clone().into());
+            item.insert("open".into(), (*open).into());
+            agent.as_ref()
+        }
+    };
+    if let Some(agent) = agent {
+        item.insert("agent".into(), agent.clone().into());
+    }
+    serde_json::Value::Object(item)
+}
+
 fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
     let mut row = BTreeMap::new();
     match entry {
@@ -7813,12 +7850,19 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
             status,
             expanded,
             ..
+        } => {
+            row.insert("kind".into(), "tool".into());
+            row.insert("id".into(), id.clone());
+            row.insert("text".into(), title.clone());
+            row.insert("status".into(), status.clone());
+            row.insert("expanded".into(), expanded.to_string());
         }
-        | Entry::SubagentTask {
+        Entry::SubagentTask {
             id,
             title,
             status,
             expanded,
+            parts,
             ..
         } => {
             row.insert("kind".into(), "tool".into());
@@ -7826,6 +7870,11 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
             row.insert("text".into(), title.clone());
             row.insert("status".into(), status.clone());
             row.insert("expanded".into(), expanded.to_string());
+            let items: Vec<serde_json::Value> = parts.iter().map(subagent_part_item).collect();
+            row.insert(
+                "items".into(),
+                serde_json::to_string(&items).unwrap_or_else(|_| "[]".into()),
+            );
         }
         Entry::Permission {
             request_id,
