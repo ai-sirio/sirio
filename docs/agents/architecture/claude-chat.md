@@ -557,14 +557,15 @@ keeps it.
 gateway sign-in (never to an API-key session), after the answer and before `result`, and only when
 the state changes. `RateLimitPush::parse` (`sirio_claude::message`) reads `status`, `rateLimitType`
 (the window), `resetsAt` (epoch seconds), `limitScope`, and the fill: the top-level `utilization` (a
-0-1 fraction) or else the named window's entry under `unifiedWindows`. The fill goes through
-`sirio_claude::whole_percent`: `(utilization × 100 + 1e-9).floor()`, clamped to 0-100, so `0.57`
-reads 57. An empty token counts as absent. The fold (`claude/events.rs`, `CliMessage::RateLimit`)
-makes a `SessionNotice::RateLimited` for every status except `allowed` and an empty one. The dedup
-key is `(status, window, scope)`: a repeat adds no line, a change of any of the three does, and an
-`allowed` or empty push clears the key, so the same warning is shown again after the plan had room.
-Known limit: a warning on a second window leaves the event's top level unchanged (the second window
-shows only under `unifiedWindows`), so it has the same key and adds no line.
+0-1 fraction) or else the named window's entry under `unifiedWindows`. The fill is multiplied by 100
+(`to_percent`), then `sirio_claude::whole_percent`: `(value + 1e-9).floor()`, clamped to 0-100, so
+`0.57` reads 57. An empty token counts as absent. The fold (`claude/events.rs`,
+`CliMessage::RateLimit`) makes a `SessionNotice::RateLimited` for every status except `allowed` and
+an empty one. The dedup key is `(status, window, scope)`: a repeat adds no line, a change of any of
+the three does, and an `allowed` or empty push clears the key, so the same warning is shown again
+after the plan had room. Known limit: a warning on a second window leaves the event's top level
+unchanged (the second window shows only under `unifiedWindows`), so it has the same key and adds no
+line.
 
 `sirio_ui::chat::limit_notice` writes the sentence. A part with no value is left out.
 
@@ -588,11 +589,11 @@ row, unchanged.
 
 **A local command's output.** `/usage` and `/context` are answered by the CLI itself, with no model
 call. The answer, already in 2.1.301 (the oldest version probed above the floor; 2.1.258-2.1.300
-were not probed), is a top-level synthetic `assistant` line (`model: "<synthetic>"`)
-that carries `local_command_run: {command, args}`, then a `result` with `num_turns: 0` and
-`local_command`. The fold draws a synthetic line only when it is top level and carries the marker;
-it then pushes `SessionNotice::LocalCommandOutput {command, text, report}` and the next chunk opens
-a new row. The rules:
+were not probed), is a top-level synthetic `assistant` line (`model: "<synthetic>"`) that carries
+`local_command_run: {command, args}`, then a `result` with `num_turns: 0` and `local_command`. The
+fold draws a synthetic line only when it is top level and carries the marker; it then pushes
+`SessionNotice::LocalCommandOutput {command, text, report}` and the next chunk opens a new row. The
+rules:
 
 - Empty text and no `usage_report` draw nothing. A report with no text is still an answer.
 - A model's answer that carries the marker, a subagent's line, and a marker of the wrong type are
@@ -625,10 +626,10 @@ out, and a row with no part at all is dropped:
 - The plan's rows under one heading per group, in the order the groups first appear (`Session`,
   `Weekly`, any other group as sent). A heading shows only over rows that were drawn. A row reads
   `{name} · {p}% · resets at {time} · {severity}`, the last part only for `warning` and `critical`,
-  as the word the CLI sent.
-  The name is the scope's `display_name`, else `Current session` (`session`), `All models`
-  (`weekly_all`), or the `kind` as sent. The percent uses `whole_percent`. The reset uses the same
-  time format as the notice.
+  as the word the CLI sent. The name is the scope's `display_name`, else `Current session`
+  (`session`), `All models` (`weekly_all`), or the `kind` as sent. The percent is the row's
+  `percent` as sent (already 0-100), through `whole_percent`. The reset uses the same time format as
+  the notice.
 - `Plan limits: unavailable` or `Plan limits: none reported`; the second also stands for rows that
   all held nothing to draw.
 - `Extra usage: off`; `Extra usage: $12.34 of $50.00 this month` (amounts are minor units; USD
