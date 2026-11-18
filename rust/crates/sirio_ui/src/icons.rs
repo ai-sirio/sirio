@@ -136,6 +136,10 @@ pub enum Icon {
     /// Expands the Primary half again, from the rail or a peek
     /// (`lucide/panel-left-open.svg`).
     PanelLeftOpen,
+    /// A filled star (`lucide/star-filled.svg`): the Primary's mark on its
+    /// card and, under the pointer, its Unset Primary button. A text glyph
+    /// drew it as a dot at the sidebar's sizes.
+    StarFilled,
     /// The Zed catalog's archive mark (`zed/archive.svg`). It was the Files
     /// tree's glyph for zip, tar, 7z, … until that tree moved to the Material
     /// theme, which draws `zip` instead; nothing draws it today.
@@ -272,6 +276,7 @@ impl Icon {
             Icon::PanelRight => "icons/zed/threads_sidebar_right_open.svg",
             Icon::PanelLeftClose => "icons/lucide/panel-left-close.svg",
             Icon::PanelLeftOpen => "icons/lucide/panel-left-open.svg",
+            Icon::StarFilled => "icons/lucide/star-filled.svg",
             Icon::Archive => "icons/zed/archive.svg",
             Icon::Lock => "icons/zed/lock.svg",
             Icon::FileTree => "icons/zed/file_tree.svg",
@@ -351,6 +356,7 @@ impl Icon {
             Icon::PanelLeftOpen => {
                 include_bytes!("../../../assets/icons/lucide/panel-left-open.svg")
             }
+            Icon::StarFilled => include_bytes!("../../../assets/icons/lucide/star-filled.svg"),
             Icon::Archive => include_bytes!("../../../assets/icons/zed/archive.svg"),
             Icon::Lock => include_bytes!("../../../assets/icons/zed/lock.svg"),
             Icon::FileTree => include_bytes!("../../../assets/icons/zed/file_tree.svg"),
@@ -524,6 +530,7 @@ pub struct IconElement {
     style: StyleRefinement,
     icon: Icon,
     size: IconSize,
+    selector: Option<String>,
 }
 
 impl IconElement {
@@ -532,7 +539,15 @@ impl IconElement {
             style: StyleRefinement::default(),
             icon,
             size,
+            selector: None,
         }
+    }
+
+    /// Names the painted SVG for `debug_bounds` in tests (a monochrome icon
+    /// only; a full-colour mark is a canvas and ignores it).
+    pub fn selector(mut self, selector: impl Into<String>) -> Self {
+        self.selector = Some(selector.into());
+        self
     }
 }
 
@@ -603,6 +618,9 @@ impl RenderOnce for IconElement {
                 .data(icon.svg())
                 .text_color(window.text_style().color);
             element.style().refine(&self.style);
+            if let Some(selector) = self.selector {
+                element = gpui::InteractiveElement::debug_selector(element, move || selector);
+            }
             element.into_any_element()
         }
     }
@@ -665,7 +683,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 59] = [
+pub const ALL_ICONS: [Icon; 60] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -697,6 +715,7 @@ pub const ALL_ICONS: [Icon; 59] = [
     Icon::PanelRight,
     Icon::PanelLeftClose,
     Icon::PanelLeftOpen,
+    Icon::StarFilled,
     Icon::Archive,
     Icon::Lock,
     Icon::MagnifyingGlass,
@@ -856,7 +875,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 2, "both Lucide panel icons must be walked");
+        assert_eq!(checked, 3, "both Lucide panel icons and the filled star must be walked");
     }
 
     #[test]

@@ -175,11 +175,49 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
     }
 }
 
-/// The badge the Sessions segment wears: error outranks needs-input.
-pub fn attention(open: &[SessionRow]) -> Option<ActivityStatus> {
-    [ActivityStatus::Error, ActivityStatus::NeedsInput]
-        .into_iter()
-        .find(|wanted| open.iter().any(|row| row.status == Some(*wanted)))
+/// Why the bell lists a session, most severe first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BellReason {
+    Error,
+    NeedsInput,
+    Unread,
+}
+
+impl BellReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::NeedsInput => "Needs input",
+            Self::Unread => "Unread",
+        }
+    }
+}
+
+/// What the bell says about one session: its status when that needs the
+/// user, else whether it ended a turn out of sight.
+pub fn bell_reason(row: &SessionRow) -> Option<BellReason> {
+    match row.status {
+        Some(ActivityStatus::Error) => Some(BellReason::Error),
+        Some(ActivityStatus::NeedsInput) => Some(BellReason::NeedsInput),
+        _ if row.unread => Some(BellReason::Unread),
+        _ => None,
+    }
+}
+
+/// The sessions the bell lists: most severe first, newest first within a
+/// reason, undated last.
+pub fn bell_entries(open: &[SessionRow]) -> Vec<(BellReason, &SessionRow)> {
+    let mut entries: Vec<_> = open
+        .iter()
+        .filter_map(|row| bell_reason(row).map(|reason| (reason, row)))
+        .collect();
+    entries.sort_by(|(a, row_a), (b, row_b)| a.cmp(b).then_with(|| newest_first(row_a.at, row_b.at)));
+    entries
+}
+
+/// The most severe reason among the open sessions: the bell's dot.
+pub fn bell_signal(open: &[SessionRow]) -> Option<BellReason> {
+    bell_entries(open).first().map(|(reason, _)| *reason)
 }
 
 /// A card's time label, from elapsed time (not calendar days).
@@ -429,10 +467,9 @@ mod tests {
         assert!(session_list(&rows, &[], "nothing").open.is_empty());
     }
 
-    #[test]
-    fn attention_prefers_error_over_needs_input() {
-        let row = |status| SessionRow {
-            key: String::new(),
+    fn bell_row(key: &str, status: Option<ActivityStatus>, unread: bool, at: Option<i64>) -> SessionRow {
+        SessionRow {
+            key: key.to_owned(),
             target: SessionTarget::Open(0),
             title: String::new(),
             icon: Icon::MessageSquare,
@@ -440,22 +477,62 @@ mod tests {
             project: String::new(),
             branch: String::new(),
             status,
-            at: None,
+            at,
             selected: false,
-            unread: false,
-        };
-        assert_eq!(attention(&[row(Some(ActivityStatus::Running))]), None);
+            unread,
+        }
+    }
+
+    #[test]
+    fn bell_ranks_error_over_needs_input_over_unread() {
+        let rows = [
+            bell_row("u", None, true, Some(1)),
+            bell_row("n", Some(ActivityStatus::NeedsInput), false, Some(1)),
+            bell_row("e", Some(ActivityStatus::Error), false, Some(1)),
+        ];
+        assert_eq!(bell_signal(&rows), Some(BellReason::Error));
+        let order: Vec<_> = bell_entries(&rows)
+            .into_iter()
+            .map(|(reason, row)| (reason, row.key.as_str()))
+            .collect();
         assert_eq!(
-            attention(&[row(Some(ActivityStatus::NeedsInput))]),
-            Some(ActivityStatus::NeedsInput)
+            order,
+            [
+                (BellReason::Error, "e"),
+                (BellReason::NeedsInput, "n"),
+                (BellReason::Unread, "u")
+            ]
         );
-        assert_eq!(
-            attention(&[
-                row(Some(ActivityStatus::NeedsInput)),
-                row(Some(ActivityStatus::Error))
-            ]),
-            Some(ActivityStatus::Error)
-        );
+    }
+
+    #[test]
+    fn an_unread_row_that_also_needs_input_is_listed_once_as_needs_input() {
+        let rows = [bell_row("a", Some(ActivityStatus::NeedsInput), true, None)];
+        let entries = bell_entries(&rows);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, BellReason::NeedsInput);
+    }
+
+    #[test]
+    fn bell_sorts_newest_first_within_a_reason_and_undated_last() {
+        let rows = [
+            bell_row("old", None, true, Some(10)),
+            bell_row("none", None, true, None),
+            bell_row("new", None, true, Some(20)),
+        ];
+        let keys: Vec<_> = bell_entries(&rows).into_iter().map(|(_, r)| r.key.as_str()).collect();
+        assert_eq!(keys, ["new", "old", "none"]);
+    }
+
+    #[test]
+    fn closed_and_quiet_rows_give_no_signal() {
+        let rows = [
+            bell_row("a", None, false, Some(1)),
+            bell_row("b", Some(ActivityStatus::Running), false, None),
+            bell_row("c", Some(ActivityStatus::Done), false, None),
+        ];
+        assert_eq!(bell_signal(&rows), None);
+        assert!(bell_entries(&rows).is_empty());
     }
 
     #[test]
@@ -614,14 +691,7 @@ impl Sidebar {
             .when(!row.selected, |this| this.hover(|style| style.bg(theme.ely.hover)))
             .when(cursor, |this| this.border_1().border_color(theme.sirio.quantity))
             .on_click(move |_, window, cx| {
-                let event = match &select_target {
-                    SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
-                    SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab {
-                        path: path.clone(),
-                        index: *index,
-                    },
-                    SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id.clone()),
-                };
+                let event = session_event(select_target.clone());
                 select_entity.update(cx, |sidebar, cx| {
                     let focus_index = sidebar
                         .session_walk()

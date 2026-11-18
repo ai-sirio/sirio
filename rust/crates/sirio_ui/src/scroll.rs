@@ -122,6 +122,89 @@ pub(crate) fn request_frame_when_geometry_moves(
     .into_any_element()
 }
 
+/// How long a fading bar stays full after the surface last moved.
+pub(crate) const BAR_IDLE: std::time::Duration = std::time::Duration::from_millis(900);
+/// How long a fading bar takes to go from full to gone.
+pub(crate) const BAR_FADE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A fading bar's visibility, 0..=1, from the time since its surface last moved.
+pub(crate) fn fade_presence(since_moved: Option<std::time::Duration>) -> f32 {
+    let Some(since) = since_moved else {
+        return 0.0;
+    };
+    let quiet = since.saturating_sub(BAR_IDLE);
+    1.0 - (quiet.as_secs_f32() / BAR_FADE.as_secs_f32()).min(1.0)
+}
+
+/// What keeps a fading bar up: when its surface last moved, and whether the
+/// pointer is on the bar. Kept by whoever owns the surface.
+#[derive(Default)]
+pub(crate) struct BarActivity {
+    offset: Cell<gpui::Point<gpui::Pixels>>,
+    moved_at: Rc<Cell<Option<std::time::Instant>>>,
+    hovered: Rc<Cell<bool>>,
+}
+
+/// The least presence a mounted bar gets. Ely's thumb unmounts at zero, and
+/// with it the track that takes the drag, so an idle bar is drawn at this
+/// instead: invisible, but still there to be grabbed.
+const REST_PRESENCE: f32 = 0.001;
+/// How wide a strip along the bar's edge counts as the pointer being on it.
+const BAR_HOVER_STRIP: f32 = 14.0;
+
+/// [`bar`] for a surface whose bar should not sit on it while it is idle:
+/// the thumb shows while the surface moves, holds for [`BAR_IDLE`], then fades
+/// over [`BAR_FADE`]. It stays up while the pointer is on the bar's edge or a
+/// drag is in progress, and an idle bar stays mounted at [`REST_PRESENCE`] so
+/// the thumb can still be grabbed. Frames are asked for only while the
+/// presence is changing or a drag is held.
+pub(crate) fn bar_fading(
+    id: impl Into<SharedString>,
+    handle: &ScrollHandle,
+    activity: &BarActivity,
+    window: &mut gpui::Window,
+    cx: &gpui::App,
+) -> AnyElement {
+    let now = std::time::Instant::now();
+    let offset = handle.offset();
+    if activity.offset.get() != offset {
+        activity.offset.set(offset);
+        activity.moved_at.set(Some(now));
+    }
+    let dragging = cx.has_active_drag();
+    let held = activity.hovered.get() || dragging;
+    if held {
+        activity.moved_at.set(Some(now));
+    }
+    let presence = fade_presence(activity.moved_at.get().map(|at| at.elapsed()));
+    if dragging || (presence > 0.0 && !held) {
+        window.request_animation_frame();
+    }
+    let hovered = activity.hovered.clone();
+    let moved_at = activity.moved_at.clone();
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .child(
+            div()
+                .id("bar-hover-strip")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(BAR_HOVER_STRIP))
+                .on_hover(move |over, window, _| {
+                    hovered.set(*over);
+                    moved_at.set(Some(std::time::Instant::now()));
+                    window.refresh();
+                }),
+        )
+        .child(bar_with(id, handle, presence.max(REST_PRESENCE)))
+        .into_any_element()
+}
+
 /// Ely's vertical bar over one tracked surface, under a selector the
 /// drawn-frame tests can find. Ely's track carries no selector of its own, so
 /// the tag goes on a full-surface overlay that exists only while there is
@@ -139,6 +222,10 @@ pub(crate) fn request_frame_when_geometry_moves(
 /// While the bar is up, [`request_frame_when_geometry_moves`] does the same
 /// for a viewport that resizes or content that grows or shrinks under it.
 pub(crate) fn bar(id: impl Into<SharedString>, handle: &ScrollHandle) -> AnyElement {
+    bar_with(id, handle, 1.0)
+}
+
+fn bar_with(id: impl Into<SharedString>, handle: &ScrollHandle, presence: f32) -> AnyElement {
     let id: SharedString = id.into();
     let has_overflow = |handle: &ScrollHandle| {
         thumb(
@@ -175,7 +262,7 @@ pub(crate) fn bar(id: impl Into<SharedString>, handle: &ScrollHandle) -> AnyElem
             SharedString::from(format!("{id}-track")),
             handle,
             Axis::Vertical,
-        ))
+        ).presence(presence))
         .child(request_frame_when_geometry_moves(handle, Axis::Vertical))
         .into_any_element()
 }
@@ -446,5 +533,25 @@ mod tests {
             0,
             "a horizontal bar asks for nothing when only the box's height changes"
         );
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_fading_bar_is_absent_before_any_movement_and_after_the_fade() {
+        assert_eq!(fade_presence(None), 0.0, "never moved: nothing drawn");
+        assert_eq!(fade_presence(Some(Duration::ZERO)), 1.0, "just moved: full");
+        assert_eq!(
+            fade_presence(Some(BAR_IDLE)),
+            1.0,
+            "the idle delay holds it full"
+        );
+        let mid = fade_presence(Some(BAR_IDLE + BAR_FADE / 2));
+        assert!(mid > 0.0 && mid < 1.0, "mid fade is partial: {mid}");
+        assert_eq!(fade_presence(Some(BAR_IDLE + BAR_FADE)), 0.0, "faded out");
     }
 }

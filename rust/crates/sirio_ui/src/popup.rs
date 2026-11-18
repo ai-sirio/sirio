@@ -286,6 +286,32 @@ pub fn hang_below(
         .into_any_element()
 }
 
+/// Like [`hang_below`], but right-aligned: the card's right edge is the
+/// `relative` parent's right edge. For a trigger at the end of a row.
+pub fn hang_below_end(
+    id: impl Into<ElementId>,
+    gap: Pixels,
+    content: impl IntoElement,
+    closing: Option<Instant>,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .absolute()
+        .bottom_0()
+        .right_0()
+        .size_0()
+        .child(hang(
+            id.into(),
+            Anchor::TopRight,
+            None,
+            gap,
+            content,
+            closing,
+            cx,
+        ))
+        .into_any_element()
+}
+
 /// Floats `content` over the window point `at`, its bottom-left corner there,
 /// [`HANG_GAP`] above it: a completion popup over the caret that opened it.
 /// `at` is a window point, as a caret measures, not one relative to a parent.

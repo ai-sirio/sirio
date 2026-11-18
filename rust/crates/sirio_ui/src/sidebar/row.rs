@@ -82,6 +82,12 @@ pub(super) struct RowInputs {
     /// measures. An input so a row that becomes the first re-renders, even
     /// when it is mounted cached, and paints its probe.
     pub(super) first_card: bool,
+    /// Whether the card may be removed: neither the Primary nor git's main
+    /// checkout. Drawn as a cross under the pointer, never otherwise.
+    pub(super) removable: bool,
+    /// Whether this is the first removable card, whose cross the debug layout
+    /// read measures.
+    pub(super) first_removable: bool,
 }
 
 /// One sidebar row as its own view. It owns nothing but its inputs; every
@@ -110,6 +116,8 @@ impl Render for RowView {
             inputs.project_icon,
             inputs.drag,
             inputs.first_card,
+            inputs.removable,
+            inputs.first_removable,
             self.sidebar.clone(),
             theme,
             window,
@@ -294,6 +302,7 @@ impl Sidebar {
             Icon::PanelLeftOpen => "panel-left-open",
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
+            Icon::StarFilled => "star-filled",
             Icon::FileTree => "file-tree",
             Icon::Diff => "diff",
             Icon::DiffUnified => "diff-unified",
@@ -488,6 +497,8 @@ impl Sidebar {
         project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
         first_card: bool,
+        removable: bool,
+        first_removable: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
         window: &mut Window,
@@ -503,8 +514,9 @@ impl Sidebar {
         let is_project = kind == RowKind::Project;
         let is_worktree = kind == RowKind::Worktree;
         // #372: the primary checkout offers no hover-x — like its disabled
-        // context-menu item, it cannot be `git worktree remove`d.
-        let is_removable_worktree = is_worktree && !row.is_primary;
+        // context-menu item, it cannot be `git worktree remove`d. Nor does
+        // git's main checkout, whatever the Primary marker says (`removable`).
+        let is_removable_worktree = is_worktree && !row.is_primary && removable;
         // Zed's row rhythm (34 / 53): a worktree row is always a two-line
         // card (13px title over a 12.5px context line). Project rows draw
         // through `render_section` at `SECTION_HEIGHT`, so no single-line
@@ -578,8 +590,12 @@ impl Sidebar {
             .relative()
             .h(px(row_height))
             .w_full()
+            .rounded(px(6.0))
             .px(px(ROW_PAD_X))
             .py(px(ROW_PAD_Y))
+            // The card's content lines up with the project's name; its box
+            // (and so the hover wash and the probe) stays full width.
+            .when(is_worktree, |this| this.pl(px(ROW_PAD_X + CARD_CONTENT_INDENT)))
             .flex()
             .gap(px(8.0))
             .when(selected, |this| this.bg(theme.ely.active))
@@ -664,6 +680,7 @@ impl Sidebar {
                     .id(("sidebar-status-running", row_id))
                     .debug_selector(move || format!("sidebar-status-running-{row_id}"))
                     .flex_none()
+                    .group_hover(hover_group.clone(), |style| style.invisible())
                     .child(loading::bloom(
                         "sidebar-running-bloom",
                         loading::BLOOM_GLYPH,
@@ -679,6 +696,7 @@ impl Sidebar {
                     .id(("sidebar-status-settled", row_id))
                     .debug_selector(move || format!("sidebar-status-settled-{row_id}"))
                     .flex_none()
+                    .group_hover(hover_group.clone(), |style| style.invisible())
                     .child(loading::settled_bloom(
                         "sidebar-settled-bloom",
                         loading::BLOOM_GLYPH,
@@ -687,6 +705,154 @@ impl Sidebar {
                     .into_any_element(),
             ),
             RowStatusGlyph::None => None,
+        };
+        // A worktree card's trailing seat. The bloom and the hover buttons
+        // share it: under the pointer the buttons stand where the bloom was
+        // (it goes invisible, keeping its box), so they sit at one x on every
+        // card whatever its status, and the seat is the same width on all of
+        // them -- the primary holds an empty place where the cross would be.
+        // The first card's star records where it is drawn for the debug
+        // layout read, hidden or not: a canvas prepaints either way.
+        let star_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card_star.clone());
+        let remove_probe =
+            (is_worktree && first_removable).then(|| entity.read(cx).probe.card_remove.clone());
+        let (slot_bloom, tail_bloom) = if is_worktree {
+            (status_bloom, None)
+        } else {
+            (None, status_bloom)
+        };
+        let trailing_slot = {
+            let star_entity = entity.clone();
+            let remove_entity = entity.clone();
+            let is_primary = row.is_primary;
+            let star_color = if is_primary { theme.ely.fg } else { theme.ely.fg_subtle };
+            div()
+                .relative()
+                .flex_none()
+                .w(px(TRAILING_SLOT_WIDTH))
+                .self_stretch()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .flex()
+                        .items_center()
+                        .children(slot_bloom),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .id(("sidebar-card-star", row_id))
+                                .debug_selector(move || format!("sidebar-card-star-{row_id}"))
+                                .cursor(gpui::CursorStyle::PointingHand)
+                                .w(px(16.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(theme.radii.chip)
+                                .hover(|style| style.bg(theme.ely.hover))
+                                .invisible()
+                                .group_hover(hover_group.clone(), |style| style.visible())
+                                .when_some(star_probe, |this, cell| {
+                                    this.child(
+                                        gpui::canvas(
+                                            move |bounds, _, _| cell.set(Some(bounds)),
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size_full(),
+                                    )
+                                })
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    star_entity.update(cx, |sidebar, cx| {
+                                        let Some(target) = sidebar.context_target(row_id) else {
+                                            return;
+                                        };
+                                        let action = if is_primary {
+                                            SidebarContextAction::UnsetPrimary
+                                        } else {
+                                            SidebarContextAction::SetPrimary
+                                        };
+                                        sidebar.dispatch_context_action(target, action, window, cx);
+                                    });
+                                })
+                                // The primary is the filled star, the same one the
+                                // rest-state marker uses; a linked worktree is outline.
+                                .child(if is_primary {
+                                    IconElement::new(Icon::StarFilled, IconSize::XSmall)
+                                        .selector(format!("sidebar-card-star-filled-{row_id}"))
+                                        .text_color(star_color)
+                                        .into_any_element()
+                                } else {
+                                    EIcon::new(IconName::Star)
+                                        .size(EIconSize::Xs)
+                                        .color(star_color)
+                                        .into_any_element()
+                                }),
+                        )
+                        .child(if is_removable_worktree {
+                            div()
+                                .id(("remove-worktree", row_id))
+                                .debug_selector(move || format!("remove-worktree-{row_id}"))
+                                .w(px(16.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(theme.typography.scaled(12.0))
+                                .text_color(theme.ely.fg_subtle)
+                                .rounded(theme.radii.chip)
+                                .hover(|style| style.bg(theme.ely.hover))
+                                .invisible()
+                                .group_hover(hover_group.clone(), |style| style.visible())
+                                .when_some(remove_probe, |this, cell| {
+                                    this.child(
+                                        gpui::canvas(
+                                            move |bounds, _, _| cell.set(Some(bounds)),
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size_full(),
+                                    )
+                                })
+                                .on_click(move |event, window, cx| {
+                                    cx.stop_propagation();
+                                    remove_entity.update(cx, |sidebar, cx| {
+                                        sidebar.open_worktree_close_menu(
+                                            row_id,
+                                            event.position(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                })
+                                .child(
+                                    IconElement::new(Icon::Close, IconSize::XSmall)
+                                        .text_color(theme.ely.fg_subtle),
+                                )
+                                .into_any_element()
+                        } else {
+                            div().w(px(16.0)).flex_none().into_any_element()
+                        }),
+                )
         };
         // Any unread pill makes the whole worktree row read as news: a dot at its
         // leading edge and a heavier title. A project row is already semibold.
@@ -741,9 +907,11 @@ impl Sidebar {
                     div()
                         .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
                         .flex_none()
-                        .text_size(theme.typography.scaled(10.0))
-                        .text_color(theme.ely.fg_subtle)
-                        .child("★"),
+                        .group_hover(hover_group.clone(), |style| style.invisible())
+                        .child(
+                            IconElement::new(Icon::StarFilled, IconSize::XSmall)
+                                .text_color(theme.ely.fg_subtle),
+                        ),
                 )
             })
             .when_some(Self::status_text(&row), |this, status| {
@@ -806,37 +974,6 @@ impl Sidebar {
                         }),
                 )
             })
-            .when(is_removable_worktree, |this| {
-                let remove_entity = entity.clone();
-                this.child(
-                    div()
-                        .id(("remove-worktree", row_id))
-                        .debug_selector(move || format!("remove-worktree-{row_id}"))
-                        .w(px(16.0))
-                        .flex_none()
-                        .text_size(theme.typography.scaled(12.0))
-                        .text_color(theme.ely.fg_subtle)
-                        .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.ely.hover))
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |event, window, cx| {
-                            cx.stop_propagation();
-                            remove_entity.update(cx, |sidebar, cx| {
-                                sidebar.open_worktree_close_menu(
-                                    row_id,
-                                    event.position(),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        })
-                        .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.ely.fg_subtle),
-                        ),
-                )
-            })
             .when_some(tab_id, |this, tab_id| {
                 this.child(
                     div()
@@ -861,16 +998,12 @@ impl Sidebar {
                         ),
                 )
             })
-            // Last, after every hover control on the line. Those controls are
-            // `.invisible()` rather than unmounted, so they hold their 16px
-            // whether or not the pointer is on the row -- but only some rows
-            // have them (a primary checkout cannot be removed, a worktree has
-            // no project settings). Anything placed before them therefore
-            // sits at a different x per row, which is exactly the drift
-            // `running_agent_badges_share_one_trailing_edge_across_worktrees`
-            // exists to catch. Last is the only seat where the bloom lands on
-            // one trailing edge for every row.
-            .when_some(status_bloom, |this, bloom| this.child(bloom));
+            // Last. A collapsed project's bloom lands here; a worktree's rides
+            // in `trailing_slot`, which is the same width on every card, so
+            // the bloom keeps one trailing edge across rows
+            // (`running_agent_badges_share_one_trailing_edge_across_worktrees`).
+            .when_some(tail_bloom, |this, bloom| this.child(bloom))
+            .when(is_worktree, |this| this.child(trailing_slot));
         let content = div()
             .min_w_0()
             .flex_1()
@@ -885,7 +1018,33 @@ impl Sidebar {
         // layout read. The card has no border, so a full-size absolute child
         // spans its whole box.
         let card_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card.clone());
-        row_view.child(content).when_some(card_probe, |this, cell| {
+        // A worktree card reports where it is and whether the pointer is on it,
+        // for the hover card beside the sidebar.
+        let hover_bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<Pixels>>));
+        let hover_probe = is_worktree.then(|| hover_bounds.clone());
+        let row_view = if is_worktree {
+            let hover_entity = entity.clone();
+            row_view.on_hover(move |hovered, _, cx| {
+                let bounds = hover_bounds.get();
+                hover_entity.update(cx, |sidebar, cx| {
+                    sidebar.hover_card_hover(row_id, bounds, *hovered, cx)
+                });
+            })
+        } else {
+            row_view
+        };
+        row_view
+            .when_some(hover_probe, |this, cell| {
+                this.child(
+                    gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+            })
+            .child(content)
+            .when_some(card_probe, |this, cell| {
             this.child(
                 gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
                     .absolute()

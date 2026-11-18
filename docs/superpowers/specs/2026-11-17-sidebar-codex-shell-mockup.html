@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>D · Solo il guscio Codex</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0a09}
+a{color:#7eb1f3}a:hover{color:#a9cbf7}
+.win{width:760px;height:900px;display:flex;font-family:Inter,system-ui,sans-serif;color:#f3f1f0;background:#131110;overflow:hidden;position:relative}
+.sb{width:300px;flex:none;background:#1b1917;border-right:1px solid #2c2b29;display:flex;flex-direction:column;padding:8px 8px 10px;box-sizing:border-box;gap:2px}
+.hdr{height:40px;display:flex;align-items:center;justify-content:space-between;padding:0 2px 0 8px;flex:none}
+.ttl{display:flex;align-items:center;gap:4px;font-size:15px;font-weight:600;color:#f3f1f0;background:transparent;border:0;font-family:inherit;padding:4px 6px 4px 0;border-radius:6px}
+.ib{width:28px;height:28px;border:0;background:transparent;color:#afadab;border-radius:6px;display:flex;align-items:center;justify-content:center;position:relative;padding:0}
+.ib:hover{background:#252422;color:#f3f1f0}
+.badge{position:absolute;top:5px;right:6px;width:6px;height:6px;border-radius:3px;background:#69a1e8;box-shadow:0 0 0 2px #1b1917}
+.row{height:30px;display:flex;align-items:center;gap:8px;padding:0 6px 0 8px;border-radius:6px;font-size:13.5px;color:#f3f1f0;white-space:nowrap;position:relative;box-sizing:border-box;flex:none}
+.row:hover,.row.hov{background:#252422}
+.rb{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;border:0;background:transparent;color:inherit;font:inherit;padding:0;text-align:left;height:30px}
+.lbl{overflow:hidden;text-overflow:ellipsis;min-width:0;white-space:nowrap}
+.act{width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:#afadab;border:0;background:transparent;padding:0}
+.act:hover{color:#f3f1f0;background:#2c2b29}
+.muted{color:#94928f}
+.sec{display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 4px 0 8px;flex:none}
+.secb{display:flex;align-items:center;gap:4px;font-size:12.5px;color:#94928f;border:0;background:transparent;font-family:inherit;padding:0}
+.list{flex:1;border:1px solid #69a1e8;border-radius:8px;padding:4px;overflow:hidden;position:relative;display:flex;flex-direction:column;gap:1px}
+.thumb{position:absolute;right:2px;top:6px;width:4px;height:200px;border-radius:2px;background:#413f3d}
+.gap{height:8px;flex:none}
+.ic{width:16px;height:16px;flex:none}
+.dot{width:6px;height:6px;border-radius:3px;background:#69a1e8;flex:none}
+.run{width:7px;height:7px;border-radius:4px;background:#69a1e8;box-shadow:0 0 0 3px rgba(105,161,232,.22);flex:none}
+.wc{margin-left:24px;border-radius:6px;padding:6px 6px 6px 8px;display:flex;flex-direction:column;gap:3px;flex:none;position:relative}
+.wc:hover,.wc.hov{background:#252422}
+.wl{display:flex;align-items:center;gap:8px;font-size:13.5px;height:20px;white-space:nowrap}
+.ws{display:flex;align-items:center;gap:8px;font-size:12.5px;color:#94928f;height:20px;padding-left:22px;white-space:nowrap}
+.sub{font-size:12px;color:#94928f;flex:none}
+.pills{display:flex;gap:4px;margin-left:auto;flex:none}
+.pill{width:20px;height:20px;border-radius:5px;border:1px solid #2c2b29;display:flex;align-items:center;justify-content:center;color:#afadab;box-sizing:border-box}
+.pill.on{border-color:#69a1e8;color:#f3f1f0}
+.wacts{display:none;gap:2px;margin-left:auto}
+.wc:hover .wacts,.wc.hov .wacts{display:flex}
+.wc:hover .wrest,.wc.hov .wrest{display:none}
+.wrest{margin-left:auto;display:flex;align-items:center;gap:6px}
+.card{position:absolute;width:290px;background:#201f1d;border:1px solid #2c2b29;border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.55);padding:12px 14px;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;z-index:2}
+.ct{display:flex;gap:10px;align-items:flex-start;justify-content:space-between}
+.ctt{font-size:14px;font-weight:500;line-height:20px}
+.meta{display:flex;align-items:center;gap:6px;color:#afadab;font-size:12.5px;white-space:nowrap}
+.hr{height:1px;background:#2c2b29;margin:2px -14px}
+.trow{display:flex;align-items:center;gap:8px;font-size:12.5px;color:#d9d7d5;height:22px}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.tabs{height:38px;border-bottom:1px solid #2c2b29;display:flex;align-items:flex-end;gap:2px;padding:0 10px;flex:none}
+.tab{height:30px;display:flex;align-items:center;gap:6px;padding:0 12px;font-size:12.5px;color:#94928f;border-radius:6px 6px 0 0}
+.tab.on{background:#1b1917;color:#f3f1f0}
+.term{padding:18px 20px;display:flex;flex-direction:column;gap:9px}
+.ln{height:8px;border-radius:4px;background:#22201e}
+</style>
+</helmet>
+<div class="win">
+  <nav class="sb" aria-label="Sidebar">
+    <div class="hdr">
+      <button class="ttl">Sirio <svg class="ic" style="width:14px;height:14px;color:#94928f" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button>
+      <div style="display:flex;gap:2px">
+        <button class="ib" aria-label="Notifiche"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"></path><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"></path></svg><span class="badge"></span></button>
+        <button class="ib" aria-label="Cerca"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg></button>
+      </div>
+    </div>
+    <div class="row"><button class="rb"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"></path></svg><span class="lbl">Nuova chat</span></button></div>
+    <div class="gap"></div>
+    <div class="sec">
+      <button class="secb">Progetti <svg class="ic" style="width:13px;height:13px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button>
+      <button class="act" aria-label="Aggiungi progetto"><svg class="ic" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg></button>
+    </div>
+    <div class="list">
+      <span class="thumb"></span>
+      <div class="row muted"><button class="rb"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path></svg><span class="lbl">sirio-website</span></button></div>
+      <div class="row"><button class="rb"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"></path></svg><span class="lbl">sirio</span></button></div>
+      <div class="wc">
+        <div class="wl"><svg class="ic" style="width:14px;height:14px;color:#94928f" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v12"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span class="lbl">main</span><span class="sub">★ idle</span></div>
+        <div class="ws"><span class="lbl">Release notes 0.41.1</span><span class="pills"><span class="pill"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span></span></div>
+      </div>
+      <div class="wc hov">
+        <div class="wl"><svg class="ic" style="width:14px;height:14px;color:#94928f" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v12"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span class="lbl">feature/improve_siderbar</span><span class="wrest"><span class="run"></span></span><span class="wacts"><button class="act" aria-label="Fissa"><svg class="ic" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button><button class="act" aria-label="Archivia"><svg class="ic" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="5" x="2" y="3" rx="1"></rect><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"></path><path d="M10 12h4"></path></svg></button></span></div>
+        <div class="ws"><span class="lbl">Sidebar stile Codex con Ely</span><span class="pills"><span class="pill on"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span class="pill"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span class="pill"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></svg></span></span></div>
+      </div>
+      <div class="wc">
+        <div class="wl"><svg class="ic" style="width:14px;height:14px;color:#94928f" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v12"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span class="lbl">fix/689-opencode-plugin</span><span class="wrest"><span class="dot"></span></span></div>
+        <div class="ws"><span class="lbl">Fix plugin OpenCode 2.x</span><span class="pills"><span class="pill"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span></span></div>
+      </div>
+      <div class="wc">
+        <div class="wl"><svg class="ic" style="width:14px;height:14px;color:#94928f" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v12"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span class="lbl">feat/claude-ide-bridge</span><span class="sub">idle</span></div>
+        <div class="ws"><span class="lbl">Rebase su main</span><span class="pills"><span class="pill"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span class="pill"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span></span></div>
+      </div>
+      <div class="gap"></div>
+      <div class="row muted"><button class="rb"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path></svg><span class="lbl">herdr</span></button></div>
+      <div class="row"><button class="rb"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"></path></svg><span class="lbl">tiller</span></button></div>
+      <div class="wc">
+        <div class="wl"><svg class="ic" style="width:14px;height:14px;color:#94928f" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v12"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span class="lbl">main</span><span class="sub">★ idle</span></div>
+        <div class="ws"><span class="lbl">Aggiorna UI Tiller stile IntelliJ</span><span class="pills"><span class="pill"><svg class="ic" style="width:11px;height:11px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span></span></div>
+      </div>
+      <div class="gap"></div>
+      <div class="row muted"><button class="rb"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path></svg><span class="lbl">sirio-promo</span></button></div>
+      <div class="row muted"><button class="rb"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path></svg><span class="lbl">project-tracker</span></button></div>
+    </div>
+  </nav>
+  <div class="card" style="left:300px;top:244px">
+    <div class="ct">
+      <div class="ctt">feature/improve_siderbar</div>
+      <div class="meta"><svg class="ic" style="width:13px;height:13px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>8 m</div>
+    </div>
+    <div class="meta"><svg class="ic" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path></svg>sirio</div>
+    <div class="hr"></div>
+    <div class="trow"><span class="run"></span><span class="lbl">Claude · Sidebar stile Codex con Ely</span></div>
+    <div class="trow"><span class="dot" style="background:#94928f"></span><span class="lbl">Codex · Rebase su main</span></div>
+    <div class="trow"><svg class="ic" style="width:13px;height:13px;color:#94928f" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></svg><span class="lbl">Terminale</span></div>
+  </div>
+  <div class="main">
+    <div class="tabs"><div class="tab on">Claude · Sidebar stile Codex</div><div class="tab">Codex · Rebase</div><div class="tab">Terminale</div></div>
+    <div class="term" style="padding-left:310px">
+      <div class="ln" style="width:70%"></div><div class="ln" style="width:52%"></div><div class="ln" style="width:80%"></div><div class="ln" style="width:40%"></div><div class="ln" style="width:66%"></div><div class="ln" style="width:58%"></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":760,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

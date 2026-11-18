@@ -15,6 +15,12 @@
 use std::path::{Path, PathBuf};
 
 use ely_gpui_component::menus::{Hang, layer};
+use ely_gpui_component::{
+    buttons::IconButton as EIconButton,
+    data_display::{DotBadge, Tone},
+    primitives::{Disclosure, Icon as EIcon, IconName},
+    theme::{ControlSize as EControlSize, IconSize as EIconSize},
+};
 use gpui::{
     App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
     KeyDownEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel,
@@ -31,7 +37,7 @@ use sirio_theme::{AgentBrandColor, Theme, Typography};
 use crate::caret;
 use crate::loading;
 use crate::popup::{
-    HANG_GAP, Popup, hang_below, leaving, menu_card, menu_label, menu_row, reap_popup,
+    HANG_GAP, Popup, hang_below, hang_below_end, leaving, menu_card, menu_label, menu_row, reap_popup,
 };
 use crate::project_forms::{
     CloneForm, CloneFormEvent, CloneJob, CloneJobEvent, CreateForm, CreateFormEvent, CreateJob,
@@ -50,6 +56,7 @@ use crate::status::ActivityStatus;
 use crate::text_selection::selectable_text;
 
 mod fade;
+mod hover_card;
 mod row;
 mod section;
 mod sessions;
@@ -190,15 +197,17 @@ pub struct SidebarTab {
 /// panel's content width, so 298 for the default 300 less the panel's border.
 const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
-/// The one size of the icons under the view switch: expand all, collapse
+/// The one size of the icons under the title: expand all, collapse
 /// all and the `+`.
 const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
-/// Horizontal padding of one Projects/Sessions segment.
-const VIEW_TAB_PAD_X: f32 = 10.0;
-
 pub(crate) const ROW_HEIGHT: f32 = 34.0;
 /// Horizontal padding of a sidebar row and of a section header (Zed's 6px).
 pub(crate) const ROW_PAD_X: f32 = 6.0;
+/// How far a worktree card's content sits in from its box, so it lines up
+/// with the project name above it.
+const CARD_CONTENT_INDENT: f32 = 24.0;
+/// The width of a card's trailing seat: the star, 6 px, the cross.
+const TRAILING_SLOT_WIDTH: f32 = 38.0;
 /// Vertical padding of a sidebar row: 8 + 18 + 8 = 34, and 8 + 18 + 4 + 15 + 8 = 53.
 pub(crate) const ROW_PAD_Y: f32 = 8.0;
 /// Row title line height: the 13px title's line (the row adds `ROW_PAD_Y` above and below).
@@ -216,6 +225,16 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 /// fills paint across a card's whole box, so cards that touch merge into
 /// one highlight block; this keeps them reading as separate cards.
 pub(crate) const ROW_V_GAP: f32 = 2.0;
+
+/// Space after the last card of an expanded project, before the next project.
+const PROJECT_END_SPACE: f32 = 8.0;
+
+/// Whether `rows[index]` is the last card of an expanded project: a worktree
+/// followed by a project row or by nothing.
+fn closes_project(rows: &[SidebarRow], index: usize) -> bool {
+    rows[index].kind == RowKind::Worktree
+        && rows.get(index + 1).is_none_or(|next| next.kind == RowKind::Project)
+}
 /// Two-line card height: 8 + 18 + 4 + 15 + 8 — Zed's two-line thread row.
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 53.0;
 /// A visible row in the flattened sidebar tree.
@@ -406,6 +425,9 @@ struct OpenContextMenu {
     remote_tracking: RemoteTracking,
     /// Whether New Chat is expanded into its agents.
     chat_picker_open: bool,
+    /// The target is git's main checkout: its removals are listed but
+    /// disabled, whatever the Primary marker says.
+    is_main: bool,
 }
 
 /// Whether a worktree's branch tracks a remote branch — resolved off the
@@ -524,7 +546,7 @@ pub enum SidebarEvent {
     },
     /// Close the open tab with this id.
     CloseTab(usize),
-    /// The user picked a view on the header switch; the host persists it.
+    /// The user picked a view on the title menu; the host persists it.
     ViewChanged(SidebarView),
     /// The close button of a live session. Unlike `CloseTab`, the host asks
     /// before closing a tab whose agent is still working.
@@ -637,24 +659,123 @@ impl WorktreePrompt {
 }
 
 /// The bounds the debug layout read reports for the sidebar, from the latest
-/// paint: the first project section header and the first worktree card.
-/// `first_*` name the rows that may write, so a row that scrolled into the
-/// sticky header or moved down the list cannot leave its rect behind.
+/// paint: the shell's own parts, the first project row (with its `+` and
+/// three dots), the first worktree card (with its star) and the first
+/// removable one (with its cross). `first_*` name the rows that may write, so
+/// a row that scrolled into the sticky header or moved down the list cannot
+/// leave its rect behind.
 #[derive(Default)]
 struct ProbeRects {
     first_section: std::cell::Cell<Option<usize>>,
     first_card: std::cell::Cell<Option<usize>>,
-    section: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
-    card: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// The first worktree card a person can remove (not the Primary, not git's
+    /// main checkout): the card whose cross `card_remove` records.
+    first_removable: std::cell::Cell<Option<usize>>,
+    section: ProbeCell,
+    /// The first project row's `+` and three dots.
+    section_add: ProbeCell,
+    section_menu: ProbeCell,
+    card: ProbeCell,
+    card_star: ProbeCell,
+    card_remove: ProbeCell,
+    /// The chrome the sidebar draws itself: cleared at the top of every
+    /// render and refilled by the paint, so a part that is not drawn reads
+    /// `None`.
+    title: ProbeCell,
+    bell: ProbeCell,
+    search: ProbeCell,
+    new_chat: ProbeCell,
+    section_header: ProbeCell,
+    /// The section header's expand all and collapse all buttons.
+    header_expand_all: ProbeCell,
+    header_collapse_all: ProbeCell,
+    filter: ProbeCell,
+    bell_menu: ProbeCell,
+    hover_card: ProbeCell,
+}
+
+/// Where one part of the sidebar was last painted.
+type ProbeCell = std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>;
+
+/// A child that records its parent's painted bounds into `cell`. It spans the
+/// parent, so the parent's box is what is recorded.
+fn probe_canvas(cell: &ProbeCell) -> impl IntoElement {
+    let cell = cell.clone();
+    gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+}
+
+/// The painted bounds of the sidebar's parts, for the debug layout read. Each
+/// is `None` while that part is not drawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SidebarProbe {
+    /// The first project row (31 px), not the section header.
+    pub section: Option<Bounds<Pixels>>,
+    /// The first project row's `+` and three dots (hover-only, so drawn or
+    /// not they are always located).
+    pub section_add: Option<Bounds<Pixels>>,
+    pub section_menu: Option<Bounds<Pixels>>,
+    pub card: Option<Bounds<Pixels>>,
+    pub card_star: Option<Bounds<Pixels>>,
+    /// The cross of the first card that can be removed.
+    pub card_remove: Option<Bounds<Pixels>>,
+    /// The section header's expand all and collapse all buttons.
+    pub header_expand_all: Option<Bounds<Pixels>>,
+    pub header_collapse_all: Option<Bounds<Pixels>>,
+    pub title: Option<Bounds<Pixels>>,
+    pub bell: Option<Bounds<Pixels>>,
+    pub search: Option<Bounds<Pixels>>,
+    pub new_chat: Option<Bounds<Pixels>>,
+    pub section_header: Option<Bounds<Pixels>>,
+    pub filter: Option<Bounds<Pixels>>,
+    pub bell_menu: Option<Bounds<Pixels>>,
+    pub hover_card: Option<Bounds<Pixels>>,
+}
+
+/// What the debug attention read reports about the sidebar's shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarShellState {
+    pub list_focused: bool,
+    pub filter_shown: bool,
+    /// The worktree path the open hover card is about.
+    pub hover_card_worktree: Option<PathBuf>,
+    /// The bell's dot: "error", "needs-input" or "unread".
+    pub bell: Option<&'static str>,
 }
 
 impl ProbeRects {
-    fn follow(&self, section: Option<usize>, card: Option<usize>) {
+    fn clear_chrome(&self) {
+        for cell in [
+            &self.title,
+            &self.bell,
+            &self.search,
+            &self.new_chat,
+            &self.section_header,
+            &self.header_expand_all,
+            &self.header_collapse_all,
+            &self.filter,
+            &self.bell_menu,
+            &self.hover_card,
+        ] {
+            cell.set(None);
+        }
+    }
+
+    fn follow(&self, section: Option<usize>, card: Option<usize>, removable: Option<usize>) {
         if self.first_section.replace(section) != section {
             self.section.set(None);
+            self.section_add.set(None);
+            self.section_menu.set(None);
         }
         if self.first_card.replace(card) != card {
             self.card.set(None);
+            self.card_star.set(None);
+        }
+        if self.first_removable.replace(removable) != removable {
+            self.card_remove.set(None);
         }
     }
 }
@@ -672,10 +793,13 @@ pub struct Sidebar {
     project_worktree_defaults: std::collections::HashMap<String, (Option<String>, Option<String>)>,
     filter: String,
     filter_focus: FocusHandle,
+    /// Whether the Search button has shown the filter field.
+    filter_shown: bool,
     filter_focus_subscription: Option<gpui::Subscription>,
     tree_cursor: usize,
     pill_cursor: Option<usize>,
     tree_focus: FocusHandle,
+    tree_focus_subscription: Option<gpui::Subscription>,
     /// Shared blink state for every sidebar text field's insertion caret
     /// (filter, project-settings card, worktree prompt). One is enough:
     /// window focus is unique. Visibility is recomputed each render.
@@ -690,6 +814,21 @@ pub struct Sidebar {
     /// The hover-x's closure menu; shares `context_menu_focus` for Escape.
     worktree_close_menu: Popup<OpenWorktreeCloseMenu>,
     add_project_menu: Popup<()>,
+    /// The title's Projects / Sessions menu.
+    view_menu: Popup<()>,
+    /// The header bell's list of sessions that want the user.
+    bell_menu: Popup<()>,
+    /// The New Chat row's list of agents for the current worktree.
+    new_chat_menu: Popup<SidebarContextTarget>,
+    /// The worktree New Chat aims at, by path: the last one the host or a
+    /// click selected. Selecting a project row leaves it alone.
+    current_worktree: Option<PathBuf>,
+    /// When the bell opened (Unix ms): its entries' ages are read at this
+    /// instant, so the list does not tick while it is open.
+    bell_opened_at_ms: i64,
+    /// The bell's drawn bottom edge, window y, from its last paint: the card
+    /// hangs under it and is bounded by what is left below.
+    bell_bottom: std::rc::Rc<std::cell::Cell<Pixels>>,
     /// The resolved launch source per adapter id, pushed by the host beside
     /// the tab bar's copy, so the worktree menu's New Chat offers exactly
     /// the agents the + menu does.
@@ -736,7 +875,16 @@ pub struct Sidebar {
     cache_rows: bool,
     /// What the debug layout read measures; see [`ProbeRects`].
     probe: std::rc::Rc<ProbeRects>,
+    /// The worktree card's hover card; see `hover_card.rs`.
+    hover_card: hover_card::HoverCardState,
+    /// Where the sidebar was drawn last, for placing the hover card beside it.
+    sidebar_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     list_scroll: ScrollHandle,
+    /// When each list last moved, for its fading scrollbar.
+    list_bar: crate::scroll::BarActivity,
+    sessions_bar: crate::scroll::BarActivity,
+    /// The section header's chevron: the list under it is hidden. In memory only.
+    list_folded: bool,
     view: SidebarView,
     closed_sessions: Vec<sessions::ClosedSession>,
     session_views: std::collections::HashMap<String, gpui::Entity<sessions::SessionRowView>>,
@@ -746,6 +894,18 @@ pub struct Sidebar {
     armed_delete: Option<String>,
     session_cursor: usize,
     clock: Option<gpui::Task<()>>,
+}
+
+/// Space kept between the bell's card and the window's bottom edge.
+const BELL_MENU_MARGIN: Pixels = px(8.0);
+
+/// What choosing a session emits, whichever list it was chosen from.
+pub(super) fn session_event(target: SessionTarget) -> SidebarEvent {
+    match target {
+        SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
+        SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab { path, index },
+        SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id),
+    }
 }
 
 impl Sidebar {
@@ -775,12 +935,52 @@ impl Sidebar {
         self.view
     }
 
-    /// The first project section header and the first worktree card as last
-    /// painted, for the debug layout read. Both are `None` outside the
-    /// Projects view, and a row that stopped being the first one is
-    /// forgotten when the sidebar next renders.
-    pub fn probe_bounds(&self) -> (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>) {
-        (self.probe.section.get(), self.probe.card.get())
+    /// The sidebar's parts as last painted, for the debug layout read. The
+    /// row-bound ones (the first project row and its buttons, the first card,
+    /// its star, the first removable card's cross) are `None` outside the
+    /// Projects view, and a row that stopped being the first one is forgotten
+    /// when the sidebar next renders.
+    pub fn probe_bounds(&self) -> SidebarProbe {
+        let probe = &self.probe;
+        SidebarProbe {
+            section: probe.section.get(),
+            section_add: probe.section_add.get(),
+            section_menu: probe.section_menu.get(),
+            card: probe.card.get(),
+            card_star: probe.card_star.get(),
+            card_remove: probe.card_remove.get(),
+            header_expand_all: probe.header_expand_all.get(),
+            header_collapse_all: probe.header_collapse_all.get(),
+            title: probe.title.get(),
+            bell: probe.bell.get(),
+            search: probe.search.get(),
+            new_chat: probe.new_chat.get(),
+            section_header: probe.section_header.get(),
+            filter: probe.filter.get(),
+            bell_menu: probe.bell_menu.get(),
+            hover_card: probe.hover_card.get(),
+        }
+    }
+
+    /// The shell's state for the debug attention read.
+    pub fn shell_state(&self, window: &Window) -> SidebarShellState {
+        let open = sessions::session_list(&self.rows, &[], "").open;
+        let hover_card_worktree = self
+            .hover_card
+            .row_id
+            .filter(|_| self.hover_card.shown)
+            .and_then(|id| self.rows.iter().find(|row| row.id == id))
+            .and_then(|row| row.path.clone());
+        SidebarShellState {
+            list_focused: self.tree_focus.is_focused(window),
+            filter_shown: self.filter_shown,
+            hover_card_worktree,
+            bell: sessions::bell_signal(&open).map(|reason| match reason {
+                sessions::BellReason::Error => "error",
+                sessions::BellReason::NeedsInput => "needs-input",
+                sessions::BellReason::Unread => "unread",
+            }),
+        }
     }
 
     /// Restores a view without reporting it (the host already knows).
@@ -796,15 +996,21 @@ impl Sidebar {
         self.sync_clock(cx);
     }
 
-    /// A click on the header switch: switches, clears the filter (a worktree
+    /// A pick on the title menu: switches, clears the filter (a worktree
     /// filter means nothing to the session list and vice versa) and reports.
-    fn choose_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+    fn choose_view(&mut self, view: SidebarView, window: &mut Window, cx: &mut Context<Self>) {
         if self.view == view {
+            self.close_view_menu(cx);
+            self.focus_list(window, cx);
             return;
         }
         self.view = view;
         self.armed_delete = None;
         self.filter.clear();
+        self.filter_shown = false;
+        // The title menu took focus; the list is the sensible home.
+        self.focus_list(window, cx);
+        self.view_menu.close();
         if view == SidebarView::Sessions {
             self.set_clock(sessions::unix_now_ms(), cx);
         }
@@ -905,7 +1111,16 @@ impl Sidebar {
         rows
     }
 
+    /// Whether the list is folded away with no query reaching into it. Its
+    /// keys then act on nothing the user can see, so they do nothing.
+    fn list_hidden(&self) -> bool {
+        self.list_folded && self.filter.is_empty()
+    }
+
     fn session_step(&mut self, down: bool, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let count = self.session_walk().len();
         if count == 0 {
             return;
@@ -919,17 +1134,16 @@ impl Sidebar {
     }
 
     fn activate_session_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let Some(row) = self.session_walk().into_iter().nth(self.session_cursor) else {
             return;
         };
         if self.armed_delete.take().is_some() {
             cx.notify();
         }
-        cx.emit(match row.target {
-            SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
-            SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab { path, index },
-            SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id),
-        });
+        cx.emit(session_event(row.target));
     }
 
     /// Creates the expanded fixture shown by the reference sidebar capture.
@@ -1039,10 +1253,12 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            filter_shown: false,
             filter_focus_subscription: None,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
+            tree_focus_subscription: None,
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
@@ -1050,6 +1266,12 @@ impl Sidebar {
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
+            view_menu: Popup::default(),
+            bell_menu: Popup::default(),
+            new_chat_menu: Popup::default(),
+            current_worktree: None,
+            bell_opened_at_ms: 0,
+            bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -1061,7 +1283,12 @@ impl Sidebar {
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
             probe: Default::default(),
+            hover_card: Default::default(),
+            sidebar_bounds: Default::default(),
             list_scroll: ScrollHandle::new(),
+            list_bar: Default::default(),
+            sessions_bar: Default::default(),
+            list_folded: false,
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
             session_views: std::collections::HashMap::new(),
@@ -1142,10 +1369,12 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            filter_shown: false,
             filter_focus_subscription: None,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
+            tree_focus_subscription: None,
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
@@ -1153,6 +1382,12 @@ impl Sidebar {
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
+            view_menu: Popup::default(),
+            bell_menu: Popup::default(),
+            new_chat_menu: Popup::default(),
+            current_worktree: None,
+            bell_opened_at_ms: 0,
+            bell_bottom: Default::default(),
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             clones_in_flight: Vec::new(),
@@ -1164,7 +1399,12 @@ impl Sidebar {
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
             probe: Default::default(),
+            hover_card: Default::default(),
+            sidebar_bounds: Default::default(),
             list_scroll: ScrollHandle::new(),
+            list_bar: Default::default(),
+            sessions_bar: Default::default(),
+            list_folded: false,
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
             session_views: std::collections::HashMap::new(),
@@ -1189,7 +1429,7 @@ impl Sidebar {
 
         let mut offset = 0.0;
         let mut current = None;
-        for row in rows {
+        for (index, row) in rows.iter().enumerate() {
             if offset > scrolled {
                 break;
             }
@@ -1201,6 +1441,9 @@ impl Sidebar {
                 _ => CARD_TWO_LINE_HEIGHT,
             };
             offset += height + ROW_V_GAP;
+            if closes_project(rows, index) {
+                offset += PROJECT_END_SPACE;
+            }
         }
         current
     }
@@ -1552,6 +1795,7 @@ impl Sidebar {
                     RemoteTracking::Untracked
                 },
                 chat_picker_open: false,
+                is_main: self.is_main_checkout(row_id),
             });
             self.worktree_close_menu.close();
             self.context_menu_focus.focus(window, cx);
@@ -1863,6 +2107,7 @@ impl Sidebar {
         // right-click on the same row. Pointer dismissal still animates via
         // `close_context_menu`.
         self.context_menu.close();
+        self.new_chat_menu.close();
         cx.notify();
         if action == SidebarContextAction::RemoveProject {
             if let SidebarContextTarget::Project { id, .. } = target {
@@ -1907,6 +2152,81 @@ impl Sidebar {
         }
         self.close_context_menu(cx);
         cx.notify();
+    }
+
+    fn toggle_view_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.view_menu.take_press_was_open() {
+            self.view_menu.open(());
+            self.bell_menu.close();
+            self.new_chat_menu.close();
+        }
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn toggle_bell_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.bell_menu.take_press_was_open() {
+            self.bell_opened_at_ms = sessions::unix_now_ms();
+            self.bell_menu.open(());
+            self.view_menu.close();
+            self.new_chat_menu.close();
+        }
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn toggle_new_chat_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.new_chat_menu.take_press_was_open()
+            && let Some(target) = self.new_chat_target()
+        {
+            self.new_chat_menu.open(target);
+            self.view_menu.close();
+            self.bell_menu.close();
+        }
+        self.close_context_menu(cx);
+        cx.notify();
+    }
+
+    fn close_new_chat_menu(&mut self, cx: &mut Context<Self>) {
+        if self.new_chat_menu.begin_close() {
+            reap_popup(cx, |sidebar| &mut sidebar.new_chat_menu);
+            cx.notify();
+        }
+    }
+
+    /// The row id of the current worktree, the one New Chat opens in: the
+    /// remembered one when it is still listed, else the one the host marks selected.
+    fn current_worktree_row(&self) -> Option<usize> {
+        let remembered = self.current_worktree.as_deref();
+        self.rows
+            .iter()
+            .find(|row| {
+                row.kind == RowKind::Worktree
+                    && match remembered {
+                        Some(path) => row.path.as_deref() == Some(path),
+                        None => row.selected,
+                    }
+            })
+            .map(|row| row.id)
+    }
+
+    fn new_chat_target(&self) -> Option<SidebarContextTarget> {
+        self.current_worktree_row()
+            .and_then(|row_id| self.context_target(row_id))
+    }
+
+    fn close_bell_menu(&mut self, cx: &mut Context<Self>) {
+        if self.bell_menu.begin_close() {
+            reap_popup(cx, |sidebar| &mut sidebar.bell_menu);
+            cx.notify();
+        }
+    }
+
+    fn close_view_menu(&mut self, cx: &mut Context<Self>) {
+        if self.view_menu.begin_close() {
+            reap_popup(cx, |sidebar| &mut sidebar.view_menu);
+            cx.notify();
+        }
     }
 
     fn close_add_project_menu(&mut self, cx: &mut Context<Self>) {
@@ -2232,15 +2552,67 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Shows the filter field and puts the caret in it.
+    fn show_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_shown = true;
+        self.filter_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The Search button: shows the field; an empty one that has focus is
+    /// hidden again, one holding text, or not focused, stays and takes focus.
+    fn toggle_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_shown && self.filter.is_empty() && self.filter_focus.is_focused(window) {
+            self.hide_filter(window, cx);
+        } else {
+            self.show_filter(window, cx);
+        }
+    }
+
+    /// Clears the filter, hides its field and hands focus to the list.
+    fn hide_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.clear();
+        self.filter_shown = false;
+        self.focus_list(window, cx);
+        cx.notify();
+    }
+
+    /// Hands focus to the list as a new visit: the keyboard's place on a pill
+    /// and an armed delete belong to the visit before, and would otherwise sit
+    /// ready for a Backspace that closes a tab nobody is pointing at. Focus
+    /// that arrives at the list from elsewhere clears both through the list's
+    /// focus subscription in `render`, whatever brought it there; this clears
+    /// them as well, for the call that finds the list focused already, where
+    /// no focus change happens.
+    pub fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pill_cursor = None;
+        self.armed_delete = None;
+        self.tree_focus.focus(window, cx);
+    }
+
+    /// Gives focus back after something else had it (Settings closing): to the
+    /// filter field when it is open, else to the list as a new visit.
+    pub fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_shown {
+            self.filter_focus.focus(window, cx);
+        } else {
+            self.focus_list(window, cx);
+        }
+    }
+
     fn on_filter_key(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.field_blink.wake();
         self.armed_delete = None;
         let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.hide_filter(window, cx);
+            return;
+        }
         if key == "backspace" || key == "delete" {
             self.filter.pop();
         } else if let Some(character) = event.keystroke.key_char.as_deref()
@@ -2313,6 +2685,9 @@ impl Sidebar {
     }
 
     fn tree_step(&mut self, direction: tree_keys::Direction, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let rows = self.visible_rows();
         self.pill_cursor = None;
         if rows.is_empty() {
@@ -2326,6 +2701,9 @@ impl Sidebar {
     }
 
     fn pill_step(&mut self, direction: tree_keys::Direction, cx: &mut Context<Self>) {
+        if self.list_hidden() {
+            return;
+        }
         let rows = self.visible_rows();
         let Some(row) = rows.get(self.tree_cursor) else {
             self.pill_cursor = None;
@@ -2367,6 +2745,16 @@ impl Sidebar {
     }
 
     fn select_row(&mut self, id: usize, cx: &mut Context<Self>) {
+        if self.current_worktree.is_none() {
+            self.current_worktree = self.current_worktree_row().and_then(|row| {
+                self.rows.iter().find(|r| r.id == row).and_then(|r| r.path.clone())
+            });
+        }
+        if let Some(row) = self.rows.iter().find(|row| row.id == id && row.kind == RowKind::Worktree)
+            && row.path.is_some()
+        {
+            self.current_worktree = row.path.clone();
+        }
         for row in &mut self.rows {
             row.selected = row.id == id;
         }
@@ -2377,6 +2765,7 @@ impl Sidebar {
     /// by calling this, so the highlight always agrees with what the shell
     /// actually treats as the current worktree.
     pub fn set_selected_worktree(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.current_worktree = Some(path.to_path_buf());
         let mut changed = false;
         for row in &mut self.rows {
             let selected = row.kind == RowKind::Worktree && row.path.as_deref() == Some(path);
@@ -2642,6 +3031,25 @@ impl Sidebar {
         }
     }
 
+    /// Whether `row` is git's main checkout of the project whose row sits at
+    /// `project_path`. The catalog roots a git project at its main checkout, so
+    /// a worktree at that very path is the one `git worktree remove` refuses
+    /// (and whose deletion would destroy the repository). This is independent
+    /// of the Primary marker, which one click on a star moves or clears.
+    fn is_main_checkout_of(project_path: Option<&Path>, row: &SidebarRow) -> bool {
+        row.kind == RowKind::Worktree && row.path.is_some() && row.path.as_deref() == project_path
+    }
+
+    fn is_main_checkout(&self, row_id: usize) -> bool {
+        let Some(project_index) = self.enclosing_project_index(row_id) else {
+            return false;
+        };
+        self.rows
+            .iter()
+            .find(|row| row.id == row_id)
+            .is_some_and(|row| Self::is_main_checkout_of(self.rows[project_index].path.as_deref(), row))
+    }
+
     /// Opens the branch-name prompt for the project whose New Worktree row
     /// was clicked.
     fn begin_worktree_prompt(
@@ -2860,10 +3268,12 @@ impl Sidebar {
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
+            .filter(|_| !self.is_main_checkout(row_id))
             .map(|row| row.title.clone())
         else {
-            // #372: the primary checkout is not removable — the hover-x is
-            // not drawn for it, so reaching here means a stale row id.
+            // #372: neither the primary nor git's main checkout is removable —
+            // the hover-x is not drawn for them, so reaching here means a
+            // stale row id.
             return;
         };
         self.worktree_close_menu.open(OpenWorktreeCloseMenu {
@@ -2934,6 +3344,7 @@ impl Sidebar {
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
+            .filter(|_| !self.is_main_checkout(row_id))
             .map(|row| row.title.clone())
         else {
             return;
@@ -3037,9 +3448,10 @@ impl Sidebar {
         else {
             return;
         };
-        // #372: defensive — the primary checkout must never reach
+        // #372: defensive — the primary checkout, and git's main checkout
+        // whatever the Primary marker says, must never reach
         // `git worktree remove`; see `open_worktree_close_menu`.
-        if is_primary {
+        if is_primary || self.is_main_checkout(row_id) {
             return;
         }
         let project_id = self
@@ -3180,6 +3592,114 @@ impl Sidebar {
             .take_while(|row| row.kind != RowKind::Project)
             .filter(|row| row.kind == RowKind::Worktree && Self::row_matches(row, &query))
             .count()
+    }
+
+    /// Whether something should keep the hover card shut: a drag, any popup,
+    /// a form or prompt, a narrow sidebar, or the list being folded away.
+    fn hover_card_blocked(&self, cx: &App) -> bool {
+        cx.has_active_drag()
+            || self.context_menu.get().is_some()
+            || self.worktree_close_menu.get().is_some()
+            || self.add_project_menu.get().is_some()
+            || self.view_menu.get().is_some()
+            || self.bell_menu.get().is_some()
+            || self.new_chat_menu.get().is_some()
+            || self.project_form.is_some()
+            || self.prompt.is_some()
+            || self.prompt_open
+            || self.panel_width < hover_card::MIN_SIDEBAR_WIDTH
+            || self.view != SidebarView::Projects
+            || self.list_hidden()
+    }
+
+    /// The pointer entered or left a worktree card.
+    fn hover_card_hover(
+        &mut self,
+        row_id: usize,
+        bounds: Option<Bounds<Pixels>>,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !hovered {
+            self.hover_card.leave(row_id, cx);
+        } else if let Some(bounds) = bounds
+            && !self.hover_card_blocked(cx)
+        {
+            self.hover_card.scroll_y = self.list_scroll.offset().y;
+            self.hover_card.hover(row_id, bounds, cx);
+        }
+    }
+
+    /// The pointer entered or left the open hover card.
+    fn hover_card_pointer(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.hover_card.keep();
+        } else {
+            self.hover_card.leave_card(cx);
+        }
+    }
+
+    /// The open hover card, or `None` when it is not open or must close: the
+    /// list scrolled, or its worktree left the visible rows.
+    fn hover_card_element(
+        &mut self,
+        rows: &[SidebarRow],
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let row_id = self.hover_card.row_id?;
+        let row = rows.iter().find(|row| row.id == row_id && row.kind == RowKind::Worktree);
+        let stale = row.is_none()
+            || self.hover_card_blocked(cx)
+            || self.list_scroll.offset().y != self.hover_card.scroll_y;
+        let (Some(row), false) = (row, stale) else {
+            self.hover_card.dismiss();
+            return None;
+        };
+        if !self.hover_card.shown {
+            return None;
+        }
+        let row_bounds = self.hover_card.row_bounds?;
+        let sidebar_right = self.sidebar_bounds.get()?.right() + px(hover_card::PANEL_BORDER);
+        // A window too narrow to hold the card beside the sidebar would put it
+        // over the row's own star and cross and eat their clicks: no card.
+        if !hover_card::fits(sidebar_right, window.viewport_size().width) {
+            self.hover_card.dismiss();
+            return None;
+        }
+        let project_name = self
+            .rows
+            .iter()
+            .take_while(|candidate| candidate.id != row_id)
+            .filter(|candidate| candidate.kind == RowKind::Project)
+            .last()
+            .map(|project| project.title.clone())
+            .unwrap_or_default();
+        let origin = hover_card::card_origin(row_bounds, sidebar_right);
+        let card = hover_card::render_card(
+            row,
+            &project_name,
+            &row.pills,
+            self.hover_card.opened_at_ms,
+            theme,
+        );
+        let entity = cx.entity();
+        let body = div()
+            .id("sidebar-hover-card")
+            .debug_selector(|| "sidebar-hover-card".to_owned())
+            .child(probe_canvas(&self.probe.hover_card))
+            .occlude()
+            .on_hover(move |hovered, _, cx| {
+                entity.update(cx, |sidebar, cx| sidebar.hover_card_pointer(*hovered, cx));
+            })
+            .child(card);
+        let placed = gpui::anchored()
+            .anchor(gpui::Anchor::TopLeft)
+            .snap_to_window()
+            .position(origin)
+            .child(body);
+        Some(ely_gpui_component::primitives::raise("sidebar-hover-card-layer", placed).into_any_element())
     }
 
     fn visible_rows(&self) -> Vec<SidebarRow> {
@@ -3453,6 +3973,7 @@ impl Sidebar {
         let closing = popup.closing_since();
         let remote_tracking = menu.remote_tracking.clone();
         let chat_picker_open = menu.chat_picker_open;
+        let is_main = menu.is_main;
         let target = menu.target;
         let position = menu.position;
         // The hover-x's closure menu is 280px for the same pair of removals;
@@ -3467,7 +3988,12 @@ impl Sidebar {
                 "sidebar-context-item-{}",
                 Self::context_action_selector(item.action)
             );
-            let enabled = item.enabled;
+            let removes = matches!(
+                item.action,
+                SidebarContextAction::RemoveWorktree
+                    | SidebarContextAction::RemoveWorktreeAndRemoteBranch
+            );
+            let enabled = item.enabled && !(is_main && removes);
             let action = item.action;
             let item_target = target.clone();
             let item_entity = entity.clone();
@@ -3599,6 +4125,381 @@ impl Sidebar {
                 .text_color(theme.ely.fg_subtle)
                 .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
                 .child(menu_label("Other agents…")),
+        )
+    }
+
+    /// The 40 px header: the title that opens the view menu.
+    fn render_header(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let view = self.view;
+        let entity = cx.entity();
+        let menu = self.view_menu.get().map(|_| {
+            Self::render_view_menu(&self.view_menu, entity, view, *theme, cx).into_any_element()
+        });
+        div()
+            .debug_selector(|| "sidebar-header".to_owned())
+            .relative()
+            .flex_none()
+            .h(px(40.0))
+            .w_full()
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .id("sidebar-title")
+                    .debug_selector(|| "sidebar-title".to_owned())
+                    .child(probe_canvas(&self.probe.title))
+                    .h(px(28.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .rounded(theme.radii.control)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.ely.hover))
+                    .text_size(theme.typography.scaled(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.ely.fg)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.view_menu.note_trigger_press()),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_view_menu(cx)))
+                    .child("Sirio")
+                    .child(
+                        div()
+                            .debug_selector(|| "sidebar-title-chevron".to_owned())
+                            .flex()
+                            .flex_none()
+                            .child(
+                                EIcon::new(IconName::ChevronDown)
+                                    .size(EIconSize::Sm)
+                                    .color(theme.ely.fg_subtle),
+                            ),
+                    ),
+            )
+            .when_some(menu, |this, menu| this.child(menu))
+            .child(div().flex_1())
+            .child(self.render_bell(theme, window.viewport_size().height, cx))
+            .child(
+                div()
+                    .id("sidebar-search")
+                    .debug_selector(|| "sidebar-search".to_owned())
+                    .child(probe_canvas(&self.probe.search))
+                    .flex_none()
+                    .child(
+                        EIconButton::new("sidebar-search-button", IconName::Search)
+                            .size(EControlSize::Sm)
+                            .tooltip("Search")
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_filter(window, cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The 31 px New Chat row under the header: opens the agents that can
+    /// launch a chat in the current worktree. Without a current worktree it
+    /// is muted, opens nothing and says why in its tooltip.
+    fn render_new_chat(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let enabled = self.new_chat_target().is_some();
+        let menu = match self.new_chat_menu.get() {
+            Some(target) => {
+                let outside = cx.entity();
+                let card = menu_card("sidebar-new-chat-menu", cx)
+                    .debug_selector(|| "sidebar-new-chat-menu".to_owned())
+                    .w(px(240.0))
+                    .text_size(theme.typography.ui_size)
+                    .on_mouse_down_out(move |_, _, cx| {
+                        outside.update(cx, |sidebar, cx| sidebar.close_new_chat_menu(cx));
+                    })
+                    .child(Self::render_context_chat_agents(
+                        target,
+                        &self.chat_agents(),
+                        cx.entity(),
+                        *theme,
+                        cx,
+                    ));
+                Some(hang_below(
+                    "sidebar-new-chat-menu-layer",
+                    HANG_GAP,
+                    card,
+                    self.new_chat_menu.closing_since(),
+                    cx,
+                ))
+            }
+            None => None,
+        };
+        let color = if enabled { theme.ely.fg } else { theme.ely.fg_muted };
+        div()
+            .relative()
+            .flex_none()
+            .w_full()
+            .h(px(31.0))
+            .px(px(8.0))
+            .child(
+                div()
+                    .id("sidebar-new-chat")
+                    .debug_selector(|| "sidebar-new-chat".to_owned())
+                    .child(probe_canvas(&self.probe.new_chat))
+                    .size_full()
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.scaled(13.0))
+                    .text_color(color)
+                    .when(enabled, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme.ely.hover))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, _| this.new_chat_menu.note_trigger_press()),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_new_chat_menu(cx)))
+                    })
+                    .when(!enabled, |row| {
+                        row.tooltip(crate::controls::tooltip("Select a worktree first"))
+                    })
+                    .child(EIcon::new(IconName::SquarePen).size(EIconSize::Sm).color(color))
+                    .child(div().when(!enabled, |label| {
+                        label.debug_selector(|| "sidebar-new-chat-disabled".to_owned())
+                    }).child("New Chat")),
+            )
+            .when_some(menu, |this, menu| this.child(menu))
+            .into_any_element()
+    }
+
+    /// The bell: a ghost icon button wearing a dot for the most severe thing
+    /// that wants the user, and the list of those sessions under it.
+    fn render_bell(&self, theme: &Theme, window_height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let open = sessions::session_list(&self.rows, &[], "").open;
+        let entries = sessions::bell_entries(&open);
+        let signal = sessions::bell_signal(&open);
+        let button = EIconButton::new("sidebar-bell-button", IconName::Bell)
+            .size(EControlSize::Sm)
+            .tooltip("Notifications")
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_bell_menu(cx)));
+        let dot = signal.map(|reason| {
+            let (tone, selector) = match reason {
+                sessions::BellReason::Error => (Tone::Danger, "sidebar-bell-dot-error"),
+                sessions::BellReason::NeedsInput => {
+                    (Tone::Warning, "sidebar-bell-dot-needs-input")
+                }
+                sessions::BellReason::Unread => (Tone::Info, "sidebar-bell-dot-unread"),
+            };
+            div()
+                .debug_selector(|| selector.to_owned())
+                .absolute()
+                .top(px(2.0))
+                .right(px(2.0))
+                .child(DotBadge::new().tone(tone))
+        });
+        let menu = self.bell_menu.get().map(|_| {
+            let rows = entries
+                .iter()
+                .map(|(reason, row)| (*reason, (*row).clone()))
+                .collect::<Vec<_>>();
+            Self::render_bell_menu(
+                &self.bell_menu,
+                &self.probe.bell_menu,
+                cx.entity(),
+                rows,
+                self.bell_opened_at_ms,
+                (window_height - self.bell_bottom.get() - HANG_GAP - BELL_MENU_MARGIN)
+                    .max(px(120.0)),
+                *theme,
+                cx,
+            )
+            .into_any_element()
+        });
+        div()
+            .id("sidebar-bell")
+            .debug_selector(|| "sidebar-bell".to_owned())
+            .child(probe_canvas(&self.probe.bell))
+            .relative()
+            .flex_none()
+            // The icon button prevents the default of its mouse-down, so it
+            // never takes focus: without this, focus would stay in whatever
+            // held it (a terminal running an agent) and Escape, which the
+            // root's capture only sees along the sidebar's own dispatch path,
+            // would reach that instead of closing the popover.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.bell_menu.note_trigger_press();
+                    this.context_menu_focus.focus(window, cx);
+                }),
+            )
+            .child(button)
+            .child({
+                let bottom = self.bell_bottom.clone();
+                gpui::canvas(move |bounds, _, _| bottom.set(bounds.bottom()), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+            })
+            .when_some(dot, |this, dot| this.child(dot))
+            .when_some(menu, |this, menu| this.child(menu))
+            .into_any_element()
+    }
+
+    fn render_bell_menu(
+        popup: &Popup<()>,
+        bell_menu_probe: &ProbeCell,
+        entity: gpui::Entity<Self>,
+        entries: Vec<(sessions::BellReason, sessions::SessionRow)>,
+        opened_at_ms: i64,
+        max_height: Pixels,
+        theme: Theme,
+        cx: &App,
+    ) -> impl IntoElement {
+        let outside = entity.clone();
+        let mut card = menu_card("sidebar-bell-menu", cx)
+            .debug_selector(|| "sidebar-bell-menu".to_owned())
+            .child(probe_canvas(bell_menu_probe))
+            .w(px(280.0))
+            .max_h(max_height)
+            .overflow_y_scroll()
+            .text_size(theme.typography.ui_size)
+            .on_mouse_down_out(move |_, _, cx| {
+                outside.update(cx, |sidebar, cx| sidebar.close_bell_menu(cx));
+            });
+        if entries.is_empty() {
+            let label = "Nothing needs you";
+            card = card.child(
+                div()
+                    .debug_selector(move || format!("sidebar-bell-empty:{label}"))
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .text_color(theme.ely.fg_muted)
+                    .child(label),
+            );
+        }
+        for (index, (reason, row)) in entries.into_iter().enumerate() {
+            let selector = format!("sidebar-bell-entry-{index}");
+            let event_row = row.clone();
+            let click_entity = entity.clone();
+            let reason_color = match reason {
+                sessions::BellReason::Error => theme.ely.danger,
+                sessions::BellReason::NeedsInput => theme.ely.warning,
+                sessions::BellReason::Unread => theme.ely.info,
+            };
+            let place = format!("{} \u{b7} {}", row.project, row.branch);
+            let age = row.at.map(|at| sessions::relative_time(opened_at_ms, at));
+            card = card.child(
+                menu_row(gpui::SharedString::from(selector.clone()), false, false, cx)
+                    .debug_selector(move || selector.clone())
+                    .w_full()
+                    .h_auto()
+                    .py(px(5.0))
+                    .flex_col()
+                    .items_start()
+                    .gap(px(1.0))
+                    .on_click(move |_, _, cx| {
+                        let target = event_row.target.clone();
+                        click_entity.update(cx, |sidebar, cx| {
+                            sidebar.close_bell_menu(cx);
+                            cx.emit(session_event(target));
+                        })
+                    })
+                    .child(menu_label(row.title.clone()).flex_none().w_full())
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .gap(px(6.0))
+                            .text_size(theme.typography.scaled(11.0))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(reason_color)
+                                    .child(reason.label()),
+                            )
+                            .child(
+                                menu_label(place).text_color(theme.ely.fg_subtle),
+                            )
+                            .when_some(age, |this, age| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(theme.ely.fg_subtle)
+                                        .child(age),
+                                )
+                            }),
+                    ),
+            );
+        }
+        hang_below_end(
+            "sidebar-bell-menu-layer",
+            HANG_GAP,
+            card,
+            popup.closing_since(),
+            cx,
+        )
+    }
+
+    fn render_view_menu(
+        popup: &Popup<()>,
+        entity: gpui::Entity<Self>,
+        current: SidebarView,
+        theme: Theme,
+        cx: &App,
+    ) -> impl IntoElement {
+        let outside = entity.clone();
+        let item = |view: SidebarView, label: &'static str, selector: &'static str, check: &'static str| {
+            let entity = entity.clone();
+            menu_row(selector, false, false, cx)
+                .debug_selector(|| selector.to_owned())
+                .w_full()
+                .gap(px(8.0))
+                .text_size(theme.typography.ui_size)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |sidebar, cx| sidebar.choose_view(view, window, cx))
+                })
+                .child(menu_label(label))
+                .when(view == current, |row| {
+                    row.child(
+                        div()
+                            .debug_selector(|| check.to_owned())
+                            .flex()
+                            .flex_none()
+                            .child(
+                                EIcon::new(IconName::Check)
+                                    .size(EIconSize::Sm)
+                                    .color(theme.ely.fg),
+                            ),
+                    )
+                })
+        };
+        let card = menu_card("sidebar-view-menu", cx)
+            .debug_selector(|| "sidebar-view-menu".to_owned())
+            .w(px(190.0))
+            .child(item(
+                SidebarView::Projects,
+                "Projects",
+                "sidebar-view-menu-projects",
+                "sidebar-view-menu-check-projects",
+            ))
+            .child(item(
+                SidebarView::Sessions,
+                "Sessions",
+                "sidebar-view-menu-sessions",
+                "sidebar-view-menu-check-sessions",
+            ))
+            .on_mouse_down_out(move |_, _, cx| {
+                outside.update(cx, |sidebar, cx| sidebar.close_view_menu(cx));
+            });
+        hang_below(
+            "sidebar-view-menu-layer",
+            HANG_GAP,
+            card,
+            popup.closing_since(),
+            cx,
         )
     }
 
@@ -3814,82 +4715,17 @@ impl Sidebar {
 
 impl Focusable for Sidebar {
     fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.filter_focus.clone()
+        if self.filter_shown {
+            self.filter_focus.clone()
+        } else {
+            self.tree_focus.clone()
+        }
     }
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
-/// One segment of the header's view switch, drawn like the Chat/Code
-/// switch it copies: the two segments share the track's width, the current
-/// one is a filled pill on the track and the other is bare text.
-fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    let (id, icon_id, label_id, icon, label) = match tab {
-        SidebarView::Projects => (
-            "sidebar-view-projects",
-            "sidebar-view-icon-projects",
-            "sidebar-view-label-projects",
-            Icon::FolderFill,
-            "Projects",
-        ),
-        SidebarView::Sessions => (
-            "sidebar-view-sessions",
-            "sidebar-view-icon-sessions",
-            "sidebar-view-label-sessions",
-            Icon::MessageSquare,
-            "Sessions",
-        ),
-    };
-    let active = tab == current;
-    let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .flex_1()
-        .h_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(6.0))
-        .px(px(VIEW_TAB_PAD_X))
-        .rounded(theme.radii.chip_active)
-        .text_size(theme.typography.scaled(13.0))
-        .font_weight(if active {
-            FontWeight::MEDIUM
-        } else {
-            FontWeight::NORMAL
-        })
-        .text_color(tone)
-        .cursor_pointer()
-        .map(|this| {
-            if active {
-                this.bg(theme.ely.active)
-            } else {
-                // The track is already `hover`, so the bare segment answers
-                // the pointer with its text.
-                this.hover(|style| style.text_color(theme.ely.fg))
-            }
-        })
-        .child(
-            div()
-                .debug_selector(move || icon_id.to_owned())
-                .flex()
-                .flex_none()
-                .child(IconElement::new(icon, IconSize::Small).text_color(tone)),
-        )
-        .child(
-            // At the narrowest sidebar the labels give way, never the icons.
-            div()
-                .debug_selector(move || label_id.to_owned())
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(label),
-        )
-}
-
-/// A 20px icon control in the row under the view switch, the size and hover
+/// A 20px icon control in the row under the title, the size and hover
 /// of the `+` beside it. The icon says what it does only by shape, so the words live in
 /// the tooltip. The caller attaches the click.
 fn header_icon_button(
@@ -3930,8 +4766,32 @@ impl Render for Sidebar {
         if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
+        // The header's Ely icons read Ely's theme on every frame; fixtures
+        // that set only Sirio's theme get it installed the same lazy way.
+        if !cx.has_global::<ely_gpui_component::theme::Theme>() {
+            crate::ely::init(cx);
+        }
         let rows = self.visible_rows();
         let view = self.view;
+        self.probe.clear_chrome();
+        // The first card whose cross is drawn, and each worktree's project row
+        // path (the rows come project first), for git's main checkout.
+        let mut removable_ids = std::collections::HashSet::new();
+        let mut first_removable = None;
+        {
+            let mut project_path: Option<&Path> = None;
+            for row in &rows {
+                if row.kind == RowKind::Project {
+                    project_path = row.path.as_deref();
+                } else if row.kind == RowKind::Worktree
+                    && !row.is_primary
+                    && !Self::is_main_checkout_of(project_path, row)
+                {
+                    removable_ids.insert(row.id);
+                    first_removable.get_or_insert(row.id);
+                }
+            }
+        }
         self.probe.follow(
             (view == SidebarView::Projects)
                 .then(|| rows.iter().find(|row| row.kind == RowKind::Project).map(|row| row.id))
@@ -3939,20 +4799,28 @@ impl Render for Sidebar {
             (view == SidebarView::Projects)
                 .then(|| rows.iter().find(|row| row.kind == RowKind::Worktree).map(|row| row.id))
                 .flatten(),
+            (view == SidebarView::Projects).then_some(first_removable).flatten(),
         );
         let first_section_probe = self.probe.first_section.get();
         let first_card_probe = self.probe.first_card.get();
-        let section_probe = self.probe.section.clone();
+        let section_probes = section::SectionProbes {
+            row: self.probe.section.clone(),
+            add: self.probe.section_add.clone(),
+            menu: self.probe.section_menu.clone(),
+        };
+        let expand_all_probe = self.probe.header_expand_all.clone();
+        let collapse_all_probe = self.probe.header_collapse_all.clone();
+        let filter_probe = self.probe.filter.clone();
+        let section_header_probe = self.probe.section_header.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
-        let badge = (view == SidebarView::Projects)
-            .then(|| sessions::attention(&sessions::session_list(&self.rows, &[], "").open))
-            .flatten();
         let sticky_section = self.sticky_section(&rows);
         // Read off `self` here: the closure that draws the sticky header
         // runs inside the element builder, where `self` is already borrowed.
         let sticky_worktree_count = sticky_section
             .as_ref()
             .map_or(0, |row| self.worktree_count(row.id));
+        let hover_card_element = self.hover_card_element(&rows, &theme, window, cx);
+        let sidebar_bounds = self.sidebar_bounds.clone();
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
@@ -3976,6 +4844,22 @@ impl Render for Sidebar {
             ));
         }
         let tree_focus = self.tree_focus.clone();
+        if self.tree_focus_subscription.is_none() {
+            // Focus arriving at the list from anywhere (a mouse-down on a row,
+            // the palette, the filter) starts a new visit: see `focus_list`.
+            self.tree_focus_subscription = Some(cx.on_focus(
+                &tree_focus,
+                window,
+                |sidebar, _window, cx| {
+                    let pill_held = sidebar.pill_cursor.take().is_some();
+                    let delete_armed = sidebar.armed_delete.take().is_some();
+                    if pill_held || delete_armed {
+                        cx.notify();
+                    }
+                },
+            ));
+        }
+        let ring_active = self.tree_focus.is_focused(window);
         let filter_is_focused = filter_focus.is_focused(window);
         // Sidebar text fields (filter, worktree prompt) share one blink:
         // window focus is unique, so at most one caret is ever visible.
@@ -3993,6 +4877,10 @@ impl Render for Sidebar {
         let field_caret_visible = field_focused && self.field_blink.visible();
         let filter_text = self.filter.clone();
         let filter_is_empty = filter_text.is_empty();
+        let show_filter = self.filter_shown || !filter_is_empty;
+        // Folding hides the rows, never the element that owns list focus; a
+        // query reaches into a folded list the way it opens folded projects.
+        let show_list = !self.list_folded || !filter_is_empty;
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
         let context_menu = self.context_menu.get().map(|_| {
@@ -4049,7 +4937,7 @@ impl Render for Sidebar {
                 if row.kind == RowKind::Project {
                     let worktree_count = self.worktree_count(row.id);
                     let probe =
-                        (first_section_probe == Some(row.id)).then(|| section_probe.clone());
+                        (first_section_probe == Some(row.id)).then(|| section_probes.clone());
                     rendered_rows.push(
                         section::render_section(row, worktree_count, entity.clone(), theme, probe)
                             .into_any_element(),
@@ -4068,6 +4956,8 @@ impl Render for Sidebar {
                     project_id,
                     project_icon,
                     first_card: first_card_probe == Some(row.id),
+                    removable: removable_ids.contains(&row.id),
+                    first_removable: first_removable == Some(row.id),
                     row,
                 };
                 let row_id = inputs.row.id;
@@ -4090,12 +4980,19 @@ impl Render for Sidebar {
                         render_count: 0,
                     }),
                 };
-                rendered_rows.push(if cache_rows && !changed {
+                let card = if cache_rows && !changed {
                     view.clone()
                         .cached(StyleRefinement::default().w_full().h(px(row_height)))
                         .into_any_element()
                 } else {
                     view.clone().into_any_element()
+                };
+                // The margin sits on a wrapper, not on the cached view, and
+                // `sticky_section` adds the same space to its arithmetic.
+                rendered_rows.push(if closes_project(&rows, index) {
+                    div().mb(px(PROJECT_END_SPACE)).child(card).into_any_element()
+                } else {
+                    card
                 });
                 next_views.insert(row_id, view);
             }
@@ -4249,6 +5146,15 @@ impl Render for Sidebar {
                     if sidebar.armed_delete.take().is_some() {
                         cx.notify();
                         closed = true;
+                    } else if sidebar.view_menu.is_open() {
+                        sidebar.close_view_menu(cx);
+                        closed = true;
+                    } else if sidebar.bell_menu.is_open() {
+                        sidebar.close_bell_menu(cx);
+                        closed = true;
+                    } else if sidebar.new_chat_menu.is_open() {
+                        sidebar.close_new_chat_menu(cx);
+                        closed = true;
                     } else if sidebar.has_open_project_surface() {
                         sidebar.close_project_surface(cx);
                         closed = true;
@@ -4272,133 +5178,20 @@ impl Render for Sidebar {
             .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
-            .pt(px(8.0))
             .child(
-                div()
-                    .debug_selector(|| "sidebar-view-tabs".to_owned())
-                    .h(px(30.0))
-                    .mx(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    // The track's own 2px inset around its 26px segments —
-                    // component geometry, like `controls::segmented`.
-                    .p(px(2.0))
-                    .rounded(theme.radii.control)
-                    // `hover`, not `surface`: on every ladder it stands off
-                    // the sidebar's `bg` in both appearances, where
-                    // `surface` all but vanished on the light ones.
-                    .bg(theme.ely.hover)
-                    .border_1()
-                    .border_color(theme.ely.border)
-                    .child({
-                        let projects_entity = entity.clone();
-                        view_tab(SidebarView::Projects, view, &theme).on_click(move |_, _, cx| {
-                            projects_entity.update(cx, |sidebar, cx| {
-                                sidebar.choose_view(SidebarView::Projects, cx)
-                            });
-                        })
-                    })
-                    .child({
-                        let sessions_entity = entity.clone();
-                        view_tab(SidebarView::Sessions, view, &theme)
-                            .when_some(badge, |this, status| {
-                                let (color, name) = match status {
-                                    ActivityStatus::Error => (theme.ely.danger, "error"),
-                                    _ => (theme.ely.warning, "needs-input"),
-                                };
-                                this.child(
-                                    div()
-                                        .debug_selector(move || {
-                                            format!("sidebar-sessions-badge-{name}")
-                                        })
-                                        .flex_none()
-                                        .w(px(6.0))
-                                        .h(px(6.0))
-                                        .rounded_full()
-                                        .bg(color),
-                                )
-                            })
-                            .on_click(move |_, _, cx| {
-                                sessions_entity.update(cx, |sidebar, cx| {
-                                    sidebar.choose_view(SidebarView::Sessions, cx)
-                                });
-                            })
-                    }),
+                gpui::canvas(move |bounds, _, _| sidebar_bounds.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
             )
-            .when(view == SidebarView::Projects, |this| {
-                // Open and fold the whole list, then the `+`: one row under
-                // the switch, the three drawn at one size. They are icons, so
-                // the tooltip is the only place the bulk buttons' words
-                // appear.
-                this.child(
-                    div()
-                        .debug_selector(|| "sidebar-header-actions".to_owned())
-                        .mt(px(6.0))
-                        .h(px(20.0))
-                        .w_full()
-                        .pr(px(FILTER_LEFT_INSET))
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(4.0))
-                        .child(
-                            header_icon_button(
-                                "sidebar-expand-all",
-                                Icon::SquarePlus,
-                                "Expand all projects",
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_all_projects_expanded(true, cx);
-                            })),
-                        )
-                        .child(
-                            header_icon_button(
-                                "sidebar-collapse-all",
-                                Icon::SquareMinus,
-                                "Collapse all projects",
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_all_projects_expanded(false, cx);
-                            })),
-                        )
-                        .child(
-                            div()
-                                .id("add-project")
-                                .debug_selector(|| "add-project".to_string())
-                                .flex_none()
-                                .w(px(20.0))
-                                .h(px(20.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
-                                    this.add_project_menu.note_trigger_press();
-                                }))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_add_project(cx);
-                                }))
-                                .child(
-                                    div()
-                                        .debug_selector(|| "add-project-icon".to_owned())
-                                        .flex()
-                                        .flex_none()
-                                        .child(
-                                            IconElement::new(Icon::Plus, HEADER_ICON_SIZE)
-                                                .text_color(theme.ely.fg_subtle),
-                                        ),
-                                )
-                                .when_some(add_project_menu, |this, menu| this.child(menu)),
-                        ),
-                )
-            })
-            .child(
+            .child(self.render_header(&theme, window, cx))
+            .child(self.render_new_chat(&theme, cx))
+            .when(show_filter, |this| this.child(
                 div()
                     .id("filter-field")
                     .debug_selector(|| "filter-field".to_string())
+                    .child(probe_canvas(&filter_probe))
                     .track_focus(&filter_focus)
                     .relative()
                     .mt(px(6.0))
@@ -4493,15 +5286,121 @@ impl Render for Sidebar {
                                 )
                             }),
                     ),
-            )
-            .when(view == SidebarView::Projects, |this| this.child(
+            ))
+            .child({
+                // Folds the list under it, whichever list the view shows. The
+                // bulk buttons appear on hover; the `+` is always drawn.
+                let folded = self.list_folded;
+                let title = if view == SidebarView::Projects { "Projects" } else { "Sessions" };
                 div()
+                    .id("sidebar-section-header")
+                    .debug_selector(|| "sidebar-section-header".to_owned())
+                    .child(probe_canvas(&section_header_probe))
+                    .group("sidebar-section-header")
+                    .flex_none()
+                    .h(px(28.0))
+                    .w_full()
+                    .px(px(FILTER_LEFT_INSET))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .id("sidebar-section-toggle")
+                            .debug_selector(|| "sidebar-section-toggle".to_owned())
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .cursor_pointer()
+                            .text_color(theme.ely.fg_subtle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.list_folded = !this.list_folded;
+                                this.pill_cursor = None;
+                                this.armed_delete = None;
+                                cx.notify();
+                            }))
+                            .child(title)
+                            .child(Disclosure::new("sidebar-section-toggle", !folded)),
+                    )
+                    .when(view == SidebarView::Projects, |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap(px(4.0))
+                                .child(
+                                    header_icon_button(
+                                        "sidebar-expand-all",
+                                        Icon::SquarePlus,
+                                        "Expand all projects",
+                                        &theme,
+                                    )
+                                    .child(probe_canvas(&expand_all_probe))
+                                    .opacity(0.0)
+                                    .group_hover("sidebar-section-header", |style| style.opacity(1.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_all_projects_expanded(true, cx);
+                                    })),
+                                )
+                                .child(
+                                    header_icon_button(
+                                        "sidebar-collapse-all",
+                                        Icon::SquareMinus,
+                                        "Collapse all projects",
+                                        &theme,
+                                    )
+                                    .child(probe_canvas(&collapse_all_probe))
+                                    .opacity(0.0)
+                                    .group_hover("sidebar-section-header", |style| style.opacity(1.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_all_projects_expanded(false, cx);
+                                    })),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-project")
+                                        .debug_selector(|| "add-project".to_string())
+                                        .flex_none()
+                                        .w(px(20.0))
+                                        .h(px(20.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
+                                            this.add_project_menu.note_trigger_press();
+                                        }))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.start_add_project(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .debug_selector(|| "add-project-icon".to_owned())
+                                                .flex()
+                                                .flex_none()
+                                                .child(
+                                                    IconElement::new(Icon::Plus, HEADER_ICON_SIZE)
+                                                        .text_color(theme.ely.fg_subtle),
+                                                ),
+                                        )
+                                        .when_some(add_project_menu, |this, menu| this.child(menu)),
+                                ),
+                        )
+                    })
+            })
+            .when(view == SidebarView::Projects, |this| this.child(
+                list_frame(
+                    ring_active,
+                    crate::scroll::bar_fading("sidebar-list-bar", &self.list_scroll, &self.list_bar, window, cx),
+                    &theme,
+                    div()
                     .id("sidebar-tree")
                     .debug_selector(|| "sidebar-tree".to_owned())
                     .key_context(tree_keys::KEY_CONTEXT)
                     .track_focus(&tree_focus)
                     .on_key_down(cx.listener(|sidebar, event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.key != "backspace" {
+                        if event.keystroke.key != "backspace" || sidebar.list_hidden() {
                             return;
                         }
                         let Some(pill_index) = sidebar.pill_cursor else {
@@ -4529,10 +5428,7 @@ impl Render for Sidebar {
                     .on_action(cx.listener(|sidebar, _: &tree_keys::Expand, _, cx| {
                         sidebar.pill_step(tree_keys::Direction::Right, cx);
                     }))
-                    .mt(px(11.0))
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .h_full()
+                    .size_full()
                     .relative()
                     .overflow_y_scroll()
                     .track_scroll(&self.list_scroll)
@@ -4544,7 +5440,7 @@ impl Render for Sidebar {
                     .on_drop::<RowDrag>(move |_, _, cx| {
                         reorder_drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
                     })
-                    .child(
+                    .when(show_list, |this| this.child(
                         div()
                             .flex()
                             .flex_col()
@@ -4552,8 +5448,8 @@ impl Render for Sidebar {
                             .flex_none()
                             .gap(px(ROW_V_GAP))
                             .children(rendered_rows),
-                    )
-                    .when_some(sticky_section, |this, row| {
+                    ))
+                    .when_some(sticky_section.filter(|_| show_list), |this, row| {
                         this.child(
                             div()
                                 .debug_selector(|| "sidebar-sticky-section".to_owned())
@@ -4571,11 +5467,16 @@ impl Render for Sidebar {
                                 )),
                         )
                     }),
+                ),
             ))
             .when(view == SidebarView::Sessions, |this| {
                 let empty = session_list.open.is_empty() && session_list.closed.is_empty();
                 this.child(
-                    div()
+                    list_frame(
+                        ring_active,
+                        crate::scroll::bar_fading("sidebar-sessions-bar", &self.sessions_scroll, &self.sessions_bar, window, cx),
+                        &theme,
+                        div()
                         .id("sidebar-sessions")
                         .debug_selector(|| "sidebar-sessions".to_owned())
                         .key_context(tree_keys::KEY_CONTEXT)
@@ -4597,19 +5498,17 @@ impl Render for Sidebar {
                                 cx.notify();
                             }
                         }))
-                        .mt(px(11.0))
-                        .flex_1()
-                        .min_h(px(0.0))
+                        .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.sessions_scroll)
-                        .child(
+                        .when(show_list, |this| this.child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap(px(ROW_V_GAP))
                                 .children(session_elements),
-                        )
-                        .when(empty, |this| {
+                        ))
+                        .when(empty && show_list, |this| {
                             this.child(
                                 div()
                                     .debug_selector(|| "sessions-empty".to_owned())
@@ -4621,6 +5520,7 @@ impl Render for Sidebar {
                                     .child("No sessions"),
                             )
                         }),
+                    ),
                 )
             })
             .when(notice.is_some(), |this| {
@@ -4821,7 +5721,44 @@ impl Render for Sidebar {
             .when_some(project_form, |this, form| {
                 this.child(Self::render_project_form(form, entity.clone(), theme))
             })
+            .when_some(hover_card_element, |this, card| this.child(card))
     }
+}
+
+/// The frame a list scrolls in: a plain box under the list that carries what
+/// must not scroll with it, the overlay scrollbar and the focus ring. The ring
+/// is always drawn, transparent while the list is unfocused, so focus moves no
+/// pixel of layout.
+fn list_frame(
+    ring_active: bool,
+    bar: gpui::AnyElement,
+    theme: &Theme,
+    list: impl IntoElement,
+) -> gpui::Div {
+    div()
+        .mt(px(11.0))
+        .flex_1()
+        .min_h(px(0.0))
+        .relative()
+        .child(list)
+        .child(bar)
+        .child({
+            let color = if ring_active { theme.ely.focus } else { gpui::transparent_black() };
+            div()
+                .debug_selector(|| "sidebar-list-ring".to_owned())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(color)
+                // What the drawn-frame tests read: present only while the ring
+                // is painted in the focus colour.
+                .when(color == theme.ely.focus, |this| {
+                    this.child(div().debug_selector(|| "sidebar-list-ring-focused".to_owned()).size_full())
+                })
+        })
 }
 
 #[cfg(test)]
@@ -4905,10 +5842,9 @@ pub(super) mod tests_support {
 mod tests {
     use super::*;
 
-    /// Opens the New Worktree prompt the way a user does. The section
-    /// header's `+` is hover-revealed (`group_hover`), and gpui lays an
-    /// invisible element out — so `debug_bounds` finds it — but does not
-    /// hit-test it, so the header has to be hovered before the click.
+    /// Opens the New Worktree prompt the way a user does. The project row's
+    /// `+` is drawn only under the pointer (`group_hover` raising its opacity
+    /// from 0), so the row is hovered before the click, as a hand does.
     fn click_section_add(cx: &mut VisualTestContext) {
         let header = cx
             .debug_bounds("sidebar-section-0")
@@ -4917,7 +5853,7 @@ mod tests {
         cx.run_until_parked();
         let add = cx
             .debug_bounds("sidebar-section-add-0")
-            .expect("the section add control is rendered once the header is hovered");
+            .expect("the section add control is located once the row is hovered");
         cx.simulate_click(add.center(), Modifiers::none());
         cx.run_until_parked();
     }
@@ -6083,6 +7019,9 @@ mod tests {
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
+        // The shortened window below must still hold the 150px card inside
+        // its margin; the filter's height above the row is what makes it.
+        click_control(&mut cx, "sidebar-search");
 
         // A window that ends 1px past the row's bottom-right corner, so the
         // click that opens the menu lands 2px from the window's corner. The
@@ -7767,6 +8706,144 @@ mod tests {
         );
     }
 
+    fn filter_fixture_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::WindowHandle<Sidebar>, VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        (window, cx)
+    }
+
+    /// Moves focus off the filter the way the shell does after a row click.
+    fn focus_list(window: &gpui::WindowHandle<Sidebar>, cx: &mut VisualTestContext) {
+        window
+            .update(cx, |sidebar, window, cx| sidebar.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn search_shows_and_focuses_the_filter(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        assert!(cx.debug_bounds("filter-field").is_none(), "hidden until asked");
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some());
+        let focused = window
+            .update(&mut cx, |sidebar, window, _| sidebar.filter_focus.is_focused(window))
+            .unwrap();
+        assert!(focused, "the filter takes focus");
+    }
+
+    #[gpui::test]
+    async fn escape_clears_and_hides_the_filter(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "ma");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "");
+        assert!(cx.debug_bounds("filter-field").is_none(), "the field is gone");
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "focus goes to the list");
+    }
+
+    #[gpui::test]
+    async fn the_filter_stays_while_it_holds_text(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("t");
+        cx.run_until_parked();
+        focus_list(&window, &mut cx);
+        assert!(
+            cx.debug_bounds("filter-field").is_some(),
+            "text keeps the field drawn after focus leaves"
+        );
+    }
+
+    #[gpui::test]
+    async fn search_hides_an_empty_filter_and_keeps_one_with_text(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some());
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_none(), "empty: hidden again");
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "focus goes to the list");
+
+        // Shown, empty and not focused: Search focuses it instead of hiding.
+        click_control(&mut cx, "sidebar-search");
+        focus_list(&window, &mut cx);
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some(), "unfocused empty: kept");
+        let focused = window
+            .update(&mut cx, |s, window, _| s.filter_focus.is_focused(window))
+            .unwrap();
+        assert!(focused, "and focused");
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_none(), "focused empty: hidden");
+
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-search");
+        assert!(cx.debug_bounds("filter-field").is_some(), "text keeps it drawn");
+        let (filter_focused, text) = window
+            .update(&mut cx, |s, window, _| (s.filter_focus.is_focused(window), s.filter.clone()))
+            .unwrap();
+        assert!(filter_focused, "and focused");
+        assert_eq!(text, "ma");
+    }
+
+    #[gpui::test]
+    async fn switching_view_clears_and_hides_the_filter(cx: &mut gpui::TestAppContext) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-search");
+        cx.simulate_input("ma");
+        cx.run_until_parked();
+        choose_from_title_menu(&mut cx, "sessions");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.filter.clone()).unwrap(), "");
+        assert!(cx.debug_bounds("filter-field").is_none());
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "the list takes focus after the title menu");
+    }
+
+    #[gpui::test]
+    async fn with_the_filter_hidden_the_sidebar_hands_out_the_list_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, mut cx) = filter_fixture_window(cx);
+        let (before, tree, filter) = window
+            .update(&mut cx, |s, _, cx| {
+                (
+                    Focusable::focus_handle(s, cx),
+                    s.tree_focus.clone(),
+                    s.filter_focus.clone(),
+                )
+            })
+            .unwrap();
+        assert_eq!(before, tree);
+        window
+            .update(&mut cx, |s, window, cx| s.show_filter(window, cx))
+            .unwrap();
+        let after = window
+            .update(&mut cx, |s, _, cx| Focusable::focus_handle(s, cx))
+            .unwrap();
+        assert_eq!(after, filter);
+    }
+
     /// F-SID-02: typing in the Filter field narrows the drawn rows to the
     /// matching project, and clearing the filter restores every row.
     #[gpui::test]
@@ -7776,7 +8853,8 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        // Focus the filter field the way a user does: click it.
+        // Show the filter the way a user does: click Search.
+        click_control(&mut cx, "sidebar-search");
         let filter = cx
             .debug_bounds("filter-field")
             .expect("the Filter field is drawn");
@@ -7933,6 +9011,260 @@ mod tests {
             .unwrap_or_else(|| panic!("{selector} is drawn"));
         cx.simulate_click(control.center(), Modifiers::none());
         cx.run_until_parked();
+    }
+
+    fn card_star_actions(
+        cx: &mut TestAppContext,
+        primary: bool,
+    ) -> Vec<(bool, SidebarContextAction)> {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let row_id = sidebar.read_with(&cx, |s, _| {
+            s.rows
+                .iter()
+                .find(|row| row.kind == RowKind::Worktree && row.is_primary == primary)
+                .map(|row| row.id)
+                .expect("the worktree row exists")
+        });
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let star_selector: &'static str =
+            Box::leak(format!("sidebar-card-star-{row_id}").into_boxed_str());
+        let row = cx.debug_bounds(row_selector).expect("the card is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let star = cx
+            .debug_bounds(star_selector)
+            .expect("the star is drawn once the card is hovered");
+        cx.simulate_click(star.center(), Modifiers::none());
+        cx.run_until_parked();
+        let emitted: Vec<_> = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                SidebarEvent::ContextAction {
+                    target: SidebarContextTarget::Worktree { is_primary, .. },
+                    action,
+                } => Some((*is_primary, *action)),
+                _ => None,
+            })
+            .collect();
+        let selected_by_click = events.borrow().iter().any(|event| {
+            matches!(event, SidebarEvent::SelectTab(_) | SidebarEvent::SelectWorktree(_))
+        });
+        assert!(!selected_by_click, "the star click does not also select the card");
+        emitted
+    }
+
+    #[gpui::test]
+    async fn the_card_star_sets_primary_on_a_worktree(cx: &mut TestAppContext) {
+        assert_eq!(
+            card_star_actions(cx, false),
+            vec![(false, SidebarContextAction::SetPrimary)]
+        );
+    }
+
+    #[gpui::test]
+    async fn the_card_star_unsets_primary_on_the_primary(cx: &mut TestAppContext) {
+        assert_eq!(
+            card_star_actions(cx, true),
+            vec![(true, SidebarContextAction::UnsetPrimary)]
+        );
+    }
+
+    fn hover_card(cx: &mut VisualTestContext, row_id: usize) {
+        let selector: &'static str = Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let row = cx.debug_bounds(selector).expect("the card is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn the_card_buttons_take_the_blooms_place_on_every_card(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let (primary, linked) = sidebar.read_with(&cx, |s, _| {
+            let id = |primary: bool| {
+                s.rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.is_primary == primary)
+                    .map(|row| row.id)
+                    .expect("the worktree row exists")
+            };
+            (id(true), id(false))
+        });
+        sidebar.update(&mut cx, |s, cx| {
+            s.set_worktree_activity(
+                linked,
+                Some(ActivityStatus::Running),
+                Some(AgentBrandColor::Claude),
+                Vec::new(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let star = |cx: &mut VisualTestContext, id: usize| {
+            hover_card(cx, id);
+            let selector: &'static str =
+                Box::leak(format!("sidebar-card-star-{id}").into_boxed_str());
+            cx.debug_bounds(selector).expect("the star is drawn under the pointer")
+        };
+        let idle = star(&mut cx, primary);
+        let running = star(&mut cx, linked);
+        assert_eq!(
+            running.right(),
+            idle.right(),
+            "the star sits at one x on a running card and an idle one"
+        );
+        let bloom = cx
+            .debug_bounds(Box::leak(format!("sidebar-status-running-{linked}").into_boxed_str()))
+            .expect("the bloom keeps its box");
+        let cross = cx
+            .debug_bounds(Box::leak(format!("remove-worktree-{linked}").into_boxed_str()))
+            .expect("the cross is drawn under the pointer");
+        assert_eq!(
+            cross.right(),
+            bloom.right(),
+            "the cross stands on the bloom's trailing edge: cross={cross:?} bloom={bloom:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_primary_star_is_the_filled_glyph(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let (primary, linked) = sidebar.read_with(&cx, |s, _| {
+            let id = |primary: bool| {
+                s.rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.is_primary == primary)
+                    .map(|row| row.id)
+                    .expect("the worktree row exists")
+            };
+            (id(true), id(false))
+        });
+        hover_card(&mut cx, primary);
+        assert!(
+            cx.debug_bounds(Box::leak(format!("sidebar-card-star-filled-{primary}").into_boxed_str()))
+                .is_some(),
+            "the primary draws the filled star glyph"
+        );
+        hover_card(&mut cx, linked);
+        assert!(
+            cx.debug_bounds(Box::leak(format!("sidebar-card-star-filled-{linked}").into_boxed_str()))
+                .is_none(),
+            "a linked worktree keeps the outline star"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_list_ring_follows_list_focus(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let ring = cx.debug_bounds("sidebar-list-ring").expect("the ring is always drawn");
+        let tree = cx.debug_bounds("sidebar-tree").expect("the list is drawn");
+        assert_eq!(ring, tree, "the ring lays over the list and shifts nothing");
+        let active = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("sidebar-list-ring-focused").is_some()
+        };
+        assert!(!active(&mut cx), "no ring while the list is not focused");
+        window
+            .update(&mut cx, |s, window, cx| s.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(active(&mut cx), "the ring shows while the list has focus");
+        assert_eq!(cx.debug_bounds("sidebar-list-ring"), Some(tree));
+    }
+
+    /// A sidebar with 20 worktrees in a 320x240 window, so the list overflows.
+    fn long_list_fixture(cx: &mut TestAppContext) -> (gpui::WindowHandle<Sidebar>, VisualTestContext) {
+        cx.update(Theme::init);
+        let project_root = PathBuf::from("/tmp/sidebar-bar-fade");
+        let worktrees = (0..20)
+            .map(|index| SidebarWorktree {
+                branch: format!("worktree-{index}"),
+                path: project_root.join(format!("worktree-{index}")),
+                is_primary: index == 0,
+                comment: None,
+            })
+            .collect();
+        let window = cx.open_window(size(px(320.0), px(240.0)), |_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "bar-fade".into(),
+                    name: "Bar Fade".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees,
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        (window, cx)
+    }
+
+    /// The point on the list's scrollbar thumb at rest (top of the track).
+    fn bar_thumb_point(cx: &mut VisualTestContext) -> gpui::Point<gpui::Pixels> {
+        let bar = cx
+            .debug_bounds("sidebar-list-bar")
+            .expect("the bar stays mounted while the list overflows, so it can be grabbed");
+        point(bar.right() - px(8.0), bar.top() + px(6.0))
+    }
+
+    #[gpui::test]
+    async fn a_faded_scrollbar_can_still_be_grabbed(cx: &mut TestAppContext) {
+        let (window, mut cx) = long_list_fixture(cx);
+        let grab = bar_thumb_point(&mut cx);
+        cx.simulate_mouse_move(grab, None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(grab + point(px(0.0), px(8.0)), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(grab + point(px(0.0), px(16.0)), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(grab + point(px(0.0), px(60.0)), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let offset = window.update(&mut cx, |s, _, _| s.list_scroll.offset().y).unwrap();
+        cx.simulate_mouse_up(grab + point(px(0.0), px(60.0)), gpui::MouseButton::Left, Modifiers::none());
+        assert!(offset < px(0.0), "dragging the idle bar's thumb scrolls the list: {offset:?}");
+    }
+
+    #[gpui::test]
+    async fn a_thumb_held_past_the_idle_window_keeps_scrolling(cx: &mut TestAppContext) {
+        let (window, mut cx) = long_list_fixture(cx);
+        let grab = bar_thumb_point(&mut cx);
+        let at = |dy: f32| grab + point(px(0.0), px(dy));
+        let offset = |cx: &mut VisualTestContext| {
+            window.update(cx, |s, _, _| s.list_scroll.offset().y).unwrap()
+        };
+        cx.simulate_mouse_move(grab, None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(6.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(12.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(20.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        // The fade is wall time, so the hold is real: longer than idle + fade.
+        std::thread::sleep(crate::scroll::BAR_IDLE + crate::scroll::BAR_FADE + std::time::Duration::from_millis(200));
+        cx.simulate_mouse_move(at(30.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let before = offset(&mut cx);
+        cx.simulate_mouse_move(at(40.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(at(60.0), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let after = offset(&mut cx);
+        cx.simulate_mouse_up(at(60.0), gpui::MouseButton::Left, Modifiers::none());
+        assert!(after < before, "the held drag still scrolls after the idle window: {before:?} -> {after:?}");
+    }
+
+    #[gpui::test]
+    async fn the_zed_card_still_spans_the_panel(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let tree = cx.debug_bounds("sidebar-tree").expect("the list is drawn");
+        let card = window.update(&mut cx, |s, _, _| s.probe_bounds()).unwrap().card;
+        let card = card.expect("the first card is probed");
+        assert_eq!(card.left(), tree.left(), "the card starts at the list's edge");
+        assert_eq!(card.right(), tree.right(), "the card ends at the list's edge");
     }
 
     /// Folds or opens one project the way the host restoring a session
@@ -8155,9 +9487,847 @@ mod tests {
         }
     }
 
-    /// At the narrowest sidebar the segment labels give way, never a
-    /// control: the `+` and both bulk buttons stay whole in their own row
-    /// under the view switch, at the same size, inside the sidebar.
+    /// Opens the title menu and picks `item` (`projects` or `sessions`).
+    fn choose_from_title_menu(cx: &mut VisualTestContext, item: &'static str) {
+        click_control(cx, "sidebar-title");
+        let selector = match item {
+            "projects" => "sidebar-view-menu-projects",
+            _ => "sidebar-view-menu-sessions",
+        };
+        click_control(cx, selector);
+    }
+
+    #[gpui::test]
+    async fn the_title_menu_switches_to_sessions_and_back(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "closed until asked");
+
+        click_control(&mut cx, "sidebar-title");
+        assert!(cx.debug_bounds("sidebar-view-menu").is_some(), "the title opens the menu");
+        click_control(&mut cx, "sidebar-view-menu-sessions");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(sidebar.read_with(&cx, |sidebar, _| sidebar.view), SidebarView::Sessions);
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "choosing closes the menu");
+        let changes = events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, SidebarEvent::ViewChanged(SidebarView::Sessions)))
+            .count();
+        assert_eq!(changes, 1, "one ViewChanged(Sessions)");
+
+        choose_from_title_menu(&mut cx, "projects");
+        assert_eq!(sidebar.read_with(&cx, |sidebar, _| sidebar.view), SidebarView::Projects);
+    }
+
+    #[gpui::test]
+    async fn choosing_the_current_view_closes_the_menu_without_a_change(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-title");
+        assert!(cx.debug_bounds("sidebar-view-menu").is_some());
+        click_control(&mut cx, "sidebar-view-menu-projects");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "the menu closes");
+        assert!(
+            !events.borrow().iter().any(|event| matches!(event, SidebarEvent::ViewChanged(_))),
+            "no ViewChanged for the view already shown"
+        );
+        let list_focused = window
+            .update(&mut cx, |s, window, _| s.tree_focus.is_focused(window))
+            .unwrap();
+        assert!(list_focused, "the list takes focus");
+    }
+
+    fn new_chat_fixture(
+        cx: &mut TestAppContext,
+        with_worktree: bool,
+    ) -> (gpui::WindowHandle<Sidebar>, VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(move |_window, cx| {
+            let mut sidebar = if with_worktree {
+                tests_support::sidebar_with_one_project(cx)
+            } else {
+                Sidebar::from_projects(Vec::new(), cx)
+            };
+            sidebar.apply_chat_launch_sources(vec![(
+                "codex".to_string(),
+                sirio_registry::LaunchSource::Builtin {
+                    program: "codex-acp".into(),
+                    args: vec![],
+                },
+            )]);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        (window, cx)
+    }
+
+
+    fn hover_ms(cx: &mut VisualTestContext, ms: u64) {
+        cx.executor().advance_clock(std::time::Duration::from_millis(ms));
+        cx.run_until_parked();
+    }
+
+    fn pointer_away(cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(gpui::point(px(1500.0), px(900.0)), None, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn linked_row(cx: &mut VisualTestContext) -> usize {
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        sidebar.read_with(cx, |s, _| {
+            s.rows
+                .iter()
+                .find(|row| row.kind == RowKind::Worktree && !row.is_primary)
+                .map(|row| row.id)
+                .expect("the worktree row exists")
+        })
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_opens_after_half_a_second(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 400);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "not yet at 400 ms");
+        hover_ms(&mut cx, 110);
+        let card = cx.debug_bounds("sidebar-hover-card").expect("open at 510 ms");
+        assert_eq!(
+            card.left(),
+            px(300.0 + hover_card::PANEL_BORDER + hover_card::GAP),
+            "the card sits 4 px past the sidebar's visible right edge, its border included: {card:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn probe_rects_report_the_new_chrome(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let probe = |cx: &mut VisualTestContext| window.update(cx, |s, _, _| s.probe_bounds()).unwrap();
+        let rects = probe(&mut cx);
+        assert!(rects.title.is_some(), "the title is probed");
+        assert!(rects.bell.is_some(), "the bell is probed");
+        assert!(rects.search.is_some(), "the search button is probed");
+        assert!(rects.new_chat.is_some(), "the New Chat row is probed");
+        let header = rects.section_header.expect("the section header is probed");
+        assert_eq!(header.size.height, px(28.0), "the header is 28 px");
+        let project = rects.section.expect("the first project row is probed");
+        assert_eq!(project.size.height, px(31.0), "the project row is 31 px, not the header");
+        assert!(rects.card.is_some(), "the first card is probed");
+        assert!(rects.card_star.is_some(), "the card's star is probed even while it is invisible");
+        assert!(rects.filter.is_none(), "the filter field is absent while hidden");
+        assert!(rects.bell_menu.is_none(), "the bell menu is absent while closed");
+        assert!(rects.hover_card.is_none(), "no hover card before the pointer rests");
+
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 400);
+        assert!(probe(&mut cx).hover_card.is_none(), "not yet at 400 ms");
+        hover_ms(&mut cx, 110);
+        assert!(probe(&mut cx).hover_card.is_some(), "open at 510 ms");
+        let state = window.update(&mut cx, |s, w, _| s.shell_state(w)).unwrap();
+        assert!(state.hover_card_worktree.is_some(), "the state names the hovered worktree");
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        assert!(probe(&mut cx).hover_card.is_none(), "the rect goes with the card");
+
+        click_control(&mut cx, "sidebar-search");
+        assert!(probe(&mut cx).filter.is_some(), "the filter field is probed once shown");
+        assert!(window.update(&mut cx, |s, w, _| s.shell_state(w)).unwrap().filter_shown);
+        click_control(&mut cx, "sidebar-bell");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(probe(&mut cx).bell_menu.is_some(), "the open bell menu is probed");
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_lingers_then_closes(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 150);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "lingers at 150 ms");
+        hover_ms(&mut cx, 100);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "gone at 250 ms");
+    }
+
+    fn tabbed_row(cx: &mut VisualTestContext) -> usize {
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        sidebar.read_with(cx, |s, _| {
+            s.rows.iter().find(|row| !row.pills.is_empty()).map(|row| row.id).expect("a worktree with tabs")
+        })
+    }
+
+    /// Opens `menu` while the pointer rests on `id`, waits past the open delay
+    /// and says whether the hover card is up.
+    fn card_after_opening(
+        cx: &mut TestAppContext,
+        menu: Option<&str>,
+    ) -> bool {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let id = tabbed_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 200);
+        if let Some(menu) = menu {
+            window
+                .update(&mut cx, |s, window, cx| match menu {
+                    "context" => s.open_context_menu(id, gpui::point(px(150.0), px(400.0)), window, cx),
+                    "bell" => s.toggle_bell_menu(cx),
+                    "new_chat" => s.toggle_new_chat_menu(cx),
+                    _ => s.toggle_view_menu(cx),
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+        hover_ms(&mut cx, 400);
+        cx.debug_bounds("sidebar-hover-card").is_some()
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_never_opens_while_a_menu_is_open(cx: &mut TestAppContext) {
+        assert!(card_after_opening(cx, None), "control: with no menu the same hover opens the card");
+        for menu in ["context", "bell", "new_chat", "view"] {
+            assert!(!card_after_opening(cx, Some(menu)), "no hover card while the {menu} menu is open");
+        }
+    }
+
+    #[gpui::test]
+    async fn moving_to_the_next_card_keeps_an_open_hover_card_open(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let (a, b) = (tabbed_row(&mut cx), linked_row(&mut cx));
+        hover_card(&mut cx, a);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        hover_card(&mut cx, b);
+        hover_ms(&mut cx, 400);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "still open on the next card");
+    }
+
+    #[gpui::test]
+    async fn moving_to_the_next_card_before_the_hover_card_opens_still_opens_it(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let (a, b) = (tabbed_row(&mut cx), linked_row(&mut cx));
+        hover_card(&mut cx, a);
+        hover_ms(&mut cx, 100);
+        hover_card(&mut cx, b);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "the next card's timer survives");
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_stays_while_the_pointer_is_on_it(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let id = tabbed_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        let card = cx.debug_bounds("sidebar-hover-card").expect("open");
+        cx.simulate_mouse_move(card.center(), None, Modifiers::none());
+        hover_ms(&mut cx, 400);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "open while the pointer is on it");
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 250);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "gone after the pointer leaves it");
+    }
+
+    #[gpui::test]
+    async fn a_hover_card_near_the_bottom_is_lifted_inside_the_window(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        cx.simulate_resize(gpui::size(px(1200.0), px(200.0)));
+        cx.run_until_parked();
+        let id = tabbed_row(&mut cx);
+        // A 28-character branch: long enough for any height guess to count two
+        // lines for it, while it is drawn on one.
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        sidebar.update(&mut cx, |s, cx| {
+            s.rows.iter_mut().find(|row| row.id == id).expect("row").title = "a-branch-name-of-28-chars-x".to_owned();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        let card = cx.debug_bounds("sidebar-hover-card").expect("open");
+        assert!(card.top() >= px(0.0), "{card:?}");
+        assert!((card.bottom() - px(200.0)).abs() < px(1.0), "flush with the window bottom: {card:?}");
+    }
+
+    #[gpui::test]
+    async fn scrolling_or_filtering_closes_the_hover_card(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        sidebar.update(&mut cx, |s, cx| {
+            s.list_scroll.set_offset(gpui::point(px(0.0), px(-40.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "scrolling closes it");
+
+        sidebar.update(&mut cx, |s, cx| {
+            s.list_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some(), "shown again");
+        window
+            .update(&mut cx, |s, _, cx| {
+                s.filter = "main".to_string();
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "a filter that drops the row closes it");
+    }
+
+    /// The card sits 4 px past the sidebar; a window too narrow to hold it there
+    /// without overlapping the row would put it over the row's own star and
+    /// close button and eat their clicks, so it does not open.
+    #[gpui::test]
+    async fn the_hover_card_stays_off_in_a_window_too_narrow_to_hold_it_beside_the_sidebar(
+        cx: &mut TestAppContext,
+    ) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        cx.simulate_resize(gpui::size(px(500.0), px(800.0)));
+        cx.run_until_parked();
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 600);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none(), "no card in a 500 px window");
+        // The control: the same pointer opens it once the window is wide enough.
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        cx.run_until_parked();
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+    }
+
+    /// The bell's button never takes focus (an Ely icon button prevents the
+    /// default of its mouse-down), so Escape would reach whatever held focus:
+    /// a terminal running an agent. Opening the bell must move focus into the
+    /// sidebar, where Escape closes the popover.
+    #[gpui::test]
+    async fn opening_the_bell_takes_focus_so_escape_closes_it_instead_of_reaching_a_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let outside = cx.update(|window, cx| {
+            let handle = cx.focus_handle();
+            window.focus(&handle, cx);
+            handle
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| outside.is_focused(window)));
+        let button = cx.debug_bounds("sidebar-bell").expect("the bell is drawn");
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(window.update(&mut cx, |s, _, _| s.bell_menu.is_open()).unwrap(), "the bell opened");
+        assert!(
+            !cx.update(|window, _| outside.is_focused(window)),
+            "focus left the outside holder for the sidebar"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(!window.update(&mut cx, |s, _, _| s.bell_menu.is_open()).unwrap(), "Escape closed it");
+    }
+
+    /// A pill the keyboard is on belongs to one visit to the list: closing
+    /// Settings, or Escape in the filter, hands focus back to the list, and a
+    /// Backspace there must not close a tab nobody is pointing at.
+    #[gpui::test]
+    async fn a_pill_cursor_does_not_survive_focus_leaving_and_returning_to_the_list(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.focus_row_with_pills(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.pill_cursor).unwrap(), Some(0));
+        // Focus leaves for the filter and comes back by its Escape path.
+        window.update(&mut cx, |s, window, cx| s.show_filter(window, cx)).unwrap();
+        cx.run_until_parked();
+        window.update(&mut cx, |s, window, cx| s.hide_filter(window, cx)).unwrap();
+        cx.run_until_parked();
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert!(
+            !events.borrow().iter().any(|event| matches!(event, SidebarEvent::CloseTab(_))),
+            "no tab closes on a stale pill: {:?}",
+            events.borrow()
+        );
+    }
+
+    /// The list can gain focus straight from a mouse-down, which never passes
+    /// through `focus_list`. A pill the keyboard left selected on the visit
+    /// before must not survive that, and a Backspace must not close it.
+    #[gpui::test]
+    async fn a_pill_cursor_does_not_survive_a_mouse_focus_of_the_list(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // Focus events reach the list only while its window is active, and a
+        // headless test window starts inactive.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.focus_row_with_pills(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.pill_cursor).unwrap(), Some(0));
+        // Control: while the list keeps focus, Backspace closes the pill it is on.
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert!(
+            events.borrow().iter().any(|event| matches!(event, SidebarEvent::CloseTab(_))),
+            "Backspace on a selected pill closes it while the list keeps focus: {:?}",
+            events.borrow()
+        );
+        // Focus leaves for the filter, then the list takes it directly, as a
+        // mouse-down on one of its rows does.
+        window.update(&mut cx, |s, window, cx| s.show_filter(window, cx)).unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |s, window, cx| s.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            window.update(&mut cx, |s, window, _| s.tree_focus.is_focused(window)).unwrap(),
+            "the list holds focus"
+        );
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert_eq!(
+            window.update(&mut cx, |s, _, _| s.pill_cursor).unwrap(),
+            None,
+            "the stale pill cursor is forgotten when the list takes focus"
+        );
+        assert!(
+            !events.borrow().iter().any(|event| matches!(event, SidebarEvent::CloseTab(_))),
+            "no tab closes on a pill the list took focus over: {:?}",
+            events.borrow()
+        );
+    }
+
+    /// Git's main checkout can never be removed, whatever the app's Primary
+    /// marker says: `git worktree remove` refuses it and the remote branch
+    /// deletion that precedes it would still go through. Unsetting the Primary
+    /// on it (one click on its star) must not turn its cross on.
+    #[gpui::test]
+    async fn the_main_checkout_offers_no_removal_even_when_it_is_not_the_primary(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let root = PathBuf::from("/tmp/main-checkout-project");
+        let window = cx.add_window({
+            let root = root.clone();
+            move |_window, cx| {
+                Sidebar::from_projects(
+                    vec![SidebarProject {
+                        id: "p".to_string(),
+                        name: "Project".to_string(),
+                        is_git: true,
+                        root_path: root.clone(),
+                        worktrees: vec![
+                            SidebarWorktree {
+                                branch: "main".into(),
+                                path: root.clone(),
+                                is_primary: false,
+                                comment: None,
+                            },
+                            SidebarWorktree {
+                                branch: "feature".into(),
+                                path: root.join("feature"),
+                                is_primary: true,
+                                comment: None,
+                            },
+                            SidebarWorktree {
+                                branch: "plain".into(),
+                                path: root.join("plain"),
+                                is_primary: false,
+                                comment: None,
+                            },
+                        ],
+                    }],
+                    cx,
+                )
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let id_of = |cx: &VisualTestContext, title: &str| {
+            sidebar.read_with(cx, |s, _| {
+                s.rows.iter().find(|row| row.title == title).map(|row| row.id).expect("row")
+            })
+        };
+        let (main, plain) = (id_of(&cx, "main"), id_of(&cx, "plain"));
+
+        // The control: an ordinary worktree shows its cross under the pointer.
+        hover_card(&mut cx, plain);
+        assert!(cx.debug_bounds(Box::leak(format!("remove-worktree-{plain}").into_boxed_str())).is_some());
+        pointer_away(&mut cx);
+
+        hover_card(&mut cx, main);
+        assert!(
+            cx.debug_bounds(Box::leak(format!("remove-worktree-{main}").into_boxed_str())).is_none(),
+            "the main checkout has no cross"
+        );
+        pointer_away(&mut cx);
+
+        // And its context menu cannot start a removal.
+        let row = cx
+            .debug_bounds(Box::leak(format!("sidebar-row-{main}").into_boxed_str()))
+            .expect("the main row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        for selector in [
+            "sidebar-context-item-remove-worktree-context",
+            "sidebar-context-item-remove-worktree-and-remote-context",
+        ] {
+            if let Some(item) = cx.debug_bounds(selector) {
+                cx.simulate_click(item.center(), Modifiers::none());
+                cx.run_until_parked();
+                assert!(!cx.has_pending_prompt(), "{selector} must not ask to remove the main checkout");
+                // A click that was ignored leaves the menu open; reopen is not needed.
+            }
+        }
+        sidebar.update(&mut cx, |s, cx| s.remove_worktree_row(main, None, cx));
+        cx.run_until_parked();
+        assert!(
+            sidebar.read_with(&cx, |s, _| s.rows.iter().any(|row| row.id == main)),
+            "the removal guard holds below the UI"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_stays_off_on_a_narrow_sidebar(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        window.update(&mut cx, |s, _, cx| s.set_panel_width(190.0, cx)).unwrap();
+        cx.run_until_parked();
+        let id = linked_row(&mut cx);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 600);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none());
+        // The control: the same pointer opens it once the sidebar is wide enough.
+        window.update(&mut cx, |s, _, cx| s.set_panel_width(300.0, cx)).unwrap();
+        cx.run_until_parked();
+        pointer_away(&mut cx);
+        hover_ms(&mut cx, 300);
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+    }
+
+    #[gpui::test]
+    async fn the_hover_card_lists_the_worktree_tabs(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let id = sidebar.read_with(&cx, |s, _| {
+            s.rows.iter().find(|row| !row.pills.is_empty()).map(|row| row.id).expect("a worktree with tabs")
+        });
+        hover_card(&mut cx, id);
+        hover_ms(&mut cx, 510);
+        for selector in [
+            "sidebar-hover-card-project-sirio",
+            "sidebar-hover-card-tab-Chat",
+            "sidebar-hover-card-tab-Terminal",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector} is drawn in the card");
+        }
+    }
+
+    #[gpui::test]
+    async fn new_chat_offers_the_agents_for_the_selected_worktree(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let expected = window
+            .update(&mut cx, |s, _, _| {
+                let row = s.current_worktree_row().expect("a current worktree");
+                s.context_target(row).expect("its target")
+            })
+            .unwrap();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none());
+        click_control(&mut cx, "sidebar-new-chat");
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_some(), "the menu is drawn");
+        click_control(&mut cx, "sidebar-context-chat-agent-codex");
+        let emitted = events.borrow().iter().any(|event| {
+            matches!(event, SidebarEvent::ContextAction {
+                target,
+                action: SidebarContextAction::NewChatAgent("codex"),
+            } if *target == expected)
+        });
+        assert!(emitted, "the agent opens a chat in the selected worktree");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "the menu closes");
+    }
+
+    fn emitted_new_chat_path(events: &std::rc::Rc<std::cell::RefCell<Vec<SidebarEvent>>>) -> Option<PathBuf> {
+        events.borrow().iter().find_map(|event| match event {
+            SidebarEvent::ContextAction {
+                target: SidebarContextTarget::Worktree { path, .. },
+                action: SidebarContextAction::NewChatAgent("codex"),
+            } => Some(path.clone()),
+            _ => None,
+        })
+    }
+
+    #[gpui::test]
+    async fn new_chat_survives_selecting_a_project_row(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-row-0");
+        assert!(cx.debug_bounds("sidebar-new-chat-disabled").is_none(), "still enabled");
+        click_control(&mut cx, "sidebar-new-chat");
+        click_control(&mut cx, "sidebar-context-chat-agent-codex");
+        assert_eq!(emitted_new_chat_path(&events), Some(PathBuf::from("/tmp/sirio")));
+    }
+
+    #[gpui::test]
+    async fn new_chat_keeps_the_worktree_the_menu_was_opened_for(cx: &mut TestAppContext) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-new-chat");
+        window
+            .update(&mut cx, |s, _, cx| {
+                s.set_selected_worktree(std::path::Path::new("/tmp/sirio-feat-x"), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-context-chat-agent-codex");
+        assert_eq!(emitted_new_chat_path(&events), Some(PathBuf::from("/tmp/sirio")));
+    }
+
+    #[gpui::test]
+    async fn new_chat_is_disabled_without_a_selected_worktree(cx: &mut TestAppContext) {
+        let (_window, mut cx) = new_chat_fixture(cx, false);
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        assert!(cx.debug_bounds("sidebar-new-chat-disabled").is_some(), "drawn muted");
+        click_control(&mut cx, "sidebar-new-chat");
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "no menu");
+        assert!(events.borrow().is_empty(), "no event");
+    }
+
+    #[gpui::test]
+    async fn the_header_menus_close_each_other_and_escape_closes_new_chat(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut cx) = new_chat_fixture(cx, true);
+        click_control(&mut cx, "sidebar-new-chat");
+        click_control(&mut cx, "sidebar-title");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-view-menu").is_some());
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "title closes new chat");
+        // The open title menu hangs over the row, so open New Chat directly.
+        window.update(&mut cx, |s, _, cx| s.toggle_new_chat_menu(cx)).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-view-menu").is_none(), "new chat closes title");
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_some());
+        click_control(&mut cx, "sidebar-bell");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "bell closes new chat");
+        window.update(&mut cx, |s, _, cx| s.toggle_new_chat_menu(cx)).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-menu").is_none(), "new chat closes bell");
+        cx.simulate_keystrokes("escape");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-new-chat-menu").is_none(), "escape closes it");
+    }
+
+    #[gpui::test]
+    async fn the_title_menu_marks_the_current_view(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
+            .unwrap();
+        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-title");
+        assert!(cx.debug_bounds("sidebar-view-menu-check-sessions").is_some());
+        assert!(cx.debug_bounds("sidebar-view-menu-check-projects").is_none());
+    }
+
+    /// The section header's chevron folds the whole list away and back.
+    #[gpui::test]
+    async fn the_section_header_folds_the_whole_list(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let header = cx
+            .debug_bounds("sidebar-section-header")
+            .expect("the section header is drawn");
+        assert_eq!(header.size.height, px(28.0), "the section header is 28px");
+        assert!(cx.debug_bounds("sidebar-tree").is_some(), "the list starts drawn");
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(!row_drawn(&mut cx, 1), "the rows are folded away");
+        assert!(cx.debug_bounds("sidebar-section-header").is_some(), "the header stays");
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(row_drawn(&mut cx, 1), "the list is back");
+    }
+
+    /// Folding hides the rows, not the element that owns keyboard focus, so
+    /// the host and the filter can still hand focus to it.
+    #[gpui::test]
+    async fn a_folded_list_keeps_a_drawn_focus_owner(cx: &mut TestAppContext) {
+        let (_window, mut cx) = filter_fixture_window(cx);
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(cx.debug_bounds("sidebar-tree").is_some(), "the folded list keeps its focus owner");
+    }
+
+    /// Keys that reach a folded list act on rows the user cannot see: Right
+    /// then Backspace must not close a tab behind the fold.
+    #[gpui::test]
+    async fn a_folded_list_ignores_the_tree_keys(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.focus_row_with_pills(window, cx))
+            .unwrap();
+        click_control(&mut cx, "sidebar-section-toggle");
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("right");
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty(), "no event behind the fold: {:?}", events.borrow());
+        let pill = window.update(&mut cx, |sidebar, _, _| sidebar.pill_cursor).unwrap();
+        assert_eq!(pill, None, "no pill is selected behind the fold");
+    }
+
+    /// The same holds in Sessions: Enter on a folded list opens nothing.
+    #[gpui::test]
+    async fn a_folded_sessions_list_hides_its_cards_and_ignores_enter(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        assert!(cx.debug_bounds("session-status-running-0").is_some(), "cards start drawn");
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(cx.debug_bounds("session-status-running-0").is_none(), "the cards are folded away");
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty(), "enter opens nothing: {:?}", events.borrow());
+    }
+
+    /// A filter query reaches into a folded list, as it opens folded projects.
+    #[gpui::test]
+    async fn a_filter_query_shows_a_folded_list(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        click_control(&mut cx, "sidebar-section-toggle");
+        assert!(!row_drawn(&mut cx, 1), "folded: no project row");
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.filter = "alpha".to_string();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(row_drawn(&mut cx, 1), "a matching query shows the list");
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.filter.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!row_drawn(&mut cx, 1), "clearing the query restores the fold");
+    }
+
+    /// At the narrowest sidebar the `+` and both bulk buttons stay whole in
+    /// the section header under the filter, at the same size, inside the sidebar.
     #[gpui::test]
     async fn at_the_narrowest_sidebar_the_header_controls_stay_whole(cx: &mut TestAppContext) {
         cx.update(Theme::init);
@@ -8168,16 +10338,31 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let strip = cx.debug_bounds("sidebar-view-tabs").expect("the view switch");
-        let projects = cx.debug_bounds("sidebar-view-projects").expect("the Projects segment");
-        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("the Sessions segment");
-        assert!(
-            sessions.right() <= strip.right() && projects.left() >= strip.left(),
-            "both segments sit inside the track"
-        );
-        assert_eq!(projects.size.width, sessions.size.width, "the segments share the track");
+        click_control(&mut cx, "sidebar-search");
+        let strip = cx.debug_bounds("sidebar-title").expect("the title");
+        let filter_probe = cx.debug_bounds("filter-field").expect("the filter field");
+        assert!(strip.right() <= filter_probe.right(), "the title stays inside the sidebar");
         let filter = cx.debug_bounds("filter-field").expect("the filter field");
-        for selector in ["sidebar-collapse-all", "sidebar-expand-all", "add-project"] {
+        let header = cx.debug_bounds("sidebar-header").expect("the header");
+        for selector in ["sidebar-bell", "sidebar-search"] {
+            let control = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"));
+            assert!(
+                control.left() >= header.left() && control.right() <= header.right(),
+                "{selector} stays whole inside the header"
+            );
+            assert!(
+                control.top() >= header.top() && control.bottom() <= header.bottom(),
+                "{selector} sits in the header row"
+            );
+        }
+        let section = cx.debug_bounds("sidebar-section-header").expect("the section header");
+        for selector in [
+            "sidebar-collapse-all",
+            "sidebar-expand-all",
+            "add-project",
+        ] {
             let control = cx
                 .debug_bounds(selector)
                 .unwrap_or_else(|| panic!("{selector} is drawn"));
@@ -8188,8 +10373,8 @@ mod tests {
                 filter.right()
             );
             assert!(
-                control.top() >= strip.bottom() && control.bottom() <= filter.top(),
-                "{selector} sits between the view switch and the filter"
+                control.top() >= filter.bottom() && control.bottom() <= section.bottom(),
+                "{selector} sits in the section header under the filter"
             );
         }
         // The glyphs, not their 20px boxes: the `+` was text and the bulk
@@ -8346,6 +10531,7 @@ mod tests {
     #[gpui::test]
     async fn the_switch_shows_sessions_newest_first_and_reports_the_view(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| sessions_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -8353,9 +10539,7 @@ mod tests {
         let events = tests_support::collect_events(&sidebar, &mut cx);
         assert!(cx.debug_bounds("sidebar-tree").is_some(), "Projects is the default view");
 
-        let segment = cx.debug_bounds("sidebar-view-sessions").expect("the Sessions segment");
-        cx.simulate_click(segment.center(), Modifiers::none());
-        cx.run_until_parked();
+        choose_from_title_menu(&mut cx, "sessions");
 
         assert!(cx.debug_bounds("sidebar-sessions").is_some());
         assert!(cx.debug_bounds("sidebar-tree").is_none());
@@ -8392,53 +10576,143 @@ mod tests {
         assert!(matches!(events.borrow().last(), Some(SidebarEvent::CloseSessionTab(1))));
     }
 
+    fn bell_fixture(status: Option<ActivityStatus>, cx: &mut Context<Sidebar>) -> Sidebar {
+        let mut sidebar = tests_support::sidebar_with_one_project(cx);
+        sidebar.set_worktree_tabs(
+            1,
+            vec![SidebarTab {
+                tab: SidebarTabRef::Open(7),
+                title: "Needs you".into(),
+                selected: false,
+                kind: TabKind::AgentChat,
+                agent: AgentMark::for_agent_id("pi"),
+                persistence_id: "tab-7".into(),
+                status,
+                last_event_at: Some(1_000),
+                unread: false,
+            }],
+            cx,
+        );
+        sidebar
+    }
+
     #[gpui::test]
-    async fn the_sessions_segment_carries_the_attention_badge_in_the_projects_view(
-        cx: &mut TestAppContext,
-    ) {
+    async fn the_bell_carries_the_attention_dot_in_both_views(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        cx.update(crate::ely::init);
+        let window =
+            cx.add_window(|_window, cx| bell_fixture(Some(ActivityStatus::NeedsInput), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        assert!(cx.debug_bounds("sidebar-sessions-badge-error").is_none());
-        assert!(cx.debug_bounds("sidebar-sessions-badge-needs-input").is_none());
-
-        let asking = |status| SidebarTab {
-            tab: SidebarTabRef::Open(3),
-            title: "Asks".into(),
-            selected: false,
-            kind: TabKind::AgentChat,
-            agent: AgentMark::for_agent_id("pi"),
-            persistence_id: "tab-3".into(),
-            status: Some(status),
-            last_event_at: Some(1),
-            unread: false,
-        };
-        window
-            .update(&mut cx, |sidebar, _window, cx| {
-                sidebar.set_worktree_tabs(2, vec![asking(ActivityStatus::NeedsInput)], cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("sidebar-sessions-badge-needs-input").is_some());
-
-        window
-            .update(&mut cx, |sidebar, _window, cx| {
-                sidebar.set_worktree_tabs(2, vec![asking(ActivityStatus::Error)], cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("sidebar-sessions-badge-error").is_some(), "error outranks");
-        assert!(cx.debug_bounds("sidebar-sessions-badge-needs-input").is_none());
-
+        assert!(cx.debug_bounds("sidebar-bell").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_some());
         window
             .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
             .unwrap();
         cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_some());
+
+        window
+            .update(&mut cx, |sidebar, _window, cx| {
+                sidebar.set_worktree_tabs(1, Vec::new(), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
+    }
+
+    #[gpui::test]
+    async fn choosing_a_bell_entry_selects_that_session_and_closes_the_menu(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window =
+            cx.add_window(|_window, cx| bell_fixture(Some(ActivityStatus::NeedsInput), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        click_control(&mut cx, "sidebar-bell");
+        assert!(cx.debug_bounds("sidebar-bell-menu").is_some());
+        click_control(&mut cx, "sidebar-bell-entry-0");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(matches!(events.borrow().last(), Some(SidebarEvent::SelectTab(7))));
+        assert!(cx.debug_bounds("sidebar-bell-menu").is_none(), "the menu closes");
+    }
+
+    #[gpui::test]
+    async fn the_empty_bell_says_nothing_needs_you(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| bell_fixture(Some(ActivityStatus::Done), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
+        click_control(&mut cx, "sidebar-bell");
         assert!(
-            cx.debug_bounds("sidebar-sessions-badge-error").is_none(),
-            "no badge while the list itself is shown"
+            cx.debug_bounds("sidebar-bell-empty:Nothing needs you").is_some(),
+            "the empty line draws its label"
         );
+        assert!(cx.debug_bounds("sidebar-bell-entry-0").is_none());
+    }
+
+    fn bell_tab(id: usize, status: Option<ActivityStatus>, unread: bool) -> SidebarTab {
+        SidebarTab {
+            tab: SidebarTabRef::Open(id),
+            title: format!("Chat {id}"),
+            selected: false,
+            kind: TabKind::AgentChat,
+            agent: AgentMark::for_agent_id("pi"),
+            persistence_id: format!("tab-{id}"),
+            status,
+            last_event_at: Some(1_000),
+            unread,
+        }
+    }
+
+    #[gpui::test]
+    async fn an_error_outranks_a_needs_input_session_on_the_bell(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = tests_support::sidebar_with_one_project(cx);
+            sidebar.set_worktree_tabs(
+                1,
+                vec![
+                    bell_tab(1, Some(ActivityStatus::NeedsInput), false),
+                    bell_tab(2, Some(ActivityStatus::Error), false),
+                ],
+                cx,
+            );
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-dot-error").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
+    }
+
+    #[gpui::test]
+    async fn an_unread_session_alone_gives_the_unread_dot(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = tests_support::sidebar_with_one_project(cx);
+            sidebar.set_worktree_tabs(
+                1,
+                vec![bell_tab(1, Some(ActivityStatus::Done), true)],
+                cx,
+            );
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-bell-dot-unread").is_some());
+        assert!(cx.debug_bounds("sidebar-bell-dot-error").is_none());
+        assert!(cx.debug_bounds("sidebar-bell-dot-needs-input").is_none());
     }
 
     #[gpui::test]
@@ -8641,12 +10915,8 @@ mod tests {
             "delete is re-armed"
         );
 
-        let projects = cx.debug_bounds("sidebar-view-projects").expect("Projects tab");
-        cx.simulate_click(projects.center(), Modifiers::none());
-        cx.run_until_parked();
-        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("Sessions tab");
-        cx.simulate_click(sessions.center(), Modifiers::none());
-        cx.run_until_parked();
+        choose_from_title_menu(&mut cx, "projects");
+        choose_from_title_menu(&mut cx, "sessions");
         assert!(
             cx.debug_bounds("closed-session-confirm-0").is_none(),
             "view switch disarms"
@@ -8673,9 +10943,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("closed-session-confirm-0").is_some(), "delete is armed");
 
-        let filter = cx.debug_bounds("filter-field").expect("filter field");
-        cx.simulate_click(filter.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_control(&mut cx, "sidebar-search");
         assert!(
             cx.debug_bounds("closed-session-confirm-0").is_none(),
             "filter focus disarms"

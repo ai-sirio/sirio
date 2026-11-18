@@ -1169,3 +1169,17 @@ window is resized. `multi_line(min, max)` only builds the field with its rows.
   and returns without notifying when they are unchanged.
 
 A sync with upstream must keep `set_rows`.
+
+## Compared, not ported, 2026-11-17 (sidebar, upstream 2d827752)
+
+Looked at while restyling the sidebar in Codex's shell; none of these was
+brought in.
+
+- **HoverCard**: needs `HoverListenerMode`, and has no side placement upstream
+  (it opens above or below its trigger). The sidebar's hover card beside the
+  list is Sirio's own (`sirio_ui::sidebar::hover_card`); the chat's `HoverCard`
+  is untouched.
+- **ScrollArea / Scrollbar**: a new `ScrollSource`, and a press-blocking track
+  strip that would change the chat's bars. The sidebar keeps Sirio's own fading
+  bar (`sirio_ui::scroll::bar_fading`).
+- **Disclosure / Collapsible / DotBadge**: documentation-only differences.
