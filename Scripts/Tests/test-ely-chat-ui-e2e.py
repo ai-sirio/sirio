@@ -1054,7 +1054,7 @@ def effort_full_light(run: Run) -> None:
 TRANSCRIPT_REGION = (0.25, 0.113, 0.53, 0.705)
 # The sidebar row's status bloom, the ring glyph that stands where the row's status word was, in
 # pixels of the default 1470x833 window (the sidebar is a fixed-width column, so it does not move
-# with the window's size): the 14 px glyph centred at (291, 200), with a margin. `unfocused_spinner`
+# with the window's size): the 14 px glyph centred at about (290, 196), with a margin. `unfocused_spinner`
 # judges this and not the transcript, see there.
 SIDEBAR_BLOOM = "32x30+275+185"
 # The slash popup's box: the three command rows hung above the composer band, which starts below.
