@@ -1440,6 +1440,8 @@ mod tests {
             "message": {"id": "msg_1", "model": "claude-opus-5",
                         "content": [{"type": "text", "text": "hi"}]}
         }));
+        // Guard: holds before the change. An ordinary assistant line already
+        // parsed as `Assistant`; only the two `None`s below are new.
         let CliMessage::Assistant(assistant) = message else {
             panic!("an ordinary assistant line must parse as Assistant");
         };
@@ -1462,6 +1464,7 @@ mod tests {
             !events.iter().any(|e| matches!(e, ChatEvent::AgentMessageChunk(_))),
             "a failed result repeating the drawn text must add no chunk"
         );
+        // Guard: holds before the change. `apply_result` always ends the turn.
         assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
 
         // Guard: holds before the change (every failed result was drawn). The
