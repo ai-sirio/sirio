@@ -74,10 +74,11 @@ pub(crate) struct Fold {
     backgrounded: BTreeSet<String>,
     /// How many background tasks the CLI last said were running.
     background_tasks: usize,
-    /// The last rate-limit status announced. The push repeats every turn,
-    /// and re-announcing an unchanged refusal would stack one banner per
-    /// turn until the window resets.
-    rate_limit_status: Option<String>,
+    /// The last rate-limit line announced, as (status, window, scope). The
+    /// push repeats every turn, and re-announcing an unchanged one would
+    /// stack one banner per turn until the window resets. An `allowed` push
+    /// clears it, so the same warning is news again after the plan has room.
+    rate_limit_seen: Option<(String, Option<String>, Option<String>)>,
     /// Ids of the main-thread messages a `message_start` announced since the
     /// last `result`. An `assistant` line with one of these ids has already
     /// been drawn from its deltas.
@@ -92,6 +93,10 @@ pub(crate) struct Fold {
     /// The last event this turn that opened or extended a transcript row was
     /// an `AgentMessageChunk`, so the next chunk would run on into it.
     last_row_was_chunk: bool,
+    /// The text of a local command's answer drawn this turn, until the turn
+    /// ends. A command that fails repeats it as its `result`, and drawing
+    /// that too would print the answer twice.
+    local_command_text: Option<String>,
 }
 
 /// What an `assistant` line's model says when the CLI wrote the line itself
@@ -255,6 +260,38 @@ impl Fold {
                         .is_none_or(|id| self.streamed_ids.contains(id))
                     || matches!(self.open_message, Some(None));
                 self.orphan_text = false;
+                if synthetic && assistant.local_command_run.is_some() {
+                    // The CLI answered a command itself (`/usage`): its text
+                    // is drawn as the command's output, never as the model's.
+                    let text = assistant.text();
+                    let report = assistant
+                        .usage_report
+                        .clone()
+                        .map(serde_json::Value::Object);
+                    // An empty text is an answer only when the card can read
+                    // the report; otherwise the row would be a label over nothing.
+                    let readable = report
+                        .as_ref()
+                        .is_some_and(|report| sirio_claude::UsageReport::parse(report).is_some());
+                    if !text.is_empty() || readable {
+                        self.local_command_text = Some(text.clone()).filter(|t| !t.is_empty());
+                        self.notices.push(SessionNotice::LocalCommandOutput {
+                            command: assistant
+                                .local_command_run
+                                .as_ref()
+                                .map(|run| run.command.clone())
+                                .unwrap_or_default(),
+                            text,
+                            report,
+                        });
+                        // Its row sits between the text around it, so the
+                        // next chunk opens a new row and needs no separator.
+                        self.last_row_was_chunk = false;
+                        events.push(ChatEvent::OtherSessionUpdate {
+                            kind: "SessionNotice".into(),
+                        });
+                    }
+                }
                 if !synthetic && !drawn_by_stream {
                     let body = assistant.text();
                     if !body.is_empty() {
@@ -328,21 +365,34 @@ impl Fold {
             | CliMessage::ControlCancelRequest(_) => Vec::new(),
             CliMessage::RateLimit(limit) => {
                 // The push arrives every turn and almost always says the
-                // plan has room, which is not news. Only a change to a
-                // status that is not `allowed` is.
+                // plan has room, which is not news. Only a change to the
+                // (status, window, scope) of one that is not `allowed` is:
+                // the CLI sends a new event for each scope.
+                //
+                // Known limit: a warning on a second window leaves the
+                // event's top level unchanged (the second window only shows
+                // up under `unifiedWindows`), so it has the same key and
+                // adds no line.
                 let status = limit.status.clone().unwrap_or_default();
                 if status.is_empty() || status == "allowed" {
-                    self.rate_limit_status = Some(status);
+                    self.rate_limit_seen = None;
                     return Vec::new();
                 }
-                if self.rate_limit_status.as_deref() == Some(status.as_str()) {
+                let key = (
+                    status.clone(),
+                    limit.rate_limit_type.clone(),
+                    limit.limit_scope.clone(),
+                );
+                if self.rate_limit_seen.as_ref() == Some(&key) {
                     return Vec::new();
                 }
-                self.rate_limit_status = Some(status.clone());
+                self.rate_limit_seen = Some(key);
                 self.notices.push(SessionNotice::RateLimited {
                     status,
                     window: limit.rate_limit_type.clone(),
                     resets_at: limit.resets_at,
+                    used_percent: limit.used_percent,
+                    limit_scope: limit.limit_scope.clone(),
                 });
                 vec![ChatEvent::OtherSessionUpdate {
                     kind: "SessionNotice".into(),
@@ -625,8 +675,10 @@ impl Fold {
 
     fn apply_result(&mut self, result: ResultPayload) -> Vec<ChatEvent> {
         let mut events = Vec::new();
+        let local_command_text = self.local_command_text.take();
         if result.is_error
             && let Some(text) = result.result.clone().filter(|text| !text.is_empty())
+            && local_command_text.as_deref() != Some(text.as_str())
         {
             // The user must see why a turn failed. The alternative — a bare
             // footer saying "ended" — is the exact silent failure this
@@ -1127,12 +1179,64 @@ mod tests {
                 status: "rejected".into(),
                 window: Some("seven_day".into()),
                 resets_at: Some(1_790_496_000),
+                used_percent: Some(100),
+                limit_scope: None,
             }]
         );
         // The push repeats every turn. Saying it again while nothing has
         // changed would stack one banner per turn for the rest of the day.
         assert!(fold.apply(parse(line)).is_empty());
         assert!(fold.take_notices().is_empty());
+    }
+
+    // Failure list, written before the code: a rejection under a new scope,
+    // or on another window, swallowed by the one before it; the same warning
+    // announced twice because one carried `unifiedWindows`; the same warning
+    // swallowed after an `allowed` in between.
+    #[test]
+    fn a_rate_limit_is_announced_again_only_when_status_window_or_scope_changes() {
+        let push = |info: serde_json::Value| {
+            json!({"type": "rate_limit_event", "rate_limit_info": info})
+        };
+        let warning = || {
+            json!({"status": "allowed_warning", "rateLimitType": "five_hour",
+                   "utilization": 0.92, "resetsAt": 1789990800})
+        };
+        let mut fold = Fold::new();
+        let announced = |fold: &mut Fold, info: serde_json::Value| {
+            fold.apply(parse(push(info)));
+            fold.take_notices().len()
+        };
+        // Guard: holds before the change. The first warning is announced.
+        assert_eq!(announced(&mut fold, warning()), 1);
+        // Guard: holds before the change. The same warning, with or without
+        // the per-window detail, adds nothing.
+        let mut detailed = warning();
+        detailed["unifiedWindows"] = json!({"five_hour": {"utilization": 0.92}});
+        assert_eq!(announced(&mut fold, detailed), 0);
+        assert_eq!(announced(&mut fold, warning()), 0);
+        // Guard: holds before the change (the old status-only key also saw
+        // the change of status). The same window refusing is announced once.
+        let mut rejected = warning();
+        rejected["status"] = json!("rejected");
+        assert_eq!(announced(&mut fold, rejected.clone()), 1);
+        assert_eq!(announced(&mut fold, rejected.clone()), 0);
+        // A new scope is a new event, with the same status and window.
+        let mut scoped = rejected.clone();
+        scoped["limitScope"] = json!("group_pool");
+        assert_eq!(announced(&mut fold, scoped.clone()), 1);
+        // Guard: holds before the change. The repeat of it adds nothing.
+        assert_eq!(announced(&mut fold, scoped), 0);
+        // Another window with the same status is a change of window.
+        let mut weekly = rejected;
+        weekly["rateLimitType"] = json!("seven_day");
+        assert_eq!(announced(&mut fold, weekly), 1);
+        // Guard: holds before the change. The plan having room clears the
+        // memory: the warning is news again.
+        let mut allowed = warning();
+        allowed["status"] = json!("allowed");
+        assert_eq!(announced(&mut fold, allowed), 0);
+        assert_eq!(announced(&mut fold, warning()), 1);
     }
 
     #[test]
@@ -1204,5 +1308,200 @@ mod tests {
             [ChatEvent::ToolCallUpdated { id, status: Some(status), .. }]
                 if id == "toolu_main" && status == "Pending"
         ));
+    }
+
+    // --- A local command's answer (`/usage`, `/context`).
+
+    fn local_command_line(model: &str, run: serde_json::Value, text: &str) -> serde_json::Value {
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_local", "model": model,
+                        "content": [{"type": "text", "text": text}]},
+            "local_command_run": run,
+            "parent_tool_use_id": null
+        })
+    }
+
+    fn output_signal() -> Vec<ChatEvent> {
+        vec![ChatEvent::OtherSessionUpdate {
+            kind: "SessionNotice".into(),
+        }]
+    }
+
+    #[test]
+    fn a_synthetic_answer_to_a_local_command_is_one_output_notice() {
+        let mut fold = Fold::new();
+        fold.last_row_was_chunk = true;
+        let line = local_command_line(
+            "<synthetic>",
+            json!({"command": "usage", "args": ""}),
+            "Estimated cost: $0",
+        );
+        assert_eq!(fold.apply(parse(line)), output_signal());
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::LocalCommandOutput {
+                command: "usage".into(),
+                text: "Estimated cost: $0".into(),
+                report: None,
+            }]
+        );
+        assert!(
+            !fold.last_row_was_chunk,
+            "the output is a row of its own: the next chunk must not run on into it"
+        );
+    }
+
+    #[test]
+    fn the_usage_report_travels_raw_and_only_as_an_object() {
+        let report = json!({"rate_limits": null, "limits": [{"kind": "session", "percent": 12}]});
+        let mut fold = Fold::new();
+        let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "text");
+        line["usage_report"] = report.clone();
+        fold.apply(parse(line));
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::LocalCommandOutput {
+                command: "usage".into(),
+                text: "text".into(),
+                report: Some(report),
+            }]
+        );
+        for unusable in [json!(null), json!([1]), json!("x"), json!(7)] {
+            let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "text");
+            line["usage_report"] = unusable;
+            fold.apply(parse(line));
+            assert!(matches!(
+                fold.take_notices().as_slice(),
+                [SessionNotice::LocalCommandOutput { report: None, .. }]
+            ));
+        }
+    }
+
+    #[test]
+    fn a_report_with_no_text_is_an_answer_only_when_the_card_can_read_it() {
+        let mut fold = Fold::new();
+        let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "");
+        // Guard: holds before the change. A synthetic line with no text drew
+        // nothing, marker or not; only the report-only answer below is new.
+        assert_eq!(fold.apply(parse(line.clone())), vec![]);
+        assert!(fold.take_notices().is_empty());
+        // An object the card cannot read (it names neither `session` nor
+        // `rate_limits`) over no text would be a bare label over nothing.
+        line["usage_report"] = json!({"limits": []});
+        assert_eq!(fold.apply(parse(line.clone())), vec![]);
+        assert!(fold.take_notices().is_empty());
+        for readable in [json!({"rate_limits": null}), json!({"session": {}})] {
+            line["usage_report"] = readable;
+            assert_eq!(fold.apply(parse(line.clone())), output_signal());
+            assert!(matches!(
+                fold.take_notices().as_slice(),
+                [SessionNotice::LocalCommandOutput { text, report: Some(_), .. }] if text.is_empty()
+            ));
+        }
+    }
+
+    #[test]
+    fn a_model_answer_that_carries_the_marker_is_left_to_the_ordinary_rules() {
+        // Guard: holds before the change. The unknown marker was ignored, so an
+        // unstreamed model answer was already drawn as a chunk.
+        let mut fold = Fold::new();
+        let line = local_command_line(
+            "claude-opus-5",
+            json!({"command": "usage", "args": ""}),
+            "an answer no stream carried",
+        );
+        assert_eq!(
+            fold.apply(parse(line)),
+            vec![ChatEvent::AgentMessageChunk("an answer no stream carried".into())]
+        );
+        assert!(fold.take_notices().is_empty());
+    }
+
+    #[test]
+    fn a_subagents_message_is_not_a_local_command_answer() {
+        // Guard: holds before the change. A subagent's line drew nothing.
+        let mut fold = Fold::new();
+        let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "text");
+        line["parent_tool_use_id"] = json!("toolu_parent");
+        assert_eq!(fold.apply(parse(line)), vec![]);
+        assert!(fold.take_notices().is_empty());
+    }
+
+    #[test]
+    fn a_wrongly_typed_marker_draws_nothing_and_the_line_still_parses() {
+        // Guard: holds before the change. The unknown field was ignored, so the
+        // line parsed and a synthetic one drew nothing.
+        for run in [json!("usage"), json!({"command": 5}), json!([]), json!(null)] {
+            let line = local_command_line("<synthetic>", run, "text");
+            let message = parse(line);
+            assert!(
+                matches!(message, CliMessage::Assistant(_)),
+                "a wrong type costs the field, never the line"
+            );
+            let mut fold = Fold::new();
+            assert_eq!(fold.apply(message), vec![]);
+            assert!(fold.take_notices().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_assistant_line_with_neither_field_still_parses_as_assistant() {
+        // `AssistantPayload` has no container default: the two fields must carry
+        // their own, or every ordinary line would demote to `Other`.
+        let message = parse(json!({
+            "type": "assistant",
+            "message": {"id": "msg_1", "model": "claude-opus-5",
+                        "content": [{"type": "text", "text": "hi"}]}
+        }));
+        // Guard: holds before the change. An ordinary assistant line already
+        // parsed as `Assistant`; only the two `None`s below are new.
+        let CliMessage::Assistant(assistant) = message else {
+            panic!("an ordinary assistant line must parse as Assistant");
+        };
+        assert!(assistant.local_command_run.is_none() && assistant.usage_report.is_none());
+    }
+
+    #[test]
+    fn a_failing_command_is_drawn_once_not_again_as_the_results_error() {
+        let mut fold = Fold::new();
+        fold.apply(parse(local_command_line(
+            "<synthetic>",
+            json!({"command": "usage"}),
+            "the block",
+        )));
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": true, "result": "the block",
+            "num_turns": 0
+        })));
+        assert!(
+            !events.iter().any(|e| matches!(e, ChatEvent::AgentMessageChunk(_))),
+            "a failed result repeating the drawn text must add no chunk"
+        );
+        // Guard: holds before the change. `apply_result` always ends the turn.
+        assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
+
+        // Guard: holds before the change (every failed result was drawn). The
+        // remembered text ends with its turn: the same words as a later
+        // turn's failure are that turn's own error and are drawn.
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": true, "result": "the block"
+        })));
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::AgentMessageChunk(_))));
+    }
+
+    #[test]
+    fn a_failing_result_with_other_words_is_still_drawn() {
+        // Guard: holds before the change. Every failed result was drawn.
+        let mut fold = Fold::new();
+        fold.apply(parse(local_command_line(
+            "<synthetic>",
+            json!({"command": "usage"}),
+            "the block",
+        )));
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": true, "result": "a real failure"
+        })));
+        assert!(events.contains(&ChatEvent::AgentMessageChunk("a real failure".into())));
     }
 }

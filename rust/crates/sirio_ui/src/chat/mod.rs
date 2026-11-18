@@ -57,6 +57,7 @@ mod controls;
 mod file_links;
 use file_links::file_link_target;
 mod history;
+mod limit_notice;
 pub(crate) mod list_scroll;
 mod menus;
 mod mode_cycle;
@@ -65,6 +66,7 @@ pub use prompt_history::PromptRecord;
 mod question_dock;
 mod visible_text;
 mod session_panel;
+mod usage_card;
 mod status_line;
 mod thought;
 mod tool_calls;
@@ -1091,6 +1093,16 @@ enum Entry {
         deletions: u64,
         skipped_links: u64,
     },
+    /// What the CLI answered to a command it ran itself (`/usage`): the
+    /// command's name and its text, already cleaned for display. Never
+    /// persisted: it states the account as it is right now. With a `report`
+    /// (a `/usage` that carried the CLI's `usage_report`) the card is drawn
+    /// and copied instead of the text.
+    CommandOutput {
+        command: String,
+        text: String,
+        report: Option<sirio_chat::UsageReport>,
+    },
     /// A transport failure, surfaced instead of silently doing nothing.
     Error {
         message: String,
@@ -1247,9 +1259,21 @@ impl Entry {
                 deletions,
                 skipped_links,
             } => rewind_report_text(files, *insertions, *deletions, *skipped_links),
+            Self::CommandOutput {
+                report: Some(report),
+                ..
+            } => usage_card::plain_text(report),
+            Self::CommandOutput { command, text, .. } => {
+                format!("{}\n{text}", command_label(command))
+            }
             Self::Error { message, .. } => message.clone(),
         }
     }
+}
+
+/// The line over a local command's output: the command as the reader typed it.
+fn command_label(command: &str) -> String {
+    format!("/{command}")
 }
 
 /// The answer to one `rewind_files` call, reduced to what the surface
@@ -1444,6 +1468,9 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
         // not the conversation: restoring it later would present a stale
         // restore as a live one.
         Entry::RewindPreview { .. } | Entry::RewindReport { .. } => None,
+        // The account's state at a moment in time, like a warning: restored
+        // later it would state numbers that are no longer true.
+        Entry::CommandOutput { .. } => None,
         // A live request: restored tomorrow it would offer an answer to a
         // server that is no longer waiting.
         Entry::Elicitation { .. } => None,
@@ -2979,13 +3006,26 @@ impl Chat {
                 text: summary,
                 kind: NoticeKind::BackgroundTask,
             },
-            SessionNotice::RateLimited { window, .. } => {
-                let text = match window {
-                    Some(window) => format!("Usage limit reached ({window})"),
-                    None => "Usage limit reached".to_string(),
-                };
+            SessionNotice::RateLimited {
+                status,
+                window,
+                resets_at,
+                used_percent,
+                limit_scope,
+            } => {
+                let now = chrono::Local::now();
+                let resets_at = resets_at
+                    .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+                    .map(|at| at.with_timezone(&chrono::Local));
                 Entry::Notice {
-                    text,
+                    text: limit_notice::rate_limit_sentence(
+                        &status,
+                        window.as_deref(),
+                        used_percent,
+                        resets_at,
+                        limit_scope.as_deref(),
+                        &now,
+                    ),
                     kind: NoticeKind::Warning,
                 }
             }
@@ -3049,6 +3089,23 @@ impl Chat {
                 })
                 .detach();
                 return;
+            }
+            // What the CLI answered to a command it ran itself. The text is
+            // the CLI's, so it is cleaned here, once, for what is drawn,
+            // copied and read back.
+            SessionNotice::LocalCommandOutput {
+                command,
+                text,
+                report,
+            } => {
+                // As the `CliNotice` arm does; `push_entry` would settle it too.
+                self.settle_open_thought();
+                Entry::CommandOutput {
+                    command: visible_text::visible_text(&command, false),
+                    text: visible_text::visible_text(&text, true),
+                    // An unreadable report falls back to the text.
+                    report: report.as_ref().and_then(sirio_chat::UsageReport::parse),
+                }
             }
             // The CLI's own words: a refusal, a fallback, an informational line.
             // Nothing is added for an empty one.
@@ -7433,6 +7490,23 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
         }
         Entry::RewindReport { .. } => {
             row.insert("kind".into(), "rewind-report".into());
+        }
+        Entry::CommandOutput {
+            command,
+            text,
+            report,
+        } => {
+            row.insert("kind".into(), "command-output".into());
+            row.insert("command".into(), command.clone());
+            row.insert("text".into(), text.clone());
+            if let Some(report) = report {
+                let now = chrono::Local::now();
+                row.insert(
+                    "card".into(),
+                    usage_card::card_lines(report, &now).join("\n"),
+                );
+                row.insert("headline".into(), usage_card::headline(report, &now));
+            }
         }
         Entry::Error { message, .. } => {
             row.insert("kind".into(), "error".into());
@@ -18798,6 +18872,8 @@ two"
                 status: "rejected".into(),
                 window: None,
                 resets_at: None,
+                used_percent: None,
+                limit_scope: None,
             }, cx);
             chat.apply_notice(SessionNotice::CliNotice {
                 text: "Opus 5.5's safeguards stopped the response".into(),

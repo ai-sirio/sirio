@@ -2084,6 +2084,35 @@ def wait_for_handshake_gate():
 # ---------------------------------------------------------------------------
 
 RETRY_GATE_PATH = flag_value("fixture-retry-gate")
+# `--fixture-limits=<file>`: JSON `{"soon": epoch, "later": epoch}`, the reset times the
+# `limit ...` prompts report (read when the prompt arrives, so the file may be written late).
+LIMITS_PATH = flag_value("fixture-limits")
+
+
+def cli_limit_resets():
+    with open(LIMITS_PATH, encoding="utf-8") as handle:
+        limits = json.load(handle)
+    return limits["soon"], limits["later"]
+
+
+def cli_limit_event(info):
+    send({"type": "rate_limit_event", "rate_limit_info": info,
+          "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
+def cli_limit_refused(text_body, info):
+    """A turn the plan refused: the event, the CLI's synthetic error message and a
+    failed `result`, with no model reply (written by hand like `retry out`)."""
+    cli_limit_event(info)
+    send({"type": "assistant",
+          "message": {"id": trace_uuid(), "type": "message", "role": "assistant",
+                      "model": "<synthetic>", "content": [{"type": "text", "text": text_body}],
+                      "stop_reason": "stop_sequence"},
+          "error": "rate_limit", "is_api_error_message": True, "api_error_status": 429,
+          "parent_tool_use_id": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+    send({"type": "result", "subtype": "success", "is_error": True, "result": text_body,
+          "terminal_reason": "api_error", "api_error_status": 429,
+          "stop_reason": "stop_sequence", "session_id": SESSION_ID, "uuid": trace_uuid()})
 
 
 def cli_system(subtype, **fields):
@@ -2119,7 +2148,51 @@ def cli_inform(content, level):
     cli_system("informational", content=content, level=level)
 
 
+# `--fixture-usage=<file>`: JSON `{"marker": bool, "report": <value>, "fails": bool, "text": str}`
+# for the local commands `/usage` and `/context`, re-read on every one. A missing key means:
+# `marker` true, no `usage_report` field written, `fails` false, the command's own text (the
+# blocks below). `"report": null` writes `usage_report: null`.
+USAGE_PATH = flag_value("fixture-usage")
+USAGE_TEXT = ("Estimated cost:        $0.0000\nTotal duration (API):  0s\n"
+              "Total duration (wall): 3s\n"
+              "Total code changes:    0 lines added, 0 lines removed\n"
+              "Usage:                 0 input, 0 output, 0 cache read, 0 cache write")
+CONTEXT_TEXT = "Context: 1k of 200k tokens"
+
+
+def cli_local_command(command):
+    """A command the CLI answers itself, as the real one does (probe a9, Q1): no model call,
+    so no `requesting` line. A synthetic assistant message and a `result`; with `marker` false,
+    the floor's shape, both without the field that names the command."""
+    options = {}
+    if USAGE_PATH:
+        with open(USAGE_PATH, encoding="utf-8") as handle:
+            options = json.load(handle)
+    marker = options.get("marker", True)
+    body = options.get("text", USAGE_TEXT if command == "usage" else CONTEXT_TEXT)
+    assistant = {"type": "assistant",
+                 "message": {"id": trace_uuid(), "type": "message", "role": "assistant",
+                             "model": "<synthetic>", "content": [{"type": "text", "text": body}],
+                             "stop_reason": None},
+                 "parent_tool_use_id": None, "session_id": SESSION_ID, "uuid": trace_uuid()}
+    if marker:
+        assistant["local_command_run"] = {"command": command, "args": ""}
+    if "report" in options:
+        assistant["usage_report"] = options["report"]
+    send(assistant)
+    result_line = {"type": "result", "subtype": "success", "is_error": bool(options.get("fails")),
+                   "num_turns": 0, "total_cost_usd": 0, "duration_ms": 0, "duration_api_ms": 0,
+                   "stop_reason": None, "result": body,
+                   "session_id": SESSION_ID, "uuid": trace_uuid()}
+    if marker:
+        result_line["local_command"] = command
+    send(result_line)
+
+
 def cli_notices_turn(prompt):
+    if prompt in ("/usage", "/context"):
+        cli_local_command(prompt[1:])
+        return
     requesting()
     if prompt == "retry twice":
         cli_retry(1, 617, 529, "overloaded")
@@ -2150,6 +2223,31 @@ def cli_notices_turn(prompt):
               "session_id": SESSION_ID, "uuid": trace_uuid()})
         send({"type": "result", "subtype": "success", "is_error": True, "result": sentence,
               "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+        return
+    elif prompt in ("limit warning", "limit warning again", "limit allowed"):
+        soon, _ = cli_limit_resets()
+        cli_streamed("ok", "msg_lw")
+        info = {"status": "allowed", "resetsAt": soon, "rateLimitType": "five_hour"}
+        if prompt != "limit allowed":
+            info.update({"status": "allowed_warning", "utilization": 0.92,
+                         "surpassedThreshold": 0.9})
+        if prompt == "limit warning":
+            info["unifiedWindows"] = {"five_hour": {"utilization": 0.92, "resetsAt": soon}}
+        cli_limit_event(info)
+    elif prompt == "limit rejected":
+        soon, _ = cli_limit_resets()
+        cli_limit_refused(
+            "You've hit your limit \u00b7 resets 3:15pm (UTC)",
+            {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": soon,
+             "unifiedWindows": {"five_hour": {"utilization": 1, "resetsAt": soon}}})
+        return
+    elif prompt == "limit pooled":
+        _, later = cli_limit_resets()
+        cli_limit_refused(
+            "You've hit your team's pooled group budget",
+            {"status": "rejected", "rateLimitType": "overage", "resetsAt": later,
+             "overageDisabledReason": "org_level_disabled_until",
+             "limitScope": "group_pool"})
         return
     elif prompt == "notify":
         cli_streamed("ok", "msg_n")

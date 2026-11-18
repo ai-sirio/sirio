@@ -643,14 +643,20 @@ pub enum SessionNotice {
         /// The CLI's own sentence, already written for a reader.
         summary: String,
     },
-    /// The plan stopped allowing turns.
+    /// The plan is near a limit or past it: a warning, a refusal or any other
+    /// status the CLI reports except `allowed`.
     RateLimited {
-        /// The CLI's own word for the refusal.
+        /// The CLI's own word for the state (`allowed_warning`, `rejected`, ...).
         status: String,
-        /// Which window ran out, when it named one.
+        /// Which window the status is about, when the CLI named one.
         window: Option<String>,
         /// When that window resets, in unix seconds.
         resets_at: Option<i64>,
+        /// How full that window is, in whole percent, when the event said.
+        used_percent: Option<u8>,
+        /// What an overage denial was charged to (`service`, `group_pool`,
+        /// `channel`), as the CLI sent it.
+        limit_scope: Option<String>,
     },
     /// The CLI is retrying a failed API request.
     Retrying {
@@ -680,5 +686,15 @@ pub enum SessionNotice {
         text: String,
         /// The `informational` level was `warning`.
         warning: bool,
+    },
+    /// What the CLI answered to a command it ran itself, with no model call
+    /// (`/usage`, `/context`).
+    LocalCommandOutput {
+        /// The command's name, without the slash.
+        command: String,
+        text: String,
+        /// The structured twin of the text (`usage_report`), raw: this crate
+        /// does not know the CLI's types.
+        report: Option<serde_json::Value>,
     },
 }

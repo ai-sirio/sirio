@@ -22,6 +22,7 @@ const FAKE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_eli
 const ELICIT_MCP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/elicit_mcp.py");
 const STATE_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_state_api.py");
 const TASKS_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_tasks_api.py");
+const LIMITS_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_limits_api.py");
 
 /// The real binary of the newest installed mise `claude`, never the `latest` link or the
 /// wrapper in `~/.local/bin` (running that under a private HOME reinstalls claude there).
@@ -279,6 +280,8 @@ struct CliEnv {
     port: u16,
     session_id: String,
     launch_env: Vec<(String, String)>,
+    /// A gateway token, applied to the CLI's command alone as `ANTHROPIC_AUTH_TOKEN`.
+    auth_token: Option<String>,
 }
 
 impl CliEnv {
@@ -301,7 +304,37 @@ impl CliEnv {
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.as_str())),
             );
+        if let Some(token) = &self.auth_token {
+            command.env("ANTHROPIC_AUTH_TOKEN", token);
+            // Every command that carries the token passes the guard, `run_claude` included.
+            assert_local_base_url(command);
+        }
     }
+}
+
+/// Whether `url` is the fake API on this machine: `http://127.0.0.1:`, a port, then the end
+/// or a path. A prefix check alone would let `http://127.0.0.1:1@example.com/` through.
+pub fn is_local_base_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(b'/'))
+}
+
+/// Panics unless the finished `command`'s `ANTHROPIC_BASE_URL` is a local one. Read from the
+/// command's own environment, so no later `env` call can point it elsewhere. The message
+/// names neither the URL nor anything else of the environment.
+fn assert_local_base_url(command: &Command) {
+    let local = command
+        .get_envs()
+        .find(|(name, _)| *name == "ANTHROPIC_BASE_URL")
+        .and_then(|(_, value)| value)
+        .is_some_and(|url| is_local_base_url(&url.to_string_lossy()));
+    assert!(
+        local,
+        "the CLI's ANTHROPIC_BASE_URL is a 127.0.0.1 address: false"
+    );
 }
 
 /// What a finished `Session::run_claude` printed.
@@ -328,6 +361,37 @@ impl Session {
     /// background-task test (`fake_tasks_api.py`), with no MCP server.
     pub fn start_tasks(claude: &Path, python: &Path, root: &Path) -> Self {
         Self::launch(claude, python, root, TASKS_API, false, None, None, false, true)
+    }
+
+    /// Launches `claude` against the rate-limit fake API (`fake_limits_api.py`), which answers
+    /// with the status and headers `limits` holds (`{"status": .., "headers": {..}}`, re-read
+    /// on every request) and logs method and path of each request to `limits` + `.requests`.
+    ///
+    /// `auth_token`, when given, is passed to the CLI's command alone as `ANTHROPIC_AUTH_TOKEN`
+    /// (the gateway auth under which the CLI emits `rate_limit_event`). It lives only in the
+    /// CLI's environment and the test's TMPDIR. Before the CLI starts, `CliEnv::apply` checks
+    /// that the command's `ANTHROPIC_BASE_URL` has the host `127.0.0.1` (`http://127.0.0.1:`,
+    /// port digits, then the end or `/`), and panics otherwise.
+    pub fn start_limits(
+        claude: &Path,
+        python: &Path,
+        root: &Path,
+        limits: &Path,
+        auth_token: Option<&str>,
+    ) -> Self {
+        Self::launch_broken(
+            claude,
+            python,
+            root,
+            LIMITS_API,
+            false,
+            None,
+            None,
+            false,
+            true,
+            None,
+            Some((limits, auth_token)),
+        )
     }
 
     /// Launches `claude` against the session-state fake API with `user` as the config dir's
@@ -367,7 +431,17 @@ impl Session {
     /// never gets a prompt from here. See `BrokenStart`.
     pub fn start_broken(claude: &Path, python: &Path, root: &Path, broken: BrokenStart) -> Self {
         Self::launch_broken(
-            claude, python, root, STATE_API, false, None, None, false, true, Some(broken),
+            claude,
+            python,
+            root,
+            STATE_API,
+            false,
+            None,
+            None,
+            false,
+            true,
+            Some(broken),
+            None,
         )
     }
 
@@ -394,6 +468,7 @@ impl Session {
             user_mcp,
             fresh,
             None,
+            None,
         )
     }
 
@@ -409,6 +484,7 @@ impl Session {
         user_mcp: bool,
         fresh: bool,
         broken: Option<BrokenStart>,
+        limits: Option<(&Path, Option<&str>)>,
     ) -> Self {
         if fresh {
             let _ = std::fs::remove_dir_all(root);
@@ -433,6 +509,7 @@ impl Session {
         let mut api_command = Command::new(python);
         api_command
             .args(["-I", api_script, &port.to_string()])
+            .args(limits.map(|(file, _)| file))
             .env_clear()
             .env("PATH", ISOLATED_PATH)
             .stdin(Stdio::null())
@@ -515,8 +592,12 @@ impl Session {
             port,
             session_id: session_id.clone(),
             launch_env,
+            auth_token: limits.and_then(|(_, token)| token).map(str::to_string),
         };
         cli.apply(&mut command);
+        if limits.is_some() {
+            assert_local_base_url(&command);
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

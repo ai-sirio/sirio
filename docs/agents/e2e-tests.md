@@ -467,6 +467,40 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # open has no E2E.
 # The live check is `claude_lists_hooks` (#[ignore], acp_conformance; the command is in
 # docs/agents/architecture/claude-chat.md, the Hooks card).
+# A9, usage and limits: five scenarios on the notices stub (Scripts/Tests/stubs/notices/claude),
+# which forwards the two fixture variables to the fixture's `cli_notices` mode. limit_notice (the
+# prompts `limit warning`, `limit warning again`, `limit allowed`, `limit rejected`, `limit
+# pooled`: one row for a warning and not a second, the same warning again after an allowed, the
+# refusal, then the overage refusal with its scope; the CLI's own refusal text is still one
+# assistant row), usage_text (`/usage` and `/context` are command-output rows with the CLI's text
+# and no assistant row; a failing `/usage` whose result repeats the text is drawn once; a bidi
+# or control character in the plain text shows in angle brackets),
+# usage_floor (a `/usage` with no marker adds only the turn row, ends the turn, and the next
+# prompt is answered), usage_card (a `usage_report` is drawn as a card: the read row's `card`
+# lists the totals, the models, a heading per group and the extra usage, a bidi override in a
+# scope name and a newline in a kind show as `U+202E` and `U+000A` in angle brackets, and
+# `headline` is the first active row's name) and usage_unavailable (eight malformed or partial
+# reports read as unavailable or none reported, never 0%: a row with no percent shows no `%`, a
+# row's missing parts leave no stray separator, an empty row no line, a group of such rows no
+# heading, totals with only removed lines read `2 lines removed`). All five
+# run state-only; usage_card and usage_text also capture.
+# Three variables, passed by launch() and reset per scenario: SIRIO_FIXTURE_LIMITS
+# (--fixture-limits, JSON {"soon": epoch, "later": epoch}, the resets of the `limit ...` prompts),
+# SIRIO_FIXTURE_USAGE (--fixture-usage, JSON {"marker": bool, "report": value, "fails": bool,
+# "text": str}, re-read on every command, so a scenario changes the answer between two sends) and
+# SIRIO_E2E_TZ (passed to Sirio as TZ). limit_notice and usage_card set SIRIO_E2E_TZ=UTC and put
+# every reset 3 or 4 days ahead, so a time reads `%a %H:%M` whenever the run happens, and compute
+# the expected text in UTC with a fixed English day list. The same-day and far-date formats are
+# covered by the unit test `reset_time_formats`. The fixture files of limit_notice and usage_card
+# are written by Python (json.dump), so a hidden character is only ever built at run time; the other
+# three write theirs with printf.
+# The capture: a framed run on a private Xvfb of 2400x1200 (--display :N), frames/usage-card.png
+# and frames/usage-text.png:
+#   Scripts/Tests/test-chat-session-panel-e2e.sh --display :N --only usage_card,usage_text
+# The live checks are `claude_answers_usage_locally`,
+# `claude_reports_rate_limits_through_a_gateway` and `claude_usage_report_on_account`; the last is
+# run by hand by Enzo, never CI, never an agent. The commands are in
+# docs/agents/architecture/claude-chat.md, Usage and limits.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 

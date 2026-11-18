@@ -355,8 +355,10 @@ impl TaskOutput {
 /// here so that only one convention — percent — ever leaves this crate.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RateLimitPush {
-    /// `allowed` while the plan has room. Anything else is the CLI
-    /// reporting that it does not, and is the only field worth a warning.
+    /// What the CLI says about the plan: `allowed` (room), `allowed_warning`
+    /// (room, nearing the limit), `rejected` (no room). Any other value is
+    /// kept as sent and shown as sent, except an empty one, which the fold
+    /// reads like `allowed`.
     pub status: Option<String>,
     /// Which window `status` is about, e.g. `five_hour`.
     pub rate_limit_type: Option<String>,
@@ -368,6 +370,13 @@ pub struct RateLimitPush {
     pub five_hour: Option<f64>,
     /// Seven-day window utilization on the **0–100 scale**.
     pub seven_day: Option<f64>,
+    /// How full the `rate_limit_type` window is, in whole percent: the event's top-level
+    /// `utilization`, or else that window's own entry in `unifiedWindows`,
+    /// by [`crate::whole_percent`].
+    pub used_percent: Option<u8>,
+    /// What an overage denial was charged to: `service`, `group_pool`,
+    /// `channel`. The CLI sends it only with an overage denial.
+    pub limit_scope: Option<String>,
 }
 
 impl RateLimitPush {
@@ -383,12 +392,23 @@ impl RateLimitPush {
                 .as_f64()
                 .map(to_percent)
         };
+        // An empty token is as good as none: the sentence leaves the part out.
+        let non_empty = |key: &str| string(info, key).filter(|text| !text.is_empty());
+        let rate_limit_type = non_empty("rateLimitType");
+        let used = info
+            .get("utilization")
+            .and_then(serde_json::Value::as_f64)
+            .map(to_percent)
+            .or_else(|| window(rate_limit_type.as_deref()?))
+            .map(crate::whole_percent);
         Some(Self {
             status: string(info, "status"),
-            rate_limit_type: string(info, "rateLimitType"),
+            rate_limit_type,
             resets_at: info.get("resetsAt").and_then(serde_json::Value::as_i64),
             five_hour: window("five_hour"),
             seven_day: window("seven_day"),
+            used_percent: used,
+            limit_scope: non_empty("limitScope"),
         })
     }
 }
@@ -439,6 +459,25 @@ pub struct AssistantPayload {
     pub session_id: Option<String>,
     #[serde(default)]
     pub uuid: Option<String>,
+    /// Set when the CLI answered a local command itself (`/usage`,
+    /// `/context`): the message is a synthetic one holding the command's
+    /// output, with no model call behind it.
+    #[serde(default, deserialize_with = "lenient")]
+    pub local_command_run: Option<LocalCommandRun>,
+    /// The structured twin of a local command's text, only `/usage` on a
+    /// subscriber's account. Kept raw: an object, or nothing.
+    #[serde(default, deserialize_with = "lenient")]
+    pub usage_report: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Which local command a synthetic assistant message answers.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct LocalCommandRun {
+    /// The command's name, without the slash.
+    pub command: String,
+    /// What followed the name on the line.
+    #[serde(default, deserialize_with = "lenient")]
+    pub args: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -937,6 +976,48 @@ mod tests {
         assert_eq!(compaction.trigger.as_deref(), Some("manual"));
         assert_eq!(compaction.pre_tokens, Some(43_134));
         assert_eq!(compaction.post_tokens, Some(11_574));
+    }
+
+    // Failure list, written before the code: 0.57 read as 56 (IEEE product),
+    // 0.999 rounded up to 100, the top-level utilization ignored in favour of
+    // the window's, a window with no top level not read at all, a `limitScope`
+    // dropped, a missing utilization read as 0%, a utilization of a wrong type
+    // taking the line down.
+    #[test]
+    fn a_pushed_limit_says_how_full_it_is_and_what_was_charged() {
+        let read = |info: &str| {
+            let line = format!(r#"{{"type":"rate_limit_event","rate_limit_info":{info}}}"#);
+            let Some(CliMessage::RateLimit(limit)) = CliMessage::parse(&line) else {
+                panic!("a rate_limit_event should parse as a rate limit");
+            };
+            limit
+        };
+        for (utilization, percent) in [(0.57, 57), (0.29, 29), (0.58, 58), (0.999, 99), (1.0, 100)] {
+            let limit = read(&format!(r#"{{"status":"allowed_warning","utilization":{utilization}}}"#));
+            assert_eq!(limit.used_percent, Some(percent));
+        }
+        // The top level wins over the window's own entry.
+        let both = read(
+            r#"{"rateLimitType":"five_hour","utilization":0.92,
+                "unifiedWindows":{"five_hour":{"utilization":0.5}}}"#,
+        );
+        assert_eq!(both.used_percent, Some(92));
+        // With no top level, the window `rateLimitType` names answers.
+        let windowed = read(
+            r#"{"rateLimitType":"seven_day",
+                "unifiedWindows":{"five_hour":{"utilization":0.5},"seven_day":{"utilization":0.58}}}"#,
+        );
+        assert_eq!(windowed.used_percent, Some(58));
+        let neither = read(r#"{"status":"rejected","rateLimitType":"overage","limitScope":"group_pool"}"#);
+        assert_eq!(neither.used_percent, None);
+        assert_eq!(neither.limit_scope.as_deref(), Some("group_pool"));
+        let blank = read(r#"{"status":"rejected","rateLimitType":"","limitScope":""}"#);
+        assert_eq!(blank.rate_limit_type, None);
+        assert_eq!(blank.limit_scope, None);
+        let mistyped = read(r#"{"status":"allowed_warning","utilization":"high"}"#);
+        assert_eq!(mistyped.used_percent, None);
+        // Guard: holds before the change. A mistyped percent leaves the status.
+        assert_eq!(mistyped.status.as_deref(), Some("allowed_warning"));
     }
 
     #[test]

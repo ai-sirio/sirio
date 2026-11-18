@@ -2768,3 +2768,483 @@ fn claude_reports_api_retries_and_unstreamed_answers() {
     assert!(clean, "the CLI exited successfully on stdin EOF: {clean}");
     assert_nothing_left(&session);
 }
+
+/// The lines of a turn that parse as a `CliMessage`.
+fn parsed_turn(lines: &[serde_json::Value]) -> Vec<sirio_claude::CliMessage> {
+    lines
+        .iter()
+        .filter_map(|line| sirio_claude::CliMessage::parse(&line.to_string()))
+        .collect()
+}
+
+/// The requests the fake limits API logged so far (`fake_limits_api.py` writes one line of
+/// method and path per request to the limits file's `.requests` sibling). Every line counts,
+/// whether or not it parses.
+fn logged_requests(limits: &std::path::Path) -> Vec<String> {
+    let mut path = limits.as_os_str().to_owned();
+    path.push(".requests");
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Proves the real `claude` answers `/usage` itself: a synthetic assistant line naming the
+/// command (`local_command_run`) and a `result` with no turn and `local_command` set, with no
+/// request to the model API at all. A positive control (`say hi`) then shows the API logs a
+/// request when the CLI does call it, so "no request" cannot be a logger that never writes.
+///
+/// One CLI against the rate-limit fake API (`fake_limits_api.py`), API-key auth, scratch HOME
+/// and nothing beyond 127.0.0.1. It launches a real CLI, so it is `#[ignore]`d and stays off CI:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_answers_usage_locally
+///
+/// It SKIPs without a resolvable mise `claude` binary, below 2.1.301 and without `python3`.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_answers_usage_locally() {
+    use sirio_claude::{CliMessage, ControlRequest};
+
+    let Some((claude, python, scratch)) =
+        live_claude("usage-local", sirio_claude::ClaudeVersion::new(2, 1, 301))
+    else {
+        return;
+    };
+    let limits = scratch.root.join("limits.json");
+    std::fs::write(&limits, r#"{"status": 200, "headers": {}}"#).unwrap();
+    let mut session = claude_live::Session::start_limits(
+        &claude,
+        &python,
+        &scratch.root.join("usage"),
+        &limits,
+        None,
+    );
+    session.write(&ControlRequest::initialize("usage-init"));
+
+    // `/usage`: the marker, the result, and no request.
+    let lines = run_turn(&mut session, "/usage");
+    let turn = parsed_turn(&lines);
+    let marker = turn.iter().position(|message| {
+        matches!(message, CliMessage::Assistant(assistant)
+            if assistant.parent_tool_use_id.is_none()
+                && assistant.local_command_run.as_ref().is_some_and(|run| run.command == "usage"))
+    });
+    assert!(marker.is_some(), "a top-level assistant line with local_command_run usage");
+    let result = lines.iter().find(|line| line["type"] == "result");
+    assert!(result.is_some(), "the turn ends with a result");
+    let result = result.unwrap();
+    assert!(result["num_turns"] == 0, "the result's num_turns is 0: false");
+    assert!(
+        result["local_command"] == "usage",
+        "the result's local_command is usage: false"
+    );
+    assert!(
+        logged_requests(&limits).is_empty(),
+        "/usage sent no request to the model API"
+    );
+
+    // Positive control: a prompt the CLI does send logs exactly one request.
+    let _ = run_turn(&mut session, "say hi");
+    let requests = logged_requests(&limits);
+    assert!(requests.len() == 1, "one request after say hi: false");
+    let logged: serde_json::Value = serde_json::from_str(&requests[0]).unwrap_or_default();
+    let path = logged["path"].as_str().unwrap_or_default();
+    assert!(
+        path.starts_with("/v1/messages"),
+        "the request is a /v1/messages call"
+    );
+
+    let exit = session.close_cli();
+    let clean = exit.is_some_and(|status| status.success());
+    assert!(clean, "the CLI exited successfully on stdin EOF: {clean}");
+    assert_nothing_left(&session);
+}
+
+/// The headers of a fake API answer that carry `status` and the given window fields, written
+/// as `anthropic-ratelimit-unified-*` (copied from the A9 probe's `r_q4.py`).
+fn unified_headers(
+    status: &str,
+    claim: &str,
+    fields: &[(&str, String)],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut headers = serde_json::Map::new();
+    headers.insert(
+        "anthropic-ratelimit-unified-status".into(),
+        status.into(),
+    );
+    headers.insert(
+        "anthropic-ratelimit-unified-representative-claim".into(),
+        claim.into(),
+    );
+    for (name, value) in fields {
+        headers.insert(
+            format!("anthropic-ratelimit-unified-{}", name.replace('_', "-")),
+            value.clone().into(),
+        );
+    }
+    headers
+}
+
+/// An unsigned gateway-shaped JWT, built at run time: base64url of `{"alg":"none"}`, a payload
+/// with `aud: claude-gateway` and an expiry an hour out, and a dummy signature. Not a
+/// credential of anything.
+fn gateway_token() -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    fn base64url(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |acc, (at, byte)| acc | u32::from(*byte) << (16 - 8 * at));
+            for at in 0..=chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * at) & 63) as usize] as char);
+            }
+        }
+        out
+    }
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let header = serde_json::json!({"alg": "none"}).to_string();
+    let payload = serde_json::json!({"aud": "claude-gateway", "exp": exp}).to_string();
+    format!("{}.{}.x", base64url(header.as_bytes()), base64url(payload.as_bytes()))
+}
+
+/// Proves the real `claude` turns `anthropic-ratelimit-unified-*` response headers into the
+/// `rate_limit_event` Sirio reads: an `allowed_warning` on the five-hour window with its
+/// utilization and reset, then an overage refusal that carries its `limitScope` and ends the
+/// turn with an error result.
+///
+/// The CLI emits the event only under subscriber or gateway auth, so the token is a fake
+/// gateway JWT built at run time and passed to the CLI as `ANTHROPIC_AUTH_TOKEN` alone: it
+/// lives only in the CLI's environment and the test's TMPDIR. `CliEnv::apply` refuses to
+/// start the CLI unless its base URL is on 127.0.0.1. The CLI runs in a scratch HOME against
+/// `fake_limits_api.py`, so nothing leaves the machine. It launches a real CLI, so it is
+/// `#[ignore]`d and stays off CI:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_reports_rate_limits_through_a_gateway
+///
+/// It SKIPs without a resolvable mise `claude` binary, below 2.1.327 (the env-token gateway was
+/// seen only there) and without `python3`. On 2.1.327 or newer a missing event fails.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_reports_rate_limits_through_a_gateway() {
+    use sirio_claude::{CliMessage, ControlRequest};
+
+    let Some((claude, python, scratch)) =
+        live_claude("rate-limits", sirio_claude::ClaudeVersion::new(2, 1, 327))
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let in_three_hours = now + 3 * 3600;
+    let in_four_days = now + 4 * 86400;
+    let limits = scratch.root.join("limits.json");
+    let write_limits = |status: u16, headers: serde_json::Map<String, serde_json::Value>| {
+        std::fs::write(
+            &limits,
+            serde_json::json!({"status": status, "headers": headers}).to_string(),
+        )
+        .unwrap();
+    };
+    // The probe's case `warning-5h-92`.
+    write_limits(
+        200,
+        unified_headers(
+            "allowed_warning",
+            "five_hour",
+            &[
+                ("reset", in_three_hours.to_string()),
+                ("5h_utilization", "0.92".into()),
+                ("5h_reset", in_three_hours.to_string()),
+                ("5h_surpassed_threshold", "0.9".into()),
+                ("5h_status", "allowed_warning".into()),
+                ("7d_utilization", "0.1".into()),
+                ("7d_reset", in_four_days.to_string()),
+            ],
+        ),
+    );
+    let token = gateway_token();
+    let mut session = claude_live::Session::start_limits(
+        &claude,
+        &python,
+        &scratch.root.join("limits"),
+        &limits,
+        Some(&token),
+    );
+    session.write(&ControlRequest::initialize("limits-init"));
+
+    // Turn 1: the warning, before the result.
+    let lines = run_turn(&mut session, "case warning-5h-92");
+    let turn = parsed_turn(&lines);
+    let warning = turn.iter().position(|message| {
+        matches!(message, CliMessage::RateLimit(push)
+            if push.status.as_deref() == Some("allowed_warning"))
+    });
+    assert!(warning.is_some(), "an allowed_warning rate_limit_event in the turn");
+    let CliMessage::RateLimit(push) = &turn[warning.unwrap()] else {
+        unreachable!()
+    };
+    assert!(
+        push.rate_limit_type.as_deref() == Some("five_hour"),
+        "the window is five_hour: false"
+    );
+    assert!(push.used_percent == Some(92), "the window is 92 percent used: false");
+    assert!(
+        push.resets_at == Some(in_three_hours),
+        "the event carries the written reset: false"
+    );
+    // `run_turn` stops at the turn's result, so an event in `turn` came before it.
+
+    // Turn 2: an overage refusal charged to the pooled budget (`rej-overage-orgcap-group_pool`).
+    write_limits(
+        429,
+        unified_headers(
+            "rejected",
+            "overage",
+            &[
+                ("reset", in_four_days.to_string()),
+                ("overage_status", "rejected".into()),
+                ("overage_disabled_reason", "org_spend_cap_reached".into()),
+                ("overage_scope", "group_pool".into()),
+                ("overage_reset", in_four_days.to_string()),
+            ],
+        ),
+    );
+    let lines = run_turn(&mut session, "case rej-overage-orgcap-group_pool");
+    let turn = parsed_turn(&lines);
+    let rejection = turn.iter().position(|message| {
+        matches!(message, CliMessage::RateLimit(push)
+            if push.status.as_deref() == Some("rejected"))
+    });
+    assert!(rejection.is_some(), "a rejected rate_limit_event in the turn");
+    let CliMessage::RateLimit(push) = &turn[rejection.unwrap()] else {
+        unreachable!()
+    };
+    assert!(
+        push.rate_limit_type.as_deref() == Some("overage"),
+        "the window is overage: false"
+    );
+    assert!(
+        push.limit_scope.as_deref() == Some("group_pool"),
+        "the scope is group_pool: false"
+    );
+    let failed = turn
+        .iter()
+        .any(|message| matches!(message, CliMessage::Result(result) if result.is_error));
+    assert!(failed, "the refused turn's result is an error: {failed}");
+
+    // The last turn ended in an error result, and a CLI whose last result is one may exit
+    // non-zero: what matters is that it exits on stdin EOF instead of being killed.
+    let exit = session.close_cli();
+    assert!(exit.is_some(), "the CLI exited on stdin EOF without being killed");
+    assert_nothing_left(&session);
+}
+
+/// Checks the shape of a real account's `/usage` answer, on the user's own `claude`.
+///
+/// This is the one live test that touches a real account, so it runs only by hand, by the
+/// project owner, and never in CI or by an agent: it SKIPs unless `SIRIO_LIVE_CLAUDE_ACCOUNT=1`.
+/// It launches the user's `claude` in their environment, in a fresh directory under TMPDIR,
+/// with the launch line of Sirio's usage probe (`--no-session-persistence`,
+/// `--setting-sources ""`), so no hook or MCP server of theirs runs and no session file is
+/// written. It sends only `/usage` (no model turn, so nothing is spent) and prints no value of
+/// the account, only one status line of structure counts:
+///
+///     SIRIO_LIVE_CLAUDE_ACCOUNT=1 TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_usage_report_on_account
+///
+/// What a fresh `/usage` can prove, and this asserts: the marker (`local_command_run` usage),
+/// `num_turns` 0 and, when the answer carries a `usage_report`, that `UsageReport::parse`
+/// reads it and that every limit row names its kind, group and severity. The status line says
+/// whether a report came, whether its limits were rows or unavailable, and how many rows and
+/// models were checked, so a pass that checked nothing shows as such.
+///
+/// The four token counts of a `model_usage` entry are checked only for models the session
+/// already holds, which a fresh session does not: its `session.model_usage` is empty, so
+/// "models checked" is normally 0 and those keys are not proven against the wire by this test.
+/// SKIPs below 2.1.301, where `local_command_run` first appears.
+#[test]
+#[ignore = "runs the user's own claude against their real account, by hand only"]
+fn claude_usage_report_on_account() {
+    use sirio_agents::ClaudeCodeAdapter;
+    use sirio_claude::{CliMessage, ControlRequest, PlanLimits, UsageReport};
+
+    if std::env::var("SIRIO_LIVE_CLAUDE_ACCOUNT").as_deref() != Ok("1") {
+        eprintln!("SKIP: SIRIO_LIVE_CLAUDE_ACCOUNT=1 is not set");
+        return;
+    }
+    let Some(program) = ClaudeCodeAdapter.availability().executable else {
+        eprintln!("SKIP: claude is not on PATH");
+        return;
+    };
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or(home);
+    let scratch = claude_live::Scratch::new("usage-account", &real_home);
+
+    // `claude --version` in the user's own environment, within 30 s.
+    let version_path = scratch.root.join("version.out");
+    let mut version_child = Command::new(&program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(std::fs::File::create(&version_path).unwrap())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("claude --version runs");
+    let version_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if version_child.try_wait().expect("claude --version is waited on").is_some() {
+            break;
+        }
+        if Instant::now() >= version_deadline {
+            let _ = version_child.kill();
+            let _ = version_child.wait();
+            panic!("claude --version did not finish in 30 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let version_text = std::fs::read_to_string(&version_path).unwrap_or_default();
+    let version_text = version_text.trim();
+    let Some(version) = sirio_claude::ClaudeVersion::parse(version_text) else {
+        panic!("claude reported an unreadable version");
+    };
+    eprintln!("claude reports {version_text}");
+    if !version.meets_floor() || version < sirio_claude::ClaudeVersion::new(2, 1, 301) {
+        eprintln!("SKIP: claude {version} is below what this test needs");
+        return;
+    }
+    let work = scratch.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+
+    /// Kills the CLI on every exit path, after the test had its chance to let it finish.
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let line = sirio_claude::LaunchLine::usage_probe();
+    let mut child = Kill(
+        Command::new(&program)
+            .args(&line.args)
+            .current_dir(&work)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("claude launches"),
+    );
+    let mut stdin = child.0.stdin.take().expect("a piped stdin");
+    let stdout = child.0.stdout.take().expect("a piped stdout");
+    let (line_tx, line_rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line_tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    writeln!(stdin, "{}", ControlRequest::initialize("account-init")).expect("initialize is written");
+    let usage = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": "/usage"}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    });
+    writeln!(stdin, "{usage}").expect("/usage is written");
+    stdin.flush().expect("stdin is flushed");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut lines = Vec::new();
+    while let Ok(text) = line_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let done = value["type"] == "result";
+        lines.push(value);
+        if done {
+            break;
+        }
+    }
+    // Close stdin and give the CLI up to 10 s to exit by itself: it may still be writing to
+    // the user's own config directory, and only then is it killed.
+    drop(stdin);
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    while child.0.try_wait().ok().flatten().is_none() && Instant::now() < exit_deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let result = lines.iter().find(|line| line["type"] == "result");
+    assert!(result.is_some(), "/usage ends with a result within 60 s");
+    assert!(result.unwrap()["num_turns"] == 0, "the result's num_turns is 0: false");
+    let turn = parsed_turn(&lines);
+    let answer = turn.iter().find_map(|message| match message {
+        CliMessage::Assistant(assistant)
+            if assistant.parent_tool_use_id.is_none()
+                && assistant.local_command_run.as_ref().is_some_and(|run| run.command == "usage") =>
+        {
+            Some(assistant)
+        }
+        _ => None,
+    });
+    assert!(answer.is_some(), "a top-level assistant line with local_command_run usage");
+
+    let mut present = false;
+    let mut rows_state = "unavailable";
+    let (mut rows_checked, mut models_checked) = (0usize, 0usize);
+    if let Some(raw) = &answer.unwrap().usage_report {
+        present = true;
+        let report = UsageReport::parse(&serde_json::Value::Object(raw.clone()));
+        assert!(report.is_some(), "the usage_report is readable");
+        let report = report.unwrap();
+        if let PlanLimits::Rows(rows) = &report.limits {
+            rows_state = "rows";
+            for row in rows {
+                assert!(!row.kind.is_empty(), "every row has a kind");
+                assert!(!row.group.is_empty(), "every row has a group");
+                assert!(!row.severity.is_empty(), "every row has a severity");
+                rows_checked += 1;
+            }
+        }
+        for (_, tokens) in report.totals.iter().flat_map(|totals| &totals.models) {
+            assert!(tokens.input.is_some(), "every model has its input count");
+            assert!(tokens.output.is_some(), "every model has its output count");
+            assert!(tokens.cache_read.is_some(), "every model has its cache read count");
+            assert!(tokens.cache_write.is_some(), "every model has its cache write count");
+            models_checked += 1;
+        }
+    }
+    eprintln!(
+        "usage_report: {}, limits: {rows_state}, rows checked: {rows_checked}, models checked: {models_checked}",
+        if present { "present" } else { "absent" }
+    );
+}
+
+/// The guard `CliEnv::apply` runs before a CLI that carries the gateway token starts (so at
+/// every spawn site that applies it, `launch_broken` included). This test starts no CLI.
+///
+/// Failure list, written first: a userinfo that hides another host
+/// (`http://127.0.0.1:1@example.com/`) passes a prefix check, and so would an empty port.
+/// A bare port and a port with a path are the URLs the harness itself builds, so they must
+/// pass.
+#[test]
+fn the_gateway_base_url_guard_checks_the_host() {
+    for url in ["http://127.0.0.1:1@example.com/", "http://127.0.0.1:/"] {
+        assert!(!claude_live::is_local_base_url(url), "a URL that is not the local API is refused");
+    }
+    for url in ["http://127.0.0.1:8080", "http://127.0.0.1:8080/v1"] {
+        // Guard: holds before the change (the old prefix check also accepts these).
+        assert!(claude_live::is_local_base_url(url), "a local API URL is accepted");
+    }
+}
