@@ -595,7 +595,8 @@ fold draws a synthetic line only when it is top level and carries the marker; it
 `SessionNotice::LocalCommandOutput {command, text, report}` and the next chunk opens a new row. The
 rules:
 
-- Empty text and no `usage_report` draw nothing. A report with no text is still an answer.
+- Empty text draws nothing unless the card can read the report (it names `session` or
+  `rate_limits`); a report with no text is then still an answer.
 - A model's answer that carries the marker, a subagent's line, and a marker of the wrong type are
   left to the ordinary rules; a wrong type costs the field, never the line.
 - A failed `result` that repeats the text just drawn adds no second chunk. The remembered text ends

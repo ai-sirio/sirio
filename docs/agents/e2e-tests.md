@@ -473,14 +473,16 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # pooled`: one row for a warning and not a second, the same warning again after an allowed, the
 # refusal, then the overage refusal with its scope; the CLI's own refusal text is still one
 # assistant row), usage_text (`/usage` and `/context` are command-output rows with the CLI's text
-# and no assistant row; a failing `/usage` whose result repeats the text is drawn once),
+# and no assistant row; a failing `/usage` whose result repeats the text is drawn once; a bidi
+# or control character in the plain text shows in angle brackets),
 # usage_floor (a `/usage` with no marker adds only the turn row, ends the turn, and the next
 # prompt is answered), usage_card (a `usage_report` is drawn as a card: the read row's `card`
 # lists the totals, the models, a heading per group and the extra usage, a bidi override in a
 # scope name and a newline in a kind show as `U+202E` and `U+000A` in angle brackets, and
-# `headline` is the first active row's name) and usage_unavailable (seven malformed reports read
-# as unavailable or none reported, never 0%: a row with no percent shows no `%`, a row's missing
-# parts leave no stray separator, an empty row no line, a group of such rows no heading). All five
+# `headline` is the first active row's name) and usage_unavailable (eight malformed or partial
+# reports read as unavailable or none reported, never 0%: a row with no percent shows no `%`, a
+# row's missing parts leave no stray separator, an empty row no line, a group of such rows no
+# heading, totals with only removed lines read `2 lines removed`). All five
 # run state-only; usage_card and usage_text also capture.
 # Three variables, passed by launch() and reset per scenario: SIRIO_FIXTURE_LIMITS
 # (--fixture-limits, JSON {"soon": epoch, "later": epoch}, the resets of the `limit ...` prompts),

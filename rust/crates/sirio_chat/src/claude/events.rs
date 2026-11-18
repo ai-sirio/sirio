@@ -1189,11 +1189,10 @@ mod tests {
         assert!(fold.take_notices().is_empty());
     }
 
-    // Failure list, written before the code: a rejection under a new scope
-    // swallowed by the one before it; a rejection on another window
-    // swallowed by it; the same
-    // warning announced twice because one carried `unifiedWindows`; the same
-    // warning swallowed after an `allowed` in between.
+    // Failure list, written before the code: a rejection under a new scope,
+    // or on another window, swallowed by the one before it; the same warning
+    // announced twice because one carried `unifiedWindows`; the same warning
+    // swallowed after an `allowed` in between.
     #[test]
     fn a_rate_limit_is_announced_again_only_when_status_window_or_scope_changes() {
         let push = |info: serde_json::Value| {

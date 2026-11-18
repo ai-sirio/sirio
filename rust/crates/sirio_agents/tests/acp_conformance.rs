@@ -2923,8 +2923,9 @@ fn gateway_token() -> String {
 /// The CLI emits the event only under subscriber or gateway auth, so the token is a fake
 /// gateway JWT built at run time and passed to the CLI as `ANTHROPIC_AUTH_TOKEN` alone: it
 /// lives only in the CLI's environment and the test's TMPDIR. `CliEnv::apply` refuses to
-/// start the CLI unless its base URL is on 127.0.0.1. The CLI runs in a scratch HOME against `fake_limits_api.py`, so nothing
-/// leaves the machine. It launches a real CLI, so it is `#[ignore]`d and stays off CI:
+/// start the CLI unless its base URL is on 127.0.0.1. The CLI runs in a scratch HOME against
+/// `fake_limits_api.py`, so nothing leaves the machine. It launches a real CLI, so it is
+/// `#[ignore]`d and stays off CI:
 ///
 ///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_reports_rate_limits_through_a_gateway
 ///
