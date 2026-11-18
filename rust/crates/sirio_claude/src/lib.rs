@@ -47,5 +47,8 @@ pub use message::{
 pub use permissions::{PermissionRule, PermissionRules, SettingsError, parse_permission_rules};
 pub use reload::{CacheImpact, PluginsReloaded, parse_plugins_reload};
 pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe, diff_from_result};
-pub use usage::{ContextUsageReport, PlanUsage, RateLimitWindow, RewindOutcome, whole_percent};
+pub use usage::{
+    ContextUsageReport, ExtraUsage, LimitRow, ModelTokens, PlanLimits, PlanUsage, RateLimitWindow,
+    RewindOutcome, SessionTotals, UsageReport, whole_percent,
+};
 pub use version::{ClaudeVersion, MIN_CLAUDE_VERSION};

@@ -66,6 +66,7 @@ pub use prompt_history::PromptRecord;
 mod question_dock;
 mod visible_text;
 mod session_panel;
+mod usage_card;
 mod status_line;
 mod thought;
 mod tool_calls;
@@ -1094,8 +1095,14 @@ enum Entry {
     },
     /// What the CLI answered to a command it ran itself (`/usage`): the
     /// command's name and its text, already cleaned for display. Never
-    /// persisted: it states the account as it is right now.
-    CommandOutput { command: String, text: String },
+    /// persisted: it states the account as it is right now. With a `report`
+    /// (a `/usage` that carried the CLI's `usage_report`) the card is drawn
+    /// and copied instead of the text.
+    CommandOutput {
+        command: String,
+        text: String,
+        report: Option<sirio_chat::UsageReport>,
+    },
     /// A transport failure, surfaced instead of silently doing nothing.
     Error {
         message: String,
@@ -1252,7 +1259,11 @@ impl Entry {
                 deletions,
                 skipped_links,
             } => rewind_report_text(files, *insertions, *deletions, *skipped_links),
-            Self::CommandOutput { command, text } => {
+            Self::CommandOutput {
+                report: Some(report),
+                ..
+            } => usage_card::plain_text(report),
+            Self::CommandOutput { command, text, .. } => {
                 format!("{}\n{text}", command_label(command))
             }
             Self::Error { message, .. } => message.clone(),
@@ -3082,12 +3093,18 @@ impl Chat {
             // What the CLI answered to a command it ran itself. The text is
             // the CLI's, so it is cleaned here, once, for what is drawn,
             // copied and read back.
-            SessionNotice::LocalCommandOutput { command, text, .. } => {
+            SessionNotice::LocalCommandOutput {
+                command,
+                text,
+                report,
+            } => {
                 // As the `CliNotice` arm does; `push_entry` would settle it too.
                 self.settle_open_thought();
                 Entry::CommandOutput {
                     command: visible_text::visible_text(&command, false),
                     text: visible_text::visible_text(&text, true),
+                    // An unreadable report falls back to the text.
+                    report: report.as_ref().and_then(sirio_chat::UsageReport::parse),
                 }
             }
             // The CLI's own words: a refusal, a fallback, an informational line.
@@ -7474,10 +7491,22 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
         Entry::RewindReport { .. } => {
             row.insert("kind".into(), "rewind-report".into());
         }
-        Entry::CommandOutput { command, text } => {
+        Entry::CommandOutput {
+            command,
+            text,
+            report,
+        } => {
             row.insert("kind".into(), "command-output".into());
             row.insert("command".into(), command.clone());
             row.insert("text".into(), text.clone());
+            if let Some(report) = report {
+                let now = chrono::Local::now();
+                row.insert(
+                    "card".into(),
+                    usage_card::card_lines(report, &now).join("\n"),
+                );
+                row.insert("headline".into(), usage_card::headline(report, &now));
+            }
         }
         Entry::Error { message, .. } => {
             row.insert("kind".into(), "error".into());

@@ -98,6 +98,12 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      repeats the text
 #   usage_floor        (SIRIO_FIXTURE_USAGE) a CLI that writes no marker for `/usage` (the floor's) adds only the turn
 #                      row, ends the turn and still answers the next prompt
+#   usage_card         (SIRIO_FIXTURE_USAGE, SIRIO_E2E_TZ=UTC) a `/usage` that carries the CLI's `usage_report` is drawn as
+#                      a card: the read row's `card` lists the totals, the models, one heading per group with a line per
+#                      row, and the extra usage; a hostile scope name and kind show as text; `headline` is the first
+#                      active row's name
+#   usage_unavailable  (SIRIO_FIXTURE_USAGE) a malformed report (`rate_limits` null or a number, `limits` empty or a
+#                      string) reads as unavailable or none reported, and a row with no `percent` shows no `%`
 #   startup_*          (SIRIO_FIXTURE_STARTUP) the chat's error row is the CLI's own start-up text, with no ACP in it:
 #     startup_config_invalid  the sentence, the file and its backup, and the override shown as text
 #     startup_opt_in     a reason the CLI reports only when Sirio's launch sets CLAUDE_CODE_STARTUP_FAILURE_RESULTS
@@ -397,7 +403,8 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   permission_rules permission_rules_refused permission_rules_closed_panel permission_rules_coalesced
   permission_rules_after_always_allow permission_rules_unreadable
   hooks_card hooks_policy hooks_refused hooks_closed_panel hooks_coalesced hooks_refresh hooks_unreadable
-  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream limit_notice usage_text usage_floor
+  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream limit_notice usage_text usage_floor usage_card
+  usage_unavailable
   startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
@@ -5318,6 +5325,7 @@ scenario_usage_text() {
     "[r for r in $USAGE_ROWS if r[0] == 'command-output'] == [('command-output', 'usage', '$block')]"
   # Guard: holds before the change (the CLI's synthetic text was never drawn as an assistant row).
   check_panel "Guard: no assistant row" "not any(r['kind'] == 'assistant' for r in c['transcript'])"
+  capture usage-text
   send_prompt "/context"
   notice_turns "the /context turn ends" 2
   check_panel "/context is a row of its own, in order" \
@@ -5346,6 +5354,90 @@ scenario_usage_floor() {
   check_panel "Guard: the next prompt gets its answer" \
     "[r for r in c['transcript'] if r['kind'] == 'assistant'][-1]['text'] == 'ok'"
   echo "OK: usage_floor: a command with no marker adds only the turn row and the chat still answers"
+  stop_app
+}
+
+# The usage card (A9). Every reset is 3 days off, so `{T}` is `%a %H:%M` whenever this runs. The hostile scope name
+# and kind are built here, never typed.
+scenario_usage_card() {
+  SIRIO_E2E_TZ=UTC
+  SIRIO_FIXTURE_USAGE="$RUN_DIR/usage_card-usage.json"
+  local expected="$RUN_DIR/usage_card-expected.txt"
+  python3 - "$SIRIO_FIXTURE_USAGE" "$expected" <<'PY'
+import json, sys, time
+from datetime import datetime, timezone
+days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+at = datetime.fromtimestamp(int(time.time()) + 3 * 86400, timezone.utc)
+iso = at.strftime("%Y-%m-%dT%H:%M:%SZ")
+when = "%s %s" % (days[at.weekday()], at.strftime("%H:%M"))
+bidi = "\N{RIGHT-TO-LEFT OVERRIDE}"
+D = " " + chr(0xB7) + " "
+L, R = chr(0x27E8), chr(0x27E9)
+def row(kind, group, percent, severity, active=False, scope=None, resets=iso):
+    out = {"kind": kind, "group": group, "percent": percent, "resets_at": resets,
+           "severity": severity, "is_active": active}
+    if scope:
+        out["scope"] = {"model": {"display_name": scope}}
+    return out
+report = {
+    "session": {"total_cost_usd": 1.5, "total_api_duration_ms": 65000, "total_duration_ms": 3725000,
+                "total_lines_added": 10, "total_lines_removed": 2,
+                "model_usage": {"claude-opus-5-5": {"inputTokens": 1200, "outputTokens": 3400,
+                                                    "cacheReadInputTokens": 50000,
+                                                    "cacheCreationInputTokens": 700}}},
+    "rate_limits": {
+        "limits": [row("session", "session", 42, "normal", True),
+                   row("weekly_all", "weekly", 81, "warning"),
+                   row("weekly_scoped", "weekly", 97, "critical", scope="Fa" + bidi + "ble"),
+                   row("future\nmeter", "later", 5, "sparkly", resets=None)],
+        "extra_usage": {"is_enabled": True, "monthly_limit": 5000, "used_credits": 1234, "currency": "USD"}}}
+with open(sys.argv[1], "w") as handle:
+    json.dump({"report": report}, handle)
+lines = ["This chat: $1.50" + D + "API 1m 5s" + D + "total 1h 2m" + D + "10 lines added, 2 removed",
+         "claude-opus-5-5: 1k in" + D + "3k out" + D + "50k cache read" + D + "700 cache write",
+         "Session",
+         "Current session" + D + "42%" + D + "resets at " + when,
+         "Weekly",
+         "All models" + D + "81%" + D + "resets at " + when + D + "warning",
+         "Fa" + L + "U+202E" + R + "ble" + D + "97%" + D + "resets at " + when + D + "critical",
+         "later",
+         "future" + L + "U+000A" + R + "meter" + D + "5%",
+         "Extra usage: $12.34 of $50.00 this month"]
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines))
+PY
+  notices_chat usage_card
+  send_prompt "/usage"
+  notice_turns "the /usage turn ends" 1
+  check_panel "the report is drawn as a card: its lines, the hostile text shown as text, no live override" \
+    "[r['card'] for r in c['transcript'] if r['kind'] == 'command-output'] == [open('$expected', encoding='utf-8').read()] and not any(chr(0x202e) in r.get('card', '') or chr(10) in r.get('headline', '') for r in c['transcript'])"
+  check_panel "the headline is the first active row's name" \
+    "[r['headline'] for r in c['transcript'] if r['kind'] == 'command-output'] == ['Current session']"
+  capture usage-card
+  echo "OK: usage_card: /usage with a report is drawn as a card, hostile text shown as text"
+  stop_app
+}
+
+# A malformed report never crashes and never reads 0% (A9 review focus 4): five answers, each its own row.
+scenario_usage_unavailable() {
+  SIRIO_FIXTURE_USAGE="$RUN_DIR/usage_unavailable-usage.json"
+  usage_options '{}'
+  notices_chat usage_unavailable
+  local n=0 report
+  for report in \
+    '{"rate_limits": null}' \
+    '{"rate_limits": {"limits": []}}' \
+    '{"rate_limits": {"limits": "x"}}' \
+    '{"rate_limits": 7}' \
+    '{"rate_limits": {"limits": [{"kind": "session", "group": "session", "severity": "normal", "is_active": true}]}}'; do
+    n=$((n + 1))
+    usage_options "{\"report\": $report}"
+    send_prompt "/usage"
+    notice_turns "the /usage turn $n ends" "$n"
+  done
+  check_panel "each malformed report reads as unavailable or none reported, and a row with no percent shows no %" \
+    "[r['card'] for r in c['transcript'] if r['kind'] == 'command-output'] == ['Plan limits: unavailable', 'Plan limits: none reported', 'Plan limits: unavailable', 'Plan limits: unavailable', 'Session\nCurrent session']"
+  echo "OK: usage_unavailable: a malformed report is unavailable, never 0%"
   stop_app
 }
 

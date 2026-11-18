@@ -623,7 +623,11 @@ impl Chat {
                     skipped_links,
                 ))
                 .into_any_element(),
-            Entry::CommandOutput { command, text } => {
+            Entry::CommandOutput {
+                report: Some(report),
+                ..
+            } => usage_card::render(&report, entry_index, source_start, theme, &interaction),
+            Entry::CommandOutput { command, text, .. } => {
                 let label = command_label(&command);
                 // The text starts after the label and its line break, so a
                 // selection highlights exactly what it copies.

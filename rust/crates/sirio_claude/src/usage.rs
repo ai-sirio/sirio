@@ -183,6 +183,174 @@ impl ContextUsageReport {
     }
 }
 
+/// The `usage_report` a local `/usage` carries: this chat's totals, the plan's
+/// limit rows and the extra-usage line, each read apart so one the CLI changed
+/// costs that part and not the card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageReport {
+    /// This chat's cost, time, edits and tokens. `None` without `session`.
+    pub totals: Option<SessionTotals>,
+    /// The plan's limit rows, or that they cannot be read.
+    pub limits: PlanLimits,
+    /// The extra usage (overage) line, from `rate_limits.extra_usage`.
+    pub extra: Option<ExtraUsage>,
+}
+
+/// The plan's limit rows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanLimits {
+    /// `rate_limits` or `limits` is absent, null or the wrong type: the CLI
+    /// could not say. Distinct from no rows, which it said.
+    Unavailable,
+    /// The rows, in the CLI's order; empty when the plan has none.
+    Rows(Vec<LimitRow>),
+}
+
+/// One row of the plan's limits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitRow {
+    pub kind: String,
+    pub group: String,
+    /// On the 0–100 scale. `None` when the CLI left it out: unknown, never 0.
+    pub percent: Option<f64>,
+    /// The reset as the CLI sent it (ISO 8601), unparsed.
+    pub resets_at: Option<String>,
+    /// `scope.model.display_name`, else `scope.surface.display_name`.
+    pub scope_name: Option<String>,
+    pub severity: String,
+    pub is_active: bool,
+}
+
+/// This chat's totals, from `session` (snake_case keys).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionTotals {
+    pub cost_usd: Option<f64>,
+    pub api_ms: Option<u64>,
+    pub wall_ms: Option<u64>,
+    pub lines_added: Option<u64>,
+    pub lines_removed: Option<u64>,
+    /// One entry per model, in the CLI's order.
+    pub models: Vec<(String, ModelTokens)>,
+}
+
+/// One model's token counts, from a `model_usage` entry (camelCase keys). A
+/// count the CLI left out is `None`: the card leaves it out, never shows 0.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelTokens {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+/// The extra usage (overage) state, from `rate_limits.extra_usage`. Amounts
+/// are in minor units.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtraUsage {
+    pub enabled: bool,
+    pub monthly_limit: Option<f64>,
+    pub used: Option<f64>,
+    pub currency: Option<String>,
+}
+
+impl UsageReport {
+    /// Reads the raw `usage_report`. `None` unless it is an object that has
+    /// `session` or `rate_limits`.
+    #[must_use]
+    pub fn parse(report: &Value) -> Option<Self> {
+        let report = report.as_object()?;
+        if !report.contains_key("session") && !report.contains_key("rate_limits") {
+            return None;
+        }
+        let rate_limits = report.get("rate_limits").and_then(Value::as_object);
+        Some(Self {
+            totals: report.get("session").and_then(read_totals),
+            limits: rate_limits
+                .and_then(|limits| limits.get("limits"))
+                .and_then(Value::as_array)
+                .map_or(PlanLimits::Unavailable, |rows| {
+                    PlanLimits::Rows(rows.iter().filter_map(read_row).collect())
+                }),
+            extra: rate_limits
+                .and_then(|limits| limits.get("extra_usage"))
+                .and_then(read_extra),
+        })
+    }
+}
+
+/// The text of `key`, or `None` for anything that is not a string.
+fn text_of(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    object.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// One limit row; `None` when it is not an object.
+fn read_row(value: &Value) -> Option<LimitRow> {
+    let row = value.as_object()?;
+    let scope = row.get("scope");
+    let display_name = |part: &str| {
+        scope
+            .and_then(|scope| scope.get(part))
+            .and_then(|part| part.get("display_name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    Some(LimitRow {
+        kind: text_of(row, "kind").unwrap_or_default(),
+        group: text_of(row, "group").unwrap_or_default(),
+        percent: row.get("percent").and_then(Value::as_f64),
+        resets_at: text_of(row, "resets_at"),
+        scope_name: display_name("model").or_else(|| display_name("surface")),
+        severity: text_of(row, "severity").unwrap_or_default(),
+        is_active: row.get("is_active").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// `session`, or `None` when it is not an object.
+fn read_totals(value: &Value) -> Option<SessionTotals> {
+    let session = value.as_object()?;
+    let count = |key: &str| session.get(key).and_then(Value::as_u64);
+    Some(SessionTotals {
+        cost_usd: session.get("total_cost_usd").and_then(Value::as_f64),
+        api_ms: count("total_api_duration_ms"),
+        wall_ms: count("total_duration_ms"),
+        lines_added: count("total_lines_added"),
+        lines_removed: count("total_lines_removed"),
+        models: session
+            .get("model_usage")
+            .and_then(Value::as_object)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|(name, usage)| {
+                        let usage = usage.as_object()?;
+                        let tokens = |key: &str| usage.get(key).and_then(Value::as_u64);
+                        Some((
+                            name.clone(),
+                            ModelTokens {
+                                input: tokens("inputTokens"),
+                                output: tokens("outputTokens"),
+                                cache_read: tokens("cacheReadInputTokens"),
+                                cache_write: tokens("cacheCreationInputTokens"),
+                            },
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// `rate_limits.extra_usage`, or `None` when it is not an object.
+fn read_extra(value: &Value) -> Option<ExtraUsage> {
+    let extra = value.as_object()?;
+    Some(ExtraUsage {
+        enabled: extra.get("is_enabled").and_then(Value::as_bool).unwrap_or(false),
+        monthly_limit: extra.get("monthly_limit").and_then(Value::as_f64),
+        used: extra.get("used_credits").and_then(Value::as_f64),
+        currency: text_of(extra, "currency"),
+    })
+}
+
 #[cfg(test)]
 mod rewind_tests {
     use super::*;
@@ -263,6 +431,152 @@ mod context_tests {
         assert_eq!(
             ContextUsageReport::parse(&json!({"totalTokens": 10, "rawMaxTokens": 0})),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod usage_report_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn rows(report: &UsageReport) -> &[LimitRow] {
+        match &report.limits {
+            PlanLimits::Rows(rows) => rows,
+            PlanLimits::Unavailable => panic!("expected rows"),
+        }
+    }
+
+    #[test]
+    fn usage_report_parse_cases() {
+        // A report that is not an object, or names neither part, is not one.
+        for not_a_report in [json!(null), json!(7), json!("x"), json!([]), json!({}), json!({"x": 1})] {
+            assert_eq!(UsageReport::parse(&not_a_report), None);
+        }
+
+        // `rate_limits` that is not an object is unavailable, extra and all;
+        // `session` is still read.
+        for bad in [json!(null), json!(7), json!("x"), json!([1])] {
+            let report = UsageReport::parse(&json!({
+                "session": {"total_cost_usd": 2.5}, "rate_limits": bad
+            }))
+            .expect("session is present");
+            assert_eq!(report.limits, PlanLimits::Unavailable);
+            assert_eq!(report.extra, None);
+            assert_eq!(report.totals.expect("totals").cost_usd, Some(2.5));
+        }
+
+        // `limits` absent or of the wrong type is unavailable while the extra
+        // line, which does not depend on the rows, is still read.
+        for limits in [None, Some(json!(null)), Some(json!("x")), Some(json!({}))] {
+            let mut rate_limits = json!({"extra_usage": {"is_enabled": false}});
+            if let Some(limits) = limits {
+                rate_limits["limits"] = limits;
+            }
+            let report = UsageReport::parse(&json!({ "rate_limits": rate_limits })).expect("a report");
+            assert_eq!(report.limits, PlanLimits::Unavailable);
+            assert_eq!(report.totals, None);
+            assert!(!report.extra.expect("extra").enabled);
+        }
+
+        // An empty list is a statement ("none reported"), not unavailable.
+        let empty = UsageReport::parse(&json!({"rate_limits": {"limits": []}})).expect("a report");
+        assert_eq!(empty.limits, PlanLimits::Rows(vec![]));
+
+        // A row that is not an object is skipped; the rest keep their order.
+        let report = UsageReport::parse(&json!({"rate_limits": {"limits": [
+            {"kind": "a", "group": "g", "percent": 1.5, "severity": "warning", "is_active": true,
+             "resets_at": "2026-11-21T10:00:00Z"},
+            7, "x", null,
+            {"kind": "b", "group": "g"}
+        ]}}))
+        .expect("a report");
+        let kinds: Vec<&str> = rows(&report).iter().map(|row| row.kind.as_str()).collect();
+        assert_eq!(kinds, ["a", "b"]);
+        assert_eq!(rows(&report)[0].percent, Some(1.5));
+        assert_eq!(rows(&report)[0].resets_at.as_deref(), Some("2026-11-21T10:00:00Z"));
+        assert!(rows(&report)[0].is_active);
+        let only_junk = UsageReport::parse(&json!({"rate_limits": {"limits": [7, "x"]}})).expect("a report");
+        assert_eq!(only_junk.limits, PlanLimits::Rows(vec![]));
+
+        // A wrong type inside a row costs that field only, and never reads as 0.
+        let report = UsageReport::parse(&json!({"rate_limits": {"limits": [{
+            "kind": 3, "group": null, "percent": "50", "resets_at": 17, "severity": [],
+            "is_active": "yes", "scope": 4
+        }]}}))
+        .expect("a report");
+        assert_eq!(
+            rows(&report)[0],
+            LimitRow {
+                kind: String::new(),
+                group: String::new(),
+                percent: None,
+                resets_at: None,
+                scope_name: None,
+                severity: String::new(),
+                is_active: false,
+            }
+        );
+
+        // The scope name is the model's, else the surface's.
+        let report = UsageReport::parse(&json!({"rate_limits": {"limits": [
+            {"scope": {"model": {"display_name": "M"}, "surface": {"display_name": "S"}}},
+            {"scope": {"model": {"display_name": 1}, "surface": {"display_name": "S"}}},
+            {"scope": {"surface": {"display_name": "S"}}},
+            {"scope": {"model": {}}}
+        ]}}))
+        .expect("a report");
+        let names: Vec<Option<&str>> = rows(&report).iter().map(|row| row.scope_name.as_deref()).collect();
+        assert_eq!(names, [Some("M"), Some("S"), Some("S"), None]);
+
+        // `session` that is not an object leaves no totals.
+        let report = UsageReport::parse(&json!({"session": 5, "rate_limits": null})).expect("a report");
+        assert_eq!(report.totals, None);
+
+        // A wrong type inside `session` costs that field only; models keep
+        // the object's order, a non-object entry is skipped, a bad count is None.
+        let report = UsageReport::parse(&json!({"session": {
+            "total_cost_usd": "1", "total_api_duration_ms": -5, "total_duration_ms": 1.5,
+            "total_lines_added": 7, "total_lines_removed": null,
+            "model_usage": {
+                "zeta": {"inputTokens": 10, "outputTokens": "5", "cacheReadInputTokens": 3},
+                "junk": 4,
+                "alpha": {"cacheCreationInputTokens": 2}
+            }
+        }}))
+        .expect("a report");
+        let totals = report.totals.expect("totals");
+        assert_eq!(totals.cost_usd, None);
+        assert_eq!(totals.api_ms, None);
+        assert_eq!(totals.wall_ms, None);
+        assert_eq!(totals.lines_added, Some(7));
+        assert_eq!(totals.lines_removed, None);
+        assert_eq!(
+            totals.models,
+            vec![
+                (
+                    "zeta".to_string(),
+                    ModelTokens { input: Some(10), output: None, cache_read: Some(3), cache_write: None }
+                ),
+                (
+                    "alpha".to_string(),
+                    ModelTokens { input: None, output: None, cache_read: None, cache_write: Some(2) }
+                ),
+            ]
+        );
+        let report = UsageReport::parse(&json!({"session": {"model_usage": [1]}})).expect("a report");
+        assert_eq!(report.totals.expect("totals").models, vec![]);
+
+        // `extra_usage`: not an object is none; wrong types cost their field.
+        let report = UsageReport::parse(&json!({"rate_limits": {"extra_usage": 3}})).expect("a report");
+        assert_eq!(report.extra, None);
+        let report = UsageReport::parse(&json!({"rate_limits": {"extra_usage": {
+            "is_enabled": "true", "monthly_limit": "50", "used_credits": 1234, "currency": 9
+        }}}))
+        .expect("a report");
+        assert_eq!(
+            report.extra,
+            Some(ExtraUsage { enabled: false, monthly_limit: None, used: Some(1234.0), currency: None })
         );
     }
 }

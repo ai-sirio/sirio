@@ -440,8 +440,9 @@ impl ChatClient {
 /// origin. Re-exported because `sirio_ui` reads them and does not depend on
 /// `sirio_claude`.
 pub use sirio_claude::{
-    CacheImpact, ContextBreakdown, ContextOrigins, FastMode, Hook, HookEvent, HooksListing,
-    HooksMode, HooksPolicy, McpAuthStart, McpOrigin, McpServer, McpState, OriginNode,
-    PermissionRule, PermissionRules, PluginsReloaded, SettingsError, Standing, THINKING_DISPLAYS,
-    TaskOutput, is_refusal, whole_percent,
+    CacheImpact, ContextBreakdown, ContextOrigins, ExtraUsage, FastMode, Hook, HookEvent,
+    HooksListing, HooksMode, HooksPolicy, LimitRow, McpAuthStart, McpOrigin, McpServer, McpState,
+    ModelTokens, OriginNode, PermissionRule, PermissionRules, PlanLimits, PluginsReloaded,
+    SessionTotals, SettingsError, Standing, THINKING_DISPLAYS, TaskOutput, UsageReport,
+    is_refusal, whole_percent,
 };
