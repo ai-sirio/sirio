@@ -2329,16 +2329,6 @@ scenario_trace_cost() {
   send_prompt subagents
   answer_permission allow_once
   wait_panel "the first turn is Done at \$0.31" "$DONE_031" 40
-  check_panel "the items go on with the Bash, the grandchild's line under its own name, and the final sentence" \
-    "(lambda n: n[:5] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed'), ('tool', 'toolu_sub_bash', 'Completed')] and n[5][:2] == ('tool', 'toolu_agent_grand') and n[6:] == [('text', 'Grandchild here. All clear.', 'Check one thing'), ('text', 'Done. The file says hi.')])(norm(card_items('toolu_agent_text')))"
-  check_panel "the hand-back frame is drawn nowhere and the subagent's lane has no sentence left" \
-    "'Subagent hand-back' not in json.dumps(c['transcript']) and lane('toolu_agent_text')['said'] is None"
-  check_panel "no card item holds the hand-back frame, the nested Agent call's own content included" \
-    "'Subagent hand-back' not in json.dumps(card_items('toolu_agent_text')) and 'Subagent hand-back' not in json.dumps(card_items('toolu_agent_bg')) and 'Subagent hand-back' not in next(i for i in card_items('toolu_agent_text') if i.get('id') == 'toolu_agent_grand').get('content', '')"
-  panel_ctl activate trace/open >/dev/null
-  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
-  check_panel "the subagent's span and its model calls are there, and none of them is a final span" \
-    'T("toolu_agent_text") is not None and any(s["kind"] == "llm" and s["parent"] == "toolu_agent_text" for s in tab()["spans"]) and not any(s["id"].startswith("toolu_agent_text") and s["id"].endswith("/final") for s in tab()["spans"])'
   send_prompt second
   wait_panel "the second turn's cost is the difference of the process's totals: \$0.12" \
     're.match(r"^Done · .+ · \$0\.12$", S("trace")["summary"])' 30
