@@ -446,6 +446,27 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # `claude_reports_api_retries_and_unstreamed_answers`; run them one CLI at a time, with
 # `--test-threads=1` (the command is in docs/agents/architecture/claude-chat.md, Proof and
 # limits).
+# A8, the Hooks card: the seven hooks_* scenarios run on the session-panel stub; hooks_card captures
+# `frames/hooks.png` in a framed run; the other six also run in framed runs and take no captures.
+# Three variables, passed by launch() and reset per scenario: SIRIO_FIXTURE_HOOKS (--fixture-hooks,
+# the JSON file get_hooks_listing answers from, re-read on every request; unset, the fixture refuses
+# it as the 2.1.257 floor does), SIRIO_FIXTURE_HOOKS_GATE (--fixture-hooks-gate, holds each answer
+# until the file exists) and SIRIO_FIXTURE_HANDSHAKE_GATE (--fixture-handshake-gate, which the
+# session-panel stub forwards too: it holds the handshake). The files are written by Python
+# (json.dumps), so a hidden character is only ever built at run time. The scenarios read
+# `sessionPanel` and count the get_hooks_listing lines of the control log after a mark: hooks_card
+# (every group, row key, label, detail and tag; the bodies of the rows worth reading, with a bidi
+# command, a hostile source label and a multi-line command shown as text and the command last; no
+# `editable` anywhere in the read; the last good listing kept after an unreadable answer),
+# hooks_policy (the note's lines in order, the disabled tags per row, the one-line organization
+# note), hooks_refused (the panel opens during a held handshake, so only the connection-ready
+# trigger can ask: one request, no card, and still one after a turn), hooks_closed_panel (no request
+# until the panel opens, none from an idle open panel), hooks_coalesced (triggers during a held
+# answer make one follow-up: two requests in all), hooks_refresh (a turn's end and a reload that
+# applied each ask again; nothing polls) and hooks_unreadable (a note, no rows). Restoring the panel
+# open has no E2E.
+# The live check is `claude_lists_hooks` (#[ignore], acp_conformance; the command is in
+# docs/agents/architecture/claude-chat.md, the Hooks card).
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 

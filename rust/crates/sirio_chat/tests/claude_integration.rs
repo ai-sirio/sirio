@@ -2778,6 +2778,298 @@ fn rules_success_without_state_is_an_error() {
 }
 
 // ---------------------------------------------------------------------------
+// The hooks listing.
+//
+// Ways this can fail (covered by the tests below unless marked):
+//   - no `hooks` array reads as an empty listing instead of an error;
+//   - a CLI error is reworded instead of passed verbatim;
+//   - a row of wrong types hides the listing or is dropped;
+//   - a row without `event`, or with an empty one, is listed;
+//   - a row with neither `displayText` nor `commandText` is listed;
+//   - a row with only `commandText` is dropped, or has no display text;
+//   - a row with a `statusMessage` and no `commandText` invents a command
+//     from the status message;
+//   - a fractional timeout is cut to an integer; a `-0.0` timeout is kept;
+//   - `policy`, `events`, `errors`, `safeMode` or `bareMode` absent or of the
+//     wrong type fails the listing or becomes a value (the defaults rewrite);
+//   - `bareMode` as a boolean becomes a mode (`safeMode` shares the reader).
+// Not covered here, checked by reading only:
+//   - no payload and no error (the worker's `(None, None)` arm): the fixture
+//     always writes a `response`;
+//   - the 10 s timeout and the worker being gone (the handle's errors are the
+//     rules handle's);
+//   - ACP having no handle;
+//   - the trace, state and background fixture loops answering `{}` to the verb
+//     (the main loop is covered by the refusal test; the session-panel E2E's
+//     trace, session-state and background-tasks scenarios open the panel, so
+//     they send the request to the other three, but none asserts the answer).
+
+fn hooks_client(payload: Option<&str>) -> (ClaudeClient, sirio_chat::EventStream, Option<PathBuf>) {
+    let path = payload.map(|payload| scratch_json("hooks", payload));
+    let flags = path
+        .iter()
+        .map(|path| format!("--fixture-hooks={}", path.display()))
+        .collect();
+    let (client, events) = launch_with_flags("echo_control", flags);
+    (client, events, path)
+}
+
+fn expected_hook(event: &str, source: &str, label: &str, text: &str) -> sirio_chat::Hook {
+    sirio_chat::Hook {
+        event: event.into(),
+        matcher: String::new(),
+        source: source.into(),
+        source_label: label.into(),
+        plugin_name: None,
+        content_label: "Command".into(),
+        display_text: text.into(),
+        command_text: Some(text.into()),
+        disabled: false,
+        condition: None,
+        timeout: None,
+        runs_once: false,
+        runs_in_background: false,
+    }
+}
+
+#[test]
+fn hooks_listing_is_read() {
+    // The rows with the CLI's full `sourceLabel` come from the probe (run-q1:
+    // user, user with a status message, project once/background, http; run-q2:
+    // plugin and session); only the user and session rows have shortened
+    // commands. The rest are synthetic edge cases.
+    let (mut client, _events, path) = hooks_client(Some(
+        r#"{"events":[
+              {"name":"PreToolUse","summary":"Before tool execution",
+               "supportsMatcher":true,"hookCount":2},
+              {"summary":"no name"},
+              {"name":"Stop"}],
+            "hooks":[
+              {"event":"PreToolUse","matcher":"Bash","source":"userSettings",
+               "sourceLabel":"User settings (~/.claude/settings.json)","type":"command",
+               "displayText":"echo user-pre-bash","commandText":"echo user-pre-bash",
+               "contentLabel":"Command",
+               "editable":{"matcher":"Bash",
+                           "config":{"type":"command","command":"echo user-pre-bash"}}},
+              {"event":"PreToolUse","matcher":"Bash","source":"userSettings",
+               "sourceLabel":"User settings (~/.claude/settings.json)","type":"command",
+               "displayText":"Checking bash","commandText":"true","contentLabel":"Command",
+               "timeout":7,"statusMessage":"Checking bash"},
+              {"event":"Stop","matcher":"","source":"projectSettings",
+               "sourceLabel":"Project settings (.claude/settings.json)","type":"command",
+               "displayText":"true","commandText":"true","contentLabel":"Command",
+               "runsOnce":true,"runsInBackground":true},
+              {"event":"SubagentStart","matcher":"","source":"projectSettings",
+               "sourceLabel":"Project settings (.claude/settings.json)","type":"http",
+               "displayText":"http://127.0.0.1:9/hook","commandText":"http://127.0.0.1:9/hook",
+               "contentLabel":"URL","condition":"Bash(ls *)"},
+              {"event":"Stop","matcher":"","source":"pluginHook",
+               "sourceLabel":"Plugin hooks (~/.claude/plugins/*/hooks/hooks.json)",
+               "pluginName":"hkplug@inline","type":"command","displayText":"plug stop",
+               "commandText":"true","contentLabel":"Command","statusMessage":"plug stop"},
+              {"event":"PreToolUse","matcher":5,"source":"localSettings","sourceLabel":"Local",
+               "displayText":"wrong types","commandText":"wrong types","contentLabel":"Command",
+               "disabled":"yes","timeout":"7"},
+              {"event":"Stop","source":"userSettings","displayText":"half","commandText":"half",
+               "timeout":1.5,"disabled":true},
+              {"matcher":"Bash","source":"userSettings","displayText":"no event",
+               "commandText":"no event"},
+              {"event":"Notification","source":"userSettings","commandText":"only the command"},
+              {"event":"Notification","source":"policySettings","displayText":"Running a check",
+               "statusMessage":"Running a check"},
+              {"event":"Stop","source":"userSettings","displayText":"negative","timeout":-3},
+              {"event":"PreToolUse","matcher":"Bash","source":"sessionHook",
+               "sourceLabel":"Session hooks (this session only)","type":"command",
+               "displayText":"echo skill-pre","commandText":"echo skill-pre",
+               "contentLabel":"Command"},
+              {"event":"Stop","source":"userSettings","sourceLabel":"No text at all"},
+              {"event":"","source":"userSettings","displayText":"empty event",
+               "commandText":"empty event"},
+              {"event":"Stop","source":"userSettings","displayText":"zero","timeout":-0.0}],
+            "eventCatalog":[{"name":"Stop"}],
+            "safeMode":{"managedHooksStillApply":true,"exitHint":"restart without --safe-mode"},
+            "bareMode":true,
+            "policy":{"allDisabled":true,"policyUnreadable":true,"policyHookCount":2},
+            "errors":[{"file":"/w/.claude/settings.json","path":"hooks.Stop",
+                       "message":"Expected array, but received string"},
+                      {"message":"no file"}]}"#,
+    ));
+    let listing = client
+        .hooks_control()
+        .list()
+        .expect("the fixture answers with a listing");
+
+    assert_eq!(
+        listing.events,
+        vec![
+            sirio_chat::HookEvent {
+                name: "PreToolUse".into(),
+                summary: "Before tool execution".into(),
+            },
+            sirio_chat::HookEvent {
+                name: "Stop".into(),
+                summary: String::new(),
+            },
+        ]
+    );
+
+    let user = "User settings (~/.claude/settings.json)";
+    let project = "Project settings (.claude/settings.json)";
+    let mut plain = expected_hook("PreToolUse", "userSettings", user, "echo user-pre-bash");
+    plain.matcher = "Bash".into();
+    let mut status = expected_hook("PreToolUse", "userSettings", user, "true");
+    status.matcher = "Bash".into();
+    status.display_text = "Checking bash".into();
+    status.timeout = Some("7".into());
+    let mut once = expected_hook("Stop", "projectSettings", project, "true");
+    once.runs_once = true;
+    once.runs_in_background = true;
+    let mut http = expected_hook(
+        "SubagentStart",
+        "projectSettings",
+        project,
+        "http://127.0.0.1:9/hook",
+    );
+    http.content_label = "URL".into();
+    http.condition = Some("Bash(ls *)".into());
+    let mut plugin = expected_hook(
+        "Stop",
+        "pluginHook",
+        "Plugin hooks (~/.claude/plugins/*/hooks/hooks.json)",
+        "true",
+    );
+    plugin.display_text = "plug stop".into();
+    plugin.plugin_name = Some("hkplug@inline".into());
+    // Wrong JSON types: each field reads as absent, the row stays.
+    let wrong = expected_hook("PreToolUse", "localSettings", "Local", "wrong types");
+    let mut half = expected_hook("Stop", "userSettings", "", "half");
+    half.content_label = String::new();
+    half.timeout = Some("1.5".into());
+    half.disabled = true;
+    // Only `commandText`: the display text falls back to it.
+    let mut only_command = expected_hook("Notification", "userSettings", "", "only the command");
+    only_command.content_label = String::new();
+    // A status message and no `commandText`: no command is invented.
+    let mut message = expected_hook("Notification", "policySettings", "", "Running a check");
+    message.content_label = String::new();
+    message.command_text = None;
+    let mut negative = expected_hook("Stop", "userSettings", "", "negative");
+    negative.content_label = String::new();
+    negative.command_text = None;
+    let mut session = expected_hook(
+        "PreToolUse",
+        "sessionHook",
+        "Session hooks (this session only)",
+        "echo skill-pre",
+    );
+    session.matcher = "Bash".into();
+    // A negative zero is not a timeout.
+    let mut zero = expected_hook("Stop", "userSettings", "", "zero");
+    zero.content_label = String::new();
+    zero.command_text = None;
+    assert_eq!(
+        listing.hooks,
+        vec![
+            plain,
+            status,
+            once,
+            http,
+            plugin,
+            wrong,
+            half,
+            only_command,
+            message,
+            negative,
+            session,
+            zero,
+        ]
+    );
+
+    assert_eq!(
+        listing.policy,
+        sirio_chat::HooksPolicy {
+            disabled_by_policy: false,
+            managed_only: false,
+            plugin_only: false,
+            all_disabled: true,
+            unreadable: true,
+        }
+    );
+    assert_eq!(
+        listing.safe_mode,
+        Some(sirio_chat::HooksMode {
+            exit_hint: "restart without --safe-mode".into(),
+            managed_hooks_still_apply: true,
+        })
+    );
+    assert_eq!(listing.bare_mode, None);
+    assert_eq!(
+        listing.errors,
+        vec![sirio_chat::SettingsError {
+            file: "/w/.claude/settings.json".into(),
+            path: "hooks.Stop".into(),
+            message: "Expected array, but received string".into(),
+        }]
+    );
+
+    // The fixture re-reads the file. Every other key of the wrong type, or
+    // absent, reads as its default: the listing stays readable.
+    let path = path.expect("a hooks file");
+    for answer in [
+        r#"{"hooks":[],"policy":"x","events":"x","errors":"x","safeMode":"x","bareMode":1}"#,
+        r#"{"hooks":[]}"#,
+    ] {
+        std::fs::write(&path, answer).expect("rewrite");
+        let listing = client
+            .hooks_control()
+            .list()
+            .expect("a listing with no other key is still a listing");
+        assert!(listing.hooks.is_empty());
+        assert!(listing.events.is_empty());
+        assert!(listing.errors.is_empty());
+        assert_eq!(listing.policy, sirio_chat::HooksPolicy::default());
+        assert_eq!(listing.safe_mode, None);
+        assert_eq!(listing.bare_mode, None);
+    }
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn hooks_refusal_is_the_clis_own_text() {
+    let (mut client, _events, _) = hooks_client(None);
+    let error = client
+        .hooks_control()
+        .list()
+        .expect_err("a CLI without the verb refuses the request");
+    assert_eq!(
+        error,
+        "Unsupported control request subtype: get_hooks_listing"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn hooks_success_without_hooks_is_an_error() {
+    let (mut client, _events, path) = hooks_client(Some("{}"));
+    let error = client
+        .hooks_control()
+        .list()
+        .expect_err("a success with no hooks is not a listing");
+    assert_eq!(error, "the answer had no hooks");
+    // The fixture re-reads the file: hooks that are not a list.
+    let path = path.expect("a hooks file");
+    std::fs::write(&path, r#"{"hooks":"none","policy":{"allDisabled":true}}"#).expect("rewrite");
+    let error = client
+        .hooks_control()
+        .list()
+        .expect_err("hooks that are not a list are not a listing");
+    assert_eq!(error, "the answer had no hooks");
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(path);
+}
+
+// ---------------------------------------------------------------------------
 // The connector switch and the plugin and skill reloads.
 //
 // Ways this can fail:

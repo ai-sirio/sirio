@@ -131,6 +131,18 @@ RULES_LOG_PATH = flag_value("fixture-rules-log")
 RULES_GATE_PATH = flag_value("fixture-rules-gate")
 PERMISSION_FIELDS_PATH = flag_value("fixture-permission-fields")
 RESULT_GATE_PATH = flag_value("fixture-result-gate")
+# `get_hooks_listing`, in all four control loops. Without
+# `--fixture-hooks=<path>` every loop refuses it as an unsupported subtype (never
+# the catch-all success `{}`); with it, the file's JSON is the success payload,
+# verbatim, re-read on each request. `--fixture-hooks-gate=<path>` holds every
+# answer, in order, until the file exists (as `--fixture-rules-gate` does). Every
+# request is in the control log like any other.
+HOOKS_PATH = flag_value("fixture-hooks")
+HOOKS_GATE_PATH = flag_value("fixture-hooks-gate")
+HELD_HOOKS = []
+HELD_HOOKS_LOCK = threading.Lock()
+# True from the first held hooks request until the release thread has answered them all.
+HOOKS_DRAINING = False
 # The connector switch and the reloads, in the main-loop modes only; the other
 # three loops refuse `mcp_toggle`, `reload_plugins` and `reload_skills` as
 # unsupported subtypes. `--fixture-floor` (the flag `background_tasks` reads
@@ -591,6 +603,47 @@ def answer_permission_rules_now(request_id):
             payload = json.load(rules)
     except (OSError, ValueError):
         control_error(request_id, "fixture: unreadable rules file")
+        return
+    control_response(request_id, payload)
+
+
+def answer_hooks_listing(request_id):
+    """One `get_hooks_listing` request, any control loop."""
+    global HOOKS_DRAINING
+    if HOOKS_GATE_PATH:
+        with HELD_HOOKS_LOCK:
+            if HOOKS_DRAINING or not os.path.exists(HOOKS_GATE_PATH):
+                HELD_HOOKS.append(request_id)
+                if not HOOKS_DRAINING:
+                    HOOKS_DRAINING = True
+                    threading.Thread(target=release_held_hooks, daemon=True).start()
+                return
+    answer_hooks_listing_now(request_id)
+
+
+def release_held_hooks():
+    global HOOKS_DRAINING
+    while True:
+        while not os.path.exists(HOOKS_GATE_PATH):
+            time.sleep(0.05)
+        with HELD_HOOKS_LOCK:
+            if not HELD_HOOKS:
+                HOOKS_DRAINING = False
+                return
+            request_id = HELD_HOOKS.pop(0)
+        answer_hooks_listing_now(request_id)
+
+
+def answer_hooks_listing_now(request_id):
+    if not HOOKS_PATH:
+        control_error(request_id,
+                      "Unsupported control request subtype: get_hooks_listing")
+        return
+    try:
+        with open(HOOKS_PATH, encoding="utf-8") as hooks:
+            payload = json.load(hooks)
+    except (OSError, ValueError):
+        control_error(request_id, "fixture: unreadable hooks file")
         return
     control_response(request_id, payload)
 
@@ -1222,6 +1275,8 @@ def trace_main():
                 control_response(request_id, {"mcpServers": []})
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype == "get_hooks_listing":
+                answer_hooks_listing(request_id)
             elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
                 control_error(request_id, f"Unsupported control request subtype: {subtype}")
             elif subtype == "set_permission_mode":
@@ -1624,6 +1679,8 @@ def state_main():
                 control_response(request_id, {"mcpServers": []})
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype == "get_hooks_listing":
+                answer_hooks_listing(request_id)
             elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
                 control_error(request_id, f"Unsupported control request subtype: {subtype}")
             elif subtype == "set_permission_mode":
@@ -1907,6 +1964,8 @@ def bg_main():
                     control_response(request_id, {})
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype == "get_hooks_listing":
+                answer_hooks_listing(request_id)
             elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
                 control_error(request_id, f"Unsupported control request subtype: {subtype}")
             else:
@@ -2422,6 +2481,8 @@ def main():
                 answer_rename(request_id, request)
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
+            elif subtype == "get_hooks_listing":
+                answer_hooks_listing(request_id)
             elif subtype == "mcp_toggle":
                 if TOGGLE_GATE_PATH and not os.path.exists(TOGGLE_GATE_PATH):
                     threading.Thread(target=toggle_when_gated,

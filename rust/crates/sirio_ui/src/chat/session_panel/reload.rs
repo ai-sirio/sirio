@@ -208,6 +208,7 @@ impl Chat {
             let _ = this.update(cx, |chat, cx| {
                 let reload = &mut chat.session_panel.reload;
                 reload.running = false;
+                let applied = matches!(outcome, Outcome::Applied { .. });
                 match outcome {
                     Outcome::Held(impact) => reload.held = Some(impact),
                     Outcome::Applied { error_count, skills } => {
@@ -231,6 +232,10 @@ impl Chat {
                     Outcome::Failed(ReloadError::Failed(text)) => {
                         reload.message = format!("Reload failed: {}", visible_text(&text, false));
                     }
+                }
+                // Plugins carry hooks: an applied reload may have changed them.
+                if applied {
+                    chat.ask_session_hooks(cx);
                 }
                 match answer {
                     Some(list) => chat.connectors_changed(list, cx),

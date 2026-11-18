@@ -67,7 +67,19 @@ pub fn parse_permission_rules(payload: &Value) -> Option<PermissionRules> {
                 .collect()
         })
         .unwrap_or_default();
-    let errors = state
+    Some(PermissionRules {
+        rules,
+        workspace_directories,
+        managed_only: flag(state, "managedOnly"),
+        errors: parse_settings_errors(state),
+        withheld: flag(state, "withheld"),
+    })
+}
+
+/// Reads the `errors` array of a settings answer: the entries that name a
+/// `file` and a `message`.
+pub(crate) fn parse_settings_errors(container: &Value) -> Vec<SettingsError> {
+    container
         .get("errors")
         .and_then(Value::as_array)
         .map(|errors| {
@@ -86,14 +98,7 @@ pub fn parse_permission_rules(payload: &Value) -> Option<PermissionRules> {
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    Some(PermissionRules {
-        rules,
-        workspace_directories,
-        managed_only: flag(state, "managedOnly"),
-        errors,
-        withheld: flag(state, "withheld"),
-    })
+        .unwrap_or_default()
 }
 
 fn parse_rule(row: &Value) -> Option<PermissionRule> {

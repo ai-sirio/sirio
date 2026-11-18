@@ -12,6 +12,9 @@
 #   SIRIO_FIXTURE_TOGGLE_GATE     --fixture-toggle-gate     holds every mcp_toggle answer until the file exists
 #   SIRIO_FIXTURE_CLI_BUSY_GATE   --fixture-cli-busy-gate   the CLI reports a running turn until the file exists
 #   SIRIO_FIXTURE_RESULT_GATE     --fixture-result-gate     holds the turn's result until the file exists
+#   SIRIO_FIXTURE_HANDSHAKE_GATE  --fixture-handshake-gate  holds the session's `initialize` answer until the file exists
+#   SIRIO_FIXTURE_HOOKS           --fixture-hooks           the file whose JSON answers get_hooks_listing; unset: refused
+#   SIRIO_FIXTURE_HOOKS_GATE      --fixture-hooks-gate      holds every get_hooks_listing answer until the file exists
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 [ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
 case "$1" in
@@ -30,4 +33,7 @@ exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fix
   ${SIRIO_FIXTURE_TOGGLE_GATE:+"--fixture-toggle-gate=$SIRIO_FIXTURE_TOGGLE_GATE"} \
   ${SIRIO_FIXTURE_CLI_BUSY_GATE:+"--fixture-cli-busy-gate=$SIRIO_FIXTURE_CLI_BUSY_GATE"} \
   ${SIRIO_FIXTURE_RESULT_GATE:+"--fixture-result-gate=$SIRIO_FIXTURE_RESULT_GATE"} \
+  ${SIRIO_FIXTURE_HANDSHAKE_GATE:+"--fixture-handshake-gate=$SIRIO_FIXTURE_HANDSHAKE_GATE"} \
+  ${SIRIO_FIXTURE_HOOKS:+"--fixture-hooks=$SIRIO_FIXTURE_HOOKS"} \
+  ${SIRIO_FIXTURE_HOOKS_GATE:+"--fixture-hooks-gate=$SIRIO_FIXTURE_HOOKS_GATE"} \
   "$@"

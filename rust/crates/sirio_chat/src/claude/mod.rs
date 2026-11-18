@@ -25,8 +25,8 @@ use sirio_chat_child::{
     terminate_and_reap_blocking,
 };
 use sirio_claude::{
-    ContextBreakdown, McpAuthStart, McpServer, PermissionRules, PluginsReloaded, RewindOutcome,
-    TaskOutput,
+    ContextBreakdown, HooksListing, McpAuthStart, McpServer, PermissionRules, PluginsReloaded,
+    RewindOutcome, TaskOutput,
 };
 
 pub use permission::source_words;
@@ -526,6 +526,14 @@ impl ClaudeClient {
         }
     }
 
+    /// A handle that asks for the loaded hooks from another thread.
+    #[must_use]
+    pub fn hooks_control(&self) -> HooksControl {
+        HooksControl {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+
     /// A handle that reloads plugins and skills from another thread.
     #[must_use]
     pub fn reload_control(&self) -> ReloadControl {
@@ -564,6 +572,39 @@ impl RulesControl {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.command_tx
             .send_blocking(worker::Command::PermissionRules { reply: reply_tx })
+            .map_err(|_| "the Claude worker is not running".to_string())?;
+        match reply_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("Claude Code did not answer in 10 s".to_string())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("the Claude worker is not running".to_string())
+            }
+        }
+    }
+}
+
+/// The hooks-listing call of one session, detached from the client like
+/// [`RulesControl`]. Blocking, so none belongs on a UI thread.
+#[derive(Clone)]
+pub struct HooksControl {
+    command_tx: async_channel::Sender<worker::Command>,
+}
+
+impl std::fmt::Debug for HooksControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HooksControl").finish_non_exhaustive()
+    }
+}
+
+impl HooksControl {
+    /// Asks the CLI for the hooks it loaded. Blocking, bounded at 10 s. A
+    /// refusal carries the CLI's own text, unchanged.
+    pub fn list(&self) -> Result<HooksListing, String> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::HooksListing { reply: reply_tx })
             .map_err(|_| "the Claude worker is not running".to_string())?;
         match reply_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(answer) => answer,

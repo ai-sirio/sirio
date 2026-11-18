@@ -3,7 +3,7 @@
 //! It holds one card per section, stacked and scrolling as a whole; a card
 //! opens and closes from its title. `Chat::session_panel_sections` is the one
 //! list of sections, in the order they are drawn (Environment, then Context,
-//! Connectors, Permissions, Trace and Change request as they land), and both
+//! Connectors, Permissions, Hooks, Trace and Change request as they land), and both
 //! the drawing and the control snapshot read it, so a section appears in each
 //! at once.
 //! Open or closed is the chat's own and survives a relaunch
@@ -14,6 +14,7 @@ mod change_request;
 mod connectors;
 mod context;
 mod environment;
+mod hooks;
 mod permissions;
 mod reload;
 mod trace;
@@ -39,8 +40,8 @@ const OVERLAY_MARGIN: f32 = 16.0;
 /// The cards that start folded: Environment is the only one open. A key here
 /// is a section's fold wherever its card is drawn yet or not, since some are
 /// drawn only once the agent or the forge has answered.
-const FOLDED_AT_START: [&str; 5] =
-    ["context", "connectors", "permissions", "trace", "change_request"];
+const FOLDED_AT_START: [&str; 6] =
+    ["context", "connectors", "permissions", "hooks", "trace", "change_request"];
 
 /// What the debug control verb and the tests can do to the column.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,7 +77,7 @@ pub struct SessionPanelSnapshot {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct SectionSnapshot {
-    /// `environment`, `context`, `connectors`, `permissions`, `trace` or `change_request`.
+    /// `environment`, `context`, `connectors`, `permissions`, `hooks`, `trace` or `change_request`.
     pub key: String,
     pub expanded: bool,
     /// The short line beside the title.
@@ -286,6 +287,7 @@ pub(super) struct SessionPanel {
     connectors: connectors::Connectors,
     reload: reload::Reload,
     permissions: permissions::Permissions,
+    hooks: hooks::Hooks,
     change_request: change_request::ChangeRequest,
     /// What the frames the chat is painted in have told it.
     frame: Rc<Frame>,
@@ -299,13 +301,14 @@ pub(super) struct SessionPanel {
 }
 
 impl SessionPanel {
-    /// Forgets the reported context, connectors and permissions: a new client
+    /// Forgets the reported context, connectors, permissions and hooks: a new client
     /// is a new session.
     pub(super) fn clear_session(&mut self) {
         self.context.clear();
         self.connectors.clear();
         self.reload = reload::Reload::default();
         self.permissions.clear();
+        self.hooks.clear();
     }
 
     pub(super) fn new() -> Self {
@@ -320,6 +323,7 @@ impl SessionPanel {
             connectors: connectors::Connectors::default(),
             reload: reload::Reload::default(),
             permissions: permissions::Permissions::default(),
+            hooks: hooks::Hooks::default(),
             change_request: change_request::ChangeRequest::default(),
             frame: Rc::new(Frame::default()),
             environment: environment::Environment::default(),
@@ -348,6 +352,7 @@ impl Chat {
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
             self.ask_session_permissions(cx);
+            self.ask_session_hooks(cx);
             self.probe_session_change_request_forge(cx);
             self.start_session_change_request(cx);
         } else {
@@ -367,6 +372,7 @@ impl Chat {
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
             self.ask_session_permissions(cx);
+            self.ask_session_hooks(cx);
             self.probe_session_change_request_forge(cx);
             self.start_session_change_request(cx);
         } else {
@@ -455,6 +461,11 @@ impl Chat {
             self.client.as_ref().and_then(ChatClient::rules_control).is_some(),
             &panel.flipped,
         ));
+        sections.extend(hooks::section(
+            &panel.hooks,
+            self.client.as_ref().and_then(ChatClient::hooks_control).is_some(),
+            &panel.flipped,
+        ));
         sections.extend(trace::section(
             &self.trace,
             self.trace_headline(),
@@ -484,6 +495,10 @@ impl Chat {
         // The rules are read when their card is unfolded.
         if key == "permissions" && !self.session_panel.collapsed.contains(key) {
             self.ask_session_permissions(cx);
+        }
+        // So are the hooks.
+        if key == "hooks" && !self.session_panel.collapsed.contains(key) {
+            self.ask_session_hooks(cx);
         }
         // The change request is read only while its card is open.
         if key == "change_request" {

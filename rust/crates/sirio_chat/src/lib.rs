@@ -15,8 +15,8 @@ mod claude;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
 pub use claude::{
-    ClaudeClient, ClaudeLaunch, McpControl, ReloadControl, ReloadError, RulesControl, TaskControl,
-    source_words,
+    ClaudeClient, ClaudeLaunch, HooksControl, McpControl, ReloadControl, ReloadError, RulesControl,
+    TaskControl, source_words,
 };
 pub use sirio_acp::AgentCommand;
 pub use sirio_chat_vocab::*;
@@ -381,6 +381,16 @@ impl ChatClient {
         }
     }
 
+    /// The hooks listing as a handle that can leave the GPUI thread. ACP
+    /// agents have none.
+    #[must_use]
+    pub fn hooks_control(&self) -> Option<HooksControl> {
+        match self {
+            Self::Claude(client) => Some(client.hooks_control()),
+            Self::Acp(_) => None,
+        }
+    }
+
     /// The plugin and skill reloads as a handle that can leave the GPUI
     /// thread. ACP agents have none.
     #[must_use]
@@ -430,7 +440,8 @@ impl ChatClient {
 /// origin. Re-exported because `sirio_ui` reads them and does not depend on
 /// `sirio_claude`.
 pub use sirio_claude::{
-    CacheImpact, ContextBreakdown, ContextOrigins, FastMode, McpAuthStart, McpOrigin, McpServer,
-    McpState, OriginNode, PermissionRule, PermissionRules, PluginsReloaded, SettingsError,
-    Standing, THINKING_DISPLAYS, TaskOutput, is_refusal,
+    CacheImpact, ContextBreakdown, ContextOrigins, FastMode, Hook, HookEvent, HooksListing,
+    HooksMode, HooksPolicy, McpAuthStart, McpOrigin, McpServer, McpState, OriginNode,
+    PermissionRule, PermissionRules, PluginsReloaded, SettingsError, Standing, THINKING_DISPLAYS,
+    TaskOutput, is_refusal,
 };
