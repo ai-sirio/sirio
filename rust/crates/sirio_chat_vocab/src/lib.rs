@@ -687,4 +687,14 @@ pub enum SessionNotice {
         /// The `informational` level was `warning`.
         warning: bool,
     },
+    /// What the CLI answered to a command it ran itself, with no model call
+    /// (`/usage`, `/context`).
+    LocalCommandOutput {
+        /// The command's name, without the slash.
+        command: String,
+        text: String,
+        /// The structured twin of the text (`usage_report`), raw: this crate
+        /// does not know the CLI's types.
+        report: Option<serde_json::Value>,
+    },
 }

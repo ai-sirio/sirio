@@ -623,6 +623,48 @@ impl Chat {
                     skipped_links,
                 ))
                 .into_any_element(),
+            Entry::CommandOutput { command, text } => {
+                let label = command_label(&command);
+                // The text starts after the label and its line break, so a
+                // selection highlights exactly what it copies.
+                let text_start = source_start + label.len() + 1;
+                div()
+                    .id(("command-output", entry_index))
+                    .debug_selector(move || format!("command-output-{entry_index}"))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .font_family(typography.code_family)
+                    .text_size(typography.footnote)
+                    .child(
+                        div().text_color(theme.ely.fg_subtle).child(Self::render_plain_text(
+                            label,
+                            theme,
+                            format!("command-output-label-{entry_index}"),
+                            source_start,
+                            Some(&interaction),
+                        )),
+                    )
+                    // Its columns are kept: a long line scrolls sideways
+                    // instead of wrapping into the next one.
+                    .child(
+                        div()
+                            .id(("command-output-body", entry_index))
+                            .overflow_x_scroll()
+                            .whitespace_nowrap()
+                            .text_color(theme.ely.fg_muted)
+                            .child(Self::render_plain_text(
+                                text,
+                                theme,
+                                format!("command-output-text-{entry_index}"),
+                                text_start,
+                                Some(&interaction),
+                            )),
+                    )
+                    .into_any_element()
+            }
             Entry::TurnFooter(at) => div()
                 .w_full()
                 .flex()

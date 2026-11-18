@@ -93,6 +93,10 @@ pub(crate) struct Fold {
     /// The last event this turn that opened or extended a transcript row was
     /// an `AgentMessageChunk`, so the next chunk would run on into it.
     last_row_was_chunk: bool,
+    /// The text of a local command's answer drawn this turn, until the turn
+    /// ends. A command that fails repeats it as its `result`, and drawing
+    /// that too would print the answer twice.
+    local_command_text: Option<String>,
 }
 
 /// What an `assistant` line's model says when the CLI wrote the line itself
@@ -256,6 +260,33 @@ impl Fold {
                         .is_none_or(|id| self.streamed_ids.contains(id))
                     || matches!(self.open_message, Some(None));
                 self.orphan_text = false;
+                if synthetic && assistant.local_command_run.is_some() {
+                    // The CLI answered a command itself (`/usage`): its text
+                    // is drawn as the command's output, never as the model's.
+                    let text = assistant.text();
+                    let report = assistant
+                        .usage_report
+                        .clone()
+                        .map(serde_json::Value::Object);
+                    if !text.is_empty() || report.is_some() {
+                        self.local_command_text = Some(text.clone()).filter(|t| !t.is_empty());
+                        self.notices.push(SessionNotice::LocalCommandOutput {
+                            command: assistant
+                                .local_command_run
+                                .as_ref()
+                                .map(|run| run.command.clone())
+                                .unwrap_or_default(),
+                            text,
+                            report,
+                        });
+                        // Its row sits between the text around it, so the
+                        // next chunk opens a new row and needs no separator.
+                        self.last_row_was_chunk = false;
+                        events.push(ChatEvent::OtherSessionUpdate {
+                            kind: "SessionNotice".into(),
+                        });
+                    }
+                }
                 if !synthetic && !drawn_by_stream {
                     let body = assistant.text();
                     if !body.is_empty() {
@@ -639,8 +670,10 @@ impl Fold {
 
     fn apply_result(&mut self, result: ResultPayload) -> Vec<ChatEvent> {
         let mut events = Vec::new();
+        let local_command_text = self.local_command_text.take();
         if result.is_error
             && let Some(text) = result.result.clone().filter(|text| !text.is_empty())
+            && local_command_text.as_deref() != Some(text.as_str())
         {
             // The user must see why a turn failed. The alternative — a bare
             // footer saying "ended" — is the exact silent failure this
@@ -1268,5 +1301,181 @@ mod tests {
             [ChatEvent::ToolCallUpdated { id, status: Some(status), .. }]
                 if id == "toolu_main" && status == "Pending"
         ));
+    }
+
+    // --- A local command's answer (`/usage`, `/context`).
+
+    fn local_command_line(model: &str, run: serde_json::Value, text: &str) -> serde_json::Value {
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_local", "model": model,
+                        "content": [{"type": "text", "text": text}]},
+            "local_command_run": run,
+            "parent_tool_use_id": null
+        })
+    }
+
+    fn output_signal() -> Vec<ChatEvent> {
+        vec![ChatEvent::OtherSessionUpdate {
+            kind: "SessionNotice".into(),
+        }]
+    }
+
+    #[test]
+    fn a_synthetic_answer_to_a_local_command_is_one_output_notice() {
+        let mut fold = Fold::new();
+        fold.last_row_was_chunk = true;
+        let line = local_command_line(
+            "<synthetic>",
+            json!({"command": "usage", "args": ""}),
+            "Estimated cost: $0",
+        );
+        assert_eq!(fold.apply(parse(line)), output_signal());
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::LocalCommandOutput {
+                command: "usage".into(),
+                text: "Estimated cost: $0".into(),
+                report: None,
+            }]
+        );
+        assert!(
+            !fold.last_row_was_chunk,
+            "the output is a row of its own: the next chunk must not run on into it"
+        );
+    }
+
+    #[test]
+    fn the_usage_report_travels_raw_and_only_as_an_object() {
+        let report = json!({"rate_limits": null, "limits": [{"kind": "session", "percent": 12}]});
+        let mut fold = Fold::new();
+        let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "text");
+        line["usage_report"] = report.clone();
+        fold.apply(parse(line));
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::LocalCommandOutput {
+                command: "usage".into(),
+                text: "text".into(),
+                report: Some(report),
+            }]
+        );
+        for unusable in [json!(null), json!([1]), json!("x"), json!(7)] {
+            let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "text");
+            line["usage_report"] = unusable;
+            fold.apply(parse(line));
+            assert!(matches!(
+                fold.take_notices().as_slice(),
+                [SessionNotice::LocalCommandOutput { report: None, .. }]
+            ));
+        }
+    }
+
+    #[test]
+    fn a_report_with_no_text_is_still_an_answer_but_nothing_at_all_is_not() {
+        let mut fold = Fold::new();
+        let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "");
+        assert_eq!(fold.apply(parse(line.clone())), vec![]);
+        assert!(fold.take_notices().is_empty());
+        line["usage_report"] = json!({"limits": []});
+        assert_eq!(fold.apply(parse(line)), output_signal());
+        assert!(matches!(
+            fold.take_notices().as_slice(),
+            [SessionNotice::LocalCommandOutput { text, report: Some(_), .. }] if text.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_model_answer_that_carries_the_marker_is_left_to_the_ordinary_rules() {
+        let mut fold = Fold::new();
+        let line = local_command_line(
+            "claude-opus-5",
+            json!({"command": "usage", "args": ""}),
+            "an answer no stream carried",
+        );
+        assert_eq!(
+            fold.apply(parse(line)),
+            vec![ChatEvent::AgentMessageChunk("an answer no stream carried".into())]
+        );
+        assert!(fold.take_notices().is_empty());
+    }
+
+    #[test]
+    fn a_subagents_message_is_not_a_local_command_answer() {
+        let mut fold = Fold::new();
+        let mut line = local_command_line("<synthetic>", json!({"command": "usage"}), "text");
+        line["parent_tool_use_id"] = json!("toolu_parent");
+        assert_eq!(fold.apply(parse(line)), vec![]);
+        assert!(fold.take_notices().is_empty());
+    }
+
+    #[test]
+    fn a_wrongly_typed_marker_draws_nothing_and_the_line_still_parses() {
+        for run in [json!("usage"), json!({"command": 5}), json!([]), json!(null)] {
+            let line = local_command_line("<synthetic>", run, "text");
+            let message = parse(line);
+            assert!(
+                matches!(message, CliMessage::Assistant(_)),
+                "a wrong type costs the field, never the line"
+            );
+            let mut fold = Fold::new();
+            assert_eq!(fold.apply(message), vec![]);
+            assert!(fold.take_notices().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_assistant_line_with_neither_field_still_parses_as_assistant() {
+        // `AssistantPayload` has no container default: the two fields must carry
+        // their own, or every ordinary line would demote to `Other`.
+        let message = parse(json!({
+            "type": "assistant",
+            "message": {"id": "msg_1", "model": "claude-opus-5",
+                        "content": [{"type": "text", "text": "hi"}]}
+        }));
+        let CliMessage::Assistant(assistant) = message else {
+            panic!("an ordinary assistant line must parse as Assistant");
+        };
+        assert!(assistant.local_command_run.is_none() && assistant.usage_report.is_none());
+    }
+
+    #[test]
+    fn a_failing_command_is_drawn_once_not_again_as_the_results_error() {
+        let mut fold = Fold::new();
+        fold.apply(parse(local_command_line(
+            "<synthetic>",
+            json!({"command": "usage"}),
+            "the block",
+        )));
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": true, "result": "the block",
+            "num_turns": 0
+        })));
+        assert!(
+            !events.iter().any(|e| matches!(e, ChatEvent::AgentMessageChunk(_))),
+            "the failed result repeats the text already drawn: {events:?}"
+        );
+        assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
+
+        // The remembered text ends with its turn: the same words as a later
+        // turn's failure are that turn's own error and are drawn.
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": true, "result": "the block"
+        })));
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::AgentMessageChunk(_))));
+    }
+
+    #[test]
+    fn a_failing_result_with_other_words_is_still_drawn() {
+        let mut fold = Fold::new();
+        fold.apply(parse(local_command_line(
+            "<synthetic>",
+            json!({"command": "usage"}),
+            "the block",
+        )));
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": true, "result": "a real failure"
+        })));
+        assert!(events.contains(&ChatEvent::AgentMessageChunk("a real failure".into())));
     }
 }

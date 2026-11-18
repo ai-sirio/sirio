@@ -1092,6 +1092,10 @@ enum Entry {
         deletions: u64,
         skipped_links: u64,
     },
+    /// What the CLI answered to a command it ran itself (`/usage`): the
+    /// command's name and its text, already cleaned for display. Never
+    /// persisted: it states the account as it is right now.
+    CommandOutput { command: String, text: String },
     /// A transport failure, surfaced instead of silently doing nothing.
     Error {
         message: String,
@@ -1248,9 +1252,17 @@ impl Entry {
                 deletions,
                 skipped_links,
             } => rewind_report_text(files, *insertions, *deletions, *skipped_links),
+            Self::CommandOutput { command, text } => {
+                format!("{}\n{text}", command_label(command))
+            }
             Self::Error { message, .. } => message.clone(),
         }
     }
+}
+
+/// The line over a local command's output: the command as the reader typed it.
+fn command_label(command: &str) -> String {
+    format!("/{command}")
 }
 
 /// The answer to one `rewind_files` call, reduced to what the surface
@@ -1445,6 +1457,9 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
         // not the conversation: restoring it later would present a stale
         // restore as a live one.
         Entry::RewindPreview { .. } | Entry::RewindReport { .. } => None,
+        // The account's state at a moment in time, like a warning: restored
+        // later it would state numbers that are no longer true.
+        Entry::CommandOutput { .. } => None,
         // A live request: restored tomorrow it would offer an answer to a
         // server that is no longer waiting.
         Entry::Elicitation { .. } => None,
@@ -3063,6 +3078,17 @@ impl Chat {
                 })
                 .detach();
                 return;
+            }
+            // What the CLI answered to a command it ran itself. The text is
+            // the CLI's, so it is cleaned here, once, for what is drawn,
+            // copied and read back.
+            SessionNotice::LocalCommandOutput { command, text, .. } => {
+                // `push_entry` leaves a thought open across a notice.
+                self.settle_open_thought();
+                Entry::CommandOutput {
+                    command: visible_text::visible_text(&command, false),
+                    text: visible_text::visible_text(&text, true),
+                }
             }
             // The CLI's own words: a refusal, a fallback, an informational line.
             // Nothing is added for an empty one.
@@ -7447,6 +7473,11 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
         }
         Entry::RewindReport { .. } => {
             row.insert("kind".into(), "rewind-report".into());
+        }
+        Entry::CommandOutput { command, text } => {
+            row.insert("kind".into(), "command-output".into());
+            row.insert("command".into(), command.clone());
+            row.insert("text".into(), text.clone());
         }
         Entry::Error { message, .. } => {
             row.insert("kind".into(), "error".into());

@@ -93,6 +93,11 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   limit_notice       (SIRIO_FIXTURE_LIMITS, SIRIO_E2E_TZ=UTC) the rate-limit rows say which window, how full and when
 #                      it resets: a warning once (not again, but again after an allowed), then the refusal, then the
 #                      overage refusal with its scope; the CLI's own refusal text is still one assistant row
+#   usage_text         (SIRIO_FIXTURE_USAGE) a local command's answer (`/usage`, `/context`) is one command-output row
+#                      holding the CLI's text, never an assistant row, also when the command's `result` fails and
+#                      repeats the text
+#   usage_floor        (SIRIO_FIXTURE_USAGE) a CLI that writes no marker for `/usage` (the floor's) adds only the turn
+#                      row, ends the turn and still answers the next prompt
 #   startup_*          (SIRIO_FIXTURE_STARTUP) the chat's error row is the CLI's own start-up text, with no ACP in it:
 #     startup_config_invalid  the sentence, the file and its backup, and the override shown as text
 #     startup_opt_in     a reason the CLI reports only when Sirio's launch sets CLAUDE_CODE_STARTUP_FAILURE_RESULTS
@@ -392,7 +397,7 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   permission_rules permission_rules_refused permission_rules_closed_panel permission_rules_coalesced
   permission_rules_after_always_allow permission_rules_unreadable
   hooks_card hooks_policy hooks_refused hooks_closed_panel hooks_coalesced hooks_refresh hooks_unreadable
-  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream limit_notice
+  notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream limit_notice usage_text usage_floor
   startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
@@ -1238,6 +1243,8 @@ capture() { # name
 #   SIRIO_FIXTURE_RETRY_GATE, SIRIO_FIXTURE_STARTUP  the notices stub's file that holds `retry twice` after its retries,
 #                  and the kind of start-up failure the CLI reports (notice_*)
 #   SIRIO_FIXTURE_LIMITS  the notices stub's JSON {"soon": epoch, "later": epoch}: the resets the `limit ...` prompts report
+#   SIRIO_FIXTURE_USAGE  the notices stub's JSON {"marker": bool, "report": value, "fails": bool}: how `/usage` and
+#                  `/context` answer (usage_*)
 #   SIRIO_E2E_TZ   when set, the TZ Sirio runs under, so local times are the same wherever the run happens
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
@@ -1280,7 +1287,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_RELOAD=${SIRIO_FIXTURE_RELOAD:-}" "SIRIO_FIXTURE_RELOAD_GATE=${SIRIO_FIXTURE_RELOAD_GATE:-}"
     "SIRIO_FIXTURE_SKILLS=${SIRIO_FIXTURE_SKILLS:-}" "SIRIO_FIXTURE_CLI_BUSY_GATE=${SIRIO_FIXTURE_CLI_BUSY_GATE:-}"
     "SIRIO_FIXTURE_RETRY_GATE=${SIRIO_FIXTURE_RETRY_GATE:-}" "SIRIO_FIXTURE_STARTUP=${SIRIO_FIXTURE_STARTUP:-}"
-    "SIRIO_FIXTURE_LIMITS=${SIRIO_FIXTURE_LIMITS:-}"
+    "SIRIO_FIXTURE_LIMITS=${SIRIO_FIXTURE_LIMITS:-}" "SIRIO_FIXTURE_USAGE=${SIRIO_FIXTURE_USAGE:-}"
     "SIRIO_FIXTURE_HOOKS=${SIRIO_FIXTURE_HOOKS:-}" "SIRIO_FIXTURE_HOOKS_GATE=${SIRIO_FIXTURE_HOOKS_GATE:-}"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
@@ -5292,6 +5299,54 @@ PY
   stop_app
 }
 
+# What a local command answers (A9). The fixture's file is re-read on every command, so a scenario changes
+# its answer between two sends.
+usage_options() { # json
+  printf '%s' "$1" >"$SIRIO_FIXTURE_USAGE"
+}
+# The rows a local command's answer can be taken for, as (kind, command, text) triples.
+USAGE_ROWS="[(r['kind'], r.get('command', ''), r.get('text', '')) for r in c['transcript'] if r['kind'] in ('assistant', 'command-output')]"
+
+scenario_usage_text() {
+  SIRIO_FIXTURE_USAGE="$RUN_DIR/usage_text-usage.json"
+  usage_options '{}'
+  notices_chat usage_text
+  local block='Estimated cost:        $0.0000\nTotal duration (API):  0s\nTotal duration (wall): 3s\nTotal code changes:    0 lines added, 0 lines removed\nUsage:                 0 input, 0 output, 0 cache read, 0 cache write'
+  send_prompt "/usage"
+  notice_turns "the /usage turn ends" 1
+  check_panel "one command-output row holds the CLI's block, and it is not an assistant row" \
+    "$USAGE_ROWS == [('command-output', 'usage', '$block')]"
+  send_prompt "/context"
+  notice_turns "the /context turn ends" 2
+  check_panel "/context is a row of its own, in order" \
+    "$USAGE_ROWS == [('command-output', 'usage', '$block'), ('command-output', 'context', 'Context: 1k of 200k tokens')]"
+  usage_options '{"fails": true}'
+  send_prompt "/usage"
+  notice_turns "the failing /usage turn ends" 3
+  check_panel "a failing command is drawn once, never again as an assistant row" \
+    "$USAGE_ROWS == [('command-output', 'usage', '$block'), ('command-output', 'context', 'Context: 1k of 200k tokens'), ('command-output', 'usage', '$block')]"
+  echo "OK: usage_text: a local command's answer is one command-output row, not an assistant row"
+  stop_app
+}
+
+# Guard: the floor's `/usage` carries no marker, so the scenario holds before A9. It pins that nothing is drawn
+# and no spinner stays.
+scenario_usage_floor() {
+  SIRIO_FIXTURE_USAGE="$RUN_DIR/usage_floor-usage.json"
+  usage_options '{"marker": false}'
+  notices_chat usage_floor
+  send_prompt "/usage"
+  notice_turns "the /usage turn ends" 1
+  check_panel "Guard: only the user's row and the turn are there, and nothing streams" \
+    "[r['kind'] for r in c['transcript']] == ['user', 'turn'] and c['status'] == 'completed'"
+  send_prompt "hello"
+  notice_turns "the next prompt is answered" 2
+  check_panel "Guard: the next prompt gets its answer" \
+    "[r for r in c['transcript'] if r['kind'] == 'assistant'][-1]['text'] == 'ok'"
+  echo "OK: usage_floor: a command with no marker adds only the turn row and the chat still answers"
+  stop_app
+}
+
 # ---- the startup_* scenarios (A7) ------------------------------------------------------
 # A fresh Sirio on the notices stub whose CLI cannot start; waits for the chat's error row, not a connection.
 startup_chat() { # name kind
@@ -5368,6 +5423,7 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_RETRY_GATE=""
   SIRIO_FIXTURE_STARTUP=""
   SIRIO_FIXTURE_LIMITS=""
+  SIRIO_FIXTURE_USAGE=""
   SIRIO_E2E_TZ=""
   SIRIO_FIXTURE_HOOKS=""
   SIRIO_FIXTURE_HOOKS_GATE=""

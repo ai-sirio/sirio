@@ -457,6 +457,25 @@ pub struct AssistantPayload {
     pub session_id: Option<String>,
     #[serde(default)]
     pub uuid: Option<String>,
+    /// Set when the CLI answered a local command itself (`/usage`,
+    /// `/context`): the message is a synthetic one holding the command's
+    /// output, with no model call behind it.
+    #[serde(default, deserialize_with = "lenient")]
+    pub local_command_run: Option<LocalCommandRun>,
+    /// The structured twin of a local command's text, only `/usage` on a
+    /// subscriber's account. Kept raw: an object, or nothing.
+    #[serde(default, deserialize_with = "lenient")]
+    pub usage_report: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Which local command a synthetic assistant message answers.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct LocalCommandRun {
+    /// The command's name, without the slash.
+    pub command: String,
+    /// What followed the name on the line.
+    #[serde(default, deserialize_with = "lenient")]
+    pub args: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

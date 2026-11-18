@@ -40,7 +40,7 @@ pub use launch::{ChatSession, LaunchLine};
 pub use mcp::{McpAuthStart, McpOrigin, McpServer, McpState, parse_mcp_status};
 pub use message::{
     AgentToolResult, AssistantMessage, AssistantPayload, BackgroundTask, CliMessage,
-    CompactMetadata, ContentBlock, Delta, McpServerStatus, MessageLifecycle, MessageUsage,
+    CompactMetadata, ContentBlock, Delta, LocalCommandRun, McpServerStatus, MessageLifecycle, MessageUsage,
     InvalidConfigFile, ModelUsage, RateLimitPush, ResultPayload, StartupFailure, StreamEventPayload,
     SystemPayload, TaskOutput, TaskUsage, ToolResult, ToolUse, UserMessage, UserPayload,
 };

@@ -2148,7 +2148,50 @@ def cli_inform(content, level):
     cli_system("informational", content=content, level=level)
 
 
+# `--fixture-usage=<file>`: JSON `{"marker": bool, "report": <value>, "fails": bool}` for the local
+# commands `/usage` and `/context`, re-read on every one. A missing key means: `marker` true, no
+# `usage_report` field written, `fails` false. `"report": null` writes `usage_report: null`.
+USAGE_PATH = flag_value("fixture-usage")
+USAGE_TEXT = ("Estimated cost:        $0.0000\nTotal duration (API):  0s\n"
+              "Total duration (wall): 3s\n"
+              "Total code changes:    0 lines added, 0 lines removed\n"
+              "Usage:                 0 input, 0 output, 0 cache read, 0 cache write")
+CONTEXT_TEXT = "Context: 1k of 200k tokens"
+
+
+def cli_local_command(command):
+    """A command the CLI answers itself, as the real one does (probe a9, Q1): no model call,
+    so no `requesting` line. A synthetic assistant message and a `result`; with `marker` false,
+    the floor's shape, both without the field that names the command."""
+    options = {}
+    if USAGE_PATH:
+        with open(USAGE_PATH, encoding="utf-8") as handle:
+            options = json.load(handle)
+    marker = options.get("marker", True)
+    body = USAGE_TEXT if command == "usage" else CONTEXT_TEXT
+    assistant = {"type": "assistant",
+                 "message": {"id": trace_uuid(), "type": "message", "role": "assistant",
+                             "model": "<synthetic>", "content": [{"type": "text", "text": body}],
+                             "stop_reason": None},
+                 "parent_tool_use_id": None, "session_id": SESSION_ID, "uuid": trace_uuid()}
+    if marker:
+        assistant["local_command_run"] = {"command": command, "args": ""}
+    if "report" in options:
+        assistant["usage_report"] = options["report"]
+    send(assistant)
+    result_line = {"type": "result", "subtype": "success", "is_error": bool(options.get("fails")),
+                   "num_turns": 0, "total_cost_usd": 0, "duration_ms": 0, "duration_api_ms": 0,
+                   "stop_reason": None, "result": body,
+                   "session_id": SESSION_ID, "uuid": trace_uuid()}
+    if marker:
+        result_line["local_command"] = command
+    send(result_line)
+
+
 def cli_notices_turn(prompt):
+    if prompt in ("/usage", "/context"):
+        cli_local_command(prompt[1:])
+        return
     requesting()
     if prompt == "retry twice":
         cli_retry(1, 617, 529, "overloaded")
