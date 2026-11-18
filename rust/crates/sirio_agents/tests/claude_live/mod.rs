@@ -306,8 +306,35 @@ impl CliEnv {
             );
         if let Some(token) = &self.auth_token {
             command.env("ANTHROPIC_AUTH_TOKEN", token);
+            // Every command that carries the token passes the guard, `run_claude` included.
+            assert_local_base_url(command);
         }
     }
+}
+
+/// Whether `url` is the fake API on this machine: `http://127.0.0.1:`, a port, then the end
+/// or a path. A prefix check alone would let `http://127.0.0.1:1@example.com/` through.
+pub fn is_local_base_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(b'/'))
+}
+
+/// Panics unless the finished `command`'s `ANTHROPIC_BASE_URL` is a local one. Read from the
+/// command's own environment, so no later `env` call can point it elsewhere. The message
+/// names neither the URL nor anything else of the environment.
+fn assert_local_base_url(command: &Command) {
+    let local = command
+        .get_envs()
+        .find(|(name, _)| *name == "ANTHROPIC_BASE_URL")
+        .and_then(|(_, value)| value)
+        .is_some_and(|url| is_local_base_url(&url.to_string_lossy()));
+    assert!(
+        local,
+        "the CLI's ANTHROPIC_BASE_URL is a 127.0.0.1 address: false"
+    );
 }
 
 /// What a finished `Session::run_claude` printed.
@@ -568,16 +595,7 @@ impl Session {
         };
         cli.apply(&mut command);
         if limits.is_some() {
-            // Read from the finished command, so no later `env` call can point it elsewhere.
-            let local = command
-                .get_envs()
-                .find(|(name, _)| *name == "ANTHROPIC_BASE_URL")
-                .and_then(|(_, value)| value)
-                .is_some_and(|url| url.to_string_lossy().starts_with("http://127.0.0.1:"));
-            assert!(
-                local,
-                "the CLI's ANTHROPIC_BASE_URL is a 127.0.0.1 address: false"
-            );
+            assert_local_base_url(&command);
         }
         command
             .stdin(Stdio::piped())

@@ -2778,14 +2778,15 @@ fn parsed_turn(lines: &[serde_json::Value]) -> Vec<sirio_claude::CliMessage> {
 }
 
 /// The requests the fake limits API logged so far (`fake_limits_api.py` writes one line of
-/// method and path per request to the limits file's `.requests` sibling).
-fn logged_requests(limits: &std::path::Path) -> Vec<serde_json::Value> {
+/// method and path per request to the limits file's `.requests` sibling). Every line counts,
+/// whether or not it parses.
+fn logged_requests(limits: &std::path::Path) -> Vec<String> {
     let mut path = limits.as_os_str().to_owned();
     path.push(".requests");
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .map(str::to_string)
         .collect()
 }
 
@@ -2830,12 +2831,14 @@ fn claude_answers_usage_locally() {
                 && assistant.local_command_run.as_ref().is_some_and(|run| run.command == "usage"))
     });
     assert!(marker.is_some(), "a top-level assistant line with local_command_run usage");
-    let result = lines.iter().position(|line| line["type"] == "result");
+    let result = lines.iter().find(|line| line["type"] == "result");
     assert!(result.is_some(), "the turn ends with a result");
-    assert!(marker < result, "the marker line comes before the result");
-    let result = &lines[result.unwrap()];
-    assert_eq!(result["num_turns"], 0, "the result's num_turns is 0");
-    assert_eq!(result["local_command"], "usage", "the result's local_command is usage");
+    let result = result.unwrap();
+    assert!(result["num_turns"] == 0, "the result's num_turns is 0: false");
+    assert!(
+        result["local_command"] == "usage",
+        "the result's local_command is usage: false"
+    );
     assert!(
         logged_requests(&limits).is_empty(),
         "/usage sent no request to the model API"
@@ -2844,8 +2847,9 @@ fn claude_answers_usage_locally() {
     // Positive control: a prompt the CLI does send logs exactly one request.
     let _ = run_turn(&mut session, "say hi");
     let requests = logged_requests(&limits);
-    assert_eq!(requests.len(), 1, "one request after say hi");
-    let path = requests[0]["path"].as_str().unwrap_or_default();
+    assert!(requests.len() == 1, "one request after say hi: false");
+    let logged: serde_json::Value = serde_json::from_str(&requests[0]).unwrap_or_default();
+    let path = logged["path"].as_str().unwrap_or_default();
     assert!(
         path.starts_with("/v1/messages"),
         "the request is a /v1/messages call"
@@ -2988,13 +2992,16 @@ fn claude_reports_rate_limits_through_a_gateway() {
     let CliMessage::RateLimit(push) = &turn[warning.unwrap()] else {
         unreachable!()
     };
-    assert_eq!(push.rate_limit_type.as_deref(), Some("five_hour"), "the window is five_hour");
-    assert_eq!(push.used_percent, Some(92), "the window is 92 percent used");
-    assert_eq!(push.resets_at, Some(in_five_hours), "the event carries the written reset");
-    let result = turn
-        .iter()
-        .position(|message| matches!(message, CliMessage::Result(_)));
-    assert!(warning < result, "the event comes before the result");
+    assert!(
+        push.rate_limit_type.as_deref() == Some("five_hour"),
+        "the window is five_hour: false"
+    );
+    assert!(push.used_percent == Some(92), "the window is 92 percent used: false");
+    assert!(
+        push.resets_at == Some(in_five_hours),
+        "the event carries the written reset: false"
+    );
+    // `run_turn` stops at the turn's result, so an event in `turn` came before it.
 
     // Turn 2: an overage refusal charged to the pooled budget (`rej-overage-orgcap-group_pool`).
     write_limits(
@@ -3021,8 +3028,14 @@ fn claude_reports_rate_limits_through_a_gateway() {
     let CliMessage::RateLimit(push) = &turn[rejection.unwrap()] else {
         unreachable!()
     };
-    assert_eq!(push.rate_limit_type.as_deref(), Some("overage"), "the window is overage");
-    assert_eq!(push.limit_scope.as_deref(), Some("group_pool"), "the scope is group_pool");
+    assert!(
+        push.rate_limit_type.as_deref() == Some("overage"),
+        "the window is overage: false"
+    );
+    assert!(
+        push.limit_scope.as_deref() == Some("group_pool"),
+        "the scope is group_pool: false"
+    );
     let failed = turn
         .iter()
         .any(|message| matches!(message, CliMessage::Result(result) if result.is_error));
@@ -3042,13 +3055,21 @@ fn claude_reports_rate_limits_through_a_gateway() {
 /// It launches the user's `claude` in their environment, in a fresh directory under TMPDIR,
 /// with the launch line of Sirio's usage probe (`--no-session-persistence`,
 /// `--setting-sources ""`), so no hook or MCP server of theirs runs and no session file is
-/// written. It sends only `/usage` and prints no value:
+/// written. It sends only `/usage` (no model turn, so nothing is spent) and prints no value of
+/// the account, only one status line of structure counts:
 ///
 ///     SIRIO_LIVE_CLAUDE_ACCOUNT=1 TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --nocapture --test-threads=1 claude_usage_report_on_account
 ///
-/// It asserts the marker, `num_turns` 0 and, when the answer carries a `usage_report`, that
-/// `UsageReport::parse` reads it, every row names its kind, group and severity, and every
-/// model's four token counts are read: the keys proven against the real wire.
+/// What a fresh `/usage` can prove, and this asserts: the marker (`local_command_run` usage),
+/// `num_turns` 0 and, when the answer carries a `usage_report`, that `UsageReport::parse`
+/// reads it and that every limit row names its kind, group and severity. The status line says
+/// whether a report came, whether its limits were rows or unavailable, and how many rows and
+/// models were checked, so a pass that checked nothing shows as such.
+///
+/// The four token counts of a `model_usage` entry are checked only for models the session
+/// already holds, which a fresh session does not: its `session.model_usage` is empty, so
+/// "models checked" is normally 0 and those keys are not proven against the wire by this test.
+/// SKIPs below 2.1.301, where `local_command_run` first appears.
 #[test]
 #[ignore = "runs the user's own claude against their real account, by hand only"]
 fn claude_usage_report_on_account() {
@@ -3063,31 +3084,48 @@ fn claude_usage_report_on_account() {
         eprintln!("SKIP: claude is not on PATH");
         return;
     };
-    let version_output = Command::new(&program)
-        .arg("--version")
-        .output()
-        .expect("claude --version runs");
-    let version_text = String::from_utf8_lossy(&version_output.stdout)
-        .trim()
-        .to_string();
-    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
-        panic!("claude reported an unreadable version");
-    };
-    eprintln!("claude reports {version_text}");
-    if !version.meets_floor() {
-        eprintln!("SKIP: claude {version} is below the claimed floor");
-        return;
-    }
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         eprintln!("SKIP: HOME is not set");
         return;
     };
     let real_home = home.canonicalize().unwrap_or(home);
     let scratch = claude_live::Scratch::new("usage-account", &real_home);
+
+    // `claude --version` in the user's own environment, within 30 s.
+    let version_path = scratch.root.join("version.out");
+    let mut version_child = Command::new(&program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(std::fs::File::create(&version_path).unwrap())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("claude --version runs");
+    let version_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if version_child.try_wait().expect("claude --version is waited on").is_some() {
+            break;
+        }
+        if Instant::now() >= version_deadline {
+            let _ = version_child.kill();
+            let _ = version_child.wait();
+            panic!("claude --version did not finish in 30 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let version_text = std::fs::read_to_string(&version_path).unwrap_or_default();
+    let version_text = version_text.trim();
+    let Some(version) = sirio_claude::ClaudeVersion::parse(version_text) else {
+        panic!("claude reported an unreadable version");
+    };
+    eprintln!("claude reports {version_text}");
+    if !version.meets_floor() || version < sirio_claude::ClaudeVersion::new(2, 1, 301) {
+        eprintln!("SKIP: claude {version} is below what this test needs");
+        return;
+    }
     let work = scratch.root.join("work");
     std::fs::create_dir_all(&work).unwrap();
 
-    /// Kills the CLI on every exit path.
+    /// Kills the CLI on every exit path, after the test had its chance to let it finish.
     struct Kill(std::process::Child);
     impl Drop for Kill {
         fn drop(&mut self) {
@@ -3138,9 +3176,17 @@ fn claude_usage_report_on_account() {
             break;
         }
     }
+    // Close stdin and give the CLI up to 10 s to exit by itself: it may still be writing to
+    // the user's own config directory, and only then is it killed.
+    drop(stdin);
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    while child.0.try_wait().ok().flatten().is_none() && Instant::now() < exit_deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     let result = lines.iter().find(|line| line["type"] == "result");
     assert!(result.is_some(), "/usage ends with a result within 60 s");
-    assert_eq!(result.unwrap()["num_turns"], 0, "the result's num_turns is 0");
+    assert!(result.unwrap()["num_turns"] == 0, "the result's num_turns is 0: false");
     let turn = parsed_turn(&lines);
     let answer = turn.iter().find_map(|message| match message {
         CliMessage::Assistant(assistant)
@@ -3153,15 +3199,21 @@ fn claude_usage_report_on_account() {
     });
     assert!(answer.is_some(), "a top-level assistant line with local_command_run usage");
 
+    let mut present = false;
+    let mut rows_state = "unavailable";
+    let (mut rows_checked, mut models_checked) = (0usize, 0usize);
     if let Some(raw) = &answer.unwrap().usage_report {
+        present = true;
         let report = UsageReport::parse(&serde_json::Value::Object(raw.clone()));
         assert!(report.is_some(), "the usage_report is readable");
         let report = report.unwrap();
         if let PlanLimits::Rows(rows) = &report.limits {
+            rows_state = "rows";
             for row in rows {
                 assert!(!row.kind.is_empty(), "every row has a kind");
                 assert!(!row.group.is_empty(), "every row has a group");
                 assert!(!row.severity.is_empty(), "every row has a severity");
+                rows_checked += 1;
             }
         }
         for (_, tokens) in report.totals.iter().flat_map(|totals| &totals.models) {
@@ -3169,6 +3221,28 @@ fn claude_usage_report_on_account() {
             assert!(tokens.output.is_some(), "every model has its output count");
             assert!(tokens.cache_read.is_some(), "every model has its cache read count");
             assert!(tokens.cache_write.is_some(), "every model has its cache write count");
+            models_checked += 1;
         }
+    }
+    eprintln!(
+        "usage_report: {}, limits: {rows_state}, rows checked: {rows_checked}, models checked: {models_checked}",
+        if present { "present" } else { "absent" }
+    );
+}
+
+/// The guard `Session::start_limits` runs before any command that carries the gateway token
+/// starts. It starts no CLI.
+///
+/// Failure list, written first: a userinfo that hides another host
+/// (`http://127.0.0.1:1@example.com/`) passes a prefix check, and so would an empty port.
+/// A bare port and a port with a path are the URLs the harness itself builds, so they must
+/// pass.
+#[test]
+fn the_gateway_base_url_guard_checks_the_host() {
+    for url in ["http://127.0.0.1:1@example.com/", "http://127.0.0.1:/"] {
+        assert!(!claude_live::is_local_base_url(url), "a URL that is not the local API is refused");
+    }
+    for url in ["http://127.0.0.1:8080", "http://127.0.0.1:8080/v1"] {
+        assert!(claude_live::is_local_base_url(url), "a local API URL is accepted");
     }
 }

@@ -4,7 +4,8 @@
 # Every /v1/messages request streams "ok", or is refused with HTTP 429 and a rate_limit_error
 # body. Which one, and the response headers, come from LIMITS_FILE, re-read on every request:
 #   {"status": 200 | 429, "headers": {"anthropic-ratelimit-unified-status": "allowed_warning", ...}}
-# Each request appends {"method": ..., "path": ...} to LIMITS_FILE + ".requests". Nothing else of a
+# Every request, of any method, appends {"method": ..., "path": ...} to LIMITS_FILE + ".requests".
+# Nothing else of a
 # request is logged: no header (the bearer token lives in one) and no body.
 # usage: fake_limits_api.py PORT LIMITS_FILE
 # Binds 127.0.0.1 only. Nothing here is a credential.
@@ -40,8 +41,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def parse_request(self):
+        # Runs for every request line, whatever its method, before it is dispatched.
+        ok = super().parse_request()
+        if ok:
+            log_request(self.command, self.path)
+        return ok
+
     def do_GET(self):
-        log_request("GET", self.path)
         self.send_response(404)
         self.end_headers()
 
@@ -51,7 +58,6 @@ class Handler(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             request = {}
-        log_request("POST", self.path)
         if not self.path.startswith("/v1/messages") or "count_tokens" in self.path:
             self.send_response(404)
             self.end_headers()
