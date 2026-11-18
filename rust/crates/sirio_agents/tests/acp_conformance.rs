@@ -1975,6 +1975,222 @@ fn claude_lists_permission_rules() {
     );
 }
 
+// Failure list for `claude_lists_hooks`, written before the test. On a version at or above
+// 2.1.325 it fails when (items 0-5; items 6 and 7 are asserted on every version that
+// meets the floor):
+// 0. `get_hooks_listing` is refused or answers an error;
+// 1. the success does not parse with `parse_hooks_listing`;
+// 2. the user `PreToolUse` row is missing, or not from `userSettings`, or its matcher is not
+//    `Bash`, or its status message is not the display text, or its command is not the marker's;
+// 3. the project `Stop` row is missing or not from `projectSettings` (the file was not read);
+// 4. an event is missing from `events` or has an empty summary;
+// 5. the answer has no `policy` object, a policy flag is set, safe or bare mode is on, a
+//    configured row is disabled, or a settings error is listed;
+// 6. either marker exists at the end (the CLI ran a hook, or the listing took a turn);
+// 7. a process of the run outlives the CLI, or the CLI does not exit on stdin EOF.
+// On a host with managed settings (`/etc/claude-code`) the test SKIPs: they would change the
+// policy and the rows. Below 2.1.325 it accepts a parsing success or a refusal.
+/// Asks the real CLI for its hook listing before any turn, with a user `PreToolUse` hook and a
+/// project `Stop` hook configured, and checks the rows, the events, the policy, and that no hook
+/// command ran.
+///
+/// It uses the fake API of the session-state test, no credential and nothing beyond 127.0.0.1,
+/// but launches a real CLI, so it is `#[ignore]`d and stays off CI. TMPDIR must be on disk
+/// outside the home directory:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance \
+///         claude_lists_hooks -- --ignored --nocapture --test-threads=1
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, without
+/// `python3`, without `git` and on a host with managed settings.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_lists_hooks() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    if !claude_live::git_available() {
+        eprintln!("SKIP: git is not available");
+        return;
+    }
+    if std::path::Path::new("/etc/claude-code").exists() {
+        eprintln!("SKIP: managed settings exist on this host");
+        return;
+    }
+    let scratch = claude_live::Scratch::new("hooks", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version: {version_text:?}");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+    let answers = version >= sirio_claude::ClaudeVersion::new(2, 1, 325);
+    eprintln!("claude reports {version_text}");
+
+    let user_marker = scratch.root.join("user-hook.ran");
+    let project_marker = scratch.root.join("project-hook.ran");
+    let user = serde_json::json!({"hooks": {"PreToolUse": [{
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": format!("touch {}", user_marker.display()),
+            "statusMessage": "Checking bash",
+        }],
+    }]}});
+    let project = serde_json::json!({"hooks": {"Stop": [{
+        "hooks": [{
+            "type": "command",
+            "command": format!("touch {}", project_marker.display()),
+        }],
+    }]}});
+    let mut session = claude_live::Session::start_with_settings(
+        &claude,
+        &python,
+        &scratch.root.join("hooks"),
+        &user,
+        Some(&project),
+    );
+    let mut seen = Vec::new();
+
+    let init = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::initialize("hk-init"),
+    );
+    assert_eq!(
+        init["subtype"], "success",
+        "initialize answered success: false"
+    );
+
+    let answer = ask_session(
+        &mut session,
+        &mut seen,
+        sirio_claude::ControlRequest::get_hooks_listing("hk-1"),
+    );
+    // Kept with the scratch root after a panic, to see which row was missing.
+    std::fs::write(scratch.root.join("hooks-answer.json"), answer.to_string()).unwrap();
+    let succeeded = answer["subtype"] == "success";
+    let parsed = if succeeded {
+        sirio_claude::parse_hooks_listing(&answer["response"])
+    } else {
+        None
+    };
+    if answers {
+        assert!(succeeded, "the listing answered success: {succeeded}");
+        let listing = parsed
+            .as_ref()
+            .expect("the success answer parses with parse_hooks_listing");
+        let no_errors = listing.errors.is_empty();
+        assert!(no_errors, "no settings file was skipped: {no_errors}");
+        let user_row = listing.hooks.iter().find(|hook| {
+            hook.event == "PreToolUse" && hook.source == "userSettings" && hook.matcher == "Bash"
+        });
+        let user_listed = user_row.is_some();
+        assert!(user_listed, "the user hook is listed: {user_listed}");
+        let user_row = user_row.unwrap();
+        let status = user_row.display_text == "Checking bash";
+        assert!(status, "the user hook is listed with its status message: {status}");
+        let names_marker = user_row
+            .command_text
+            .as_deref()
+            .is_some_and(|text| text.contains("user-hook.ran"));
+        assert!(names_marker, "the user hook command names its marker: {names_marker}");
+        let project_listed = listing
+            .hooks
+            .iter()
+            .any(|hook| hook.event == "Stop" && hook.source == "projectSettings");
+        assert!(
+            project_listed,
+            "the project hook is listed from the project file: {project_listed}"
+        );
+        for event in ["PreToolUse", "Stop"] {
+            let summarized = listing
+                .events
+                .iter()
+                .any(|row| row.name == event && !row.summary.is_empty());
+            assert!(
+                summarized,
+                "an event of the configured hooks is listed with a summary: {summarized}"
+            );
+        }
+        let has_policy = answer["response"]["policy"].is_object();
+        assert!(has_policy, "the answer carries a policy: {has_policy}");
+        let policy = &listing.policy;
+        let clear = !(policy.disabled_by_policy
+            || policy.managed_only
+            || policy.plugin_only
+            || policy.all_disabled
+            || policy.unreadable);
+        assert!(clear, "every policy flag is false: {clear}");
+        let no_mode = listing.safe_mode.is_none() && listing.bare_mode.is_none();
+        assert!(no_mode, "neither safe mode nor bare mode is on: {no_mode}");
+        // Guard: every disabled row in the probes came with a mode or a policy flag, which
+        // fail first.
+        let enabled = listing
+            .hooks
+            .iter()
+            .filter(|hook| {
+                (hook.event == "PreToolUse" && hook.source == "userSettings")
+                    || (hook.event == "Stop" && hook.source == "projectSettings")
+            })
+            .all(|hook| !hook.disabled);
+        assert!(enabled, "the configured hooks are not disabled: {enabled}");
+        eprintln!("the CLI listed the configured hooks");
+    } else {
+        let refused = !succeeded
+            && answer["error"]
+                .as_str()
+                .is_some_and(sirio_claude::is_refusal);
+        assert!(
+            parsed.is_some() || refused,
+            "the answer is a parsing success or a refusal: false (succeeded: {succeeded})"
+        );
+        eprintln!(
+            "below 2.1.325 the CLI answered: {}",
+            if refused {
+                "a refusal"
+            } else {
+                "a success that parses"
+            }
+        );
+    }
+
+    let exit = session.close_cli();
+    assert!(
+        exit.is_some_and(|status| status.success()),
+        "the CLI exited successfully on stdin EOF: false \
+         (exit code {:?}, None when killed after 20 s)",
+        exit.map(|status| status.code())
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut left = claude_live::holders_of(&session.home());
+    while left > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        left = claude_live::holders_of(&session.home());
+    }
+    assert!(
+        left == 0,
+        "no process of the run outlives the CLI: false ({left} left)"
+    );
+    let user_ran = user_marker.exists();
+    let project_ran = project_marker.exists();
+    assert!(!user_ran, "no user hook ran: {}", !user_ran);
+    assert!(!project_ran, "no project hook ran: {}", !project_ran);
+}
+
 // Failure list for `claude_toggles_a_connector_and_reloads`, written before the test. On a version
 // that meets the floor it fails when:
 // 0. before the first toggle, `probe` does not read `Pending` or `Connected` (`Failed` fails);
