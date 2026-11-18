@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.43.0",
-  "notes": "A native Claude chat now shows more of a permission request, and the\nsession panel lists Claude Code's permission rules. Renaming a chat's tab\nnow renames its session in Claude Code too.\n\n**Permission requests say more**\n\nThe permission card of a native Claude chat used to show \"Permission\nrequested\" and the command exactly as Claude Code sent it. It now shows what\nClaude Code says about the request:\n\n- The caption is Claude Code's own title for the request, when it sends one.\n- Under the command come Claude Code's description and the reason it is\n  asking, for example *Matches an ask rule in user settings*. **Path** shows\n  the file a shell command writes to, and **MCP server** shows the server a\n  tool belongs to.\n- Hidden characters in a command can no longer disguise it. A control,\n  zero-width or right-to-left character shows as its code, for example\n  `⟨U+202E⟩`.\n- When Claude Code asks for the answer to default to no, the card starts on\n  **Reject**, and a digit key does not answer it. When Claude Code withholds\n  **Always allow**, the card does not offer it.\n\nACP chats keep the plain card.\n\n**Claude Code's rules in the session panel**\n\nThe session panel of a native Claude chat has a new **Permissions** card. It\nlists the allow, ask and deny rules and the extra directories that Claude\nCode applies to the session, each with the settings file it comes from. The\ncard is read-only. It refreshes when the panel opens, when the chat\nreconnects, after **Always allow** and at the end of each turn. Claude Code\nversions before 2.1.325 cannot list their rules, so the card does not appear\nwith them.\n\n**Renaming a tab renames the Claude session**\n\nRenaming a native Claude chat's tab used to change only Sirio's tab. Claude\nCode now gets the name as well, so `claude agents` lists the session under it\nand `claude --resume \"<name>\"` finds it. This covers the tab bar's inline\neditor and **Set Title**. A title Sirio picks on its own, from the first\nprompt or the summarizer, stays in Sirio. If Claude Code refuses the name,\nthe chat shows *Claude Code kept its earlier name* with the reason. Claude\nCode shortens a name longer than 200 characters.",
+  "version": "0.44.0",
+  "notes": "The sidebar has a new shell: a title menu, a bell for chats that need you,\nsearch, and a card that shows a worktree's tabs on hover. A native Claude\nchat can now switch its connectors on and off, reload its plugins and\nskills, and say what Claude Code reports about retries, notices, refusals\nand a failed start.\n\n**A new sidebar**\n\nThe sidebar keeps its worktree cards and gains a shell around them:\n\n- The header has a title menu to choose **Projects** or **Sessions**, a\n  **bell** that lists the chats with an error, a question or unread output,\n  and **Search**, which opens a filter field. Esc closes the field.\n- A **New Chat** row starts an agent in the current worktree.\n- Each project is a row with its folder icon; **+** and **⋯** appear on\n  hover. The section header folds the whole list.\n- On a worktree card, **★** sets or unsets the primary worktree and **×**\n  removes it, both shown on hover. Git's main checkout is never offered for\n  removal, whatever its star says.\n- Holding the pointer on a card shows a card beside the sidebar with the\n  branch, the last event, the project and one line per tab.\n- The list's scrollbar fades when you are not scrolling.\n\nA pill selected with the arrow keys is now forgotten when the list takes\nfocus, so Backspace cannot close a tab nobody is pointing at.\n\n**Connectors and plugins in the session panel**\n\nIn a native Claude chat's session panel, each connector has a switch. Claude\nCode saves the choice for the folder, so a new session there starts with\nthe connector the same way. The **Plugins and skills** row reloads Claude\nCode's plugins and skills without restarting the chat. When the reload would\nchange Claude's tools and reset the prompt cache, Sirio says which tools are\nadded and removed and offers **Reload anyway**. The row waits while a turn\nruns.\n\n**What Claude Code says, in the chat**\n\nA native Claude chat now shows Claude Code's own messages about its work:\n\n- While Claude Code retries a request, a status line above the composer says\n  so, for example *Retrying 2 of 10 in 2 s: overloaded*. Claude Code's\n  notifications appear on the same line.\n- A refusal shows Claude Code's own sentence, and its informational lines\n  appear in the transcript.\n- When Claude Code cannot start, the chat says why, for example an invalid\n  configuration file and its path, in place of a generic transport error.\n\nTwo fixes come with it. An answer that Claude Code sent again after a broken\nstream used to be invisible; it now appears under the cut reply. A refused\n`--resume` no longer leaves an \"ended\" footer in the fresh session that\nreplaces it.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.43.0/Sirio-0.43.0.dmg",
-      "sha256": "230b5a571f273cdaf082ea6732bd0a7159c65076602b21b1b0c4654f155af853",
-      "signature": "RtM2NP/DsBA94roqsFcxHA/TVYg7heUkNzcy0sLVKw1FZ5Mkj5qEFGaPY9AUKxOK9eUhiaHPQKdqF03N1nqvAA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.44.0/Sirio-0.44.0.dmg",
+      "sha256": "406d29f66601a2cc3f3295e77f0fba30bbb9fd45ce8afbd01e4b9ae7d774297a",
+      "signature": "LvarNtleFGWbTReb1amSnoi66rw6DxadHPvSoxlBX22cU0PbCt1GJYsSW1FiLUIRy+xccGLEVHJkCMgsNVlSCA=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.43.0/Sirio-0.43.0-x86_64.AppImage",
-      "sha256": "9709f44bdaa5e7252cf93d0c11fa631239095c547fc0cd18fd959aa5260df4e1",
-      "signature": "1rxeZ4NU2rJiz4xlk5nHr5mmrtxwmWer8VtCvrEQcBsLzXsml9yMFMwCeNl8AFvJUkMdZGsUfR/XQkZqjFzVDw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.44.0/Sirio-0.44.0-x86_64.AppImage",
+      "sha256": "ae095b3ce252cf03b5ac7797a6204f9a923cfbc509d91adbb782addce33c8ca3",
+      "signature": "IHA/s+30x1Hk/HTqQ2LPmc1ZWQ/thkjW85JzRsSnLgTPkhZm5m8ADBLB1hEMPqGjvrA4l9eQ4QTcJFnApi3GCg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.43.0/SirioSetup-0.43.0.exe",
-      "sha256": "94c242210169c593f3e7de35573a1aa8c2cd311c3a9c4b823251110dbc376753",
-      "signature": "hHm6SYRq1UcRQoDzlLfO8xb7rpB0V0NL14Xh1ZgxXu6betO0Xf8s5cfLLZngoDcK2e1gXf3sYJBDpiNCPaodAw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.44.0/SirioSetup-0.44.0.exe",
+      "sha256": "863b8a9faf55edb638f5b623661976dc50b7d6f0ed7bb26c933e96d834ce6fd6",
+      "signature": "3p8yLqyr+djwqj7JE2GpjXB/MkHyaTSeDiAb+hqFmiaVXmqeJH0XNwfkYZKDT/8D/rGslLoZ3lZuZc4pn651CA=="
     }
   }
 }
