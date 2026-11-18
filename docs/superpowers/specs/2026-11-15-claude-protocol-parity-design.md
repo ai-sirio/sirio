@@ -747,6 +747,18 @@ Each item is laid out the same way:
     regardless of the `display` setting; only what you see changes"), and that `"omitted"` buys
     latency, not cost. A foreground subagent may answer a little slower. The fake API cannot show
     a real response, so the cost line rests on the docs. The PR's Merge Danger says so.
+  - **A `file:` link never reaches the system opener** (found while building the card, approved
+    by the coordinator). The card draws a subagent's text with the file paths it names as
+    `file://` links, as a reply does, outside the transcript selection. Bezel's link click arms on
+    any mouse button and calls `cx.open_url` for every URL, so a middle-click, a stale press or a
+    dropped file could hand a `file://` URL to `xdg-open`. A fourth local patch to the vendored
+    `bezel_markdown` (`render.rs`, listed in `rust/vendor/README.md` with the other three) makes
+    that click do nothing for a `file:` URL in any letter case; every other URL opens as before.
+    The card opens a file link itself, through `OpenFileAt`, only on a left click whose press and
+    release fall on the same link, and never stops an event, so a drop still lands. Side effect: a
+    `file:` link that Sirio does not resolve, in a reply or a preview, no longer reaches the system
+    opener through bezel. A reply's resolved file links (#663) behave as before; the `file_links`
+    E2E scenario is the check. The PR's Merge Danger says so.
 
 ### A11 · MCP Apps widgets
 
