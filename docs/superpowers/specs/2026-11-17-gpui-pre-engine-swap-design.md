@@ -56,7 +56,7 @@ Agreed with Enzo on 2026-11-16, in this order. Each later step gets its own desi
   pixels within the tolerance of §6, same keys, same tests passing.
 - G3. The three engine patches Sirio carries keep working on the new engine: the Wayland
   drag-and-drop fix, links opening in the user's environment, and the Windows bitblt swap
-  chain.
+  chain (with the additive alpha blending it was measured on, §5.3.5).
 - G4. Remote images keep loading wherever Markdown shows them today (Preview, chat, change
   request threads), which needs the HTTP client bezel's platform installed implicitly (§5.4).
 
@@ -190,6 +190,19 @@ lock and the `ci-linux.sh` stage that tests `vendor/gpui_linux` keep their shape
    checked by hand on a Mac; the alternative is vendoring gpui-pre-macos to restore
    `Selection`. **Decided 2026-11-17 (t2s, recommended option): accept upstream's material.**
    The PR names it as the one visible change, for Enzo to check on a Mac.
+5. **Windows alpha blending (found in execution, 2026-11-18).** gpui-pre-windows 0.3.12
+   changed `DestBlendAlpha` from `ONE` to `INV_SRC_ALPHA` in `create_blend_state` and
+   `create_blend_state_for_path_sprite`. Sirio's Windows translucency (ADR 0003, and the
+   opaque panels `sirio/src/shell_chrome.rs` keeps over the frame veil) was measured on the
+   additive alpha, so the new blend would let more of the desktop through hover, selection
+   and text edges. The vendored crate restores `ONE` at those two states, a fourth
+   Sirio-local engine change; the other blend fields are unchanged from 0.3.8.
+   gpui-pre-wgpu made the same change to its `paths` pipeline (alpha `One/One` →
+   `One/OneMinusSrcAlpha`; `path_rasterization` is unchanged). It is left as upstream: Linux
+   never uses a translucent window (`shell_chrome.rs` gives blur to macOS and Windows only),
+   so the framebuffer's alpha never reaches the screen there. The macOS Metal blend states
+   are compared once the macOS sources are fetched (Task 5); any change joins the Mac hand
+   check.
 
 ### 5.4 The HTTP client gpui used to get for free
 
