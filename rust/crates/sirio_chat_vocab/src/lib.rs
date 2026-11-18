@@ -731,7 +731,8 @@ pub enum SubagentItem {
         locations: Vec<ToolCallLocationInfo>,
     },
     /// That call settled (`Completed` or `Failed`). `content` is `None` for a
-    /// nested `Agent`/`Task` call: its report is already in the card as text.
+    /// nested `Agent`/`Task` call unless it failed: its report is already in
+    /// the card as text, but an error is not a report.
     ToolCompleted {
         id: String,
         status: String,

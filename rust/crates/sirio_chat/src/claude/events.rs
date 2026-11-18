@@ -588,9 +588,10 @@ impl Fold {
             .into_iter()
             .map(|result| {
                 let open = self.subagent_open.remove(&result.tool_use_id);
-                // A nested agent's report is already in the card as text.
+                // A nested agent's report is already in the card as text; a
+                // failure is not the report, so its error text stays.
                 let content = open
-                    .filter(|open| !is_agent_call(&open.name))
+                    .filter(|open| result.is_error || !is_agent_call(&open.name))
                     .map(|open| completion_content(&open, &result, tool_use_result));
                 SubagentItem::ToolCompleted {
                     id: result.tool_use_id,
@@ -1505,7 +1506,7 @@ mod tests {
         events.extend(fold.apply(child_result("toolu_a", "toolu_r", "fn main() {}")));
         assert!(
             events.iter().all(|event| *event == signal()),
-            "a subagent's output must reach the card only: {events:?}"
+            "a subagent's output must reach the card only"
         );
         let items = updates(fold.take_notices());
         assert!(items.iter().all(|u| u.card == "toolu_a" && u.agent.is_none()));
@@ -1538,6 +1539,26 @@ mod tests {
         fold.apply(child_line("toolu_g", json!({"type": "text", "text": "Checked."})));
         fold.apply(child_result("toolu_a", "toolu_g", "the long report"));
         let items = updates(fold.take_notices());
+        // A nested agent that failed keeps its error text: it is not a report.
+        fold.apply(child_line(
+            "toolu_a",
+            json!({"type": "tool_use", "id": "toolu_h", "name": "Agent",
+                   "input": {"description": "Denied one", "prompt": "x"}}),
+        ));
+        fold.apply(parse(json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_h",
+                 "content": "permission denied", "is_error": true}
+            ]},
+            "parent_tool_use_id": "toolu_a"
+        })));
+        let failed = updates(fold.take_notices());
+        assert!(matches!(
+            failed.last().map(|u| &u.item),
+            Some(SubagentItem::ToolCompleted { id, status, content: Some(c) })
+                if id == "toolu_h" && status == "Failed" && !c.is_empty()
+        ));
         assert!(matches!(
             items.as_slice(),
             [
