@@ -727,6 +727,8 @@ TRACE_EOF = threading.Event()
 TRACE_PROMPTS = queue.Queue()
 TRACE_ANSWERS = {}
 TRACE_ANSWERED = threading.Condition()
+# Whether the session's `initialize` carried `forwardSubagentText: true`.
+TRACE_FORWARD = {"on": False}
 
 
 TRACE_UUID_LOCK = threading.Lock()
@@ -1092,13 +1094,13 @@ def async_launched(tool_use_id, task_id):
         "resolvedModel": TRACE_MODEL})
 
 
-def task_ended(task_id, tool_use_id, duration_ms):
+def task_ended(task_id, tool_use_id, duration_ms, summary="Agent finished the work"):
     send({"type": "system", "subtype": "task_updated", "task_id": task_id,
           "patch": {"status": "completed", "end_time": int(time.time() * 1000)},
           "uuid": trace_uuid(), "session_id": SESSION_ID})
     send({"type": "system", "subtype": "task_notification", "task_id": task_id,
           "tool_use_id": tool_use_id, "status": "completed",
-          "summary": "Agent finished the work", "output_file": f"/tmp/{task_id}.output",
+          "summary": summary, "output_file": f"/tmp/{task_id}.output",
           "usage": {"total_tokens": 26197, "tool_uses": 2, "duration_ms": duration_ms},
           "uuid": trace_uuid(), "session_id": SESSION_ID})
 
@@ -1207,6 +1209,80 @@ def bgprompt_agent():
     task_ended("task-bp", "toolu_bp", 12000)
 
 
+def script_subagent_text():
+    """A foreground agent whose text, thinking and tool calls the CLI forwards (one
+    stdout line per content block, sharing the message's id), a grandchild, and a
+    background agent whose lines come after the `result`. The floor (2.1.257) names no
+    `agent_id` on a line or an ask. A foreground agent's text and thinking are written only
+    when `initialize` asked for them; its tool lines always; a background agent's always."""
+    started = time.time()
+    forward = TRACE_FORWARD["on"]
+    fg, grand, bg = "toolu_agent_text", "toolu_agent_grand", "toolu_agent_bg"
+
+    def aid(task):
+        return None if BG_FLOOR else task
+
+    def sub(message_id, block, parent, task, foreground=False):
+        if foreground and not forward:
+            return
+        trace_assistant(message_id, block, parent=parent, agent_id=aid(task))
+
+    odd = "I will look. First I read the file " + chr(0x202E) + "txt."
+    message_start("msg_main_1")
+    trace_assistant("msg_main_1", tool_use(fg, "Agent", {
+        "description": "Read the notes", "prompt": "Read the notes and report.",
+        "subagent_type": "general-purpose", "run_in_background": False}))
+    trace_assistant("msg_main_1", tool_use("toolu_main_ls", "Bash", {
+        "command": "ls", "description": "List the files"}))
+    trace_assistant("msg_main_1", tool_use(bg, "Agent", {
+        "description": "Watch the logs", "prompt": "Watch the logs",
+        "subagent_type": "fork", "run_in_background": True}))
+    message_end("tool_use", 90)
+    task_started("task-text", fg, "Read the notes", "general-purpose", 1)
+    task_started_background("task-bg-t", bg, "Watch the logs")
+    async_launched(bg, "task-bg-t")
+    trace_result_line("toolu_main_ls", "README.md\nnotes.txt")
+    # The subagent's first line follows its call at once.
+    sub("msg_s1", {"type": "thinking", "thinking": "Let me look first.", "signature": ""},
+        fg, "task-text", True)
+    sub("msg_s1", {"type": "text", "text": odd}, fg, "task-text", True)
+    sub("msg_s1", tool_use("toolu_sub_read", "Read", {"file_path": "/repo/notes.txt"}),
+        fg, "task-text")
+    pause()
+    trace_result_line("toolu_sub_read", "hi", parent=fg)
+    bash_input = {"command": "cat notes.txt", "description": "Print the notes"}
+    sub("msg_s2", tool_use("toolu_sub_bash", "Bash", bash_input), fg, "task-text")
+    pause()
+    trace_ask("cli-sub-text", "Bash", "toolu_sub_bash", bash_input, agent_id=aid("task-text"))
+    allowed = wait_answer("cli-sub-text") == "allow"
+    trace_result_line("toolu_sub_bash", "hi" if allowed else "denied",
+                      is_error=not allowed, parent=fg)
+    sub("msg_s3", tool_use(grand, "Agent", {
+        "description": "Check one thing", "prompt": "Check one thing",
+        "subagent_type": "general-purpose"}), fg, "task-text")
+    task_started("task-grand", grand, "Check one thing", "general-purpose", 2)
+    sub("msg_g1", {"type": "text", "text": "Grandchild here. All clear."},
+        grand, "task-grand", True)
+    pause()
+    trace_result_line(grand, "[Subagent hand-back]\nAll clear.", parent=fg,
+                      totals=agent_totals("task-grand", 900, 0))
+    sub("msg_s4", {"type": "text", "text": "Done. The file says hi."}, fg, "task-text", True)
+    pause()
+    trace_result_line(fg, "[Subagent hand-back]\nThe file says hi.",
+                      totals=agent_totals("task-text", 2400, 2))
+    message_start("msg_main_2")
+    text("ok")
+    message_end("end_turn", 10)
+    trace_result(0.08, started)
+    # The background agent keeps writing after the result, then ends.
+    pause()
+    trace_assistant("msg_bgt_1", {"type": "text", "text": "Background start. Still going."},
+                    parent=bg, agent_id=aid("task-bg-t"))
+    # Long enough for a check to read the card at work, whatever the checks before it cost.
+    pause(TRACE_BACKGROUND_HOLD * 2)
+    task_ended("task-bg-t", bg, 5000, summary="Watched the logs.")
+
+
 TRACE_SCRIPTS = {
     "subagents": script_subagents,
     "second": script_second,
@@ -1218,6 +1294,7 @@ TRACE_SCRIPTS = {
     "subperm_early": lambda: script_subagent_permission(True),
     "background": script_background,
     "bgprompt": script_bgprompt,
+    "subagent_text": script_subagent_text,
 }
 
 
@@ -1263,6 +1340,7 @@ def trace_main():
             subtype = request.get("subtype")
             request_id = message.get("request_id")
             if subtype == "initialize":
+                TRACE_FORWARD["on"] = request.get("forwardSubagentText") is True
                 control_response(request_id, initialize_payload())
             elif subtype == "interrupt":
                 control_response(request_id, {"still_queued": 0})

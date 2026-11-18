@@ -391,7 +391,7 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   reload_busy_turn reload_busy_before_skills reload_in_flight reload_refused reload_skills_refused reload_errors
   change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
-  trace_background trace_background_prompt trace_reveal
+  trace_background trace_background_prompt trace_reveal subagent_text subagent_text_floor
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
   unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet
   elicitation_form elicitation_url elicitation_withdrawn unhandled_request
@@ -820,7 +820,21 @@ def evaluate(expr, surface, p, c):
         # One background task's entry in `surface.chat.read`, or None.
         return next((t for t in c["backgroundTasks"] if t["taskId"] == task_id), None)
 
+    def card(row_id):
+        # The transcript row of an Agent's card (a foreground or background subagent).
+        return next((r for r in c["transcript"] if r.get("kind") == "tool" and r.get("id") == row_id), None)
+
+    def card_items(row_id):
+        return json.loads(card(row_id)["items"])
+
+    def norm(items):
+        # An item as (kind, id, status) for a tool, else (kind, text[, open][, agent]).
+        return [(i["kind"], i["id"], i["status"]) if i["kind"] == "tool"
+                else (i["kind"], i["text"]) + ((i["open"],) if i["kind"] == "thought" else ()) + ((i["agent"],) if "agent" in i else ())
+                for i in items]
+
     namespace = {
+        "card": card, "card_items": card_items, "norm": norm,
         "bg": bg, "p": p, "c": c, "S": h.S, "R": h.R, "rows": h.rows, "json": json, "re": re,
         "lane": lambda key: h.R("trace", "trace/lane/" + key), "lanes_of": lanes_of,
         "wait_rows": wait_rows, "row_index": row_index, "drawn_index": drawn_index, "pending": pending, "elicit": elicit,
@@ -2346,6 +2360,61 @@ BG_COST='R("trace", "trace/stat/cost")["detail"]'
 # A background agent runs, with a model call and the tools it started under it.
 bg_agent_running() { # agent
   echo "T('$1') is not None and T('$1')['kind'] == 'subagent' and T('$1')['state'] == 'running' and T('$1')['ended'] == '0' and T('$1_bash')['parent'] == '$1' and T('$1_read')['parent'] == '$1' and any(s['kind'] == 'llm' and s['parent'] == '$1' for s in tab()['spans'])"
+}
+
+# (A10) A foreground subagent's text, thinking and calls are drawn inside its card, the lane says its
+# latest sentence, and a background agent's lines after the result go to its own card. The fixture
+# writes the foreground text and thinking only when `initialize` asked (forwardSubagentText), and
+# under SIRIO_FIXTURE_FLOOR=1 (2.1.257) no line or ask names its agent.
+SUBAGENT_ODD='"First I read the file " + chr(0x27E8) + "U+202E" + chr(0x27E9) + "txt."'
+SUBAGENT_CARD='card("toolu_agent_text")'
+subagent_text_run() { # name
+  trace_chat "$1"
+  send_prompt subagent_text
+  wait_panel "the Trace card appears" 'S("trace") is not None' 30
+  ensure_unfolded trace
+  wait_panel "the run is held at the subagent's ask, with the call in its card" \
+    "len(pending()) == 1 and $SUBAGENT_CARD is not None and len(card_items('toolu_agent_text')) == 5" 30
+  check_panel "the card is folded and titled by the description; the main thread's Bash has a row, the subagent's has none" \
+    "$SUBAGENT_CARD['expanded'] == 'false' and $SUBAGENT_CARD['text'] == 'Read the notes' and row_index('toolu_main_ls') is not None and row_index('toolu_sub_bash') is None"
+  check_panel "the card's items are the prompt, the thought, the sentence, the Read and the Bash" \
+    "(lambda n: n[:4] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed')] and n[4][:2] == ('tool', 'toolu_sub_bash') and len(n) == 5)(norm(card_items('toolu_agent_text')))"
+  check_panel "the lane says the sentence, and no hidden character reaches an item or the lane" \
+    "lane('toolu_agent_text')['said'] == $SUBAGENT_ODD and chr(0x202E) not in json.dumps(card_items('toolu_agent_text'), ensure_ascii=False) and chr(0x202E) not in json.dumps(lane('toolu_agent_text'), ensure_ascii=False)"
+  capture subagent-text
+  answer_permission allow_once
+  # The Trace reads Live until the background agent ends, so the turn's end is the chat's status.
+  wait_panel "the turn is over and the subagent's lane is done" 'c["status"] == "completed" and len(pending()) == 0 and lane("toolu_agent_text")["tag"] == "done"' 40
+  echo "step: the background agent writes after the result"
+  wait_panel "the background agent's card is in progress until its line and its end" \
+    'card("toolu_agent_bg") is not None and any(i["kind"] == "text" and i["text"] == "Background start. Still going." for i in card_items("toolu_agent_bg"))' 40
+  check_panel "that card is still in progress" 'card("toolu_agent_bg")["status"] == "InProgress"'
+  check_panel "the items go on with the Bash, the grandchild's line under its own name, and the final sentence" \
+    "(lambda n: n[:5] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed'), ('tool', 'toolu_sub_bash', 'Completed')] and n[5][:2] == ('tool', 'toolu_agent_grand') and n[6:] == [('text', 'Grandchild here. All clear.', 'Check one thing'), ('text', 'Done. The file says hi.')])(norm(card_items('toolu_agent_text')))"
+  check_panel "the hand-back frame is drawn nowhere and the subagent's lane has no sentence left" \
+    "'Subagent hand-back' not in json.dumps(c['transcript']) and lane('toolu_agent_text')['said'] is None"
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  check_panel "an agent whose latest message was text has no final span" \
+    'not any(s["id"].startswith("toolu_agent_text") and s["id"].endswith("/final") for s in tab()["spans"])'
+  wait_panel "the card is completed once the task ends" 'card("toolu_agent_bg")["status"] == "Completed"' 60
+  check_panel "the end notice is drawn as before" \
+    'any(r.get("id") != "toolu_agent_bg" and "Watched the logs." in json.dumps(r) for r in c["transcript"])'
+  local artifact="$OUT_DIR/subagent-text.json"
+  find_panel "the final items and lanes" \
+    'json.dumps({"toolu_agent_text": card_items("toolu_agent_text"), "toolu_agent_bg": card_items("toolu_agent_bg"), "lanes": {k: {"said": v.get("said"), "label": v.get("label"), "tag": v.get("tag")} for k, v in lanes_of().items()}}, indent=2, ensure_ascii=False)' 10 >"$artifact"
+  [ -s "$artifact" ] || fail "no subagent-text.json was written"
+  echo "OK: $artifact holds the final items of both cards and the lanes"
+  stop_app
+}
+
+scenario_subagent_text() {
+  subagent_text_run subagent_text
+}
+
+scenario_subagent_text_floor() {
+  SIRIO_FIXTURE_FLOOR=1
+  subagent_text_run subagent_text_floor
 }
 
 scenario_trace_background() {
