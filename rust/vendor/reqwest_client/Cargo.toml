@@ -11,7 +11,7 @@
 
 [package]
 edition = "2024"
-name = "bezel-zed-reqwest-client"
+name = "sirio-reqwest-client"
 version = "0.3.8+zed.82aeef"
 build = false
 autolib = false
@@ -44,12 +44,12 @@ version = "1.0"
 version = "0.3.32"
 
 [dependencies.gpui_util]
-version = "0.3.8+zed.82aeef"
-package = "bezel-gpui-util"
+version = "=0.3.12"
+package = "gpui-pre-util"
 
 [dependencies.http_client]
-version = "0.3.8+zed.82aeef"
-package = "bezel-zed-http-client"
+version = "=0.3.12"
+package = "gpui-pre-http-client"
 
 [dependencies.log]
 version = "0.4.16"
@@ -83,7 +83,7 @@ features = [
 ]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.http_client_tls]
-version = "0.3.8+zed.82aeef"
+version = "0.3.8"
 package = "bezel-zed-http-client-tls"
 
 [lints.clippy]
