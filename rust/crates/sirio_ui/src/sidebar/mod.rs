@@ -799,6 +799,7 @@ pub struct Sidebar {
     tree_cursor: usize,
     pill_cursor: Option<usize>,
     tree_focus: FocusHandle,
+    tree_focus_subscription: Option<gpui::Subscription>,
     /// Shared blink state for every sidebar text field's insertion caret
     /// (filter, project-settings card, worktree prompt). One is enough:
     /// window focus is unique. Visibility is recomputed each render.
@@ -1257,6 +1258,7 @@ impl Sidebar {
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
+            tree_focus_subscription: None,
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
@@ -1372,6 +1374,7 @@ impl Sidebar {
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
+            tree_focus_subscription: None,
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
@@ -2576,9 +2579,11 @@ impl Sidebar {
 
     /// Hands focus to the list as a new visit: the keyboard's place on a pill
     /// and an armed delete belong to the visit before, and would otherwise sit
-    /// ready for a Backspace that closes a tab nobody is pointing at. Every
-    /// path that gives the list focus from somewhere else goes through here,
-    /// the host's Settings-close hand-back included.
+    /// ready for a Backspace that closes a tab nobody is pointing at. Focus
+    /// that arrives at the list from elsewhere clears both through the list's
+    /// focus subscription in `render`, whatever brought it there; this clears
+    /// them as well, for the call that finds the list focused already, where
+    /// no focus change happens.
     pub fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pill_cursor = None;
         self.armed_delete = None;
@@ -4839,6 +4844,21 @@ impl Render for Sidebar {
             ));
         }
         let tree_focus = self.tree_focus.clone();
+        if self.tree_focus_subscription.is_none() {
+            // Focus arriving at the list from anywhere (a mouse-down on a row,
+            // the palette, the filter) starts a new visit: see `focus_list`.
+            self.tree_focus_subscription = Some(cx.on_focus(
+                &tree_focus,
+                window,
+                |sidebar, _window, cx| {
+                    let pill_held = sidebar.pill_cursor.take().is_some();
+                    let delete_armed = sidebar.armed_delete.take().is_some();
+                    if pill_held || delete_armed {
+                        cx.notify();
+                    }
+                },
+            ));
+        }
         let ring_active = self.tree_focus.is_focused(window);
         let filter_is_focused = filter_focus.is_focused(window);
         // Sidebar text fields (filter, worktree prompt) share one blink:
@@ -9870,6 +9890,65 @@ mod tests {
         assert!(
             !events.borrow().iter().any(|event| matches!(event, SidebarEvent::CloseTab(_))),
             "no tab closes on a stale pill: {:?}",
+            events.borrow()
+        );
+    }
+
+    /// The list can gain focus straight from a mouse-down, which never passes
+    /// through `focus_list`. A pill the keyboard left selected on the visit
+    /// before must not survive that, and a Backspace must not close it.
+    #[gpui::test]
+    async fn a_pill_cursor_does_not_survive_a_mouse_focus_of_the_list(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(tree_keys::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // Focus events reach the list only while its window is active, and a
+        // headless test window starts inactive.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        window
+            .update(&mut cx, |sidebar, window, cx| sidebar.focus_row_with_pills(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert_eq!(window.update(&mut cx, |s, _, _| s.pill_cursor).unwrap(), Some(0));
+        // Control: while the list keeps focus, Backspace closes the pill it is on.
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert!(
+            events.borrow().iter().any(|event| matches!(event, SidebarEvent::CloseTab(_))),
+            "Backspace on a selected pill closes it while the list keeps focus: {:?}",
+            events.borrow()
+        );
+        // Focus leaves for the filter, then the list takes it directly, as a
+        // mouse-down on one of its rows does.
+        window.update(&mut cx, |s, window, cx| s.show_filter(window, cx)).unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |s, window, cx| s.tree_focus.focus(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            window.update(&mut cx, |s, window, _| s.tree_focus.is_focused(window)).unwrap(),
+            "the list holds focus"
+        );
+        events.borrow_mut().clear();
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert_eq!(
+            window.update(&mut cx, |s, _, _| s.pill_cursor).unwrap(),
+            None,
+            "the stale pill cursor is forgotten when the list takes focus"
+        );
+        assert!(
+            !events.borrow().iter().any(|event| matches!(event, SidebarEvent::CloseTab(_))),
+            "no tab closes on a pill the list took focus over: {:?}",
             events.borrow()
         );
     }
