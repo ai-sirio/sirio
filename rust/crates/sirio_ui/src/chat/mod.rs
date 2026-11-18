@@ -488,25 +488,41 @@ impl MarkdownBody {
             };
             let down_chat = chat.clone();
             let down_link_at = link_at.clone();
+            let out_chat = chat.clone();
             let element = div()
                 .w_full()
-                .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                    let pressed = down_link_at(event.position);
-                    down_chat.update(cx, |chat, _| chat.card_link_press = pressed);
-                })
-                .capture_any_mouse_up(move |event, window, cx| {
+                // A file link is Sirio's: its press is taken in capture, so
+                // bezel's text never arms a click on it and never hands the
+                // `file://` URL to the system opener. Any other press clears
+                // the record and reaches bezel untouched.
+                .capture_any_mouse_down(move |event, _, cx| {
                     if event.button != MouseButton::Left {
                         return;
                     }
-                    // Only a release on the link that was pressed is a click;
-                    // one with no press (a file dropped from the OS arrives as
-                    // a release) falls through untouched.
-                    let released = link_at(event.position);
-                    let pressed = chat.update(cx, |chat, _| chat.card_link_press.take());
-                    let Some(url) = released.filter(|url| pressed.as_ref() == Some(url)) else {
+                    let pressed = down_link_at(event.position)
+                        .filter(|url| file_link_target(url).is_some());
+                    let is_file_link = pressed.is_some();
+                    down_chat.update(cx, |chat, _| chat.card_link_press = pressed);
+                    if is_file_link {
+                        cx.stop_propagation();
+                    }
+                })
+                .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                    out_chat.update(cx, |chat, _| chat.card_link_press = None);
+                })
+                .capture_any_mouse_up(move |event, _, cx| {
+                    if event.button != MouseButton::Left {
                         return;
-                    };
-                    let Some(target) = file_link_target(&url) else {
+                    }
+                    let pressed = chat.update(cx, |chat, _| chat.card_link_press.take());
+                    // A drop (from the OS or inside the app) is not a click.
+                    if cx.has_active_drag() {
+                        return;
+                    }
+                    let Some(target) = link_at(event.position)
+                        .filter(|url| pressed.as_ref() == Some(url))
+                        .and_then(|url| file_link_target(&url))
+                    else {
                         return;
                     };
                     chat.update(cx, |_, cx| {
@@ -518,8 +534,6 @@ impl MarkdownBody {
                             });
                         }
                     });
-                    cx.stop_propagation();
-                    window.prevent_default();
                 })
                 .child(rendered)
                 .into_any_element();
