@@ -243,6 +243,7 @@ impl DirectXRenderer {
 
     #[inline]
     fn present(&mut self) -> Result<()> {
+        let _perf = sirio_perf::span("DirectXRenderer.present", 0);
         let result = unsafe {
             self.resources
                 .as_ref()
@@ -332,6 +333,7 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        let _perf = sirio_perf::span("DirectXRenderer.draw", 0);
         if self.skip_draws {
             // skip drawing this frame, we just recovered from a device lost event
             // and so likely do not have the textures anymore that are required for drawing
@@ -351,6 +353,7 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        let _perf = sirio_perf::span("DirectXRenderer.render", 0);
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
@@ -1341,9 +1344,19 @@ fn create_swap_chain(
         },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: BUFFER_COUNT as u32,
-        Scaling: DXGI_SCALING_NONE,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+        // Sirio-local change (rust/vendor/README.md): a bit-block-transfer swap
+        // chain, not the flip model upstream uses here. A flip-model swap chain
+        // presented to an HWND is composed by the DWM as opaque -- DXGI only
+        // accepts `DXGI_ALPHA_MODE_IGNORE` for it -- so on this path
+        // `WindowBackgroundAppearance::Blurred` / `Transparent` could never show
+        // anything behind the window. A bitblt present copies the back buffer,
+        // alpha channel included, into the window's redirection surface, which
+        // the DWM does composite per-pixel once an accent policy is in effect
+        // (`set_window_composition_attribute` in window.rs). Bitblt swap chains
+        // only support `DXGI_SCALING_STRETCH`.
+        Scaling: DXGI_SCALING_STRETCH,
+        SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
+        AlphaMode: DXGI_ALPHA_MODE_UNSPECIFIED,
         Flags: 0,
     };
     let swap_chain =

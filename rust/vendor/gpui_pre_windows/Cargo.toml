@@ -226,4 +226,7 @@ priority = -1
 level = "allow"
 priority = 0
 
+[dependencies.sirio_perf]
+path = "../../crates/sirio_perf"
+
 [workspace]
