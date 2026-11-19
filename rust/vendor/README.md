@@ -1,7 +1,7 @@
 # `rust/vendor/` — local overrides and Ely chat components
 
 Sirio builds on the published `gpui-pre` 0.3.12 family (`gpui-pre`, `gpui-pre-platform` and the
-backends under it). This directory holds what that family does not give us as it is: two
+backends under it). This directory holds what that family does not give us as it is: three
 platform backends carrying Sirio's patches, the HTTP client gpui-pre no longer installs, and the
 two Bezel crates the shell still draws with, repointed at the new engine.
 
@@ -23,26 +23,27 @@ paths.
 |---|---|---|---|
 | `gpui_linux/` | `gpui-pre-linux` 0.3.12 | two Sirio patches | `[patch.crates-io]` |
 | `gpui_windows/` | `gpui-pre-windows` 0.3.12 | three Sirio changes | `[patch.crates-io]` |
+| `gpui_macos/` | `gpui-pre-macos` 0.3.12 | one Sirio change (#810) | `[patch.crates-io]` |
 | `bezel_theme/` | `bezel-theme` 0.1.4 | pristine `src/`, manifest repointed | `[patch.crates-io]` |
 | `bezel_markdown/` | `bezel-markdown` 0.1.4 | four changes in `src/render.rs` (+ `lib.rs` re-export), manifest repointed | `[patch.crates-io]` |
 | `reqwest_client/` | `sirio-reqwest-client` | zed's `reqwest_client`, republished by bezel | workspace member |
 | `ely-palette/`, `ely-gpui-component/` | as above | Ely sources | workspace members |
 
-macOS builds on the upstream `gpui-pre-macos` / `gpui-pre-apple` 0.3.12, unpatched, so there is no
-`gpui_macos/` here. That is a project decision with one open item: against bezel's
+macOS builds on the upstream `gpui-pre-apple` 0.3.12, unpatched, and on `gpui-pre-macos` 0.3.12
+with the one change described under `gpui_macos` below. One item is open: against bezel's
 `bezel-gpui-apple` 0.3.8 the Metal destination-alpha blend changed (`One` became
 `OneMinusSourceAlpha` on two of the three pipelines), the same change `gpui_windows/` undoes on
 Windows. A blend factor applies to every draw, and Sirio requests `Blurred` on macOS
 (`rust/crates/sirio/src/shell_chrome.rs`), so framebuffer alpha reaches the screen: the blurred
 window's look may differ. Checking it by hand on a Mac is owed before release; it has not been
-verified. If a Mac shows a regression, the follow-up is to vendor `gpui-pre-apple` (and
-`gpui-pre-macos` if it must change) the way `gpui_windows/` is vendored and restore the blend. Two
+verified. If a Mac shows a regression, the follow-up is to vendor `gpui-pre-apple` the way
+`gpui_windows/` is vendored and restore the blend. Two
 other differences do not touch Sirio: there is no backdrop-blur pass, and the shadow shader lost
 the `inset == 2` mode. A search of `rust/crates`, `vendor/ely-gpui-component` and
 `vendor/ely-palette` finds no use of either.
 
-`gpui_platform` is not patched. `gpui-pre-platform` takes `gpui-pre-linux` and `gpui-pre-windows`
-as ordinary registry dependencies, so one `[patch.crates-io]` entry per backend substitutes the
+`gpui_platform` is not patched. `gpui-pre-platform` takes `gpui-pre-linux`, `gpui-pre-windows` and
+`gpui-pre-macos` as ordinary registry dependencies, so one `[patch.crates-io]` entry per backend substitutes the
 vendored tree for every consumer that resolves that package name from crates.io.
 
 ## How a vendored package is laid out
@@ -72,23 +73,24 @@ repeating it:
   Dependencies on the engine are `=0.3.12` pins.
 - **Its own `[workspace]` table**, because Cargo refuses a directory that is both a `[patch]`
   target and an implicit member of the enclosing workspace, plus an entry in `rust/Cargo.toml`'s
-  `[workspace] exclude` (today `vendor/gpui_linux`, `vendor/gpui_windows` and
+  `[workspace] exclude` (today `vendor/gpui_linux`, `vendor/gpui_windows`, `vendor/gpui_macos` and
   `vendor/bezel_theme`; `bezel_markdown` carries the table but is not listed there).
   `reqwest_client/` is the exception: it is a workspace member and carries no `[workspace]` table.
 - **Its own committed `Cargo.lock`** where the crate has one (`gpui_linux`, `gpui_windows`,
-  `bezel_theme`), so a standalone `cargo test --manifest-path rust/vendor/<dir>/Cargo.toml` is
+  `bezel_theme`; `gpui_macos` keeps the published lock, see its section), so a standalone `cargo test --manifest-path rust/vendor/<dir>/Cargo.toml` is
   reproducible. Never hand-edit a lockfile.
 - **The `[patch.crates-io]` entry by package name** in `rust/Cargo.toml`, and a comment there
   saying why.
 - `target/` under any of them is covered by `rust/.gitignore`'s bare `target/` rule; never commit
   it, it runs to several GB.
-- Licences: `gpui_linux`, `gpui_windows` and `reqwest_client` carry `LICENSE-APACHE`;
+- Licences: `gpui_linux`, `gpui_windows`, `gpui_macos` and `reqwest_client` carry `LICENSE-APACHE`;
   `bezel_markdown` carries the MIT `LICENSE` from the repository's `v0.1.4` tag, which the
   published crate does not ship; `bezel_theme` carries none, because the published crate has none.
 
 After touching a dependency line in a vendored manifest, run
 `cargo tree --target x86_64-unknown-linux-gnu -i gpui-pre-linux` (or `-i gpui-pre-windows` for the
-Windows crate, with the Windows target) and confirm it resolves to the path source with no
+Windows crate, with the Windows target; `-i gpui-pre-macos` with `--target aarch64-apple-darwin`)
+and confirm it resolves to the path source with no
 `patch ... was not used in the crate graph` warning. A candidate whose requirement the graph cannot
 satisfy is dropped *silently*, with only that warning, and the build then uses the unpatched
 registry crate.
@@ -187,6 +189,47 @@ The manifest follows the recipe above and has its own `Cargo.lock`. There is no 
 this crate: the swap chain's effect exists only on a live DWM, and the crate's tests do not cover
 swap-chain creation. The check that matters is visual (an isolated instance over a loud backdrop,
 with a Browser tab open), plus `cargo tree -i gpui-pre-windows` showing the path source.
+
+## `gpui_macos` — every window paced by CVDisplayLink (#810)
+
+`vendor/gpui_macos/` is `gpui-pre-macos` 0.3.12 with `src/` identical to the copy Ely vendors at
+ELY-Open-Source/Ely-GPUI-Components `0b983008`. That copy differs from the release in two ways:
+
+- **The frame source.** In `MacWindow::open` (`src/window.rs`), `metal_frames` is always `None`.
+  Every window therefore takes the `CVDisplayLink` frame source (`FrameSource::DisplayLink`), as
+  gpui-pre 0.3.10 and bezel-gpui 0.3.8 did. The release picks a per-layer `CAMetalDisplayLink` on
+  macOS 14 and later. The doc comments on `FrameSource` (`src/window.rs`) and at the top of
+  `src/display_link.rs` still describe the release's choice; they are left as Ely left them.
+- **Frame logging.** `log::info!` and `log::warn!` lines name when a link attaches, detaches, is
+  refused, or ignores wakes, and when a window is occluded. Sirio installs no `log` logger, so these
+  lines print nothing in Sirio today.
+
+Why: #810. On the `macos-15` runner, a window in the background sometimes drew its next frame about
+10 s late on gpui-pre 0.3.12. In two runs before #806 merged, host-sessions case 21 took 15 s
+against 7 s on bezel-gpui 0.3.8. The final #806 run (44450730490) took 5 s, so the delay is
+intermittent. The suspected cause is a `CAMetalDisplayLink` left paused: `MetalFrames::end_frame`
+pauses the link after an update that neither drew nor asked for another frame. Then the link
+answers only `MetalFrames::wake` or a new link that `start_display_link` builds on an occlusion,
+screen or key change. This has not been confirmed on a Mac.
+
+Ely's evidence is related but not the same symptom. On their hosted macOS CI the link stopped
+answering wakes 16.5 minutes after it attached and sent again 5 to 8 s later. Their pixel job
+passed on gpui-pre 0.3.10 (`CVDisplayLink`) and failed on every run after 0.3.11 moved to
+`CAMetalDisplayLink`.
+
+The cost: on macOS 14 and later, a visible window now gets a display-link tick at the screen's
+rate for as long as it stays visible, idle or not, where the Metal link paused itself. Each tick
+runs the window's request-frame callback, which draws only when something asked for a frame. This
+is what bezel-gpui 0.3.8 did on every macOS version.
+
+The manifest follows the recipe above: `publish = false` and an empty `[workspace]` table, with no
+dependency changed. Its `Cargo.lock` is the lock the published crate ships, unchanged and not
+synced with `rust/Cargo.lock`. The crate builds only on macOS, so no stage runs it standalone and
+the lock proves nothing; it is kept only so the directory matches the release. To check that the
+patch is in use, run `cargo tree -i gpui-pre-macos --target aarch64-apple-darwin` and look for the
+path source. Proof that the fix works has to come from a Mac: put Sirio in the background, open a
+tab with `sirioctl`, and time its first render (#810, To do). The `macos-check.yml` host-sessions
+timings can show a regression, but a green run proves nothing, because the delay was intermittent.
 
 ## `bezel_theme` — repointed, source pristine
 

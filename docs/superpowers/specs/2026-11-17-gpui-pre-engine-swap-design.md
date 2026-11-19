@@ -258,7 +258,8 @@ case 5 failed ("the cat terminal is unknown") and case 21 went from 7 s to 15 s.
   neither the registry nor the host can answer publishes the registry on the GPUI thread
   (`ControlAction::SyncPanes`) and is answered from it, as it would be after the next frame. A
   host answer that is ok is never replaced.
-- **Case 21.** It still waits on the frame; #810 tracks it.
+- **Case 21.** It still waits on the frame; #810 tracks it. After the merge, `rust/vendor/gpui_macos`
+  (#810's fix, Ely's copy at `0b983008`) paces every macOS window with `CVDisplayLink` again.
 
 ## 6. Verification — "the app is identical"
 
