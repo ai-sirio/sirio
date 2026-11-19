@@ -43,8 +43,10 @@ impl UiCsp {
 /// labels `[a-z0-9-]` (no label empty or starting or ending with `-`), at least two labels, an
 /// optional `*.` first label that must be followed by at least two labels, an optional port
 /// written as given (1-65535), and one trailing `/`, which is dropped. Everything else is
-/// refused: other schemes, IP literals, `localhost` and the `.localhost`, `.local` and
-/// `.internal` names, non-ASCII hosts (no punycode conversion), and any path, query, fragment,
+/// refused: other schemes, IP literals (including the WHATWG numeric IPv4 spellings such as
+/// `0x7f.1`: any host whose last label is digits, or `0x` plus hex digits, is refused),
+/// `localhost` and the `.localhost`, `.local` and `.internal` names, non-ASCII hosts (no
+/// punycode conversion), and any path, query, fragment,
 /// userinfo or character that could end a CSP source.
 ///
 /// Known gap: there is no public-suffix list, so a wildcard over a multi-label public suffix
@@ -80,7 +82,7 @@ pub fn allowed_origin(entry: &str, connect: bool) -> Option<String> {
     if labels.len() < 2 || !labels.iter().all(|l| label_ok(l)) {
         return None;
     }
-    if base.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+    if labels.last().is_some_and(|l| ends_in_a_number(l)) {
         return None;
     }
     let local = base == "localhost"
@@ -91,6 +93,15 @@ pub fn allowed_origin(entry: &str, connect: bool) -> Option<String> {
     let star = if wildcard { "*." } else { "" };
     let port = port.map(|p| format!(":{p}")).unwrap_or_default();
     Some(format!("{scheme}{star}{base}{port}"))
+}
+
+/// WHATWG treats a host whose last label is all digits, or `0x` plus hex digits, as an IPv4
+/// address in one of its numeric spellings (`0x7f.1` is 127.0.0.1). The host is already
+/// lowercase.
+fn ends_in_a_number(label: &str) -> bool {
+    let all = |s: &str, f: fn(&u8) -> bool| s.bytes().all(|b| f(&b));
+    all(label, u8::is_ascii_digit)
+        || label.strip_prefix("0x").is_some_and(|h| all(h, u8::is_ascii_hexdigit))
 }
 
 fn label_ok(label: &str) -> bool {
@@ -156,6 +167,13 @@ mod tests {
             "https://10.0.0.1:8080",
             "https://[::1]",
             "https://[2001:db8::1]",
+            "https://0x7f.0.0.1",
+            "https://0x7f.1",
+            "https://0xc0.0xa8.1.1",
+            "https://a.0x",
+            "https://a.b.0x1",
+            "https://foo.123",
+            "https://*.0x7f.0.0.1",
             "https://localhost",
             "https://*.localhost",
             "https://app.localhost",
@@ -194,8 +212,13 @@ mod tests {
         for entry in bad {
             assert_eq!(allowed_origin(entry, false), None, "accepted: {entry:?}");
         }
-        let bad_connect =
-            ["wss://127.0.0.1", "wss://*.com", "ws://a.widget.test", "wss://a.widget.test/x"];
+        let bad_connect = [
+            "wss://127.0.0.1",
+            "wss://0x7f.0.0.1",
+            "wss://*.com",
+            "ws://a.widget.test",
+            "wss://a.widget.test/x",
+        ];
         for entry in bad_connect {
             assert_eq!(allowed_origin(entry, true), None, "accepted: {entry:?}");
         }
@@ -213,6 +236,10 @@ mod tests {
             Some("https://api.widget.test:8443")
         );
         assert_eq!(ok("wss://ws.widget.test", true).as_deref(), Some("wss://ws.widget.test"));
+        assert_eq!(
+            ok("https://0xz.widget.test", false).as_deref(),
+            Some("https://0xz.widget.test")
+        );
         // The documented gap: no public-suffix list.
         assert_eq!(ok("https://*.co.uk", false).as_deref(), Some("https://*.co.uk"));
     }
