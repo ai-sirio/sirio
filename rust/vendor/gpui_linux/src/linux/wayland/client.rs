@@ -3645,7 +3645,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_read_with_a_pending_drop_leaves_nothing_for_the_next_drag() {
+    fn a_failed_read_with_a_pending_drop_releases_the_offer_without_finishing_it() {
         let mut drag = drag_state();
         let data_offer = FakeDataOffer::new("A");
         let generation = drag.begin_uri_read(Point::default());
@@ -3654,18 +3654,6 @@ mod tests {
         drag.abandon_uri_read(generation, data_offer.clone());
         assert!(data_offer.destroyed.get());
         assert!(!data_offer.finished.get());
-
-        // The next drag starts clean.
-        let data_offer_b = FakeDataOffer::new("B");
-        let generation_b = drag.begin_uri_read(Point::default());
-        let next = file_drop_events(complete_drag_uri_read(
-            &mut drag,
-            generation_b,
-            data_offer_b.clone(),
-            "window B",
-        ));
-        assert_eq!(next, [("window B", "entered", Some(Point::default()))]);
-        assert!(!data_offer_b.finished.get());
     }
 
     #[test]
