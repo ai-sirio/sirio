@@ -3373,3 +3373,189 @@ fn the_gateway_base_url_guard_checks_the_host() {
         assert!(claude_live::is_local_base_url(url), "a local API URL is accepted");
     }
 }
+
+// Failure list for `claude_serves_mcp_apps_to_sirio`, written before the test. It fails when:
+// - the CLI's own MCP `initialize` does not declare `io.modelcontextprotocol/ui` with the
+//   `text/html;profile=mcp-app` MIME type under `CLAUDE_CODE_MCP_APPS_HOST=1` (the launch
+//   variable is not honoured, or Sirio does not set it);
+// - the model's `mcp__apps__show` call does not reach the chat as `Called` and `Returned`
+//   (the three capabilities are missing from `system/init`, or the result lost its
+//   `structuredContent`);
+// - `mcp_status` does not carry `show`'s `resourceUri` and `app` visibility, or shows `act` to
+//   the model (the `_meta.ui` of a tool is not forwarded);
+// - `ui_tool_for` does not find `show`, or `mcp_read_resource` does not return a document
+//   whose csp is the one the server declared;
+// - the widget's `act` call fails: the CLI's `toolu_mcp_call_` ask is not recognized, or its
+//   tool name is not the one Sirio granted (Sirio denies every ask it did not grant);
+// - any permission card reaches the chat: the model's `show` is allowed by the user settings
+//   and the widget's call is answered by Sirio alone;
+// - the turn does not end within 60 s.
+
+/// Proves the real `claude` and Sirio's MCP Apps plumbing agree on the wire: the host
+/// capability reaches the server, a model call to a widget tool reaches the chat with its
+/// structured result, `mcp_status` carries the tool's UI, and `mcp_read_resource` and
+/// `mcp_call` (with the CLI's own permission ask, in the default permission mode) work through
+/// the production client.
+///
+/// A fake model API (`fake_mcp_apps_api.py`) and a fake MCP server (`mcp_apps.py`) stand in for
+/// the network. It uses no credential and no network beyond 127.0.0.1, but launches a real CLI,
+/// so it is `#[ignore]`d and stays off CI:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --exact claude_serves_mcp_apps_to_sirio --test-threads=1 --nocapture
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
+/// `python3`. Its scratch directory is under the system temp dir, removed after a pass and kept
+/// after a failure.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_serves_mcp_apps_to_sirio() {
+    use sirio_chat::{ChatEvent, ClaudeClient, ClaudeLaunch, McpToolItem, SessionNotice};
+
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("mcp-apps", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    eprintln!("claude reports {version_text}");
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude is below the claimed floor");
+        return;
+    }
+
+    let rig = claude_live::AppsRig::start(&claude, &python, &scratch.root.join("apps"));
+    let launch = ClaudeLaunch::fixture(
+        std::path::PathBuf::from("/bin/sh"),
+        vec![rig.launcher.display().to_string()],
+    )
+    .mcp_apps_host(true);
+    let (mut client, events) =
+        ClaudeClient::launch(launch, &rig.work).ok()
+        .expect("the CLI completes its handshake");
+    client.prompt("run apps").ok()
+        .expect("the prompt is sent");
+
+    // The turn: the model calls `show`; the chat gets its `Called` and `Returned` notices.
+    let mut tool_updates = Vec::new();
+    let mut permission_cards = 0;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut ended = false;
+    while Instant::now() < deadline && !ended {
+        match events.try_recv() {
+            Ok(ChatEvent::TurnEnded { .. }) => ended = true,
+            Ok(ChatEvent::PermissionRequest { request_id, .. }) => {
+                permission_cards += 1;
+                let _ = client.cancel_permission(request_id);
+            }
+            Ok(ChatEvent::OtherSessionUpdate { .. }) => {
+                for notice in client.take_notices() {
+                    if let SessionNotice::McpTool(update) = notice {
+                        tool_updates.push(update);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    assert!(ended, "the turn ended within 60 s");
+    for notice in client.take_notices() {
+        if let SessionNotice::McpTool(update) = notice {
+            tool_updates.push(update);
+        }
+    }
+
+    // The server saw the host's MCP Apps capability in the CLI's own `initialize`.
+    let log = std::fs::read_to_string(&rig.mcp_log).unwrap_or_default();
+    let initializes: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|entry| entry.get("initialize").cloned())
+        .collect();
+    assert!(!initializes.is_empty(), "the server saw an initialize");
+    assert!(
+        initializes.iter().any(|params| {
+            params["capabilities"]["extensions"]["io.modelcontextprotocol/ui"]["mimeTypes"]
+                == serde_json::json!(["text/html;profile=mcp-app"])
+        }),
+        "the server saw no MCP Apps capability"
+    );
+
+    let called = tool_updates.iter().find_map(|update| match &update.item {
+        McpToolItem::Called { name, input } => Some((update.id.clone(), name.clone(), input.clone())),
+        _ => None,
+    });
+    let (call_id, name, input) = called.expect("the chat got a Called notice");
+    assert_eq!(name, "mcp__apps__show");
+    assert_eq!(input, serde_json::json!({"text": "hi"}));
+    let returned = tool_updates.iter().find_map(|update| match &update.item {
+        McpToolItem::Returned { result } if update.id == call_id => Some(result.clone()),
+        _ => None,
+    });
+    let returned = returned.expect("the chat got a Returned notice for the call");
+    assert!(
+        returned.get("structuredContent").is_some(),
+        "the result carries structuredContent"
+    );
+
+    // `mcp_status` carries each tool's UI.
+    let control = client.mcp_control();
+    let servers = control.refresh_status().ok()
+        .expect("mcp_status answers");
+    let apps = servers
+        .iter()
+        .find(|server| server.name == "apps")
+        .expect("the apps server is listed");
+    let ui_of = |tool: &str| {
+        apps.tools
+            .iter()
+            .find(|candidate| candidate.name == tool)
+            .and_then(|candidate| candidate.ui.clone())
+    };
+    let show = ui_of("show").expect("show carries a ui");
+    assert_eq!(show.resource_uri.as_deref(), Some("ui://apps/show.html"));
+    assert!(show.for_app, "show is visible to the app");
+    let act = ui_of("act").expect("act carries a ui");
+    assert!(act.for_app && !act.for_model, "act is app only");
+    assert!(
+        sirio_claude::mcp::ui_tool_for(&servers, "mcp__apps__show").is_some(),
+        "ui_tool_for finds show"
+    );
+
+    // The widget's resource, through the CLI, is a document with the declared csp.
+    let contents = control
+        .read_resource("apps", "ui://apps/show.html")
+        .ok()
+        .expect("mcp_read_resource answers");
+    let document = sirio_chat::mcp_apps::document::widget_document(&contents, "ui://apps/show.html")
+        .ok()
+        .expect("the resource is a widget document");
+    assert_eq!(document.csp.connect, ["https://api.widget.test"]);
+
+    // The widget's call: the CLI asks in the default mode, and Sirio answers its own grant.
+    let acted = control
+        .call_tool_after_user_allowed("mcp__apps__act", serde_json::json!({"step": 1}))
+        .ok()
+        .expect("the widget's call is allowed and answered");
+    assert!(
+        acted.get("content").is_some_and(serde_json::Value::is_array),
+        "the call's content is a block array"
+    );
+    assert_eq!(permission_cards, 0, "no permission card reached the chat");
+
+    client.shutdown().ok()
+        .expect("the client shuts down");
+}
