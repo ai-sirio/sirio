@@ -835,7 +835,11 @@ Each item is laid out the same way:
     iframe with `sandbox="allow-scripts allow-same-origin"` (S475), served from a second
     Sirio-owned scheme so the two origins differ on every engine (S474). The relay is not a trust
     boundary: on Windows wry injects `window.ipc` into subframes too. Rust treats every IPC message
-    as hostile, and on Windows it also drops any whose source URL is not the relay's.
+    as hostile, and on Windows it also drops any whose source URL is not the relay's. The relay
+    never hands IPC to the iframe: it relays only `postMessage` traffic whose source is that
+    iframe, which Rust then validates. A test proves that the iframe can reach neither
+    `parent.document` nor its own `<iframe>` element, so it cannot lift its sandbox (coordinator's
+    condition, 2026-11-19).
   - **The CSP, and the rest of "no network".** Sirio's protocol handler sends the CSP as a
     response header, never a meta tag, built from the spec's restrictive default (S275-S284) plus
     the declared domains, where `R` is `resourceDomains` and `C` is `connectDomains`:
@@ -872,10 +876,12 @@ Each item is laid out the same way:
     `check_permissions: true`, so managed settings, deny rules and hooks still apply. Sirio answers
     the resulting `can_use_tool` (`toolu_mcp_call_…`) itself, with allow and without a second card,
     only when it matches the one call the user just approved (same tool, same input), and only
-    once. It denies any other.
+    once. The approval lapses when that `mcp_call` answers, or after 10 seconds, whichever comes
+    first. Sirio denies any other `toolu_mcp_call_…` ask. Tests prove the denial for a different
+    input, a second use and a lapsed approval (coordinator's condition, 2026-11-19).
 
-    On 2.1.301 to 2.1.318, Sirio's card is the only gate. `mcp_call` is bound to no server and
-    checks no tool name, so all of these checks are Sirio's.
+    On 2.1.301 to 2.1.318, Sirio's card is the only gate, and the PR's Merge Danger says so.
+    `mcp_call` is bound to no server and checks no tool name, so all of these checks are Sirio's.
   - **"Ignored" means no effect, with an error answer.** JSON-RPC requires an answer to every
     request, and a dropped request leaves the view waiting forever.
     - Sirio answers `ui/initialize` with `protocolVersion` `2026-01-26`, `hostInfo`, and
@@ -894,9 +900,13 @@ Each item is laid out the same way:
     viewport. So a widget is mapped only while its whole frame lies inside the transcript viewport
     (measured against the viewport, not from prepaint) and no Sirio overlay covers it, the chat's
     own overlays included. Otherwise a placeholder of the same size stands in for it. Its height
-    follows `size-changed`, capped below the viewport's height so that the rule can be met. The
-    same rule keeps a widget from covering a permission card. A folded turn, a hidden tab or a
-    closed chat unmaps it.
+    follows `size-changed`, capped below the viewport's height so that the rule can be met. A folded
+    turn, a hidden tab or a closed chat unmaps it.
+    - While the question dock shows any question, every widget of that chat is unmapped. So no
+      widget sits beside a card it could imitate, or under the pointer when the card arrives. The
+      dock's rows already ignore input for half a second after a question appears.
+    - A widget's ask goes through the same dock as any other permission. It is not persisted, and
+      it lapses into Reject at the permission timeout.
   - **Not persisted.** As in A10, a restored chat shows the plain tool row.
   - **No webview, no widget.** Where Sirio has no webview, it sets no variable and draws the plain
     row. That covers a Wayland session that stays native (`SIRIO_FORCE_X11` set off, or no usable
@@ -909,6 +919,9 @@ Each item is laid out the same way:
       iframe on WebKitGTK.
     - The plan's first task proves all three. If the header is not enforced, the design changes
       before any other task.
+    - That proof runs on Linux only. On macOS (WKWebView) and Windows (WebView2) the same facts,
+      and WebRTC off, stay unverified until someone checks them on those systems. The PR lists
+      them as such.
 
 ## Delivery
 
