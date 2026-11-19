@@ -20,7 +20,10 @@ use std::{
 };
 
 use gtk::prelude::*;
-use webkit2gtk::{AuthenticationRequestExt, FileChooserRequestExt, SettingsExt, WebViewExt};
+use webkit2gtk::{
+    AuthenticationRequestExt, ColorChooserRequestExt, FileChooserRequestExt, OptionMenuExt,
+    SettingsExt, WebViewExt,
+};
 use wry::{
     NewWindowResponse, PermissionResponse, Rect, WebView, WebViewBuilder, WebViewExtUnix,
     dpi::{LogicalPosition, LogicalSize},
@@ -270,6 +273,34 @@ pub fn build_widget_child(
         request.cancel();
         true
     });
+    // A middle click would paste the user's X PRIMARY selection (whatever they last highlighted in
+    // any app) into an editable element of the page, which could then send it to its declared
+    // domains: button 2 is stopped, every other button goes on.
+    view.connect_button_press_event(|_, event| {
+        if event.button() == 2 {
+            gtk::glib::Propagation::Stop
+        } else {
+            gtk::glib::Propagation::Proceed
+        }
+    });
+    view.connect_button_release_event(|_, event| {
+        if event.button() == 2 {
+            gtk::glib::Propagation::Stop
+        } else {
+            gtk::glib::Propagation::Proceed
+        }
+    });
+    // No native popup or dialog the page can fill with its own text: a `<select>` popup (which can
+    // open outside the slot), a colour chooser, and the print dialog.
+    view.connect_show_option_menu(|_, menu, _, _| {
+        menu.close();
+        true
+    });
+    view.connect_run_color_chooser(|_, request| {
+        request.cancel();
+        true
+    });
+    view.connect_print(|_, _| true);
     view.connect_authenticate(|_, request| {
         request.cancel();
         true

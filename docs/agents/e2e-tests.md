@@ -556,6 +556,11 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     with the key handler disabled too (no run has seen a key reach the
 #                     page, handler on or off), so that part cannot tell the handler's work
 #                     from its absence.
+#                     A fourth widget is a textarea whose value length goes out through its height (2000
+#                     plus the length): the X PRIMARY selection is set from a python3-gi helper process
+#                     (killed by its exact PID), a real `click 2` lands on the textarea, and the length
+#                     must stay 0 (with the button-2 handler disabled the app stops answering reads: the
+#                     paste engaged). `show-option-menu`, `run-color-chooser` and `print` have no E2E.
 #                     Also a real click inside widget 1 then one in the composer then real typing (the
 #                     composer still takes the keys), a half scroll and back, a folded turn,
 #                     the effort list, a file tab over the chat, a terminal beside it, a call whose

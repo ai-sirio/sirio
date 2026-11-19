@@ -166,6 +166,21 @@
     document.body.appendChild(button);
   }
 
+  // A textarea at a known place (10,10 to 210,60 in the view). Its value length goes out through the
+  // height, on a base (2000) that the keydown count (120 plus the count) cannot reach: a middle click
+  // must not paste the PRIMARY selection into it.
+  function offerTextarea() {
+    var area = document.createElement("textarea");
+    area.id = "paste";
+    area.style.cssText = "position:absolute;left:10px;top:10px;width:200px;height:50px";
+    document.body.appendChild(area);
+    function report() {
+      notify("ui/notifications/size-changed", { height: 2000 + area.value.length });
+    }
+    area.addEventListener("input", report);
+    setInterval(report, 300);
+  }
+
   // Posts straight to the IPC handler, outside the relay: Sirio closes the widget for it.
   function forge() {
     var wk = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc;
@@ -205,6 +220,7 @@
     else if (text === "flood") { await flood(); }
     else if (text === "forge") { forge(); }
     else if (text === "idle") { offerButton(); }
+    else if (text === "paste") { offerTextarea(); }
   });
 })();
 </script>

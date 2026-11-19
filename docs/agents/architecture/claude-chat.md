@@ -925,7 +925,11 @@ a guard for any path that would hand GTK a key; no test shows it stopping one. N
 `focus_parent()` for a widget: it focuses the widget's own X child, not Sirio's top-level
 (`browser.rs` still uses it for its own child). A widget is shown before it is sized: on a hidden
 GtkWindow `set_bounds` is ignored and the page would keep its 1x1 build size, so its slot would
-stay blank and take no click. The webview cancels every
+stay blank and take no click. There is no middle-click paste: the
+webview stops button 2 (press and release), because WebKitGTK would paste the user's X PRIMARY
+selection into an editable element of the page, which could then send it to its declared domains.
+It also opens no option menu (`show-option-menu`), colour chooser (`run-color-chooser`) or print
+dialog (`print`); those three have no E2E, only the code. The webview cancels every
 file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and the
 hyperlink auditing and DNS prefetching settings are off (documented no-ops on 2.54.1, kept for older
 engines: an `<a ping>` is stopped by the CSP, and DNS prefetching has no working switch there, a

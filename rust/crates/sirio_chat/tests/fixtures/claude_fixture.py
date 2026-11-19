@@ -1086,6 +1086,18 @@ def script_mcp_idle():
     trace_result(0.05, started)
 
 
+def script_mcp_paste():
+    """A `show` call whose widget is a textarea (text "paste")."""
+    started = time.time()
+    message_start("msg_paste_1")
+    trace_assistant("msg_paste_1", tool_use(
+        "toolu_paste_1", "mcp__apps__show", {"text": "paste"}))
+    message_end("tool_use", 40)
+    pause()
+    mcp_widget_result("toolu_paste_1")
+    trace_result(0.05, started)
+
+
 def script_mcp_denied():
     """A `show` call that did not run: its `tool_use_result` is a string, as for a denial."""
     started = time.time()
@@ -1545,6 +1557,7 @@ TRACE_SCRIPTS = {
     "mcp_denied": script_mcp_denied,
     "mcp_forge": script_mcp_forge,
     "mcp_idle": script_mcp_idle,
+    "mcp_paste": script_mcp_paste,
     "mcp_subagent": script_mcp_subagent,
 }
 

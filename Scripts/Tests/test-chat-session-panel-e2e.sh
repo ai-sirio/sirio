@@ -6204,26 +6204,73 @@ print(x, y)' "$DISPLAY_TARGET")
   widget_wait "no key reached the third widget: its keydown count, carried in its height, is 0" 10 \
     'any(r["toolUseId"] == "toolu_idle_1" and r["height"] == "120" for r in w)'
   DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool key --repeat 14 --delay 40 BackSpace || fail "xdotool could not clear the composer"
+  # 8c. no middle-click paste. A fourth widget's view is a textarea (10,10 to 210,60 in the view) that reports
+  # its value length through its height (2000 plus the length). The X PRIMARY selection is set on this display
+  # from outside the app, by a helper process that owns it until it is killed by its exact PID, to a known
+  # marker; a real middle click on the textarea would paste it. Sirio stops button 2 on the webview, so the
+  # length stays 0.
+  send_prompt mcp_paste
+  WIDGET_COUNT=4
+  widget_wait "the fourth widget is ready" 60 'len(w) == 4 and any(r["toolUseId"] == "toolu_paste_1" and r["phase"] == "ready" for r in w)'
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels=100000 >/dev/null || fail "scrollBy to the bottom failed"
+  widget_wait "the fourth widget is drawn and mapped, its textarea reporting a length of 0" 30 \
+    'any(r["toolUseId"] == "toolu_paste_1" and r["mapped"] == "1" and r["height"] == "2000" for r in w)'
+  sleep 1
+  cat >"$RUN_DIR/primary-owner.py" <<'PY'
+import gi, sys
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gtk
+Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY).set_text("PRIMARYMARK", -1)
+open(sys.argv[1], "w").write("ready")
+Gtk.main()
+PY
+  rm -f "$RUN_DIR/primary-ready"
+  DISPLAY="$DISPLAY_TARGET" python3 "$RUN_DIR/primary-owner.py" "$RUN_DIR/primary-ready" &
+  PRIMARY_PID=$!
+  for _ in $(seq 1 50); do [ -f "$RUN_DIR/primary-ready" ] && break; sleep 0.2; done
+  [ -f "$RUN_DIR/primary-ready" ] || { kill "$PRIMARY_PID" 2>/dev/null || true; fail "the PRIMARY owner never started"; }
+  local paste_geo px py
+  paste_geo=$(MW read "$SURFACE" | python3 -c '
+import json, subprocess, sys
+r = next(r for r in json.load(sys.stdin)["mcpWidgets"] if r["toolUseId"] == "toolu_paste_1")
+geo = subprocess.run(["xwininfo", "-display", sys.argv[1], "-id", r["xid"]], capture_output=True, text=True).stdout
+x = int([l for l in geo.splitlines() if "Absolute upper-left X" in l][0].split()[-1])
+y = int([l for l in geo.splitlines() if "Absolute upper-left Y" in l][0].split()[-1])
+print(x, y)' "$DISPLAY_TARGET")
+  read -r px py <<<"$paste_geo"
+  echo "step: a real middle click on the textarea of the fourth widget (window at $px,$py), PRIMARY owned by pid $PRIMARY_PID"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove $(( px + 60 )) $(( py + 30 )) click 2 || { kill "$PRIMARY_PID" 2>/dev/null || true; fail "xdotool could not middle-click"; }
+  sleep 1
+  # Read while the helper still owns the selection, then kill it by its exact PID.
+  if ! MW wait "$SURFACE" 10 "the middle click pasted nothing: the textarea's value length is 0" \
+    'any(r["toolUseId"] == "toolu_paste_1" and r["height"] == "2000" for r in w)'; then
+    kill "$PRIMARY_PID" 2>/dev/null || true
+    wait "$PRIMARY_PID" 2>/dev/null || true
+    fail "the middle click pasted nothing: the textarea's value length is 0"
+  fi
+  kill "$PRIMARY_PID" 2>/dev/null || true
+  wait "$PRIMARY_PID" 2>/dev/null || true
   # 9. a call that did not run: its tool_use_result is a string, as for a denial. The widget is closed
   # with "the call did not run" and never gets the call's input (or a result), and the logger stays empty.
   send_prompt mcp_denied
-  WIDGET_COUNT=4
+  WIDGET_COUNT=5
   widget_wait "the denied call's widget is closed with 'the call did not run' and got neither input nor result" 60 \
-    'len(w) == 4 and any(r["toolUseId"] == "toolu_denied_1" and r["phase"] == "closed" and r["error"] == "the call did not run" and r["inputDelivered"] == "0" and r["resultDelivered"] == "0" and r["mapped"] == "0" for r in w)'
+    'len(w) == 5 and any(r["toolUseId"] == "toolu_denied_1" and r["phase"] == "closed" and r["error"] == "the call did not run" and r["inputDelivered"] == "0" and r["resultDelivered"] == "0" and r["mapped"] == "0" for r in w)'
   widget_invariant "9 a denied call's widget"
   # 10. a view that posts straight to the IPC handler, outside its relay, is closed at the first such
   # message; the widgets that never did have a forged count of 0 throughout.
   send_prompt mcp_forge
-  WIDGET_COUNT=5
+  WIDGET_COUNT=6
   widget_wait "the forging widget is closed with 'the view posted outside its relay', its forged count is 1 and every other widget's is 0" 60 \
-    'len(w) == 5 and any(r["toolUseId"] == "toolu_forge_1" and r["phase"] == "closed" and r["error"] == "the view posted outside its relay" and r["forged"] == "1" and r["mapped"] == "0" for r in w) and all(r["forged"] == "0" for r in w if r["toolUseId"] != "toolu_forge_1")'
+    'len(w) == 6 and any(r["toolUseId"] == "toolu_forge_1" and r["phase"] == "closed" and r["error"] == "the view posted outside its relay" and r["forged"] == "1" and r["mapped"] == "0" for r in w) and all(r["forged"] == "0" for r in w if r["toolUseId"] != "toolu_forge_1")'
   widget_invariant "10 a forging widget closed"
   # 11. the CLI dies
   send_prompt die
   widget_wait "every entry is closed and unmapped after the CLI died" 40 \
-    'len(w) == 5 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
+    'len(w) == 6 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
   widget_invariant "11 the CLI died"
-  MW remembered "$DISPLAY_TARGET" 5 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
+  MW remembered "$DISPLAY_TARGET" 6 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
   # after the steps
   [ ! -s "$WIDGET_LOGGER_LOG" ] || fail "the request logger saw $(wc -l <"$WIDGET_LOGGER_LOG") requests from the widget"
   echo "OK: the request logger is empty"
@@ -6232,11 +6279,11 @@ import json, sys
 lines = [json.loads(line) for line in sys.stdin.read().splitlines()]
 reads = [l for l in lines if l.get("subtype") == "mcp_read_resource"]
 calls = [l for l in lines if l.get("subtype") == "mcp_call"]
-assert len(reads) == 5 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
+assert len(reads) == 6 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
 assert calls, "no mcp_call"
 assert all(l.get("tool") == "mcp__apps__act" and l.get("check_permissions") is True and l.get("result_not_for_model") is True for l in calls), "an mcp_call is not a gated act"
 assert not any("mcp_call_ask" in l for l in lines), "the fixture logged an mcp_call_ask"
-print(f"OK: the CLI heard 5 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
+print(f"OK: the CLI heard 6 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
     || fail "the control log is not what the widget run should leave"
   grep -qx 'mcp-apps-host 1' "$RUN_DIR/stub-calls.log" || fail "the CLI was not started with CLAUDE_CODE_MCP_APPS_HOST=1"
   echo "OK: the CLI was started with CLAUDE_CODE_MCP_APPS_HOST=1"
