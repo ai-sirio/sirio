@@ -878,14 +878,16 @@ only name a tool of its own server that is visible to the app.
 can be shown, becomes a card in the question dock: id from `WIDGET_ASK_BASE` (`1 << 62`), title
 `Widget · <server> · <tool>`, the arguments pretty-printed and shown whole, and two rows, Reject
 (`reject_once`, preselected) and Allow (`allow_once`), never Always allow, in every permission mode,
-including bypass. It is click only: Enter, the arrows and the digits do nothing, a click answers
-once the dock is armed (500 ms), and Escape denies. `surface.chat.read` reports `clickOnly` and each
+including bypass. Only a click approves: Enter, the arrows and the digits do nothing, a click answers
+once the dock is armed (500 ms), and Escape denies. The control verb `surface.chat.permission` can
+only reject a widget's card (`reject_once`); any other option is refused with an error. `surface.chat.read` reports `clickOnly` and each
 row's `rowBounds` from the last paint. Arguments over 4000 characters, a tool the server does not
 list, one hidden from apps, an ambiguous name and a name the CLI would rewrite are refused with no
 card (and a note in the widget's `refused` list). Allow runs `mcp_call` off the UI thread and
-answers the widget with the result. Every other end answers the widget `Denied` exactly once and
-shows the card expired: Reject, Escape, a dismiss, the UI-side timer at `PERMISSION_TIMEOUT` (5 min),
-the widget being closed (the cap, a flood, three denials, its own close), the CLI going away (a
+answers the widget with the result, and a second choice while that call runs does nothing. Every
+other end answers the widget `Denied` exactly once. A Reject (a click, or `reject_once` from the
+control verb) marks the card resolved; the other ends show it expired: Escape, a dismiss, the
+UI-side timer at `PERMISSION_TIMEOUT` (5 min), the widget being closed (the cap, a flood, three denials, its own close), the CLI going away (a
 transport error, a deadline, the event stream closing, even between turns), a restart, a new
 conversation or a history session replacing the transcript, and the chat being released. A model
 turn ending touches none of them. An Allow whose call is still running when the widget closes is

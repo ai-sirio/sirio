@@ -4478,14 +4478,12 @@ impl Chat {
                 cx.emit(ChatEvent::TurnEnded);
             }
             sirio_chat::ChatEvent::TransportError(message) => {
-                self.client.take();
+                self.lose_client(cx);
                 // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
                 self.reset_agent_title();
-                self.expire_unanswered(WidgetAsks::Deny, cx);
-                self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
                 let (message, kind) = classify_connection_error(message);
                 self.fail_trace_turn(&message, cx);
                 self.push_entry(Entry::Error {
@@ -4502,14 +4500,12 @@ impl Chat {
                 // A deadline expiring is the agent failing to answer, so it
                 // belongs in the transcript like any other error rather than
                 // leaving the composer stuck in its streaming state.
-                self.client.take();
+                self.lose_client(cx);
                 // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
                 self.reset_agent_title();
-                self.expire_unanswered(WidgetAsks::Deny, cx);
-                self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
                 let message = format!(
                     "{operation:?} timed out after {:.1}s",
                     duration.as_secs_f32()
@@ -4968,6 +4964,10 @@ impl Chat {
         let Some(option) = option else {
             return Err(format!("unknown chat permission option: {option_id}"));
         };
+        // Only a click approves a widget's call; the control surface can only reject it.
+        if request_id >= WIDGET_ASK_BASE && !option.is_rejection {
+            return Err("a widget's card is approved only by a click".to_owned());
+        }
         self.respond_permission(request_id, &option, cx);
         Ok(())
     }
@@ -5370,8 +5370,9 @@ impl Chat {
         persistence.tab_id = tab_id;
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         let old_count = self.entries.len();
-        self.entries.clear();
+        // The widgets go, and their asks are denied, before the cards are cleared with the rest.
         self.close_widgets(cx);
+        self.entries.clear();
         self.turn_message_ids.clear();
         // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
@@ -6308,10 +6309,10 @@ impl Chat {
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let old_count = self.entries.len();
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
+        self.close_widgets(cx);
         self.entries.clear();
         self.turn_message_ids.clear();
         self.pending_rewind = None;
-        self.close_widgets(cx);
         self.folded_turns.clear();
         // The agent that ran the old turns is dropped without a word: its
         // trace goes with it, rather than showing a turn that never ends.
@@ -6476,7 +6477,7 @@ impl Chat {
             && let Err(error) =
                 client.prompt_content(text, mention_paths, images, self.agent_cwd.clone())
         {
-            self.client.take();
+            self.lose_client(cx);
             // The CLI that said it was running is gone.
             self.cli_state = None;
             self.cli_unprompted = false;
@@ -7106,10 +7107,21 @@ impl Chat {
         }));
     }
 
+    /// Every path that drops the client comes here: with no CLI behind them, widget asks are
+    /// denied, their cards expire and the widgets close.
+    fn lose_client(&mut self, cx: &mut Context<Self>) {
+        self.client.take();
+        self.expire_unanswered(WidgetAsks::Deny, cx);
+        self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
+    }
+
     /// The event source closed with no terminal event: see the call site in
     /// `start_connection`. `client` still being `Some` is what tells this
     /// from an already-handled `TransportError`/`Timeout`.
     fn event_source_closed(&mut self, cx: &mut Context<Self>) {
+        // A send that failed already dropped the client, and its widgets were closed then; the
+        // teardown here is for whatever opened since, and costs nothing when there is none.
+        self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
         if self.client.is_none() {
             return;
         }
@@ -7120,9 +7132,6 @@ impl Chat {
         self.cli_unprompted = false;
         self.reset_background_tasks(cx);
         self.reset_agent_title();
-        // A CLI that dies between turns is when a widget's ask lives: not only inside the
-        // streaming branch.
-        self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
         if self.streaming {
             self.expire_unanswered(WidgetAsks::Deny, cx);
         }

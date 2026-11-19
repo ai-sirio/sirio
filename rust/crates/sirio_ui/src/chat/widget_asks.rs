@@ -53,6 +53,8 @@ struct OpenAsk {
     arguments: Value,
     /// Cancelled by dropping it: Allow, Reject and every close do.
     timer: Option<Task<()>>,
+    /// Allow was chosen and the call is running: no second choice starts another.
+    calling: bool,
 }
 
 #[derive(Default)]
@@ -62,6 +64,12 @@ pub(super) struct AskState {
     /// Every answer given to a widget, in order: `(tool_use_id, ask, outcome)`.
     #[cfg(test)]
     pub(super) answers: Rc<RefCell<Vec<(String, u64, AskOutcome)>>>,
+    /// How many calls Allow started.
+    #[cfg(test)]
+    pub(super) calls: Rc<RefCell<u32>>,
+    /// With no client a test's call finishes at once; this keeps it running instead.
+    #[cfg(test)]
+    pub(super) hold_calls: bool,
 }
 
 fn refusal_reason(refusal: AppCallRefusal) -> &'static str {
@@ -170,6 +178,7 @@ impl Chat {
             full_name,
             arguments,
             timer: Some(timer),
+            calling: false,
         });
         cx.notify();
     }
@@ -239,6 +248,9 @@ impl Chat {
         else {
             return;
         };
+        if self.widgets.asks.open[position].calling {
+            return;
+        }
         let found = self.entries.iter_mut().enumerate().rev().find_map(|(index, entry)| match entry
         {
             Entry::Permission { request_id: id, resolved, expired: false, .. }
@@ -262,8 +274,16 @@ impl Chat {
         // Allow: the timer's job is done, and the call runs off the UI thread.
         let open = &mut self.widgets.asks.open[position];
         open.timer = None;
+        open.calling = true;
+        #[cfg(test)]
+        {
+            *self.widgets.asks.calls.borrow_mut() += 1;
+        }
+        let open = &self.widgets.asks.open[position];
         let (full_name, arguments) = (open.full_name.clone(), open.arguments.clone());
         match self.client.as_ref().and_then(|client| client.mcp_control()) {
+            #[cfg(test)]
+            None if self.widgets.asks.hold_calls => {}
             None => self.widget_call_returned(request_id, Err(NO_SESSION.to_owned()), cx),
             Some(control) => {
                 cx.spawn(async move |this, cx| {
@@ -720,5 +740,83 @@ mod tests {
     #[gpui::test]
     async fn a_widget_ask_is_denied_when_the_cli_goes_away_mid_turn(cx: &mut TestAppContext) {
         event_source_closes(cx, "busy", true).await;
+    }
+
+    // How it can fail, written first. A send that fails drops the client and nothing else:
+    // the cards stay answerable and the widget mapped, and the event source closing after it
+    // returns early (no client) before it denies anything.
+    //
+    // 1. The client is dropped (as a failed send does) and the ask stays open.
+    // 2. `event_source_closed` with no client leaves a later ask open.
+    // 3. Either answers twice, or answers with a result.
+    //
+    // The send itself cannot fail here (no client), so the test drops the client through
+    // `lose_client`, the helper the send-failure branch calls.
+    #[gpui::test]
+    async fn a_lost_client_denies_widget_asks_once_even_after_the_stream_closes(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = window(cx);
+        let answers = chat.update(cx, |chat, _| ready(chat));
+        chat.update(cx, |chat, cx| {
+            let request = open(chat, "lost", cx);
+            chat.lose_client(cx);
+            assert!(expired(chat, request));
+            assert_eq!(phase(chat, "lost"), SlotPhase::Closed);
+            chat.event_source_closed(cx);
+        });
+        assert_eq!(outcomes(&answers).len(), 1);
+        assert_eq!(denied(&answers, "lost"), 1);
+        // An ask opened after the client is gone is denied when the stream closes.
+        chat.update(cx, |chat, cx| {
+            let request = open(chat, "late", cx);
+            chat.event_source_closed(cx);
+            assert!(expired(chat, request));
+        });
+        assert_eq!(denied(&answers, "late"), 1);
+        assert_eq!(outcomes(&answers).len(), 2);
+    }
+
+    // How it can fail, written first. The control surface (served in release builds) approves
+    // a widget's card with no click; a second Allow starts a second call.
+    //
+    // 1. `control_permission` with `allow_once` answers, or errors after answering.
+    // 2. `control_permission` with `reject_once` does not answer Denied, or answers twice.
+    // 3. A second Allow while the call runs starts another call.
+    // 4. A close while the call runs does not deny it, or the late result is delivered.
+    //
+    // The guard is shown by counting the calls Allow starts; with no client the test keeps the
+    // call running (`hold_calls`) so the ask stays in flight. It proves the chat starts one
+    // call per ask; it does not prove what a real `mcp_call` does.
+    #[gpui::test]
+    async fn a_widget_card_is_approved_only_by_a_click_and_runs_one_call(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = window(cx);
+        let answers = chat.update(cx, |chat, _| ready(chat));
+        chat.update(cx, |chat, cx| {
+            let request = open(chat, "ctl", cx);
+            assert!(chat.control_permission(request, "allow_once", cx).is_err());
+            assert_eq!(*chat.widgets.asks.calls.borrow(), 0);
+            assert!(card(chat).is_some(), "the card is still open");
+            assert!(chat.control_permission(request, "reject_once", cx).is_ok());
+        });
+        assert_eq!(outcomes(&answers).len(), 1);
+        assert_eq!(denied(&answers, "ctl"), 1);
+
+        chat.update(cx, |chat, cx| {
+            chat.widgets.asks.hold_calls = true;
+            let request = open(chat, "once", cx);
+            let allow = option(chat, request, false);
+            chat.respond_permission(request, &allow, cx);
+            chat.respond_permission(request, &allow, cx);
+            assert_eq!(*chat.widgets.asks.calls.borrow(), 1);
+            // The widget closes while the call runs; the late result is dropped.
+            chat.cancel_question(request, cx);
+            chat.close_widgets(cx);
+            chat.widget_call_returned(request, Ok(json!({"late": true})), cx);
+        });
+        assert_eq!(outcomes(&answers).len(), 2);
+        assert_eq!(denied(&answers, "once"), 1);
     }
 }
