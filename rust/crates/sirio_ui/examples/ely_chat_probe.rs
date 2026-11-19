@@ -1,4 +1,5 @@
 //! Native compatibility probe; uses the same GPUI packages as Sirio.
+use ely_gpui_component::IconPath as _;
 use ely_gpui_component::{
     agent::ToolCallCard,
     chat::{ChatContainer, MessageBubble, PromptInput, Role, StepState},
@@ -210,7 +211,7 @@ fn main() {
             }
             assert!(
                 cx.asset_source()
-                    .load(ely_gpui_component::primitives::IconName::Check.path())
+                    .load(&ely_gpui_component::primitives::IconName::Check.path())
                     .unwrap()
                     .is_some()
             );

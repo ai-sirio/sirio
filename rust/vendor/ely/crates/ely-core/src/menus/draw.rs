@@ -267,10 +267,14 @@ pub(super) fn panel(
                 let (hover, click, close, menu) =
                     (state.clone(), state.clone(), close.clone(), menu.clone());
                 let hover_menu = menu.clone();
-                let label = item.label.clone();
+                // The host's own name for the row (`MenuItem::selectors`) wins over the label's.
+                let selector = item
+                    .selector
+                    .as_ref()
+                    .map_or_else(|| format!("menu-row-{}", item.label), ToString::to_string);
                 row(item, ix, marked, cx)
                     .when(marked && deepest, |row| row.aria_active_descendant())
-                    .debug_selector(move || format!("menu-row-{label}"))
+                    .debug_selector(move || selector.clone())
                     .when(!item.disabled, |row| {
                         let left = state.clone();
                         row.on_mouse_move(move |event, _, cx| {

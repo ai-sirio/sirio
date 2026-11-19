@@ -566,7 +566,7 @@ impl ProposalTab {
         let code = cx.new(|cx| {
             let mut code = CodeEditor::new(text, window, cx)
                 .language(language.name())
-                .highlighter(standalone_highlighter(language))
+                .line_highlighter(standalone_highlighter(language))
                 .without_breakpoints();
             code.set_view_options(prefs, cx);
             code

@@ -273,6 +273,33 @@ mod tests {
         }
     }
 
+    /// Tab, Shift-Tab and F6 keep their meaning in Sirio: the terminal's shell gets `\t`, the
+    /// editor inserts, Sirio's own fields move as before. Ely's own setup would bind them to
+    /// its focus actions, so no binding may name them after Sirio's setup.
+    #[gpui::test]
+    fn ely_init_binds_no_focus_keys(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let named_focus = cx.update(|cx| {
+            cx.key_bindings()
+                .borrow()
+                .bindings()
+                .filter(|binding| {
+                    let action = binding.action().name();
+                    let context = binding
+                        .predicate()
+                        .map(|predicate| format!("{predicate:?}"))
+                        .unwrap_or_default();
+                    action.ends_with("FocusNext")
+                        || action.ends_with("FocusPrev")
+                        || context.contains("ElyFocus")
+                })
+                .map(|binding| binding.action().name())
+                .collect::<Vec<_>>()
+        });
+        assert!(named_focus.is_empty(), "{named_focus:?}");
+    }
+
     /// What the app has when a field is hosted: Sirio's theme and Ely's chat setup.
     fn boot(cx: &mut TestAppContext) {
         cx.update(Theme::init);

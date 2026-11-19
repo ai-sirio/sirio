@@ -750,3 +750,36 @@ time, not the wall clock, so they stay as they are.
 Outcome: local change. Proof: `cd rust && cargo nextest list -p ely-documents` (no features) lists none
 of the three names, and `cd rust && cargo nextest run -p ely-documents --features test-support -E
 'test(=<full::path::name>)' --test-threads 2` runs each one, exactly once.
+
+## The facade and the switch (Task 8)
+
+`rust/vendor/ely-gpui-component` is now two files, `Cargo.toml` and `src/lib.rs`, a facade over the
+vendored crates; its old sources, assets, licences and notes are deleted (they stay in git history at
+`aacddd7ec`). It is not a vendored copy of anything, so `check-vendor.sh` does not look at it.
+
+- Chapters `buttons`, `data_display`, `feedback`, `forms`, `layout`, `lists`, `menus`, `motion`,
+  `navigation`, `overlays`, `primitives`, `theme`, `typography` are `pub use ely_core::<chapter>`;
+  `chat` = `ely_chat`, `agent` = `ely_agent`, `editor` = `ely_editor`; `git` = `ely_git` plus
+  `ely_core::lists::GitStatus`.
+- `init_chat` (the theme and `forms::bind_keys` only, never upstream's `setup`: its Tab, Shift-Tab and
+  F6 bindings stay out, guarded by `ely_ui::tests::ely_init_binds_no_focus_keys`, which passed on the
+  old crate and passes after the switch) and `init_editor` (checklist row 107: `init_chat`, then
+  `editor::bind_keys`, behind a private `EditorKeysBound` global).
+- `Assets` serves `ely/icons/<name>.svg` from `IconName::ALL`'s embedded bytes (Task 3's decision:
+  `ely-core`'s `assets.rs` stays verbatim). `IconName::path()` is a trait in the facade, `IconPath`
+  (an inherent method cannot be added to upstream's type), returning that path; the chat probe imports it.
+- `test-support` forwards to each crate's, for runs by hand: no Sirio manifest enables it.
+- Sirio call sites re-pointed: `CodeEditor::highlighter(..)` and `set_highlighter(..)` of the old
+  line-indexed signature became `line_highlighter(..)` and `set_line_highlighter(..)`
+  (`file_view/code_surface.rs`, `proposal_tab.rs`, `examples/ely_editor_probe.rs`); the debug selector
+  prefix `code-editor-line-` became `editor-line-` (`file_view.rs`, seven uses; no script uses it).
+
+One more hook, found by the switch: `crates/ely-core/src/menus/draw.rs`. Upstream's `draw::menu_level`
+sets `debug_selector("menu-row-<label>")` on a row after the row's own builder ran, so it replaced the
+name a host gave through `MenuItem::selectors`, and Sirio's `changes-menu-copy-path` and the other
+`changes-menu-*` and `change-request-menu-*` names were never drawn. The row now uses its own selector
+when it has one, and `menu-row-<label>` otherwise (upstream's tests keep finding their rows). Proof
+(ran): `changes::tests::a_right_click_on_a_file_row_copies_its_path`,
+`changes::tests::a_change_requests_row_offers_its_file_on_the_forge` and
+`right_panel::change_requests::tests::a_right_click_on_a_row_offers_its_link_to_copy`, red before,
+green after.
