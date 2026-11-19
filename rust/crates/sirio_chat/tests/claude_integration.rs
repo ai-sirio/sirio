@@ -3496,3 +3496,277 @@ fn a_reasonless_startup_error_shows_its_lines() {
     );
     let _ = std::fs::remove_file(&launches);
 }
+
+// ---------------------------------------------------------------------------
+// MCP Apps: tool notices, resource reads, widget calls and the launch variable.
+//
+// Failure list (written before the code):
+// - a notice with the gate shut: the floor, or only two of the three names in
+//   `system/init.capabilities`;
+// - no notice with the gate open, or `Returned` missing, or one call announced twice;
+// - a subagent's `mcp__` call announced;
+// - `com.anthropic` meta left in a result, or the result of an errored call not an error;
+// - `server_name` on the wire of a resource read, or the read's items not returned;
+// - `check_permissions` sent without `mcp_call_check_permissions_v1`, or not sent with it;
+// - a stray `toolu_mcp_call_` ask that draws a card or is allowed;
+// - the ask of a widget's own call surfacing a card, or being denied;
+// - an approval that outlives its call and lets the same ask through a second time;
+// - the launch variable set when not asked, or missing when asked.
+// ---------------------------------------------------------------------------
+
+fn mcp_apps_flags(extra: &[&str]) -> Vec<String> {
+    std::iter::once("--fixture-mcp-apps")
+        .chain(extra.iter().copied())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The notices of one `mcp_widget` turn that are MCP tool notices, in order.
+fn mcp_tool_notices(tag: &str, extra: &[&str]) -> Vec<sirio_chat::McpToolUpdate> {
+    let (launch, control, launches) = rename_launch(tag, "trace", &mcp_apps_flags(extra));
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    let seen = cli_notices_turn(&mut client, &events, "mcp_widget");
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+    notices_of(&seen)
+        .into_iter()
+        .filter_map(|notice| match notice {
+            SessionNotice::McpTool(update) => Some(update),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn mcp_tool_notices_follow_the_system_init_gate() {
+    use sirio_chat::McpToolItem::{Called, Returned};
+    let updates = mcp_tool_notices("mcp-notices", &[]);
+    let ids: Vec<&str> = updates.iter().map(|update| update.id.as_str()).collect();
+    assert_eq!(ids, ["toolu_show_1", "toolu_show_1", "toolu_show_2", "toolu_show_2"]);
+    for (call, text) in [(0, "hi"), (2, "again")] {
+        let Called { name, input } = &updates[call].item else {
+            panic!("a call is announced first");
+        };
+        assert_eq!(name, "mcp__apps__show");
+        assert_eq!(*input, serde_json::json!({"text": text}));
+        let Returned { result } = &updates[call + 1].item else {
+            panic!("its result follows it");
+        };
+        assert_eq!(
+            result["content"],
+            serde_json::json!([{"type": "text", "text": "{\"n\":42}"}])
+        );
+        assert_eq!(result["structuredContent"], serde_json::json!({"n": 42}));
+        // The CLI's own meta stays out, the server's own stays in.
+        assert_eq!(result["_meta"], serde_json::json!({"other/key": "v"}));
+        assert!(result.get("isError").is_none(), "a success is not marked as an error");
+    }
+
+    // Shut: the floor names no capability, and two of the three names are not the gate.
+    assert!(mcp_tool_notices("mcp-notices-floor", &["--fixture-floor"]).is_empty());
+    let two = "--fixture-mcp-apps-caps=mcp_tool_ui_meta_v1,mcp_read_resource_v1";
+    assert!(mcp_tool_notices("mcp-notices-two", &[two]).is_empty());
+}
+
+#[test]
+fn a_subagents_mcp_call_is_not_announced() {
+    let (launch, control, launches) = rename_launch("mcp-sub", "trace", &mcp_apps_flags(&[]));
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    let seen = cli_notices_turn(&mut client, &events, "mcp_subagent");
+    client.shutdown().expect("clean shutdown");
+    let notices = notices_of(&seen);
+    assert!(
+        notices
+            .iter()
+            .all(|notice| !matches!(notice, SessionNotice::McpTool(_))),
+        "a subagent's call has no row of its own to hang a widget on"
+    );
+    // The call did reach its card, so the absence above is not a silent fixture.
+    assert!(notices.iter().any(|notice| matches!(
+        notice,
+        SessionNotice::Subagent(update) if matches!(
+            &update.item,
+            sirio_chat::SubagentItem::ToolStarted { id, .. } if id == "toolu_sub_show"
+        )
+    )));
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+/// What the fixture heard, as `mcp_call` and `mcp_read_resource` requests.
+fn requests_of(control: &std::path::Path, subtype: &str) -> Vec<serde_json::Value> {
+    json_lines(control)
+        .into_iter()
+        .filter(|request| request["subtype"] == subtype)
+        .collect()
+}
+
+#[test]
+fn read_resource_names_the_server() {
+    let (launch, control, launches) = rename_launch("mcp-read", "trace", &mcp_apps_flags(&[]));
+    let (mut client, _events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    let mcp = client.mcp_control();
+    let contents = mcp
+        .read_resource("apps", "ui://apps/show.html")
+        .expect("the widget document is read");
+    let items = contents.as_array().expect("the contents are an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["mimeType"], "text/html;profile=mcp-app");
+    assert!(
+        mcp.read_resource("apps", "ui://apps/missing.html")
+            .is_err(),
+        "a resource that is not there is an error, not an empty list"
+    );
+    let reads = requests_of(&control, "mcp_read_resource");
+    assert_eq!(reads.len(), 2);
+    assert_eq!(reads[0]["serverName"], "apps");
+    assert_eq!(reads[0]["uri"], "ui://apps/show.html");
+    assert!(reads[0].get("server_name").is_none(), "the CLI refuses `server_name`");
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+/// Every event already queued, without waiting for more.
+fn queued_events(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
+    std::iter::from_fn(|| events.try_recv().ok()).collect()
+}
+
+fn is_permission_card(event: &ChatEvent) -> bool {
+    matches!(event, ChatEvent::PermissionRequest { .. })
+}
+
+#[test]
+fn a_widget_call_is_checked_and_its_ask_answered_once() {
+    let (launch, control, launches) = rename_launch("mcp-call", "trace", &mcp_apps_flags(&[]));
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    let answer = client
+        .mcp_control()
+        .call_tool_after_user_allowed("mcp__apps__act", serde_json::json!({"step": 1}))
+        .expect("the call ran");
+    assert_eq!(answer["structuredContent"]["n"], 42);
+    assert_eq!(answer["structuredContent"]["tool"], "mcp__apps__act");
+    let calls = requests_of(&control, "mcp_call");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["tool"], "mcp__apps__act");
+    assert_eq!(calls[0]["arguments"], serde_json::json!({"step": 1}));
+    assert_eq!(calls[0]["check_permissions"], true);
+    assert_eq!(calls[0]["result_not_for_model"], true);
+    let asks: Vec<_> = json_lines(&control)
+        .into_iter()
+        .filter_map(|line| line.get("mcp_call_ask").cloned())
+        .collect();
+    assert_eq!(asks, [serde_json::json!("allow")]);
+    assert!(
+        !queued_events(&events).iter().any(is_permission_card),
+        "the user already pressed Allow on the widget's own card"
+    );
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn a_widget_call_asks_for_a_check_only_with_the_capability() {
+    let caps = "--fixture-mcp-apps-caps=mcp_tool_ui_meta_v1,mcp_read_resource_v1,\
+                mcp_call_result_not_for_model_v1";
+    let flags = mcp_apps_flags(&[caps]);
+    let (launch, control, launches) = rename_launch("mcp-nocheck", "trace", &flags);
+    let (mut client, _events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    client
+        .mcp_control()
+        .call_tool_after_user_allowed("mcp__apps__act", serde_json::json!({"step": 1}))
+        .expect("the call ran");
+    let calls = requests_of(&control, "mcp_call");
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].get("check_permissions").is_none());
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+/// The value the fixture logged under `key`, once it has: a stray ask is answered after the
+/// turn's own end, on the fixture's schedule.
+fn logged_value(control: &std::path::Path, key: &str) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(value) = json_lines(control)
+            .into_iter()
+            .find_map(|line| line.get(key).cloned())
+        {
+            return value;
+        }
+        assert!(std::time::Instant::now() < deadline, "the fixture never logged the key");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_stray_mcp_call_ask_is_denied_without_a_card() {
+    let flags = mcp_apps_flags(&["--fixture-stray-mcp-ask"]);
+    let (launch, control, launches) = rename_launch("mcp-stray", "trace", &flags);
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    client.prompt("hello").expect("prompt is accepted");
+    let turn = drain_until_turn_end(&events);
+    assert_eq!(logged_value(&control, "stray_mcp_ask"), "deny");
+    let after = queued_events(&events);
+    assert!(
+        !turn.iter().chain(after.iter()).any(is_permission_card),
+        "an ask nobody approved draws no card"
+    );
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn an_approval_ends_with_its_calls_answer() {
+    // In `bypassPermissions` the CLI asks nothing, so the approval granted for the call is never
+    // used. The stray ask that follows carries the very tool and input the call had: were the
+    // approval to outlast the call's answer, it would be let through.
+    let flags = mcp_apps_flags(&["--fixture-start-bypass", "--fixture-stray-mcp-ask"]);
+    let (launch, control, launches) = rename_launch("mcp-outlive", "trace", &flags);
+    let (mut client, events) =
+        ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+    client
+        .mcp_control()
+        .call_tool_after_user_allowed("mcp__apps__act", serde_json::json!({"stray": true}))
+        .expect("the call ran");
+    client.prompt("hello").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+    assert_eq!(logged_value(&control, "stray_mcp_ask"), "deny");
+    client.shutdown().expect("clean shutdown");
+    let _ = std::fs::remove_file(&control);
+    let _ = std::fs::remove_file(&launches);
+}
+
+#[test]
+fn the_launch_variable_follows_the_switch() {
+    let host_of = |tag: &str, on: Option<bool>| {
+        let (launch, control, launches) = rename_launch(tag, "trace", &[]);
+        let launch = match on {
+            Some(on) => launch.mcp_apps_host(on),
+            None => launch,
+        };
+        let (mut client, _events) =
+            ClaudeClient::launch(launch, std::env::temp_dir()).expect("fixture handshake");
+        let host = json_lines(&launches)
+            .first()
+            .map(|line| line["mcp_apps_host"].clone())
+            .expect("the fixture logged its launch");
+        client.shutdown().expect("clean shutdown");
+        let _ = std::fs::remove_file(&control);
+        let _ = std::fs::remove_file(&launches);
+        host
+    };
+    assert_eq!(host_of("mcp-host-on", Some(true)), "1");
+    assert!(host_of("mcp-host-default", None).is_null());
+    assert!(host_of("mcp-host-off", Some(false)).is_null());
+}

@@ -7312,6 +7312,7 @@ dependencies = [
  "sirio_chat_vocab",
  "sirio_claude",
  "sirio_env",
+ "sirio_mcp_apps",
  "sirio_persistence",
 ]
 

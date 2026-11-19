@@ -29,7 +29,7 @@ STARTS_AFTER = {"session_panel_starting": 2, "session_panel_pending": None}.get(
 # reason fast mode cannot be used (`preference`, one of the CLI's own codes, where
 # every other mode says `sdk_opt_in_required`, which Sirio does not show as one),
 # so the composer menu's blocked Fast row has a reason to carry.
-START_BYPASS = MODE == "session_panel_bypass"
+START_BYPASS = MODE == "session_panel_bypass" or "--fixture-start-bypass" in sys.argv
 if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending", "session_panel_bypass"):
     MODE = "session_panel"
 # `effort_ladder` gives the session's first model an effort ladder, as the
@@ -37,7 +37,7 @@ if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending
 # `effortLevel` refused. No other mode advertises one: a chat that finds an
 # effort selector asks for High at once, and that is not what the rest of the
 # suite is about.
-EFFORT_LADDER = MODE in ("effort_ladder", "effort_refused")
+EFFORT_LADDER = MODE in ("effort_ladder", "effort_refused") or "--fixture-effort-ladder" in sys.argv
 REFUSE_EFFORT = MODE == "effort_refused"
 # A launch argument names the file `mcp_status` requests are counted in, so a
 # test needs no environment of its own; the environment names it otherwise.
@@ -255,6 +255,7 @@ def init_line(version="2.1.273"):
         "mcp_servers": mcp_servers,
         "slash_commands": ["usage"],
         "uuid": "init-uuid",
+        **mcp_apps_init_fields(),
     })
 
 
@@ -865,6 +866,202 @@ def wait_answer(cli_request_id):
         return TRACE_ANSWERS.get(cli_request_id, "deny")
 
 
+# ---------------------------------------------------------------------------
+# MCP Apps: `--fixture-mcp-apps` makes `system/init` carry the four capabilities
+# (`--fixture-mcp-apps-caps=<a,b>` replaces the list with those names, empty for
+# none; `--fixture-floor` carries none at all), `mcp_status` list the servers
+# `apps` and `other`, and, in the trace mode, `mcp_read_resource` and `mcp_call`
+# answer. `--fixture-widget-html=<path>` is the document `ui://apps/show.html`
+# serves. `--fixture-stray-mcp-ask` has each trace turn end with a `can_use_tool`
+# for `toolu_mcp_call_deadbeef`, as a CLI ask nobody expects would be.
+# ---------------------------------------------------------------------------
+
+MCP_APPS = "--fixture-mcp-apps" in sys.argv
+STRAY_MCP_ASK = "--fixture-stray-mcp-ask" in sys.argv
+# Not `flag_value`: an empty list is an answer here.
+MCP_APPS_CAPS = next(
+    (arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("--fixture-mcp-apps-caps=")),
+    None,
+)
+MCP_APPS_ALL_CAPS = [
+    "mcp_tool_ui_meta_v1",
+    "mcp_read_resource_v1",
+    "mcp_call_result_not_for_model_v1",
+    "mcp_call_check_permissions_v1",
+]
+WIDGET_MIME = "text/html;profile=mcp-app"
+WIDGET_URI = "ui://apps/show.html"
+CONTROL_LOG_LOCK = threading.Lock()
+# The permission mode in force, which decides whether an `mcp_call` asks: the real CLI
+# asks nothing in `bypassPermissions`.
+MCP_MODE = {"mode": "bypassPermissions" if START_BYPASS else "default"}
+
+
+def control_log(entry):
+    if not CONTROL_LOG_PATH:
+        return
+    with CONTROL_LOG_LOCK:
+        with open(CONTROL_LOG_PATH, "a", encoding="utf-8") as log:
+            log.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+def mcp_apps_init_fields():
+    if not MCP_APPS or BG_FLOOR:
+        return {}
+    if MCP_APPS_CAPS is None:
+        return {"capabilities": list(MCP_APPS_ALL_CAPS)}
+    return {"capabilities": [name for name in MCP_APPS_CAPS.split(",") if name]}
+
+
+def mcp_apps_servers():
+    def tool(name, visibility):
+        entry = {"name": name, "annotations": {}}
+        if not BG_FLOOR:
+            entry["_meta"] = {"ui": {"resourceUri": WIDGET_URI, "visibility": visibility}}
+        return entry
+
+    def server(name, tools):
+        entry = {"name": name, "status": "connected", "tools": tools}
+        if not BG_FLOOR:
+            entry["source"] = "dynamic"
+        return entry
+
+    return [
+        server("apps", [
+            tool("show", ["model", "app"]),
+            tool("act", ["app"]),
+            tool("report", ["app"]),
+            tool("model_only", ["model"]),
+        ]),
+        server("other", [{"name": "ping", "annotations": {}}]),
+    ]
+
+
+def mcp_status_payload(default):
+    return {"mcpServers": mcp_apps_servers()} if MCP_APPS else default
+
+
+def answer_read_resource(request_id, request):
+    if BG_FLOOR:
+        control_error(request_id, "Unsupported control request subtype: mcp_read_resource")
+    elif request.get("serverName") == "apps" and request.get("uri") == WIDGET_URI:
+        path = flag_value("fixture-widget-html")
+        if path:
+            with open(path, encoding="utf-8") as document:
+                html = document.read()
+        else:
+            html = "<!doctype html><p>widget</p>"
+        control_response(request_id, {"contents": [{
+            "uri": WIDGET_URI,
+            "mimeType": WIDGET_MIME,
+            "text": html,
+            "_meta": {"ui": {
+                "csp": {"connectDomains": ["https://api.widget.test"],
+                        "resourceDomains": ["https://cdn.widget.test",
+                                            "http://bad.widget.test"]},
+                "prefersBorder": True,
+            }},
+        }]})
+    else:
+        control_error(request_id, "mcp_read_resource: resource not found")
+
+
+def answer_mcp_call(request_id, request):
+    """Asks first when the request says to check permissions, the way the CLI does
+    outside `bypassPermissions`. On a thread of its own: the answer to the ask is read by
+    the main loop, which must stay free to read it."""
+    tool = request.get("tool")
+    arguments = request.get("arguments")
+
+    def run():
+        if request.get("check_permissions") is True and MCP_MODE["mode"] != "bypassPermissions":
+            ask_id = "toolu_mcp_call_" + os.urandom(4).hex()
+            cli_id = "cli-" + ask_id
+            trace_ask(cli_id, tool, ask_id, arguments)
+            answer = wait_answer(cli_id)
+            control_log({"mcp_call_ask": answer})
+            if answer != "allow":
+                control_error(request_id, "The tool did not run: denied")
+                return
+        compact = json.dumps(arguments, separators=(",", ":"))
+        control_response(request_id, {
+            "content": [{"type": "text", "text": f"apps:{tool}:{compact}"}],
+            "structuredContent": {"tool": tool, "args": arguments, "n": 42},
+            "_meta": {"com.anthropic/x": 1, "other/key": "v"},
+        })
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def stray_mcp_ask():
+    """An ask under an `mcp_call` id that no `mcp_call` of Sirio's explains."""
+    trace_ask("cli-mcp-stray", "mcp__apps__act", "toolu_mcp_call_deadbeef", {"stray": True})
+    control_log({"stray_mcp_ask": wait_answer("cli-mcp-stray")})
+
+
+def mcp_widget_result(tool_use_id, parent=None):
+    body = '{"n":42}'
+    trace_result_line(tool_use_id, body, parent=parent, totals={
+        "content": body, "structuredContent": {"n": 42},
+        "_meta": {"other/key": "v", "com.anthropic/hidden": 1}})
+
+
+def mcp_widget_result_in(parent):
+    mcp_widget_result("toolu_sub_show", parent=parent)
+
+
+def script_mcp_widget():
+    """Two `show` calls in a row with no text between, then the turn's text."""
+    started = time.time()
+    for number, text_in in ((1, "hi"), (2, "again")):
+        message_start(f"msg_mcp_{number}")
+        trace_assistant(f"msg_mcp_{number}", tool_use(
+            f"toolu_show_{number}", "mcp__apps__show", {"text": text_in}))
+        message_end("tool_use", 40)
+        pause()
+        mcp_widget_result(f"toolu_show_{number}")
+    message_start("msg_mcp_3")
+    text("Shown.")
+    message_end("end_turn", 10)
+    trace_result(0.05, started)
+
+
+def script_mcp_subagent():
+    """A subagent's `mcp__` call: its lines name their parent, so the call has no row of
+    its own on the main thread."""
+    started = time.time()
+    agent = "toolu_agent_mcp"
+    message_start("msg_msub_1")
+    trace_assistant("msg_msub_1", tool_use(agent, "Agent", {
+        "description": "Show it", "prompt": "Show it",
+        "subagent_type": "general-purpose", "run_in_background": False}))
+    message_end("tool_use", 40)
+    task_started("task-msub", agent, "Show it", "general-purpose", 1)
+    trace_assistant("msg_msub_s1", tool_use(
+        "toolu_sub_show", "mcp__apps__show", {"text": "sub"}),
+        parent=agent, agent_id="task-msub")
+    pause()
+    mcp_widget_result_in(agent)
+    pause()
+    trace_result_line(agent, "[Subagent hand-back]\nDone.",
+                      totals=agent_totals("task-msub", 900, 1))
+    message_start("msg_msub_2")
+    text("ok")
+    message_end("end_turn", 10)
+    trace_result(0.05, started)
+
+
+def script_mcp_flood():
+    started = time.time()
+    message_start("msg_flood_1")
+    trace_assistant("msg_flood_1", tool_use(
+        "toolu_flood_1", "mcp__apps__show", {"text": "flood"}))
+    message_end("tool_use", 40)
+    pause()
+    mcp_widget_result("toolu_flood_1")
+    trace_result(0.05, started)
+
+
 def trace_result(cost, started, interrupted=False):
     TRACE_COST["total"] = round(TRACE_COST["total"] + cost, 6)
     usage = {"claude-haiku-5-5": {
@@ -1306,6 +1503,9 @@ TRACE_SCRIPTS = {
     "background": script_background,
     "bgprompt": script_bgprompt,
     "subagent_text": script_subagent_text,
+    "mcp_widget": script_mcp_widget,
+    "mcp_flood": script_mcp_flood,
+    "mcp_subagent": script_mcp_subagent,
 }
 
 
@@ -1325,6 +1525,8 @@ def trace_turns():
         TRACE_INTERRUPT.clear()
         first = prompt.split(None, 1)[0].lower() if prompt.split() else ""
         TRACE_SCRIPTS.get(first, script_other)()
+        if STRAY_MCP_ASK:
+            stray_mcp_ask()
         if first not in ("bgprompt", "subagent_text"):
             TRACE_NEXT_ANSWERED.set()
 
@@ -1350,6 +1552,7 @@ def trace_main():
             request = message.get("request", {})
             subtype = request.get("subtype")
             request_id = message.get("request_id")
+            control_log(request)
             if subtype == "initialize":
                 TRACE_FORWARD["on"] = request.get("forwardSubagentText") is True
                 control_response(request_id, initialize_payload())
@@ -1361,7 +1564,11 @@ def trace_main():
                     "totalTokens": 48000, "rawMaxTokens": 200000, "maxTokens": 180000,
                     "percentage": 24, "model": TRACE_MODEL, "categories": []})
             elif subtype == "mcp_status":
-                control_response(request_id, {"mcpServers": []})
+                control_response(request_id, mcp_status_payload({"mcpServers": []}))
+            elif subtype == "mcp_read_resource" and MCP_APPS:
+                answer_read_resource(request_id, request)
+            elif subtype == "mcp_call" and MCP_APPS:
+                answer_mcp_call(request_id, request)
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
             elif subtype == "get_hooks_listing":
@@ -1369,6 +1576,7 @@ def trace_main():
             elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
                 control_error(request_id, f"Unsupported control request subtype: {subtype}")
             elif subtype == "set_permission_mode":
+                MCP_MODE["mode"] = request.get("mode")
                 control_response(request_id, {"mode": request.get("mode")})
             else:
                 control_response(request_id, {})
@@ -1765,7 +1973,7 @@ def state_main():
                     "totalTokens": 48000, "rawMaxTokens": 200000, "maxTokens": 180000,
                     "percentage": 24, "model": TRACE_MODEL, "categories": []})
             elif subtype == "mcp_status":
-                control_response(request_id, {"mcpServers": []})
+                control_response(request_id, mcp_status_payload({"mcpServers": []}))
             elif subtype == "list_permission_rules":
                 answer_permission_rules(request_id)
             elif subtype == "get_hooks_listing":
@@ -2479,6 +2687,7 @@ def main():
             log.write(json.dumps({
                 "resume": resume_arg(),
                 "session_id": argv_value("--session-id"),
+                "mcp_apps_host": os.environ.get("CLAUDE_CODE_MCP_APPS_HOST"),
             }) + "\n")
     if flag_value("fixture-startup"):
         startup_main(flag_value("fixture-startup"))
@@ -2647,7 +2856,8 @@ def main():
                 if unread:
                     control_error(request_id, "mcp_status: the servers could not be read")
                     continue
-                control_response(request_id, {"mcpServers": session_panel_servers()})
+                control_response(
+                    request_id, mcp_status_payload({"mcpServers": session_panel_servers()}))
             elif subtype == "mcp_reconnect":
                 name = request.get("serverName")
                 if REFUSE_RECONNECT and name == "codegraph":

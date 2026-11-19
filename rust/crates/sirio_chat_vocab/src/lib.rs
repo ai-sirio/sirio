@@ -699,6 +699,32 @@ pub enum SessionNotice {
     },
     /// One step of a subagent's work, for its card.
     Subagent(SubagentUpdate),
+    /// A main-thread MCP tool call, for the surface that draws widgets. Only sent when the CLI
+    /// listed every capability a widget needs in its `system/init`.
+    McpTool(McpToolUpdate),
+}
+
+/// One step of a main-thread `mcp__` tool call, for the row that call draws.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpToolUpdate {
+    /// The call's tool-use id, which is the id of its row.
+    pub id: String,
+    pub item: McpToolItem,
+}
+
+/// What happened to an MCP tool call.
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpToolItem {
+    /// The model called the tool. `name` is the full `mcp__server__tool` name.
+    Called {
+        name: String,
+        input: serde_json::Value,
+    },
+    /// The call's result, as an MCP `CallToolResult`: `content` is a list of blocks, the CLI's
+    /// own `com.anthropic/` meta is gone, and `isError` is present only when it is true.
+    Returned { result: serde_json::Value },
+    /// The turn ended with the call still open.
+    Cancelled,
 }
 
 /// One step of a subagent's work, for the card of the main-thread `Agent`

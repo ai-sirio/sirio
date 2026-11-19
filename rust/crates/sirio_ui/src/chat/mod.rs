@@ -3333,6 +3333,9 @@ impl Chat {
                 cx.notify();
                 return;
             }
+            // A widget's call. The chat draws no row for it yet: the tool row it belongs to
+            // is already in the transcript.
+            SessionNotice::McpTool(_) => return,
         };
         self.push_entry(entry);
     }

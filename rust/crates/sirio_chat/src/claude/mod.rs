@@ -12,6 +12,7 @@ mod permission;
 mod prompt;
 mod startup;
 mod trace;
+mod widget_approvals;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -50,6 +51,9 @@ pub struct ClaudeLaunch {
     /// a test fixture uses it to put a script in front of `python3`'s own
     /// arguments. Not `pub`, so no production path can set it by accident.
     pub(crate) prefix_args: Vec<String>,
+    /// The host draws MCP Apps widgets: the CLI is told so, and not otherwise, whatever the
+    /// user's own environment holds.
+    pub(crate) mcp_apps_host: bool,
 }
 
 impl ClaudeLaunch {
@@ -60,6 +64,7 @@ impl ClaudeLaunch {
             program: program.into(),
             resume: None,
             prefix_args: Vec::new(),
+            mcp_apps_host: false,
         }
     }
 
@@ -78,7 +83,17 @@ impl ClaudeLaunch {
             program: program.into(),
             resume: None,
             prefix_args,
+            mcp_apps_host: false,
         }
+    }
+
+    /// Tells the CLI this host draws MCP Apps widgets (`CLAUDE_CODE_MCP_APPS_HOST=1`). Off, the
+    /// variable is removed from the child's environment, so a value the user's shell holds
+    /// never reaches it.
+    #[must_use]
+    pub fn mcp_apps_host(mut self, on: bool) -> Self {
+        self.mcp_apps_host = on;
+        self
     }
 }
 
@@ -736,6 +751,45 @@ impl McpControl {
             })
             .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
         wait_for_reply(&reply_rx, "mcp_toggle", Duration::from_secs(30))
+    }
+
+    /// Reads a resource a widget names and returns the `contents` array. Blocking, bounded at
+    /// 30 s. The CLI takes the server as `serverName`.
+    pub fn read_resource(&self, server: &str, uri: &str) -> Result<serde_json::Value> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::McpReadResource {
+                server: server.to_string(),
+                uri: uri.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
+        wait_for_reply(&reply_rx, "mcp_read_resource", Duration::from_secs(30))
+    }
+
+    /// Calls a tool for a widget, after the user pressed Allow on the widget's card and only
+    /// then: the worker pre-approves the CLI's own `toolu_mcp_call_` ask for exactly this tool
+    /// and input, once. Blocking, bounded at 120 s. The `Err` is the CLI's own sentence.
+    pub fn call_tool_after_user_allowed(
+        &self,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::McpCall {
+                tool: tool.to_string(),
+                arguments,
+                reply: reply_tx,
+            })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
+        match reply_rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(answer) => answer.map_err(|error| anyhow!(error)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!("mcp_call timed out after 120s")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
+                "the Claude worker is not running: mcp_call went unanswered"
+            )),
+        }
     }
 
     /// Starts a server's sign-in and returns the page to open. Blocking,
