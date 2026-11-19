@@ -683,21 +683,105 @@ Each item is laid out the same way:
     the test checks that the base URL is 127.0.0.1 before it starts the CLI; the PR's Merge
     Danger says so. The new rate-limit copy goes in the PR's release-notes line.
 
-### A10 · Subagent text: designed with Enzo when it comes up
+### A10 · Subagent text
 
-- `--forward-subagent-text` makes the CLI stream subagents' text and thinking. Spec 2026-09-18 §10
-  left it out on purpose: "showing it is a transcript design of its own".
-- Before any plan, a short design conversation settles where the text goes (the Trace lane, a box
-  in the transcript, or both) and how much of it.
+- **Wire.** `--forward-subagent-text` makes the CLI stream subagents' text and thinking. Spec
+  2026-09-18 §10 left it out on purpose: "showing it is a transcript design of its own".
+- **Sirio** (designed with Enzo, 2026-11-18):
+  - **Transcript.** The text goes inside the existing subagent task card, interleaved in arrival
+    order with that subagent's nested tool calls. The card stays folded by default, with its
+    one-line summary.
+  - **Trace.** Each subagent lane shows its latest sentence as a label while it works.
+  - **How much.** All of the text. Thinking shows as a folded block, as it does for the main
+    agent.
+- **Degrade.** A CLI without the flag (the floor among them) behaves as today: Sirio degrades,
+  never refuses.
+- **Deviations, from the live probe** (`.superpowers/probe-a10/FINDINGS.md`: 2.1.327 over stdio
+  against a local fake API, with 2.1.326, 2.1.325, 2.1.322, 2.1.319, 2.1.310, 2.1.308, 2.1.304,
+  2.1.301 and the 2.1.257 floor; no account, no network):
+  - **The switch is the `initialize` key.** Three switches exist: the flag, the env var
+    `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` and the `initialize` key `forwardSubagentText`, which
+    overrides the other two. Every tested CLI honours the flag and the key, the floor included.
+    A CLI that does not know a flag exits (`error: unknown option`), so Sirio never passes the
+    flag. It sends `forwardSubagentText: true` in every native `initialize`; a CLI below the floor
+    is not native. So no native CLI is "without the feature", and the degrade rule above covers
+    none of them.
+  - **The card is new on the native path.** The design's "existing subagent task card" exists
+    only on the ACP path, found by title. On the native path the fold drops every subagent line,
+    and an `Agent` call with a `description` is a plain tool row. Sirio now draws a native
+    `Agent`/`Task` call as the folded subagent card, with the one-line summary, on every native
+    CLI, because every one forwards the subagent's tool calls. Its children are attached by
+    `parent_tool_use_id` (never by position, never by `agent_id`, which the floor omits). This
+    replaces today's plain `Agent` row. ACP is unchanged.
+  - **The wire.** Forwarded lines are whole blocks, one `assistant` line per content block,
+    sharing the message id, in API order (thinking, text, tool_use), each followed by its
+    `tool_result` `user` line. A subagent never streams partials. Every text block arrives, in
+    order and untruncated (a 30,178-character block tested).
+  - **Background agents.** A background agent forwards its text and thinking on every version,
+    with or without the switch: Sirio receives it today and drops it. It arrives after the turn's
+    `result`, among `task_*` lines and possibly a later turn's text. Its card fills in place, so
+    the link from an agent to its card outlives the turn. 2.1.327 under the harness ran an `Agent`
+    call without `run_in_background` in the background; Sirio handles both.
+  - **The report is drawn once in the card.** The final report comes three times: as the last
+    forwarded text, inside the `Agent` tool_result (wrapped in a hand-back frame) and, for a
+    background agent, as `task_notification.summary`. The card draws the forwarded text and never
+    the tool_result's. A background agent's end notice (its summary, at the foot of the
+    transcript) stays as it is: the card is folded, and the notice is where the reader is.
+  - **A subagent's own subagent.** Its `Agent` call is a nested row in its parent's card, and its
+    lines go into the outermost card in arrival order, each marked with its agent's name. No card
+    nests in a card.
+  - **Thinking.** Forwarded as a full block (text and signature), in the main agent's shape, so
+    one rule draws both. It arrives whole, so it starts folded.
+  - **The Trace label.** The latest sentence of the agent's latest text, never its thinking,
+    through `visible_text`, shown only while the lane is open. The Trace already counts one model
+    call per message id, so forwarded blocks do not add calls.
+  - **Not persisted.** As today: a restored chat shows the `Agent` row, and the card's content is
+    gone.
+  - **What the key changes upstream.** With the key on, the CLI asks the API for a foreground
+    subagent's thinking with `display: "updates"` instead of `"omitted"` (the floor drops the
+    field, as it does for the main agent). Nothing else in the requests moves: the foreground
+    control (run `q1b`) and the key (run `q3`) send the same four requests, with the same model,
+    the same 19 tools and the same `adaptive` thinking, and the main agent gets the same `Agent`
+    tool_result. So the model is asked for the same thinking, and only what comes back changes.
+    The API docs say billing does not depend on `display` ("What you're billed for is the same
+    regardless of the `display` setting; only what you see changes"), and that `"omitted"` buys
+    latency, not cost. A foreground subagent may answer a little slower. The fake API cannot show
+    a real response, so the cost line rests on the docs. The PR's Merge Danger says so.
+  - **A `file:` link never reaches the system opener** (found while building the card, approved
+    by the coordinator). The card draws a subagent's text with the file paths it names as
+    `file://` links, as a reply does, outside the transcript selection. Bezel's link click arms on
+    any mouse button and calls `cx.open_url` for every URL, so a middle-click, a stale press or a
+    dropped file could hand a `file://` URL to `xdg-open`. A fourth local patch to the vendored
+    `bezel_markdown` (`render.rs`, listed in `rust/vendor/README.md` with the other three) makes
+    that click do nothing for a `file:` URL in any letter case; every other URL opens as before.
+    The card opens a file link itself, through `OpenFileAt`, only on a left click whose press and
+    release fall on the same link, and never stops an event, so a drop still lands. Side effect: a
+    `file:` link that Sirio does not resolve, in a reply or a preview, no longer reaches the system
+    opener through bezel. A reply's resolved file links (#663) behave as before; the `file_links`
+    E2E scenario is the check. The PR's Merge Danger says so.
 
-### A11 · MCP Apps widgets: designed with Enzo when it comes up
+### A11 · MCP Apps widgets
 
-- `mcp_read_resource` `{serverName, uri}`, for `ui://` URIs only, returns HTML from a third party.
-  It is new and gated on `mcp_read_resource_v1`.
-- Tools declare their UI in `mcp_status` (`_meta.ui.resourceUri`, gated on `mcp_tool_ui_meta_v1`).
-- That content cannot be trusted, and MCP Apps (SEP-1865) lets a widget ask its host to call
-  tools. A short design conversation settles both: how the widget is isolated, given that Sirio's
-  web engine hosts pages in child windows, and what the widget may ask for, if anything.
+- **Wire.**
+  - `mcp_read_resource` `{serverName, uri}`, for `ui://` URIs only, returns HTML from a third
+    party. It is new and gated on `mcp_read_resource_v1`.
+  - Tools declare their UI in `mcp_status` (`_meta.ui.resourceUri`, gated on
+    `mcp_tool_ui_meta_v1`).
+  - That content cannot be trusted, and MCP Apps (SEP-1865) lets a widget ask its host to call
+    tools.
+- **Sirio** (designed with Enzo, 2026-11-18):
+  - **Where.** Inline in the transcript, under the tool call that declared the UI, in a wry child
+    window.
+  - **Isolation.** One fresh webview per widget, with no cookies or storage shared with Browser
+    tabs. A strict CSP: no network except the domains the resource declares in `_meta.ui.csp`.
+    Only `ui://` URIs.
+  - **What it may ask.** Tool calls on the same MCP server that served the widget, and nothing
+    else. Every call opens a permission card that shows the tool and its arguments, with no
+    "Always allow", and it asks even when the chat is in bypass-permissions mode. Every other
+    request from the widget is ignored.
+- **Before the PR.** A probe of the MCP Apps protocol (SEP-1865) and a dedicated security review
+  (the critic, focused on the isolation and the bridge), with every finding fixed or dismissed
+  with a reason.
 
 ## Delivery
 

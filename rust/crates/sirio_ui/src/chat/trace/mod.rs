@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 use sirio_chat::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 
+use crate::chat::visible_text::visible_text;
+
 mod view;
 
 pub use view::{
@@ -200,6 +202,7 @@ impl TraceStore {
                     | TraceEvent::SpanModel { id, .. }
                     | TraceEvent::SpanProgress { id, .. }
                     | TraceEvent::SpanUsage { id, .. }
+                    | TraceEvent::SpanSaid { id, .. }
                     | TraceEvent::SpanEnded { id, .. } => id.clone(),
                     _ => return false,
                 };
@@ -381,6 +384,8 @@ struct Span {
     progress_tokens: Option<u64>,
     tool_uses: Option<u32>,
     activity: Option<String>,
+    /// A subagent's latest sentence, from its text.
+    said: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -491,6 +496,7 @@ impl Turn {
                     progress_tokens: None,
                     tool_uses: None,
                     activity: None,
+                    said: None,
                 },
             ),
             TraceEvent::SpanNamed { id, name, detail } => {
@@ -576,6 +582,19 @@ impl Turn {
                 at,
                 measured_ms,
             } => self.end_span(&id, outcome, at, measured_ms.map(Duration::from_millis)),
+            // Each sentence replaces the last; an empty one says nothing. The
+            // CLI's text is made visible here, once, before it is stored.
+            TraceEvent::SpanSaid { id, sentence } => {
+                let sentence = visible_text(&sentence, false);
+                let Some(span) = self.span_mut(&id) else {
+                    return false;
+                };
+                if sentence.is_empty() || span.said.as_deref() == Some(sentence.as_str()) {
+                    return false;
+                }
+                span.said = Some(sentence);
+                true
+            }
             // The store itself opens and ends turns.
             TraceEvent::TurnStarted { .. }
             | TraceEvent::TurnEnded { .. }
@@ -912,6 +931,54 @@ mod tests {
             .iter()
             .find(|lane| lane.span == id)
             .unwrap_or_else(|| panic!("no lane for {id}"))
+    }
+
+    // Ways it could fail: a sentence stays on a lane that has ended; the
+    // sentence of a subagent reaches the root's or another lane's `said`; a
+    // hidden character in the CLI's text reaches the lane unmarked; an empty
+    // sentence blanks the one the lane already shows; an id nobody opened
+    // opens a lane.
+    #[test]
+    fn a_lane_shows_its_sentence_only_while_open() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_x", None, "worker", "", 100);
+        agent(&mut store, &c, "toolu_y", None, "other", "", 110);
+        let said = |store: &mut TraceStore, id: &str, sentence: &str| {
+            store.apply(TraceEvent::SpanSaid {
+                id: id.into(),
+                sentence: sentence.into(),
+            })
+        };
+        assert!(said(&mut store, "toolu_x", "First I read the file."));
+        assert!(said(&mut store, "toolu_x", "Now the tests."));
+        // Empty sentences and unknown spans change nothing.
+        assert!(!said(&mut store, "toolu_x", ""));
+        assert!(!said(&mut store, "toolu_unknown", "Lost."));
+        let hidden = char::from_u32(0x202E).expect("a bidi control");
+        said(&mut store, "toolu_y", &format!("Run {hidden}it."));
+
+        let lanes = lanes_of(&store, c.at(500));
+        let x = lane(&lanes, "toolu_x");
+        assert!(
+            x.said.as_deref() == Some("Now the tests."),
+            "the lane shows the latest sentence"
+        );
+        assert!(lanes[0].said.is_none(), "the root has no sentence");
+        let y = lane(&lanes, "toolu_y").said.clone().unwrap_or_default();
+        let marker = visible_text(&hidden.to_string(), false);
+        assert!(!y.contains(hidden), "a hidden character is shown, not kept");
+        assert!(
+            y == format!("Run {marker}it."),
+            "the hidden character shows as its marker, nothing is deleted"
+        );
+
+        end(&mut store, &c, "toolu_x", 600);
+        let lanes = lanes_of(&store, c.at(700));
+        assert!(
+            lane(&lanes, "toolu_x").said.is_none(),
+            "an ended lane says nothing"
+        );
+        assert!(lane(&lanes, "toolu_y").said.is_some(), "the other lane runs on");
     }
 
     #[test]

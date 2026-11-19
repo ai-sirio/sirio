@@ -612,6 +612,7 @@ impl Chat {
         self.background_poll_active = false;
         // The chip's count came from the connection that ended.
         self.background_tasks = 0;
+        self.end_held_cards();
         if self.background.clear() {
             self.background_changed(cx);
         }

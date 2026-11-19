@@ -149,6 +149,13 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      or a third tab selected in its place, with the worktree parked or after the turn
 #   trace_keys         real X input on the Trace tab: a click on a row and Enter on the selected row
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
+#   subagent_text      (A10) a foreground subagent's prompt, thought, text and calls are drawn in
+#                      its folded card (the Agent call has no plain row), its lane says its latest
+#                      sentence, a grandchild's line is marked in the outer card, and a background
+#                      agent's lines after the result fill its own card until its task ends;
+#                      writes subagent-text.json (a `mode` field, "forward")
+#   subagent_text_floor  the same under SIRIO_FIXTURE_FLOOR=1 (the 2.1.257 floor: no line or ask
+#                      names its agent); writes subagent-text-floor.json (`mode` "floor")
 #   unread_parked_chat a turn that ends while its worktree is not selected marks the chat unread and posts
 #                      one notification naming its branch; showing the worktree clears the mark
 #                      and the tray's roster lists the worktree with a leading dot until it is shown, in every
@@ -391,7 +398,7 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   reload_busy_turn reload_busy_before_skills reload_in_flight reload_refused reload_skills_refused reload_errors
   change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
-  trace_background trace_background_prompt trace_reveal
+  trace_background trace_background_prompt trace_reveal subagent_text subagent_text_floor
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
   unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet
   elicitation_form elicitation_url elicitation_withdrawn unhandled_request
@@ -792,10 +799,16 @@ def evaluate(expr, surface, p, c):
         return next((i for i, r in enumerate(c["transcript"]) if r.get("kind") == "tool" and r.get("id") == row_id), None)
 
     def drawn_index(row_id):
-        # The index the transcript draws a row at: consecutive tool rows are one box, drawn at
-        # the run's last row, so that is where a reveal of any of them lands.
+        # The index the transcript draws a row at: consecutive plain tool rows are one box,
+        # drawn at the run's last row, so that is where a reveal of any of them lands. A card
+        # (a row with `items`) is not a plain tool row: it is its own box and ends a run, as
+        # the app's `tool_call_run_bounds_inclusive` counts only `Entry::ToolCall`.
+        def plain(i):
+            row = c["transcript"][i]
+            return row.get("kind") == "tool" and "items" not in row
+
         at = row_index(row_id)
-        while at is not None and at + 1 < len(c["transcript"]) and c["transcript"][at + 1].get("kind") == "tool":
+        while at is not None and plain(at) and at + 1 < len(c["transcript"]) and plain(at + 1):
             at += 1
         return at
 
@@ -820,7 +833,21 @@ def evaluate(expr, surface, p, c):
         # One background task's entry in `surface.chat.read`, or None.
         return next((t for t in c["backgroundTasks"] if t["taskId"] == task_id), None)
 
+    def card(row_id):
+        # The transcript row of an Agent's card (a foreground or background subagent).
+        return next((r for r in c["transcript"] if r.get("kind") == "tool" and r.get("id") == row_id), None)
+
+    def card_items(row_id):
+        return json.loads(card(row_id)["items"])
+
+    def norm(items):
+        # An item as (kind, id, status) for a tool, else (kind, text[, open][, agent]).
+        return [(i["kind"], i["id"], i["status"]) if i["kind"] == "tool"
+                else (i["kind"], i["text"]) + ((i["open"],) if i["kind"] == "thought" else ()) + ((i["agent"],) if "agent" in i else ())
+                for i in items]
+
     namespace = {
+        "card": card, "card_items": card_items, "norm": norm,
         "bg": bg, "p": p, "c": c, "S": h.S, "R": h.R, "rows": h.rows, "json": json, "re": re,
         "lane": lambda key: h.R("trace", "trace/lane/" + key), "lanes_of": lanes_of,
         "wait_rows": wait_rows, "row_index": row_index, "drawn_index": drawn_index, "pending": pending, "elicit": elicit,
@@ -1233,7 +1260,8 @@ capture() { # name
 #   SIRIO_FIXTURE_GATE  the file session_state_background touches to release the fixture's held steps
 #   SIRIO_FIXTURE_STOP_DELAY  seconds the background-tasks stub waits before it answers a stop_task (default 1;
 #                        background_stop_click sets 5 so that a framed run's slow frames cannot skip `stopping`)
-#   SIRIO_FIXTURE_FLOOR  1 makes the background-tasks stub the 2.1.257 floor (background_shell_floor)
+#   SIRIO_FIXTURE_FLOOR  1 makes the background-tasks stub and the trace stub the 2.1.257 floor
+#                        (background_shell_floor, subagent_text_floor)
 #   SIRIO_FIXTURE_REQUEST_LOG  the file the background-tasks stub appends every control request to
 #   SIRIO_FIXTURE_TITLE_STORE, SIRIO_FIXTURE_RENAME_ERROR, SIRIO_FIXTURE_HANDSHAKE_GATE, SIRIO_FIXTURE_RENAME_GATE
 #                  the rename stub's CLI title file, the error it answers every rename with, the file that holds its
@@ -2346,6 +2374,80 @@ BG_COST='R("trace", "trace/stat/cost")["detail"]'
 # A background agent runs, with a model call and the tools it started under it.
 bg_agent_running() { # agent
   echo "T('$1') is not None and T('$1')['kind'] == 'subagent' and T('$1')['state'] == 'running' and T('$1')['ended'] == '0' and T('$1_bash')['parent'] == '$1' and T('$1_read')['parent'] == '$1' and any(s['kind'] == 'llm' and s['parent'] == '$1' for s in tab()['spans'])"
+}
+
+# (A10) A foreground subagent's text, thinking and calls are drawn inside its card, the lane says its
+# latest sentence, and a background agent's lines after the result go to its own card. The fixture
+# writes the foreground text and thinking only when `initialize` asked (forwardSubagentText), and
+# under SIRIO_FIXTURE_FLOOR=1 (2.1.257) no line or ask names its agent.
+SUBAGENT_ODD='"First I read the file " + chr(0x27E8) + "U+202E" + chr(0x27E9) + "txt."'
+SUBAGENT_CARD='card("toolu_agent_text")'
+LANES_JSON='json.dumps({k: {"said": v.get("said"), "label": v.get("label"), "tag": v.get("tag")}
+  for k, v in lanes_of().items()})'
+subagent_text_run() { # name mode (forward|floor)
+  local mode=$2
+  trace_chat "$1"
+  send_prompt subagent_text
+  wait_panel "the Trace card appears" 'S("trace") is not None' 30
+  ensure_unfolded trace
+  wait_panel "the run is held at the subagent's ask, with the call in its card" \
+    "len(pending()) == 1 and $SUBAGENT_CARD is not None and len(card_items('toolu_agent_text')) == 5" 30
+  check_panel "the card is folded and titled by the description; the main thread's Bash has a row, the subagent's has none" \
+    "$SUBAGENT_CARD['expanded'] == 'false' and $SUBAGENT_CARD['text'] == 'Read the notes' and row_index('toolu_main_ls') is not None and row_index('toolu_sub_bash') is None"
+  check_panel "the card's items are the prompt, the thought, the sentence, the Read and the Bash" \
+    "(lambda n: n[:4] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed')] and n[4][:2] == ('tool', 'toolu_sub_bash') and len(n) == 5)(norm(card_items('toolu_agent_text')))"
+  check_panel "the lane says the sentence, and no hidden character reaches an item or the lane" \
+    "lane('toolu_agent_text')['said'] == $SUBAGENT_ODD and chr(0x202E) not in json.dumps(card_items('toolu_agent_text'), ensure_ascii=False) and chr(0x202E) not in json.dumps(lane('toolu_agent_text'), ensure_ascii=False)"
+  # The lanes as read at the ask, where the check above verified `said`; kept for the artifact.
+  local lanes_ask
+  lanes_ask=$(find_panel "the lanes at the ask" "$LANES_JSON" 10)
+  answer_permission allow_once
+  # The Trace reads Live until the background agent ends, so the turn's end is the chat's status.
+  wait_panel "the turn is over and the subagent's lane is done" 'c["status"] == "completed" and len(pending()) == 0 and lane("toolu_agent_text")["tag"] == "done"' 40
+  wait_panel "the background card is at work and holds only its prompt" \
+    'card("toolu_agent_bg") is not None and card("toolu_agent_bg")["status"] == "InProgress" and [i["kind"] for i in card_items("toolu_agent_bg")] == ["prompt"]' 20
+  check_panel "the items go on with the Bash, the grandchild's line under its own name, and the final sentence" \
+    "(lambda n: n[:5] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed'), ('tool', 'toolu_sub_bash', 'Completed')] and n[5][:2] == ('tool', 'toolu_agent_grand') and n[6:] == [('text', 'Grandchild here. All clear.', 'Check one thing'), ('text', 'Done. The file says hi.')])(norm(card_items('toolu_agent_text')))"
+  check_panel "the hand-back frame is drawn nowhere and the subagent's lane has no sentence left" \
+    "'Subagent hand-back' not in json.dumps(c['transcript']) and lane('toolu_agent_text')['said'] is None"
+  check_panel "no card item holds the hand-back frame, the nested Agent call's own content included" \
+    "'Subagent hand-back' not in json.dumps(card_items('toolu_agent_text')) and 'Subagent hand-back' not in json.dumps(card_items('toolu_agent_bg')) and 'Subagent hand-back' not in next(i for i in card_items('toolu_agent_text') if i.get('id') == 'toolu_agent_grand').get('content', '')"
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  check_panel "the subagent's span and its model calls are there, and none of them is a final span" \
+    'T("toolu_agent_text") is not None and any(s["kind"] == "llm" and s["parent"] == "toolu_agent_text" for s in tab()["spans"]) and not any(s["id"].startswith("toolu_agent_text") and s["id"].endswith("/final") for s in tab()["spans"])'
+  # A new turn adopts a new trace: the lanes of this one are kept for the artifact first.
+  local lanes
+  lanes=$(find_panel "the first turn's lanes" "$LANES_JSON" 10)
+  echo "step: the background agent has not written yet; a second turn runs first"
+  send_prompt second
+  wait_panel "the second turn is answered and complete" '"A second turn." in json.dumps(c["transcript"]) and c["status"] == "completed"' 30
+  wait_panel "the background agent's line reaches its card after the new turn began, and the card still runs" \
+    'card("toolu_agent_bg")["status"] == "InProgress" and any(i["kind"] == "text" and i["text"] == "Background start. Still going." for i in card_items("toolu_agent_bg"))' 40
+  wait_panel "the card is completed once the task ends" 'card("toolu_agent_bg")["status"] == "Completed"' 60
+  wait_panel "the end notice is drawn as before" \
+    'any(r.get("id") != "toolu_agent_bg" and "Watched the logs." in json.dumps(r) for r in c["transcript"])' 30
+  # The card is folded in a state-only run: no seam of the control socket expands a transcript row,
+  # and a real click needs the row's bounds, which are not exposed (reported, not worked around).
+  capture "$1"
+  local artifact="$OUT_DIR/$(echo "$1" | tr _ -)".json
+  find_panel "the final items" \
+    'json.dumps({"mode": "'"$mode"'", "toolu_agent_text": card_items("toolu_agent_text"),
+      "toolu_agent_bg": card_items("toolu_agent_bg"),
+      "lanes_at_ask": json.loads(r"""'"$lanes_ask"'"""),
+      "lanes_first_turn": json.loads(r"""'"$lanes"'""")}, indent=2)' 10 >"$artifact"
+  [ -s "$artifact" ] || fail "no $artifact was written"
+  echo "OK: $artifact holds both cards' final items and the lanes at the ask and after turn one"
+  stop_app
+}
+
+scenario_subagent_text() {
+  subagent_text_run subagent_text forward
+}
+
+scenario_subagent_text_floor() {
+  SIRIO_FIXTURE_FLOOR=1
+  subagent_text_run subagent_text_floor floor
 }
 
 scenario_trace_background() {

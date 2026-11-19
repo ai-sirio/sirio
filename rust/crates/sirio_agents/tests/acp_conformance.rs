@@ -1571,6 +1571,131 @@ fn claude_serves_task_output_and_stops_background_tasks() {
     eprintln!("line order:\n{}", run.brief().join("\n"));
 }
 
+// Failure list for `claude_forwards_a_subagents_text_under_sirios_initialize`, written before
+// the test. It fails when, under Sirio's own `initialize` (which carries `forwardSubagentText`),
+// for a foreground `Agent` call (`run_in_background: false`) and one that omits the field:
+// - the `initialize` answer is not `success`;
+// - the main agent's `Agent` tool_use is not seen, so there is no parent id to match;
+// - no `assistant` line has `parent_tool_use_id` equal to that call's id and a text block
+//   "Sub here. Done." within 60 s (the omitted case may forward after the turn's `result`);
+// - the forwarded line carries no `message.id`, or the CLI exits before any of these.
+
+/// Sends Sirio's own `initialize` and one prompt, then waits up to 60 s for the subagent's
+/// forwarded text. Returns whether the `Agent` call was seen and the text arrived.
+fn subagent_text_reaches_stdout(
+    claude: &std::path::Path,
+    python: &std::path::Path,
+    root: &std::path::Path,
+    prompt: &str,
+) -> (bool, bool) {
+    use claude_live::Polled;
+    let mut session = claude_live::Session::start_subagent(claude, python, root);
+    session.write(&sirio_claude::ControlRequest::initialize("sub-init"));
+    session.write(&serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    }));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (mut initialized, mut agent_id, mut forwarded) = (false, None::<String>, false);
+    while !forwarded {
+        match session.poll(deadline) {
+            Polled::Line(line) => {
+                if let Some(call) = sirio_claude::CanUseTool::parse(&line) {
+                    session.write(
+                        &sirio_claude::PermissionResult::allow(call.input)
+                            .into_response(&call.request_id),
+                    );
+                }
+                if line["type"] == "control_response"
+                    && line["response"]["request_id"] == "sub-init"
+                {
+                    initialized = line["response"]["subtype"] == "success";
+                }
+                if line["type"] != "assistant" {
+                    continue;
+                }
+                let blocks = line["message"]["content"].as_array().cloned().unwrap_or_default();
+                match line["parent_tool_use_id"].as_str() {
+                    None => {
+                        agent_id = blocks
+                            .iter()
+                            .find(|b| b["type"] == "tool_use" && b["name"] == "Agent")
+                            .and_then(|b| b["id"].as_str().map(str::to_string))
+                            .or(agent_id);
+                    }
+                    Some(parent) => {
+                        forwarded = agent_id.as_deref() == Some(parent)
+                            && line["message"]["id"].is_string()
+                            && blocks
+                                .iter()
+                                .any(|b| b["type"] == "text" && b["text"] == "Sub here. Done.");
+                    }
+                }
+            }
+            Polled::Timeout | Polled::Closed => break,
+        }
+    }
+    assert!(initialized, "the initialize answer is success: false");
+    (agent_id.is_some(), forwarded)
+}
+
+/// Proves the real `claude` forwards a subagent's text on stdout under the handshake Sirio sends
+/// (`ControlRequest::initialize`, which carries `forwardSubagentText: true`): an `assistant`
+/// line whose `parent_tool_use_id` is the `Agent` call's id and whose content is the subagent's
+/// text block. Run for a foreground call (`run_in_background: false`) and one that omits the
+/// field, which some versions launch as a background task (its text may follow the `result`).
+///
+/// A fake model API (`fake_subagent_api.py`) scripts the `Agent` call and the subagent's reply.
+/// It uses no credential and no network beyond 127.0.0.1, but launches a real CLI, so it is
+/// `#[ignore]`d and stays off CI:
+///
+///     cargo nextest run -p sirio_agents --test acp_conformance --run-ignored only \
+///         -E 'test(=claude_forwards_a_subagents_text_under_sirios_initialize)'
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
+/// `python3`.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_forwards_a_subagents_text_under_sirios_initialize() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("subagent-text", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+    eprintln!("claude reports {version_text}");
+
+    for (name, prompt) in [("false", "run sub false"), ("omitted", "run sub omitted")] {
+        let (called, forwarded) =
+            subagent_text_reaches_stdout(&claude, &python, &scratch.root.join(name), prompt);
+        assert!(called, "the main agent called Agent ({name}): false");
+        assert!(
+            forwarded,
+            "the subagent's text reached stdout within 60 s ({name}): false"
+        );
+        eprintln!("prompt {name}: the subagent's text was forwarded");
+    }
+}
+
 // Failure list for `claude_takes_a_host_rename`, written before the test. It fails when, under
 // Sirio's own `initialize` and `rename_session("Café ☕ 名前", Some(<own uuid>))`:
 // - the rename is refused in stream-json (the answer is not `success`);

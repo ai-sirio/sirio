@@ -94,6 +94,9 @@ pub struct Lane {
     pub duration: Duration,
     /// What a running lane is doing; `None` for one that is not running.
     pub now: Option<String>,
+    /// The latest sentence the agent wrote, through `visible_text`. `Some`
+    /// only while the lane is open.
+    pub said: Option<String>,
     /// The permissions this agent's own calls wait on, in arrival order. A
     /// wait is listed on one lane only, though every lane above it waits.
     pub waits: Vec<LaneWait>,
@@ -299,6 +302,7 @@ impl Turn {
             calls: shape.lanes[slot(None)].calls.len(),
             duration: self.root_duration(now),
             now: self.now_row(None, &shape, now),
+            said: None,
             waits: self.waits_of(None, &shape),
             segments: self.segments_of(None, &shape, now),
             start: Duration::ZERO,
@@ -321,6 +325,7 @@ impl Turn {
                     calls: shape.lanes[slot(lane)].calls.len(),
                     duration: span.duration(now),
                     now: self.now_row(lane, &shape, now),
+                    said: span.said.clone().filter(|_| span.end.is_none()),
                     waits: self.waits_of(lane, &shape),
                     segments: self.segments_of(lane, &shape, now),
                     start,

@@ -14,10 +14,16 @@
 //!   `message_start` is only its first token and names its model, so the
 //!   wait for that token, a second or three, is part of the call. A CLI
 //!   that sends no `requesting` falls back to `message_start` as the start;
-//! - a subagent does not stream. Its `assistant` lines arrive whole, so a
-//!   call runs from the agent's previous edge to the line, and its last
-//!   call, the report, sends no line at all: the gap before the `Agent`
-//!   result is that call;
+//! - a subagent does not stream, but with `forwardSubagentText` its message
+//!   arrives as one `assistant` line per content block, all with the
+//!   message's `id`. A call runs from the agent's previous edge to the last
+//!   line of its message: it stays open while the lines come, and ends at
+//!   the agent's next message, its `tool_use` line (a message that asks for
+//!   a tool is complete, so its call ends there), its tool result, its
+//!   return or the turn's end. The latest sentence of each text block names the agent's lane.
+//!   A last text-only message is the report itself, so the report is not
+//!   timed again; on a CLI that forwards nothing the report sends no line
+//!   at all, and the gap before the `Agent` result is that call;
 //! - the CLI's own durations (`result.duration_ms`, the `Agent` result's
 //!   `totalDurationMs`) win where they exist and ride along as `measured_ms`;
 //! - a subagent that runs in the background (`is_backgrounded` with a
@@ -37,8 +43,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use sirio_claude::message::{
-    AgentToolResult, AssistantPayload, CliMessage, MessageLifecycle, MessageUsage, ResultPayload,
-    StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserPayload,
+    AgentToolResult, AssistantPayload, CliMessage, ContentBlock, MessageLifecycle, MessageUsage,
+    ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserPayload,
 };
 use sirio_claude::tools;
 
@@ -73,6 +79,27 @@ struct Agent {
     /// The model the CLI resolved for a background agent, from its launch
     /// result: the final report names it.
     model: Option<String>,
+    /// The model call whose message is still sending lines.
+    open_call: Option<OpenCall>,
+    /// The latest message (since the agent's last tool result) had a text
+    /// block, and a tool call. A text-only latest message is the report.
+    text_in_message: bool,
+    tool_in_message: bool,
+    /// The id of the latest message that opened a call. The two flags above
+    /// describe it until the agent's next tool result clears them; the id
+    /// stays, so a late line of that message still sets them (a line of an
+    /// older message is dropped: its id is already seen).
+    latest_call: Option<String>,
+}
+
+/// A subagent's model call that has not ended: its message may send more
+/// lines.
+struct OpenCall {
+    id: String,
+    /// The latest line of the message: where the call ends.
+    last: Instant,
+    /// The message's usage as of its latest line.
+    usage: Option<TokenCount>,
 }
 
 /// A prompt-started turn whose main thread has ended while background
@@ -431,6 +458,15 @@ impl TraceFold {
             Some(parent) if self.ended_agents.contains(parent) => return events,
             Some(parent) if self.is_agent(parent) => {
                 self.subagent_call(parent, assistant, at, &mut events);
+                events.extend(assistant.message.content.iter().filter_map(|block| {
+                    let ContentBlock::Text { text } = block else {
+                        return None;
+                    };
+                    Some(TraceEvent::SpanSaid {
+                        id: parent.to_string(),
+                        sentence: latest_sentence(text)?,
+                    })
+                }));
                 Some(parent.to_string())
             }
             // Nobody opened it: the tools it names still show, under the
@@ -494,8 +530,10 @@ impl TraceFold {
         }
     }
 
-    /// The model call a subagent's `assistant` line ends. It started at the
-    /// agent's previous edge, and the line is the new one.
+    /// The model call a subagent's `assistant` line belongs to. It starts at
+    /// the agent's previous edge and stays open: the message's next line
+    /// extends it, anything else ends it ([`Self::end_open_call`]). A line
+    /// with a `tool_use` block ends it too: the message is complete there.
     fn subagent_call(
         &mut self,
         agent_id: &str,
@@ -510,6 +548,15 @@ impl TraceFold {
             // rather than dropped.
             None => format!("{agent_id}/call-{}", self.next_sequence()),
         };
+        let continuing = self
+            .spans
+            .get(agent_id)
+            .and_then(|span| span.agent.as_ref())
+            .and_then(|agent| agent.open_call.as_ref())
+            .is_some_and(|open| open.id == call);
+        if !continuing {
+            self.end_open_call(agent_id, events);
+        }
         let Some(agent) = self
             .spans
             .get_mut(agent_id)
@@ -519,26 +566,90 @@ impl TraceFold {
         };
         let started = agent.edge;
         agent.edge = at;
-        if self
-            .agent_calls
-            .insert(call.clone(), agent_id.to_string())
-            .is_some()
-        {
-            return;
+        let tokens = message.usage.as_ref().map(tokens_of);
+        match agent.open_call.as_mut().filter(|_| continuing) {
+            Some(open) => {
+                open.last = at;
+                if tokens.is_some() {
+                    open.usage = tokens;
+                }
+            }
+            None => {
+                let seen = self
+                    .agent_calls
+                    .insert(call.clone(), agent_id.to_string())
+                    .is_some();
+                // A line of a message whose call already ended (a second,
+                // parallel tool call) neither reopens it nor restarts it.
+                if seen && agent.latest_call.as_deref() != Some(call.as_str()) {
+                    return;
+                }
+                if !seen {
+                    agent.text_in_message = false;
+                    agent.tool_in_message = false;
+                    agent.latest_call = Some(call.clone());
+                    agent.open_call = Some(OpenCall {
+                        id: call.clone(),
+                        last: at,
+                        usage: tokens,
+                    });
+                    events.push(call_started(
+                        call,
+                        Some(agent_id.to_string()),
+                        message.model.clone(),
+                        started,
+                    ));
+                }
+            }
         }
-        events.push(call_started(
-            call.clone(),
-            Some(agent_id.to_string()),
-            message.model.clone(),
-            started,
-        ));
-        if let Some(usage) = &message.usage {
+        let mut asks_for_tool = false;
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text } if !text.trim().is_empty() => {
+                    agent.text_in_message = true;
+                }
+                ContentBlock::ToolUse(_) => {
+                    agent.tool_in_message = true;
+                    asks_for_tool = true;
+                }
+                _ => {}
+            }
+        }
+        // A message that asks for a tool is complete (tool calls come last):
+        // the call ends here, and the tool, its waits and any nested agent
+        // start from this line.
+        if asks_for_tool {
+            self.end_open_call(agent_id, events);
+        }
+    }
+
+    /// Ends the model call `agent_id` has open, at its message's latest line,
+    /// with the usage that message last reported.
+    fn end_open_call(&mut self, agent_id: &str, events: &mut Vec<TraceEvent>) {
+        let Some(open) = self
+            .spans
+            .get_mut(agent_id)
+            .and_then(|span| span.agent.as_mut())
+            .and_then(|agent| agent.open_call.take())
+        else {
+            return;
+        };
+        if let Some(tokens) = open.usage {
             events.push(TraceEvent::SpanUsage {
-                id: call.clone(),
-                tokens: tokens_of(usage),
+                id: open.id.clone(),
+                tokens,
             });
         }
-        events.push(ended(call, SpanOutcome::Done, at, None));
+        events.push(ended(open.id, SpanOutcome::Done, open.last, None));
+    }
+
+    /// Whether the latest message of agent `id` was text with no tool call:
+    /// its report, which the CLI forwarded as a line of its own.
+    fn report_forwarded(&self, id: &str) -> bool {
+        self.spans
+            .get(id)
+            .and_then(|span| span.agent.as_ref())
+            .is_some_and(|agent| agent.text_in_message && !agent.tool_in_message)
     }
 
     /// Opens the span for a `tool_use` block: a subagent for `Agent` (and
@@ -563,6 +674,10 @@ impl TraceFold {
                 detail: detail.clone(),
                 edge: at,
                 model: None,
+                open_call: None,
+                text_in_message: false,
+                tool_in_message: false,
+                latest_call: None,
             };
             (SpanKind::Subagent, name, detail, Some(agent))
         } else {
@@ -595,7 +710,22 @@ impl TraceFold {
             return Vec::new();
         }
         let mut events = Vec::new();
-        for result in user.tool_results() {
+        let results = user.tool_results();
+        // A tool result of the agent's own ends its model call: the next
+        // message is a new one, and its text is not the report.
+        let own = user.parent_tool_use_id.as_deref();
+        if let Some(parent) = own.filter(|_| !results.is_empty()) {
+            self.end_open_call(parent, &mut events);
+            if let Some(agent) = self
+                .spans
+                .get_mut(parent)
+                .and_then(|span| span.agent.as_mut())
+            {
+                agent.text_in_message = false;
+                agent.tool_in_message = false;
+            }
+        }
+        for result in results {
             // A foreign agent that was done before its launch came back, or
             // that never launched, sends no notification: this is its end.
             if self.live_foreign.contains(&result.tool_use_id) {
@@ -670,6 +800,7 @@ impl TraceFold {
             self.end_span(id, outcome_of(result), at, None, events);
             return;
         }
+        self.end_open_call(id, events);
         let has_children = self
             .spans
             .values()
@@ -682,7 +813,9 @@ impl TraceFold {
         // The report sends no `assistant` line: the gap since the agent's
         // last edge is that call. An agent that ended with work open, or
         // that did not complete, wrote no report to draw.
-        if completed && !has_children {
+        // A report the CLI forwarded as the agent's last message is that
+        // message's call already: timing it again would count it twice.
+        if completed && !has_children && !self.report_forwarded(id) {
             self.final_report(
                 id,
                 totals
@@ -758,7 +891,8 @@ impl TraceFold {
             .spans
             .values()
             .any(|span| span.parent.as_deref() == Some(id));
-        if outcome == SpanOutcome::Done && !has_children {
+        self.end_open_call(id, events);
+        if outcome == SpanOutcome::Done && !has_children && !self.report_forwarded(id) {
             let model = self
                 .spans
                 .get(id)
@@ -1016,6 +1150,21 @@ impl TraceFold {
         self.interrupted_last_turn = interrupted;
         self.interrupted_this_turn = false;
         self.mixed_this_turn = false;
+        // The model calls of the agents the turn leaves behind end at their
+        // latest line, not at the store's turn end.
+        let mut calling: Vec<(u64, String)> = self
+            .spans
+            .iter()
+            .filter(|(id, span)| {
+                !surviving.contains(*id)
+                    && span.agent.as_ref().is_some_and(|agent| agent.open_call.is_some())
+            })
+            .map(|(id, span)| (span.seq, id.clone()))
+            .collect();
+        calling.sort();
+        for (_, id) in calling {
+            self.end_open_call(&id, &mut events);
+        }
         self.end_turn_scope(&surviving);
         self.turn_open = false;
         self.owner = Some(Owner {
@@ -1264,6 +1413,7 @@ impl TraceFold {
         measured_ms: Option<u64>,
         events: &mut Vec<TraceEvent>,
     ) {
+        self.end_open_call(id, events);
         // Only a subagent has children, so a tool's end costs no scan.
         let mut children: Vec<(u64, String)> = if self.is_agent(id) {
             // A background agent the turn waits for is not its launcher's to
@@ -1422,6 +1572,81 @@ fn turn_share<T: Clone, R>(
     match (known, before, total) {
         (true, Some(before), Some(now)) => share(&before, &now),
         _ => None,
+    }
+}
+
+/// The longest a lane's sentence runs, in characters.
+const SENTENCE_LIMIT: usize = 160;
+
+/// The latest sentence of `text`, for a subagent lane to show. Code-fence
+/// lines are skipped, the last line with anything on it is taken, its list,
+/// heading or quote marker dropped, and it is cut after each `.`, `!`, `?` or
+/// `…` that whitespace follows (so `2.1.257` stays whole). `None` when
+/// nothing is left; a sentence over [`SENTENCE_LIMIT`] characters is cut to
+/// fit, ending in `…`.
+fn latest_sentence(text: &str) -> Option<String> {
+    let last = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("```"))
+        .rfind(|line| !line.trim().is_empty())?;
+    let mut rest = last.trim();
+    loop {
+        let stripped = strip_marker(rest);
+        if stripped == rest {
+            break;
+        }
+        rest = stripped;
+    }
+    let mut start = 0;
+    let mut chars = rest.char_indices().peekable();
+    while let Some((at, character)) = chars.next() {
+        let ends = matches!(character, '.' | '!' | '?' | '…');
+        if ends && chars.peek().is_some_and(|(_, next)| next.is_whitespace()) {
+            let next = at + character.len_utf8();
+            if !rest[start..next].trim().is_empty() && !rest[next..].trim().is_empty() {
+                start = next;
+            }
+        }
+    }
+    let sentence = rest[start..].trim();
+    if sentence.is_empty() {
+        return None;
+    }
+    Some(match sentence.char_indices().nth(SENTENCE_LIMIT) {
+        Some(_) => {
+            let cut = sentence
+                .char_indices()
+                .nth(SENTENCE_LIMIT - 1)
+                .map_or(sentence.len(), |(cut, _)| cut);
+            format!("{}…", &sentence[..cut])
+        }
+        None => sentence.to_string(),
+    })
+}
+
+/// `line` without one leading list (`-`, `*`, `+`, `1.`), heading (`#`s) or
+/// quote (`>`) marker, as long as the marker stands apart from what follows.
+fn strip_marker(line: &str) -> &str {
+    let line = line.trim_start();
+    let Some(first) = line.chars().next() else {
+        return line;
+    };
+    let apart = |rest: &str| rest.is_empty() || rest.starts_with(char::is_whitespace);
+    match first {
+        '>' => line[1..].trim_start(),
+        '-' | '*' | '+' if apart(&line[1..]) => line[1..].trim_start(),
+        '#' => {
+            let rest = line.trim_start_matches('#');
+            if apart(rest) { rest.trim_start() } else { line }
+        }
+        digit if digit.is_ascii_digit() => {
+            let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+            match rest.strip_prefix('.') {
+                Some(after) if after.starts_with(char::is_whitespace) => after.trim_start(),
+                _ => line,
+            }
+        }
+        _ => line,
     }
 }
 
@@ -1830,11 +2055,7 @@ mod tests {
                 ),
                 clock.at(3_000)
             ),
-            vec![
-                llm("msg_sub", Some("toolu_X"), clock.at(2_110)),
-                usage("msg_sub", 102, 8),
-                span_ended("msg_sub", SpanOutcome::Done, clock.at(3_000), None),
-            ]
+            vec![llm("msg_sub", Some("toolu_X"), clock.at(2_110))]
         );
         assert_eq!(
             fold.line(
@@ -1845,13 +2066,11 @@ mod tests {
                 ),
                 clock.at(3_010)
             ),
-            vec![tool(
-                "toolu_B",
-                Some("toolu_X"),
-                "Bash",
-                "ls",
-                clock.at(3_010)
-            )]
+            vec![
+                usage("msg_sub", 102, 8),
+                span_ended("msg_sub", SpanOutcome::Done, clock.at(3_010), None),
+                tool("toolu_B", Some("toolu_X"), "Bash", "ls", clock.at(3_010)),
+            ]
         );
     }
 
@@ -2030,6 +2249,299 @@ mod tests {
                 ),
                 span_ended(AGENT, SpanOutcome::Done, clock.at(9_428), Some(4_537)),
             ]
+        );
+    }
+
+    fn text(text: &str) -> Value {
+        json!({"type": "text", "text": text})
+    }
+
+    fn thinking(text: &str) -> Value {
+        json!({"type": "thinking", "thinking": text, "signature": "sig"})
+    }
+
+    /// Every `SpanSaid` in `events`, as (id, sentence).
+    fn said(events: &[TraceEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::SpanSaid { id, sentence } => Some((id.clone(), sentence.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `events` end the span `id` at `at`, and how many times.
+    fn ends_of(events: &[TraceEvent], id: &str) -> Vec<Instant> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::SpanEnded { id: ended, at, .. } if ended == id => Some(*at),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn starts_of(events: &[TraceEvent], id: &str) -> Vec<Instant> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::SpanStarted { id: started, at, .. } if started == id => Some(*at),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Ways it could fail: a decimal or a version number ("2.1.257") splits
+    // the sentence; a code fence or a trailing blank line wins over the
+    // prose before it; a list or heading marker stays in the label; blank
+    // text yields an empty label instead of nothing; a huge sentence is
+    // not cut; the cut leaves more than 160 characters.
+    #[test]
+    fn the_latest_sentence_is_the_last_one() {
+        let long = "a".repeat(500);
+        let cut = latest_sentence(&long).expect("a sentence");
+        let expected = format!("{}…", "a".repeat(159));
+        let cases: [(&str, Option<&str>); 6] = [
+            ("I will look. First I read the file.", Some("First I read the file.")),
+            ("Done.\n\nThe file says hi.\n", Some("The file says hi.")),
+            ("Version 2.1.257 is the floor.", Some("Version 2.1.257 is the floor.")),
+            ("- Check the logs.\n```", Some("Check the logs.")),
+            ("## Plan", Some("Plan")),
+            ("  \n ", None),
+        ];
+        for (input, want) in cases {
+            let got = latest_sentence(input);
+            assert!(got.as_deref() == want, "a case of the latest sentence went wrong");
+        }
+        assert!(cut == expected, "a 500-character sentence is cut to 160");
+        assert_eq!(cut.chars().count(), 160);
+    }
+
+    // Ways it could fail: a thinking-only line names the lane (thinking is
+    // not a sentence the user asked to see); a text line names a lane that
+    // is not the agent's; a text line of an agent nobody opened names one.
+    #[test]
+    fn a_subagents_text_names_its_lane() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        run_capture_prefix(&mut fold, &clock);
+
+        let events = fold.line(
+            &assistant(Some(AGENT), "msg_t", vec![thinking("Hmm. Let me think.")]),
+            clock.at(7_000),
+        );
+        assert!(said(&events).is_empty(), "thinking says nothing");
+
+        let events = fold.line(
+            &assistant(Some(AGENT), "msg_t", vec![text("I looked. The file says hi.")]),
+            clock.at(7_100),
+        );
+        assert!(
+            said(&events) == vec![(AGENT.to_string(), "The file says hi.".to_string())],
+            "a parented text line names its agent's lane"
+        );
+
+        let events = fold.line(
+            &assistant(Some("toolu_nobody"), "msg_n", vec![text("Lost.")]),
+            clock.at(7_200),
+        );
+        assert!(said(&events).is_empty(), "an unknown agent has no lane");
+    }
+
+    // Ways it could fail: a message of one-line-per-block is cut at its
+    // first line (the call ends before the tool_use line); the call starts
+    // at a later line instead of the agent's edge; the call ends twice, or
+    // at the tool_result instead of its message's last line; the usage is
+    // lost or emitted early.
+    #[test]
+    fn a_subagents_call_ends_at_its_messages_last_line() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        run_capture_prefix(&mut fold, &clock);
+        // The agent's edge is the tool result at 6 849.
+        let mut all = Vec::new();
+        let lines = [
+            (assistant(Some(AGENT), "msg_2", vec![thinking("Hmm.")]), 7_000),
+            (assistant(Some(AGENT), "msg_2", vec![text("I read it.")]), 7_500),
+        ];
+        for (line, ms) in lines {
+            let events = fold.line(&line, clock.at(ms));
+            assert!(
+                ends_of(&events, "msg_2").is_empty(),
+                "the call is still open while the model writes"
+            );
+            all.extend(events);
+        }
+        // The tool_use line is the message's last: the call ends with it.
+        let events = fold.line(
+            &assistant(
+                Some(AGENT),
+                "msg_2",
+                vec![tool_use("toolu_R", "Read", json!({"file_path": "/r/x"}))],
+            ),
+            clock.at(8_000),
+        );
+        assert!(
+            ends_of(&events, "msg_2") == vec![clock.at(8_000)],
+            "the call ends once, at the tool_use line"
+        );
+        assert!(
+            events.contains(&usage("msg_2", 102, 8)),
+            "the call's usage comes with its end"
+        );
+        all.extend(events);
+        assert!(
+            starts_of(&all, "msg_2") == vec![clock.at(6_849)],
+            "one call, started at the agent's edge"
+        );
+        let events = fold.line(
+            &tool_result(Some(AGENT), "toolu_R", false, "# x"),
+            clock.at(9_000),
+        );
+        assert!(
+            ends_of(&events, "msg_2").is_empty(),
+            "the tool result does not end the call a second time"
+        );
+    }
+
+    // Ways it could fail: the call stays open through a long tool (drawn
+    // running beside it, then snapped back); a second tool_use line of the
+    // same message reopens or restarts the call, or adds a second call; the
+    // second tool_use is dropped with its span; the second line's lateness
+    // moves the call's end.
+    #[test]
+    fn a_call_ends_at_its_tool_use_line_not_at_the_tool_result() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        run_capture_prefix(&mut fold, &clock);
+        let first = fold.line(
+            &assistant(
+                Some(AGENT),
+                "msg_6",
+                vec![tool_use("toolu_A", "Read", json!({"file_path": "/r/a"}))],
+            ),
+            clock.at(7_000),
+        );
+        assert!(
+            ends_of(&first, "msg_6") == vec![clock.at(7_000)],
+            "the call ends with its first tool_use line"
+        );
+        let second = fold.line(
+            &assistant(
+                Some(AGENT),
+                "msg_6",
+                vec![tool_use("toolu_B", "Read", json!({"file_path": "/r/b"}))],
+            ),
+            clock.at(7_050),
+        );
+        assert!(
+            starts_of(&second, "msg_6").is_empty() && ends_of(&second, "msg_6").is_empty(),
+            "a parallel tool line adds no call"
+        );
+        assert!(
+            starts_of(&second, "toolu_B") == vec![clock.at(7_050)],
+            "it still opens its tool"
+        );
+        // A long tool: nothing about the call is said when it returns.
+        let late = fold.line(
+            &tool_result(Some(AGENT), "toolu_A", false, "a"),
+            clock.at(60_000),
+        );
+        assert!(
+            ends_of(&late, "msg_6").is_empty() && !late.iter().any(|event| matches!(
+                event,
+                TraceEvent::SpanUsage { id, .. } if id == "msg_6"
+            )),
+            "the call is already over"
+        );
+    }
+
+    // Ways it could fail: the turn's end leaves an open call to the store,
+    // which ends it at the turn's `result` instead of its message's last
+    // line; the call's usage is dropped with it.
+    #[test]
+    fn a_turn_end_closes_the_calls_its_agents_left_open() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        run_capture_prefix(&mut fold, &clock);
+        fold.line(
+            &assistant(Some(AGENT), "msg_5", vec![text("Working on it.")]),
+            clock.at(7_000),
+        );
+        let events = fold.line(&main_result(), clock.at(9_000));
+        assert!(
+            ends_of(&events, "msg_5") == vec![clock.at(7_000)],
+            "the call ends at its last line"
+        );
+        assert!(events.contains(&usage("msg_5", 102, 8)), "its usage is kept");
+        let at_end = events
+            .iter()
+            .position(|event| matches!(event, TraceEvent::TurnEnded { .. }));
+        let at_call = events
+            .iter()
+            .position(|event| matches!(event, TraceEvent::SpanEnded { id, .. } if id == "msg_5"));
+        assert!(at_call < at_end, "the call ends ahead of the turn");
+    }
+
+    // Ways it could fail: the forwarded report is counted twice (once as
+    // the call `msg_3`, once as `<agent>/final`); the old wire, with no
+    // forwarded line, loses its `<agent>/final`; a message that ended in a
+    // tool call still skips the final report.
+    #[test]
+    fn a_forwarded_report_is_not_counted_twice() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        run_capture_prefix(&mut fold, &clock);
+        let mut all = fold.line(
+            &assistant(Some(AGENT), "msg_3", vec![text("README.md and src.")]),
+            clock.at(8_000),
+        );
+        all.extend(fold.line(&parse(AGENT_RESULT), clock.at(9_428)));
+        let final_id = format!("{AGENT}/final");
+        assert!(
+            starts_of(&all, "msg_3") == vec![clock.at(6_849)],
+            "the report is one call"
+        );
+        assert!(
+            ends_of(&all, "msg_3") == vec![clock.at(8_000)],
+            "the call ends at its last line, before the hand-back"
+        );
+        assert!(
+            starts_of(&all, &final_id).is_empty(),
+            "no final report on top of the forwarded one"
+        );
+        assert!(!ends_of(&all, AGENT).is_empty(), "the agent still ends");
+
+        // The old wire: nothing was forwarded, the gap is the report.
+        let mut old = TraceFold::new(false);
+        run_capture_prefix(&mut old, &clock);
+        let events = old.line(&parse(AGENT_RESULT), clock.at(9_428));
+        assert!(
+            starts_of(&events, &final_id) == vec![clock.at(6_849)],
+            "without forwarded lines the final report stays"
+        );
+
+        // A last message that called a tool is not a report.
+        let mut tooled = TraceFold::new(false);
+        run_capture_prefix(&mut tooled, &clock);
+        tooled.line(
+            &assistant(Some(AGENT), "msg_4", vec![text("Let me check.")]),
+            clock.at(7_000),
+        );
+        tooled.line(
+            &assistant(
+                Some(AGENT),
+                "msg_4",
+                vec![tool_use("toolu_R", "Read", json!({"file_path": "/r/x"}))],
+            ),
+            clock.at(7_100),
+        );
+        tooled.line(&tool_result(Some(AGENT), "toolu_R", false, "x"), clock.at(7_200));
+        let events = tooled.line(&parse(AGENT_RESULT), clock.at(9_428));
+        assert!(
+            starts_of(&events, &final_id) == vec![clock.at(7_200)],
+            "a message with a tool call is not the forwarded report"
         );
     }
 
@@ -2217,17 +2729,13 @@ mod tests {
                 tool("toolu_late", Some(AGENT), "Bash", "ls", clock.at(5_000)),
             ]
         );
+        // The call ended with its tool_use line; the result ends the tool.
         assert_eq!(
             fold.line(
                 &tool_result(Some(AGENT), "toolu_late", false, "README.md"),
                 clock.at(5_200)
             ),
-            vec![span_ended(
-                "toolu_late",
-                SpanOutcome::Done,
-                clock.at(5_200),
-                None
-            )]
+            vec![span_ended("toolu_late", SpanOutcome::Done, clock.at(5_200), None)]
         );
     }
 
@@ -2706,7 +3214,10 @@ mod tests {
             &agent_result(Some("toolu_x1"), "toolu_x2", Some(1_200)),
             clock.at(2_000),
         );
-        assert_eq!(events.first(), Some(&report("toolu_x2", clock.at(1_700))));
+        assert!(
+            events.contains(&report("toolu_x2", clock.at(1_700))),
+            "the report runs from the inner agent's return"
+        );
     }
 
     #[test]

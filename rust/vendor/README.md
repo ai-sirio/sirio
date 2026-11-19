@@ -18,8 +18,8 @@ via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the Beze
 (`gpui`, `gpui_platform`, and the rest) still comes straight from the published crates.io releases,
 unpatched.
 
-Each override changes one thing about its crate and nothing else (`bezel_markdown` changes three, all
-in `src/render.rs`, plus the one-line `src/lib.rs` re-export of the third); the three are unrelated fixes that happen to need the same mechanism.
+Each override changes one thing about its crate and nothing else (`bezel_markdown` changes four, all
+in `src/render.rs`, plus the one-line `src/lib.rs` re-export of the third); the four are unrelated fixes that happen to need the same mechanism.
 `gpui_linux` is described first and at length because it established the arrangement; `gpui_windows` and `bezel_markdown`
 follow it, each with its own short section at the end.
 
@@ -167,7 +167,7 @@ translucency-capable by then (worth checking first, as for `gpui_linux`).
 
 ## `bezel_markdown` — a selection that covers each wrapped row from its first glyph, a bar under wide blocks, and text that follows the interface size
 
-`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with three changes. The first:
+`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with four changes. The first:
 `range_rects` in `src/render.rs`, the function that turns a byte range into one rectangle per
 visual row for the selection, the inline-code wash and the chips. Upstream 0.1.4 walked a range
 row by row through `TextLayout::position_for_index`, finding each row's last index by bisection
@@ -222,3 +222,17 @@ size and the markdown draws pixel for pixel as before. The check is the unit tes
 `rendered_markdown_follows_the_interface_font_size` in `sirio_ui`'s `markdown_preview.rs`. Bumping
 bezel past 0.1.4 means re-applying this change by hand, unless upstream has its own way to set the
 size by then (worth checking first).
+
+The fourth is the link click. Upstream 0.1.4's `InteractiveText` click on a link in a paragraph
+calls `cx.open_url(url)` for every URL, so a `file:` link (Sirio draws the file paths a reply names
+as `file://` links) went to the system opener, which hands the file to whatever owns its type, and
+bezel arms that click on any mouse button. `render.rs`'s `is_file_url` now makes that click do
+nothing for a URL whose scheme is `file` in any letter case, read the way a URL parser reads it
+(ASCII tab, LF and CR dropped, leading controls and spaces trimmed); every other URL opens as
+before. What a `file:` link does is the host's to decide: `sirio_ui`'s chat opens it through
+`ChatEvent::OpenFileAt`. The guard covers bezel's own click handler only; a host that calls
+`cx.open_url` itself is outside it (the known ones are `change_request_tab.rs`'s `open_links` and
+`file_view.rs`, which falls back to it for a link it did not resolve). The bookmark chip and card
+clicks are not touched (they open a web URL).
+The check is the unit test `only_a_file_link_never_reaches_the_system_opener` in `sirio_ui`'s
+`selectable_markdown.rs`. Bumping bezel past 0.1.4 means re-applying this change by hand.

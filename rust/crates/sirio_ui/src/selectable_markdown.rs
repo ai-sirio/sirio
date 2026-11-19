@@ -353,6 +353,75 @@ mod tests {
         point(bounds.left() + px(chars * char_width), bounds.top() + px(6.0))
     }
 
+    /// A plain bezel render, no Sirio handlers around it.
+    struct Bare(bezel_markdown::Doc);
+
+    impl Render for Bare {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().flex().flex_row().child(
+                div().debug_selector(|| "bare".into()).child(bezel_markdown::render(
+                    &self.0,
+                    bezel_markdown::Caption::Shown,
+                    window,
+                    cx,
+                )),
+            )
+        }
+    }
+
+    // Ways bezel's link click could fail the host:
+    // - a left click on a `file:` link reaches the system opener;
+    // - a middle click does (bezel arms on any button);
+    // - the scheme check is case-sensitive, so `FILE:` slips through;
+    // - the check reads only the first bytes, so a destination written
+    //   `<` + space or tab + `file:` (the space stays inside `<...>`) slips through;
+    // - the check is too wide and an `https:` link stops opening.
+    // Each case reads what the platform recorded before and after its click, and an
+    // `https:` link names the button, so a value left by an earlier case cannot
+    // satisfy a later one.
+    #[gpui::test]
+    async fn only_a_file_link_never_reaches_the_system_opener(cx: &mut TestAppContext) {
+        cx.update(crate::ely::init);
+        let tab = char::from(9u8);
+        let cases = [
+            ("lower", "see [docs](file:///tmp/a.rs) now".to_string(), false),
+            ("upper", "see [docs](FILE:///tmp/a.rs) now".to_string(), false),
+            ("space", "see [docs](< file:///tmp/a.rs>) now".to_string(), false),
+            ("tab", format!("see [docs](<{tab}file:///tmp/a.rs>) now"), false),
+            ("https", "see [docs](https://x.test/BTN) now".to_string(), true),
+        ];
+        for (label, source, opens) in cases {
+            for button in [MouseButton::Left, MouseButton::Middle] {
+                let doc = bezel_markdown::parse(&source.replace("BTN", &format!("{button:?}")));
+                let (_, _, vcx) = testing::host(cx, move |_, _| Bare(doc));
+                vcx.simulate_resize(size(px(800.0), px(400.0)));
+                vcx.run_until_parked();
+                let bounds = vcx.debug_bounds("bare").expect("the page renders");
+                let char_width = f32::from(bounds.size.width) / TEXT.chars().count() as f32;
+                let position = point(
+                    bounds.left() + px(5.5 * char_width),
+                    bounds.top() + px(6.0),
+                );
+                let before = vcx.cx.opened_url();
+                vcx.simulate_event(gpui::MouseDownEvent {
+                    position,
+                    modifiers: Modifiers::none(),
+                    button,
+                    click_count: 1,
+                    first_mouse: false,
+                });
+                vcx.simulate_event(gpui::MouseUpEvent {
+                    position,
+                    modifiers: Modifiers::none(),
+                    button,
+                    click_count: 1,
+                });
+                let opened = vcx.cx.opened_url() != before;
+                assert!(opened == opens, "link case {label}, button {button:?}");
+            }
+        }
+    }
+
     /// Dragging across a link selects it; it must not also open it. The
     /// chat's own body opens a link on any release over it, even one that
     /// ends a drag — right for prose nobody selects, wrong for a README.

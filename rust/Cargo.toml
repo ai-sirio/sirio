@@ -48,7 +48,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.45.1"
+version = "0.46.0"
 edition = "2024"
 publish = false
 
@@ -151,7 +151,9 @@ bezel-gpui-windows = { path = "vendor/gpui_windows" }
 # Local override that washes the first glyph of every soft-wrapped row of a selection. Upstream
 # 0.1.4 walks a range's rows through `position_for_index`, which places a wrap boundary at the end
 # of the row above, so each wrapped row's highlight began one glyph late — in a chat response and
-# the Markdown Preview alike. One function, taken from upstream 0.2.16; see rust/vendor/README.md.
+# the Markdown Preview alike. One function, taken from upstream 0.2.16. It also carries the other
+# local changes (scrollable wide blocks, text size offset) and a link click that never hands a
+# `file:` URL to the system opener; see rust/vendor/README.md.
 bezel-markdown = { path = "vendor/bezel_markdown" }
 
 [profile.dev]

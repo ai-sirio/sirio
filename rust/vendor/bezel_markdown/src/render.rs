@@ -852,6 +852,15 @@ fn text_element(
     painted_text(flat, text.text.len(), size, line_height, overlay, theme)
 }
 
+/// Whether `url` has the `file` scheme, in any letter case. It reads the URL the way
+/// a URL parser does: ASCII tab, LF and CR anywhere are dropped, then leading C0
+/// controls and spaces are trimmed, so `<` + space + `file:` is still a file URL.
+fn is_file_url(url: &str) -> bool {
+    let url: String = url.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let url = url.trim_start_matches(|c: char| c <= ' ');
+    url.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+}
+
 /// Shaped inline content with the editing overlay under it: the selection, the
 /// caret, the inline-code wash, and the layout a click resolves against.
 ///
@@ -888,7 +897,9 @@ fn painted_text(
         let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.into_iter().unzip();
         InteractiveText::new(ElementId::named_usize("md-text", ix), styled)
             .on_click(ranges, move |clicked, _window, cx| {
-                if let Some(url) = urls.get(clicked) {
+                // A `file:` link is the host's to open (or not); the system
+                // opener would hand it to whatever owns the file type.
+                if let Some(url) = urls.get(clicked).filter(|url| !is_file_url(url)) {
                     cx.open_url(url);
                 }
             })
