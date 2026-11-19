@@ -154,6 +154,8 @@ impl Chat {
             cx.notify();
             return Ok(());
         }
+        // A reload may change the plugins' tools: a widget lookup must ask again.
+        self.widgets.invalidate_lookups();
         let reload = &mut self.session_panel.reload;
         let hold = reload.held.is_none();
         reload.running = true;

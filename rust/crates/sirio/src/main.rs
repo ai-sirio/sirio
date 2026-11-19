@@ -46,7 +46,7 @@ use sirio_ui::{
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{
         Chat, ChatClaim, ChatControlSnapshot, ChatEvent, EffortListAction, ElicitationAct,
-        SessionPanelAction,
+        SessionPanelAction, TranscriptAction,
     },
     composer_prefs::ComposerPrefs,
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
@@ -1592,6 +1592,11 @@ enum ChatControlAction {
     Effort {
         surface_id: String,
         action: EffortListAction,
+    },
+    /// Debug-only: what the wheel and a turn's fold row do to the transcript.
+    Transcript {
+        surface_id: String,
+        action: TranscriptAction,
     },
     /// Debug-only: Stop on a background task, as its button does.
     StopTask {
@@ -3969,6 +3974,52 @@ impl ControlHandler for AppControlHandler {
                     reply,
                 })
             }
+            "surface.chat.transcript" if cfg!(debug_assertions) => {
+                let Some(surface_id) = request.params.get("surfaceId").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.transcript requires surfaceId",
+                    );
+                };
+                let action = match request.params.get("action").map(String::as_str) {
+                    Some("scrollBy") => {
+                        let pixels =
+                            request.params.get("pixels").map(|pixels| pixels.parse::<f32>());
+                        match pixels {
+                            Some(Ok(pixels)) if pixels.is_finite() => {
+                                TranscriptAction::ScrollBy(pixels)
+                            }
+                            _ => {
+                                return ControlResponse::failure(
+                                    &request.id,
+                                    "surface.chat.transcript scrollBy requires a numeric pixels",
+                                );
+                            }
+                        }
+                    }
+                    Some("toggleTurn") => {
+                        match request.params.get("turn").map(|turn| turn.parse::<usize>()) {
+                            Some(Ok(turn)) => TranscriptAction::ToggleTurn(turn),
+                            _ => {
+                                return ControlResponse::failure(
+                                    &request.id,
+                                    "surface.chat.transcript toggleTurn requires a numeric turn",
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.transcript requires action scrollBy or toggleTurn",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Chat {
+                    action: ChatControlAction::Transcript { surface_id, action },
+                    reply,
+                })
+            }
             "surface.chat.stopTask" | "surface.chat.paintTail" if cfg!(debug_assertions) => {
                 let (Some(surface_id), Some(task_id)) = (
                     request.params.get("surfaceId").cloned(),
@@ -4544,7 +4595,10 @@ fn agent_launch_for(launch: &AgentLaunchState, adapter_id: &str) -> Option<Launc
     if adapter_id == sirio_agents::ClaudeCodeAdapter.id()
         && let Some(program) = launch.claude.native_program()
     {
-        return Some(LaunchSpec::Claude(ClaudeLaunch::new(program)));
+        return Some(LaunchSpec::Claude(
+            ClaudeLaunch::new(program)
+                .mcp_apps_host(sirio_ui::mcp_widget::widget_webview_available()),
+        ));
     }
     agent_command_for(&launch_source_in(launch, adapter_id)).map(LaunchSpec::Acp)
 }
@@ -22174,7 +22228,7 @@ impl SirioWorkspace {
     /// prepaint re-show the active one, is deliberate: the latter would toggle
     /// the visible browser off and on again every frame, i.e. an X11 map
     /// request at frame rate.
-    fn hide_offscreen_browsers(&self, settings_covering: bool, cx: &App) {
+    fn hide_offscreen_browsers(&self, settings_covering: bool, cx: &mut App) {
         let on_screen: Vec<usize> = if settings_covering {
             Vec::new()
         } else {
@@ -22190,10 +22244,11 @@ impl SirioWorkspace {
             if on_screen.contains(&tab.id) {
                 continue;
             }
-            tab.panes.for_each(&mut |_, content| {
-                if let TabContent::Browser(surface) = content {
-                    surface.read(cx).set_native_visible(false);
-                }
+            tab.panes.for_each(&mut |_, content| match content {
+                TabContent::Browser(surface) => surface.read(cx).set_native_visible(false),
+                // An MCP Apps widget is a native child window too: it goes with its chat.
+                TabContent::Chat(chat) => chat.update(cx, |chat, cx| chat.unmap_widgets(cx)),
+                _ => {}
             });
         }
     }
@@ -22242,7 +22297,7 @@ impl SirioWorkspace {
     /// surfaces precisely because an on-screen hide issued from `render`
     /// would lose to the prepaint that runs right after it. The mark does
     /// not: prepaint itself reads it and stays unmapped.
-    fn sync_browser_overlay_obscured(&self, cx: &App) {
+    fn sync_browser_overlay_obscured(&self, cx: &mut App) {
         let obscured = Self::overlay_obscures_browsers(
             self.overflow_menu_open,
             self.tab_menu_open,
@@ -22255,10 +22310,13 @@ impl SirioWorkspace {
             self.primary_peek.is_open(),
         );
         for tab in &self.tabs {
-            tab.panes.for_each(&mut |_, content| {
-                if let TabContent::Browser(surface) = content {
-                    surface.read(cx).set_overlay_obscured(obscured);
+            tab.panes.for_each(&mut |_, content| match content {
+                TabContent::Browser(surface) => surface.read(cx).set_overlay_obscured(obscured),
+                // The same overlays cover an MCP Apps widget, which notifies only on a change.
+                TabContent::Chat(chat) => {
+                    chat.update(cx, |chat, cx| chat.set_widgets_obscured(obscured, cx));
                 }
+                _ => {}
             });
         }
     }
@@ -25493,6 +25551,11 @@ impl SirioWorkspace {
                 "lastVisibleEntry".to_string(),
                 snapshot.last_visible_entry.to_string(),
             ),
+            // The MCP Apps widgets in call order, as rows (see `ChatControlSnapshot`).
+            (
+                "mcpWidgets".to_string(),
+                sirio_control::protocol::rows::encode(&snapshot.mcp_widgets),
+            ),
             // The effort level in force, by its wire value; empty when the session has none.
             ("effort".to_string(), snapshot.effort.unwrap_or_default()),
             // The CLI's own session state; empty until it reports one.
@@ -25617,6 +25680,14 @@ impl SirioWorkspace {
                 let window = window.ok_or("the effort list needs a window")?;
                 let snapshot = chat.update(cx, |chat, cx| {
                     chat.effort_act(action, window, cx)?;
+                    Ok::<_, String>(chat.control_snapshot())
+                })?;
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
+            ChatControlAction::Transcript { surface_id, action } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let snapshot = chat.update(cx, |chat, cx| {
+                    chat.transcript_act(action, cx)?;
                     Ok::<_, String>(chat.control_snapshot())
                 })?;
                 Ok(Self::control_chat_result(&surface_id, snapshot))
@@ -33943,7 +34014,10 @@ fn main() {
     // before `application()` constructs anything — and `set_var` is only sound
     // while this is still a single-threaded process. See `display_backend`.
     #[cfg(target_os = "linux")]
-    display_backend::prepare_environment();
+    let widgets_on_x11 =
+        display_backend::prepare_environment() == display_backend::BackendChoice::ForceX11;
+    #[cfg(not(target_os = "linux"))]
+    let widgets_on_x11 = false;
 
     // #144/#145: same rule, same reason, for Windows. GPUI composes through a
     // DirectComposition visual tree by default, and such a tree does not
@@ -34072,6 +34146,9 @@ fn main() {
         // before any surface exists, because a WebView2 profile cannot move
         // once opened.
         sirio_ui::browser::set_profile_dir(session::browser_profile_path());
+        // MCP Apps widgets are native webviews: Linux under X11 only. Set before any chat
+        // launches, because the launch variable follows it.
+        sirio_ui::mcp_widget::set_widget_webview_available(widgets_on_x11);
         // The working directory can vanish between launches (a terminal
         // whose cwd was deleted): fall back rather than abort before the
         // window exists.
@@ -50568,6 +50645,9 @@ done
             "surface.chat.effort" => request::chat_effort("chat-1", "open", None),
             "surface.chat.elicitation" => {
                 request::chat_elicitation("chat-1", 1, Some(1), None, false)
+            }
+            "surface.chat.transcript" => {
+                request::chat_transcript("chat-1", "scrollBy", Some("10"), None)
             }
             "surface.chat.stopTask" => request::chat_task("surface.chat.stopTask", "chat-1", "task-1"),
             "surface.chat.paintTail" => {

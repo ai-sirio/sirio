@@ -44,6 +44,8 @@ impl McpWidget {
             answered: 0,
             refused: Vec::new(),
             xid: None,
+            input_delivered: false,
+            result_delivered: false,
         }
     }
 }

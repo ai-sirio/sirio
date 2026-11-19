@@ -58,6 +58,9 @@ pub struct WidgetSnapshot {
     pub refused: Vec<String>,
     /// The webview's X window id, for `xwininfo -id`; `None` without one.
     pub xid: Option<u64>,
+    /// Whether the bridge has sent `tool-input` / `tool-result` to the view.
+    pub input_delivered: bool,
+    pub result_delivered: bool,
 }
 
 static WIDGET_WEBVIEW_AVAILABLE: AtomicBool = AtomicBool::new(false);

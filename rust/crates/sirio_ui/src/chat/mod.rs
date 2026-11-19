@@ -67,6 +67,8 @@ mod question_dock;
 mod visible_text;
 mod session_panel;
 mod usage_card;
+mod widget_lookup;
+mod widget_slot;
 mod status_line;
 mod thought;
 mod tool_calls;
@@ -1313,6 +1315,18 @@ pub struct ChatControlSnapshot {
     /// `{source, text, tone, held}` of a retry or `{source, key, text, priority, tone, held}`
     /// of a notification.
     pub status_line: String,
+    /// The widgets of MCP Apps calls, in call order, one row of string values each: see
+    /// `widget_slot::Chat::widget_rows`.
+    pub mcp_widgets: Vec<BTreeMap<String, String>>,
+}
+
+/// What the debug control verb does to the transcript.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TranscriptAction {
+    /// Scrolls the list by this many pixels (`ListState::scroll_by`).
+    ScrollBy(f32),
+    /// Folds or unfolds the closed turn whose footer is at this entry index.
+    ToggleTurn(usize),
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -2475,6 +2489,8 @@ pub struct Chat {
     /// A preview the reader has not confirmed yet. One slot: confirming
     /// always answers the latest preview.
     pending_rewind: Option<PendingRewind>,
+    /// MCP Apps widgets: the lookup, the slots, and where the sweep places them.
+    widgets: widget_slot::Widgets,
     /// The draft, in Ely's field: IME, selection, undo, wrapping and scroll
     /// are its job. `Chat` observes it and reads `text()`/`cursor()` into
     /// `draft`/`draft_caret` on every change — the popups and Send read the
@@ -3003,6 +3019,7 @@ impl Chat {
             agent_name: None,
             agent_cwd: cwd,
             session_panel: session_panel::SessionPanel::new(),
+            widgets: widget_slot::Widgets::default(),
             composer_row,
             composer_drag: None,
             entries: Vec::new(),
@@ -3333,9 +3350,12 @@ impl Chat {
                 cx.notify();
                 return;
             }
-            // A widget's call. The chat draws no row for it yet: the tool row it belongs to
-            // is already in the transcript.
-            SessionNotice::McpTool(_) => return,
+            // A widget's call: the tool row it belongs to is already in the transcript, and
+            // gets a slot under it when the call's tool names a UI.
+            SessionNotice::McpTool(update) => {
+                self.apply_mcp_tool(update, cx);
+                return;
+            }
         };
         self.push_entry(entry);
     }
@@ -5127,6 +5147,7 @@ impl Chat {
             agent_title: self.agent_title_json(),
             question_dock: self.question_dock_json(),
             status_line: self.status_line.snapshot(),
+            mcp_widgets: self.widget_rows(),
         }
     }
 
@@ -5163,6 +5184,37 @@ impl Chat {
                     return Err(format!("the session does not offer effort {value}"));
                 }
                 self.choose_picker_row(controls::PickerRow::Effort(value), window, cx);
+            }
+        }
+        Ok(())
+    }
+
+    /// What the debug control verb does to the transcript: what the wheel and a turn's fold row
+    /// do, without needing a pointer. A turn that is not closed, or has nothing to fold, is
+    /// refused.
+    pub fn transcript_act(
+        &mut self,
+        action: TranscriptAction,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        match action {
+            TranscriptAction::ScrollBy(pixels) => {
+                if !pixels.is_finite() {
+                    return Err("pixels is not a number".to_string());
+                }
+                self.list_state.scroll_by(px(pixels));
+                cx.notify();
+            }
+            TranscriptAction::ToggleTurn(turn) => {
+                let turns = segment_turns(&self.entries);
+                let foldable = turns
+                    .iter()
+                    .position(|segment| segment.footer == Some(turn))
+                    .is_some_and(|position| turn_is_foldable(&turns, position));
+                if !foldable {
+                    return Err("no closed turn has that footer".to_string());
+                }
+                self.toggle_turn_folded(turn, cx);
             }
         }
         Ok(())
@@ -5306,6 +5358,7 @@ impl Chat {
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         let old_count = self.entries.len();
         self.entries.clear();
+        self.close_widgets(cx);
         self.turn_message_ids.clear();
         // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
@@ -6245,6 +6298,7 @@ impl Chat {
         self.entries.clear();
         self.turn_message_ids.clear();
         self.pending_rewind = None;
+        self.close_widgets(cx);
         self.folded_turns.clear();
         // The agent that ran the old turns is dropped without a word: its
         // trace goes with it, rather than showing a turn that never ends.
@@ -6928,6 +6982,8 @@ impl Chat {
         self.effort_auto_attempt = None;
         self.effort_auto_budget = EFFORT_AUTO_REQUESTS;
         self.session_panel.clear_session();
+        // A new process is a new session: the old one's tool list answers nothing.
+        self.widgets.reset_lookups();
         self.connecting = true;
         let cwd = self.agent_cwd.clone();
         self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -8249,6 +8305,7 @@ impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
+        self.widgets.note_window(window.window_handle());
         self.settle_background_popover(window, cx);
         // Read before any loader renews this view's lease.
         if sirio_perf::enabled() && crate::motion::Painter::of(cx).woken(cx) {
@@ -8507,11 +8564,15 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         &row_bezel_theme,
                                         entity.clone(),
                                     );
+                                    // A slot's prepaint reports its place inside this item, and
+                                    // this probe is where the item begins.
+                                    let probe = this.widget_item_probe(start, end);
                                     return div()
                                         .id(this.row_id(entry_index, cx))
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
+                                        .children(probe)
                                         .child(run)
                                         .into_any_element();
                                 }
@@ -8561,7 +8622,10 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                         .with_sizing_behavior(ListSizingBehavior::Auto)
                         .flex_grow_1(),
                     )
-                    .child(self.render_jump_to_latest(&bezel_theme, cx)),
+                    .child(self.render_jump_to_latest(&bezel_theme, cx))
+                    // After the list and its disc, so both have prepainted: places the
+                    // widgets, which are separate X windows over the rows.
+                    .child(self.widget_sweep(cx)),
             )
             // #239: the generating spinner, transient by construction. It is a
             // sibling of the transcript rather than an entry in it: the list is

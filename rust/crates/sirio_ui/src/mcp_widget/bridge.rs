@@ -48,6 +48,7 @@ pub(crate) struct WidgetBridge {
     input: Option<Value>,
     input_taken: bool,
     input_sent: bool,
+    result_sent: bool,
     result: Option<Value>,
     result_taken: bool,
     cancelled: Option<String>,
@@ -74,6 +75,7 @@ impl WidgetBridge {
             input: None,
             input_taken: false,
             input_sent: false,
+            result_sent: false,
             result: None,
             result_taken: false,
             cancelled: None,
@@ -95,6 +97,16 @@ impl WidgetBridge {
     /// True once the view has sent `ui/notifications/initialized`.
     pub(crate) fn ready(&self) -> bool {
         self.initialized
+    }
+
+    /// True once `tool-input` went to the view.
+    pub(crate) fn input_delivered(&self) -> bool {
+        self.input_sent
+    }
+
+    /// True once `tool-result` went to the view.
+    pub(crate) fn result_delivered(&self) -> bool {
+        self.result_sent
     }
 
     pub(crate) fn on_message(&mut self, text: &str, now: Instant) -> Vec<BridgeEffect> {
@@ -228,6 +240,7 @@ impl WidgetBridge {
         if self.input_sent {
             if let Some(result) = self.result.take() {
                 effects.push(BridgeEffect::Send(notify("ui/notifications/tool-result", result)));
+                self.result_sent = true;
             }
         }
         if let Some(reason) = self.cancelled.take() {

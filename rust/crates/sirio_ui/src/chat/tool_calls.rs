@@ -536,12 +536,13 @@ impl Chat {
             duration_ms,
             raw_input,
             raw_output,
+            id,
             ..
         } = entry
         else {
             return div().into_any_element();
         };
-        Self::render_tool_row(
+        let row = Self::render_tool_row(
             entry_index,
             ElementId::Name(
                 format!(
@@ -570,7 +571,14 @@ impl Chat {
             bezel_theme,
             entity,
             &self.tool_output_scroll,
-        )
+        );
+        // An MCP Apps widget lives under the row of its own call.
+        match self.widget_slot_element(id, entry_index, theme, bezel_theme) {
+            Some(slot) => {
+                div().w_full().flex().flex_col().child(row).child(slot).into_any_element()
+            }
+            None => row,
+        }
     }
 
     /// The protocol Task call: one run box whose header reads "Task" with
@@ -742,13 +750,17 @@ impl Chat {
             return div().into_any_element();
         };
         let run_start = *run_start;
-        let kinds: Vec<&str> = members
+        // A call with a widget slot is never folded into a `Verb · N` run: its kind is made
+        // one no other call has.
+        let owned_kinds: Vec<String> = members
             .iter()
             .map(|(_, _, entry)| match entry {
-                Entry::ToolCall { kind, .. } => kind.as_str(),
-                _ => "",
+                Entry::ToolCall { id, .. } if self.call_has_slot(id) => format!("slot:{id}"),
+                Entry::ToolCall { kind, .. } => kind.clone(),
+                _ => String::new(),
             })
             .collect();
+        let kinds: Vec<&str> = owned_kinds.iter().map(String::as_str).collect();
         let mut children: Vec<AnyElement> = Vec::new();
         let mut first_in_box = true;
         for (offset, len) in verb_folds(&kinds) {

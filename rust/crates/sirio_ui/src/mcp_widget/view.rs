@@ -169,6 +169,8 @@ impl McpWidget {
             answered: self.answered,
             refused: self.refused.clone(),
             xid: self.webview.as_ref().and_then(x11_id),
+            input_delivered: self.bridge.input_delivered(),
+            result_delivered: self.bridge.result_delivered(),
         }
     }
 

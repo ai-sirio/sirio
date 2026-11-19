@@ -476,6 +476,9 @@ impl Chat {
         let Some(control) = self.client.as_ref().and_then(|client| client.mcp_control()) else {
             return Err("this session has no connectors".to_string());
         };
+        // A reconnect or a sign-in changes what the server lists: the tool list a widget
+        // lookup keeps is old from here on.
+        self.widgets.invalidate_lookups();
         let connectors = &mut self.session_panel.connectors;
         connectors.failures.remove(&name);
         connectors.reconnect_offered.remove(&name);
@@ -526,6 +529,8 @@ impl Chat {
         let Some(control) = self.client.as_ref().and_then(|client| client.mcp_control()) else {
             return Err("this session has no connectors".to_string());
         };
+        // A toggle changes what the server lists, so a widget lookup must ask again.
+        self.widgets.invalidate_lookups();
         let connectors = &mut self.session_panel.connectors;
         connectors.failures.remove(&name);
         connectors.busy.insert(name.clone(), Busy::Switching { on });
@@ -583,6 +588,8 @@ impl Chat {
         list: anyhow::Result<Vec<McpServer>>,
         cx: &mut GpuiContext<Self>,
     ) {
+        // Whatever the action did, the servers are not what a widget lookup last read.
+        self.widgets.invalidate_lookups();
         if let Ok(list) = list {
             let connectors = &mut self.session_panel.connectors;
             connectors.set_servers(list);
@@ -612,6 +619,7 @@ impl Chat {
                 .background_spawn(async move { again.refresh_status() })
                 .await;
             let _ = this.update(cx, |chat, cx| {
+                chat.widgets.invalidate_lookups();
                 let connectors = &mut chat.session_panel.connectors;
                 connectors.busy.remove(&name);
                 // This answer is the action's own follow-up, so it does not
@@ -709,6 +717,8 @@ impl Chat {
                 }
             }
             let _ = this.update(cx, |chat, cx| {
+                // Signed in, or not: the server may list its tools now.
+                chat.widgets.invalidate_lookups();
                 let connectors = &mut chat.session_panel.connectors;
                 connectors.busy.remove(&name);
                 if offer_reconnect {
