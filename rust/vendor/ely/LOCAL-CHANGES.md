@@ -406,12 +406,17 @@ unchanged default path are named: they ran green on this code (each alone, 1 tes
 - `control.rs`: `HumanInputRequest::{custom, header_selector, body, action}`; no Ely field and no
   default Reply in custom mode, choices only with an `on_answer`.
 - Outcomes: rows 28, 29, 34, 35, 36 re-applied. Proofs: runs at Task 8,
-  `chat::ely_tests::ely_tool_and_thought_expansion_survives_virtualization` (rows 28, 29 header
-  selector and host-owned state), `chat::ely_tests::ely_request_sends_only_the_advertised_option_id`
-  (rows 34, 35, 36: asserts `ely-request-always` is absent in custom mode);
-  `chat::ely_tests::ely_expired_request_cannot_answer_the_next_request` (row 34). The `status` of
-  row 29 has no test of its own (unproven); the built-in `PermissionPrompt::new` and
-  `HumanInputRequest::new` paths are proven by the ran tests above
+  row 28: `chat::ely_tests::ely_tool_and_thought_expansion_survives_virtualization` (the card and the
+  thinking block: `expanded`, `header_selector`, `body`), and for the group
+  (`expanded` and `header_selector`) `chat::tests::a_subagent_task_card_expands_nested_tool_calls`
+  and `chat::tests::a_run_is_one_box_and_same_verb_calls_fold`. Row 29 (the group's `status`):
+  unproven as a whole (no test sets it and asserts the mark). Rows 34, 35: row 34's custom mode is
+  exercised by `chat::ely_tests::ely_request_sends_only_the_advertised_option_id` and
+  `chat::ely_tests::ely_expired_request_cannot_answer_the_next_request`; row 35 (`header_selector` of
+  a request) is unproven. Row 36: unproven (the `ely-request-always` wrapper is present by reading
+  `permission.rs`; the one Sirio assertion, in `ely_request_sends_only_the_advertised_option_id`, is
+  that it is absent in custom mode, so it cannot fail if the wrapper is missing). The built-in
+  `PermissionPrompt::new` and `HumanInputRequest::new` paths are proven by the ran tests above
   (`tests::the_prompt_walks_deny_always_then_once`,
   `tests::control::enter_sends_a_written_answer_and_skips_a_blank_one`).
 

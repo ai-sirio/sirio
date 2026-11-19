@@ -141,7 +141,7 @@ impl RenderOnce for HumanInputRequest {
             None
         };
         let theme = cx.theme();
-        let colors = theme.colors;
+        let colors = theme.colors.clone();
         div()
             .flex()
             .flex_col()

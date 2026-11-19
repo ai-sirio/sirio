@@ -502,7 +502,7 @@ impl PromptInput {
 impl RenderOnce for PromptInput {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors;
+        let colors = theme.colors.clone();
         let (radius, text_size) = (theme.radius(Radius::Xl), theme.text_size(TextSize::Base));
         let ready = self.ready.unwrap_or_else(|| {
             self.field
