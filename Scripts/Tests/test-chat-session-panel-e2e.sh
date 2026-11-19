@@ -79,7 +79,8 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #                      placement invariant on `mcpWidgets` (mapped exactly when the slot is wholly in the list's viewport
 #                      with no overlay, dock question or hidden tab; xwininfo says IsViewable exactly then) through
 #                      a half scroll, a folded turn, the effort list, a terminal tab and a dead CLI; the logger stays empty
-#   mcp_widget_flood   (framed) a widget posting pings for 3 s: surface.chat.read answers within 1 s throughout
+#   mcp_widget_flood   (framed) a widget posting pings at 125k a second for 3 s: surface.chat.read answers within 1 s
+#                      throughout, and the widget ends closed (over the rate limit for 5 s), with no card and no window
 #   mcp_widget_gate    (framed) the CLI lists _meta.ui but reports no capability: plain rows, no widget, no read, no call
 #
 # The notice_* scenarios (A7) use Scripts/Tests/stubs/notices/claude, the fixture in its cli_notices mode: the
@@ -5778,6 +5779,39 @@ elif command == "invariant":
                 print("FAIL: " + problem, file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
+elif command == "flood-end":
+    # flood-end SURFACE SECONDS ARTIFACT DISPLAY: the flooded widget ends closed, for the rate limit,
+    # with no card ever raised and no viewable window; the final row joins the artifact.
+    surface, seconds, artifact, display = sys.argv[2], float(sys.argv[3]), sys.argv[4], sys.argv[5]
+    deadline = time.time() + seconds
+    while True:
+        rows, dock, chat = read(surface)
+        if dock is not None or any(r.get("kind") == "permission" for r in chat["transcript"]):
+            print("FAIL: a widget card appeared during the flood", file=sys.stderr)
+            sys.exit(1)
+        if rows and rows[0]["phase"] == "closed":
+            break
+        if time.time() > deadline:
+            print("  read: " + json.dumps(rows), file=sys.stderr)
+            print("FAIL: the flooding widget was not closed within 30 s", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+    row = rows[0]
+    print("  closed row: " + json.dumps(row))
+    if row["error"] != "over the rate limit for 5 s":
+        print("FAIL: the widget closed for another reason", file=sys.stderr)
+        sys.exit(1)
+    viewable, line = window_state(display, row["xid"])
+    if viewable:
+        print("FAIL: the closed widget's window is still viewable", file=sys.stderr)
+        sys.exit(1)
+    with open(artifact, encoding="utf-8") as f:
+        data = json.load(f)
+    data["finalRow"] = row
+    data["finalWindow"] = line
+    with open(artifact, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    print(f"OK: the widget closed with '{row['error']}', raised no card, and its window is not viewable ({line})")
 elif command == "latency":
     # latency SURFACE SECONDS ARTIFACT: one surface.chat.read every 100 ms; each must answer in 1 s.
     surface, seconds, artifact = sys.argv[2], float(sys.argv[3]), sys.argv[4]
@@ -5868,6 +5902,7 @@ scenario_mcp_widget() {
     'all(s in norm(d["body"]) for s in ["\"text\":\"hi\"", "\"n\":42", "\"parentDocument\":\"blocked\"", "\"frameElement\":\"null\"", "\"parentIpc\":\"blocked\"", "\"rtc\":\"absent\"", "\"fetch\":\"blocked\"", "\"img\":\"blocked\"", "\"open\":\"null\""])'
   widget_invariant "2 card 1 open"
   sleep 0.6
+  # These keys reach the dock: the same press_key path's real Escape below closes this card.
   press_key Return
   press_key 1
   press_key Down
@@ -6000,14 +6035,14 @@ scenario_mcp_widget_flood() {
   send_prompt mcp_flood
   widget_wait "the flooding widget is ready" 60 'len(w) == 1 and w[0]["phase"] == "ready"'
   MW latency "$SURFACE" 3 "$OUT_DIR/mcp-widget-flood.json" || fail "the UI did not keep answering during the flood"
-  widget_wait "a card shows how many pings were answered, between 1 and 250" 30 \
-    'd and (m := re.search(r"\"answered\":(\d+)", norm(d["body"]))) and 1 <= int(m.group(1)) <= 250'
-  widget_invariant "flood card open"
-  E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="$(widget_card_id)" optionId=reject_once >/dev/null \
-    || fail "reject_once on the flood card failed"
-  widget_wait "the flood card is closed" 15 'not d'
+  # The brief's hostile pacing (a post loop of about 125k a second) leaves an IPC backlog that keeps the
+  # widget over 50 a second for 5 s of host time, so Sirio closes it and no card ever comes. The cut
+  # per second itself is covered by the bridge test a_flood_is_cut_at_fifty_a_second.
+  MW flood-end "$SURFACE" 30 "$OUT_DIR/mcp-widget-flood.json" "$DISPLAY_TARGET" || fail "the flooded widget did not end closed for the rate limit"
+  [ "$(widget_control_lines | grep -c '"subtype":"mcp_call"' || true)" = 0 ] || fail "the CLI heard an mcp_call during the flood"
+  echo "OK: the CLI heard no mcp_call"
   echo "artifact: $OUT_DIR/mcp-widget-flood.json"
-  echo "OK: mcp_widget_flood: the UI answered throughout the flood and the widget got only some answers"
+  echo "OK: mcp_widget_flood: the UI answered throughout the flood and Sirio closed the widget"
   stop_widget_logger
   stop_app
 }

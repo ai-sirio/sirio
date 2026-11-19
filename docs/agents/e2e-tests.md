@@ -542,9 +542,12 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     and back, a folded turn, the effort list, a file tab over the chat, a terminal beside it,
 #                     and a dead CLI. It also checks the CLI heard two mcp_read_resource and only
 #                     gated mcp_calls for `act`, and writes mcp-widget.json to the out dir.
-#   mcp_widget_flood  a widget posting pings for 3 s: surface.chat.read answers within 1000 ms
-#                     throughout, and the widget gets some but not all of its answers; writes
-#                     mcp-widget-flood.json with the latencies.
+#   mcp_widget_flood  a widget posting pings at about 125k a second for 3 s: surface.chat.read answers
+#                     within 1000 ms throughout; within 30 s the widget's row is closed with "over the
+#                     rate limit for 5 s" (the host's IPC backlog keeps it over 50 a second for 5 s of host
+#                     time), no card ever appeared, the CLI heard no mcp_call, and its window is not viewable;
+#                     mcp-widget-flood.json has the latencies and the final row. The per-second cut is
+#                     covered by the bridge test a_flood_is_cut_at_fifty_a_second.
 #   mcp_widget_gate   the CLI lists `_meta.ui` and serves the resource but reports no capability:
 #                     the rows are plain, no widget exists, and the CLI hears no read or call.
 # Scripts/Tests/widget-isolation.sh --display :97 --out-dir DIR is the webview's own isolation

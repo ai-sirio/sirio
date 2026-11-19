@@ -153,10 +153,10 @@
       pending[id] = function () { answered++; };
       send({ id: id, method: "ping" });
       posted++;
-      // Yielding every 500 posts (about 125k a second) leaves the host a backlog that keeps it over the
-      // rate limit for 5 s after the loop ends, so Sirio closes the widget; every 20 stays near 5k a
-      // second, which the host drains inside the 3 s.
-      if (posted % 20 === 0) { await sleep(0); }
+      // Yielding every 500 posts (about 125k a second) is deliberately hostile: the host's IPC
+      // backlog keeps the widget over 50 a second for 5 s of host time, after the loop has ended,
+      // so Sirio closes it before the report below is ever sent.
+      if (posted % 500 === 0) { await sleep(0); }
     }
     await sleep(2000);
     await call("tools/call", { name: "report", arguments: { answered: answered } });
