@@ -916,13 +916,16 @@ answered `Denied` at the close, and the call's late result is dropped. After a d
 calls are refused with no card for 10 s, and after three in a row the widget is closed; an Allow
 resets the count. Asks are never persisted.
 
-**What the webview does and does not do.** A widget takes no keyboard input in this version. A
-click inside it gives its native window GTK focus, and under X11 a key typed with the pointer over
-that window goes to it, so handing focus back (wry's `focus_parent()` focuses the widget's own X
-child, not Sirio's top-level) cannot keep keys from the page. Instead `build_widget_child`
-connects `key-press-event` and `key-release-event` handlers that stop the event on the webview's
-top-level GtkWindow, which GTK runs before the WebView sees a key: keys typed with the pointer
-over a widget are dropped. (`browser.rs` still uses `focus_parent()` for its own child.) The webview cancels every
+**What the webview does and does not do.** A widget takes no keyboard input in this version.
+Measured on a bare X server and under a window manager, a key typed while the pointer rests over a
+widget, even after a click in it, goes to Sirio's own window and reaches the composer, never the
+page. `build_widget_child` also connects `key-press-event` and `key-release-event` handlers that
+stop the event on the webview's top-level GtkWindow, which GTK runs before the WebView sees a key:
+a guard for any path that would hand GTK a key; no test shows it stopping one. Nothing calls wry's
+`focus_parent()` for a widget: it focuses the widget's own X child, not Sirio's top-level
+(`browser.rs` still uses it for its own child). A widget is shown before it is sized: on a hidden
+GtkWindow `set_bounds` is ignored and the page would keep its 1x1 build size, so its slot would
+stay blank and take no click. The webview cancels every
 file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and the
 hyperlink auditing and DNS prefetching settings are off (documented no-ops on 2.54.1, kept for older
 engines: an `<a ping>` is stopped by the CSP, and DNS prefetching has no working switch there, a

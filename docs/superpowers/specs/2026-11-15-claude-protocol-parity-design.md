@@ -872,10 +872,11 @@ Each item is laid out the same way:
       WebKitGTK 2.54 (the setting is a no-op), so a `<link rel=dns-prefetch>` may still resolve
       a name outside the declared domains; this is a disclosed gap with a follow-up for a
       DNS-level probe. A widget receives no keyboard input in this version: its webview's
-      top-level window swallows every key event before the page sees it. Under X11 a key typed
-      while the pointer rests over a widget goes to the widget's window, so handing focus back
-      to Sirio cannot keep keys from the view; such keys are dropped instead (deviation,
-      2026-11-19, security re-review).
+      top-level window stops every key event that reaches it before the page sees it. Measured
+      on a bare X server and under a window manager, a key typed while the pointer rests over a
+      widget, even after a click in it, goes to Sirio's own window, so it reaches the composer
+      like any other key and never the page; the stop is a guard for any path that would hand
+      GTK a key (deviation, 2026-11-19, security re-review).
   - **The CSP, and the rest of "no network".** Sirio's protocol handler sends the CSP as a
     response header, never a meta tag, built from the spec's restrictive default (S275-S284) plus
     the declared domains, where `R` is `resourceDomains` and `C` is `connectDomains`:
