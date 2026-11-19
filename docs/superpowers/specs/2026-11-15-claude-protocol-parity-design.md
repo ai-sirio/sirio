@@ -885,9 +885,12 @@ Each item is laid out the same way:
     arguments, with Allow and Reject and no "Always allow". It does so in every permission mode,
     bypass included. A widget has at most one open card; a further call meanwhile is refused at
     once. Arguments whose JSON exceeds 4,000 characters are refused with no card, so the card
-    always shows the whole call. On this card Reject is preselected and only a click answers it:
-    Enter and the digit keys do nothing, so a keystroke meant for the composer cannot approve a
-    call.
+    always shows the whole call. On this card Reject is preselected and only a click approves it:
+    Enter, the arrows and the digit keys do nothing, so a keystroke meant for the composer cannot
+    approve a call. Escape rejects it. The control verb `surface.chat.permission` may reject it
+    and is refused any other option, since a denial grants nothing (deviation, 2026-11-19: the
+    E2E closes cards through that verb). A second Allow while the call runs does nothing; a
+    Reject or any close in that time denies it, and the call's late answer is dropped.
 
     On Allow, Sirio sends `mcp_call {tool, arguments, result_not_for_model: true}`. Where
     `mcp_call_check_permissions_v1` is advertised (2.1.319 and later), it adds
