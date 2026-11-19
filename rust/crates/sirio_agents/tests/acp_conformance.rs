@@ -3586,7 +3586,7 @@ fn claude_serves_mcp_apps_to_sirio() {
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
-    assert!(permission_cards == 0, "no permission card reached the chat");
+    assert!(permission_cards == 0, "no permission card reached the chat for the widget's call");
 
     // The wire, as the relay in front of the CLI saw it.
     let relay = jsonl_of(&rig.relay_log);
@@ -3630,6 +3630,97 @@ fn claude_serves_mcp_apps_to_sirio() {
         }),
         "the server ran act with the widget's input"
     );
+
+    // A second prompt: the model calls `note` (allowed, text only), then `ask_me` (not allowed:
+    // the CLI asks and the test rejects), then answers. A call ran when its result is not an
+    // error, whatever shape its `tool_use_result` has.
+    if client.prompt("run notes").is_err() {
+        panic!("the second prompt was not sent");
+    }
+    let mut second_updates = Vec::new();
+    let mut second_asks = 0;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut ended = false;
+    while Instant::now() < deadline && !ended {
+        match events.try_recv() {
+            Ok(ChatEvent::TurnEnded { .. }) => ended = true,
+            Ok(ChatEvent::PermissionRequest { request_id, options, .. }) => {
+                second_asks += 1;
+                let reject = options.iter().find(|option| option.id == "reject_once");
+                let Some(reject) = reject else {
+                    panic!("the ask offered no reject option");
+                };
+                if client.respond_permission(request_id, reject.id.clone()).is_err() {
+                    panic!("the rejection was not sent");
+                }
+            }
+            Ok(ChatEvent::OtherSessionUpdate { .. }) => {
+                for notice in client.take_notices() {
+                    if let SessionNotice::McpTool(update) = notice {
+                        second_updates.push(update);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    assert!(ended, "the second turn ended within 60 s");
+    for notice in client.take_notices() {
+        if let SessionNotice::McpTool(update) = notice {
+            second_updates.push(update);
+        }
+    }
+    assert!(second_asks == 1, "exactly one ask reached the chat in the second prompt");
+    let outcome_of = |tool: &str| {
+        let id = second_updates.iter().find_map(|update| match &update.item {
+            McpToolItem::Called { name, .. } if name == tool => Some(update.id.clone()),
+            _ => None,
+        })?;
+        second_updates
+            .iter()
+            .find(|update| update.id == id && !matches!(update.item, McpToolItem::Called { .. }))
+            .map(|update| update.item.clone())
+    };
+    match outcome_of("mcp__apps__note") {
+        Some(McpToolItem::Returned { result }) => assert!(
+            result["content"][0]["text"] == "noted",
+            "the text-only call returned its text"
+        ),
+        _ => panic!("the text-only call did not produce a Returned notice"),
+    }
+    assert!(
+        matches!(outcome_of("mcp__apps__ask_me"), Some(McpToolItem::NotRun)),
+        "the rejected call produced a NotRun notice"
+    );
+
+    // The wire, for the record: the structure of each result and the one ask that is not a
+    // widget's.
+    let relay = jsonl_of(&rig.relay_log);
+    let result_of = |id: &str| {
+        relay
+            .iter()
+            .filter_map(|entry| entry.get("result"))
+            .find(|result| result["tool_use_id"] == id)
+            .cloned()
+    };
+    let note = result_of("toolu_n1").expect("the relay saw the text-only result");
+    // A success carries no `is_error` field at all (null here), so "not true" is the test.
+    assert!(note["is_error"] != true, "the text-only result is not an error");
+    let denied = result_of("toolu_n2").expect("the relay saw the rejected call's result");
+    assert!(denied["is_error"] == true, "the rejected call's result is an error");
+    eprintln!(
+        "wire: note result {{is_error: {}, tool_use_result: {}}}; ask_me result {{is_error: {}, \
+         tool_use_result: {}}}",
+        note["is_error"], note["tool_use_result_type"], denied["is_error"],
+        denied["tool_use_result_type"]
+    );
+    let other_asks = relay
+        .iter()
+        .filter_map(|entry| entry.get("ask"))
+        .filter(|ask| ask["id_prefix"] == "other")
+        .count();
+    assert!(other_asks == 1, "the CLI sent exactly one ask that is not a widget's");
 
     if client.shutdown().is_err() {
         panic!("the client did not shut down");

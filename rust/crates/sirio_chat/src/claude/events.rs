@@ -385,13 +385,25 @@ impl Fold {
                         .position(|id| *id == result.tool_use_id)
                     {
                         self.mcp_announced.remove(at);
-                        // Only a structured, non-string `tool_use_result` shows the call ran:
-                        // an error or a denial arrives as a string.
-                        let item = match structured.filter(|value| !value.is_string()) {
-                            Some(value) => McpToolItem::Returned {
-                                result: sirio_claude::call_tool_result(value, result.is_error),
-                            },
-                            None => McpToolItem::NotRun,
+                        // A call ran when its result block is not an error, whatever shape
+                        // its `tool_use_result` has: a denial and an error both carry
+                        // `is_error: true`. The result is rebuilt from the structured
+                        // `tool_use_result` when it is not a string, else from the text.
+                        let item = if result.is_error {
+                            McpToolItem::NotRun
+                        } else {
+                            // The CLI (2.1.328) sends a text-only success as the array of its
+                            // content blocks, and a structured one as an object.
+                            let value = match structured.filter(|value| !value.is_string()) {
+                                Some(blocks @ serde_json::Value::Array(_)) => {
+                                    serde_json::json!({ "content": blocks })
+                                }
+                                Some(object) => object.clone(),
+                                None => serde_json::Value::String(result.text.clone()),
+                            };
+                            McpToolItem::Returned {
+                                result: sirio_claude::call_tool_result(&value, false),
+                            }
                         };
                         self.notices.push(SessionNotice::McpTool(McpToolUpdate {
                             id: result.tool_use_id.clone(),
@@ -2043,49 +2055,59 @@ mod tests {
         assert!(mcp_updates(&mut shut).is_empty(), "the gate is shut by default");
     }
 
-    // How it can fail, written first: a call whose answer is a string (an error or a denial)
-    // is reported as having run, so the widget gets the call's input; a call with no
-    // `tool_use_result` is reported as having run; a structured result is reported as not run.
+    // How it can fail, written first: a text-only success (its `tool_use_result` is a string)
+    // is reported as not run, so its widget closes; a denial (a string, `is_error` true) is
+    // reported as having run, so the widget gets the call's input; a structured result with
+    // `is_error` true is reported as having run; a success reported as an error.
     #[test]
-    fn an_mcp_result_is_run_only_when_its_tool_use_result_is_not_a_string() {
-        use sirio_chat_vocab::McpToolItem::{NotRun, Returned};
-        let with_result = |id: &str, structured: serde_json::Value| {
+    fn an_mcp_call_ran_when_its_result_is_not_an_error() {
+        use sirio_chat_vocab::McpToolItem::{Called, NotRun, Returned};
+        let with_result = |id: &str, is_error: bool, structured: serde_json::Value| {
             parse(json!({
                 "type": "user",
                 "message": {"content": [{"type": "tool_result", "tool_use_id": id,
-                                         "is_error": false, "content": "x"}]},
+                                         "is_error": is_error, "content": "text"}]},
                 "tool_use_result": structured,
             }))
         };
         let mut fold = Fold::new();
         fold.set_mcp_apps(true);
-        for id in ["toolu_a", "toolu_b", "toolu_c", "toolu_d"] {
+        for id in ["toolu_a", "toolu_b", "toolu_c", "toolu_d", "toolu_e", "toolu_f"] {
             fold.apply(mcp_call_line(id, "mcp__apps__show"));
         }
-        // An error and a denial arrive as a string, or as no structured result at all.
-        fold.apply(mcp_result_line("toolu_a", true, "the server said no"));
-        fold.apply(with_result("toolu_b", json!("denied")));
-        fold.apply(with_result("toolu_c", json!({"structuredContent": {"n": 1}})));
-        fold.apply(mcp_result_line("toolu_d", false, "plain"));
+        // A text-only success: the string is the text, and the call ran.
+        fold.apply(with_result("toolu_a", false, json!("plain text")));
+        // A denial: a string, `is_error` true.
+        fold.apply(with_result("toolu_b", true, json!("denied")));
+        // A structured result that is an error.
+        fold.apply(with_result("toolu_c", true, json!({"structuredContent": {"n": 1}})));
+        // A structured success.
+        fold.apply(with_result("toolu_d", false, json!({"structuredContent": {"n": 1}})));
+        // The real CLI's text-only success: the array of its content blocks.
+        fold.apply(with_result("toolu_f", false, json!([{"type": "text", "text": "noted"}])));
+        // No `tool_use_result` at all, success: ran, from the text.
+        fold.apply(mcp_result_line("toolu_e", false, "from text"));
         // A result nobody announced is not announced.
         fold.apply(mcp_result_line("toolu_unknown", false, "late"));
-        let outcomes: Vec<(String, bool)> = mcp_updates(&mut fold)
-            .into_iter()
-            .filter_map(|update| match update.item {
-                NotRun => Some((update.id, false)),
-                Returned { .. } => Some((update.id, true)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            outcomes,
-            [
-                ("toolu_a".to_string(), false),
-                ("toolu_b".to_string(), false),
-                ("toolu_c".to_string(), true),
-                ("toolu_d".to_string(), false),
-            ]
-        );
+        let updates = mcp_updates(&mut fold);
+        let of = |id: &str| {
+            updates
+                .iter()
+                .find(|update| update.id == id && !matches!(update.item, Called { .. }))
+                .map(|update| update.item.clone())
+        };
+        let Some(Returned { result }) = of("toolu_a") else { panic!("a text-only success ran") };
+        // Rebuilt from the result block's text, not from the string.
+        assert_eq!(result["content"][0]["text"], "text");
+        assert!(result.get("isError").is_none());
+        assert_eq!(of("toolu_b"), Some(NotRun));
+        assert_eq!(of("toolu_c"), Some(NotRun));
+        let Some(Returned { result }) = of("toolu_d") else { panic!("a structured success ran") };
+        assert_eq!(result["structuredContent"], json!({"n": 1}));
+        let Some(Returned { result }) = of("toolu_f") else { panic!("an array success ran") };
+        assert_eq!(result["content"][0]["text"], "noted");
+        let Some(Returned { result }) = of("toolu_e") else { panic!("a bare success ran") };
+        assert_eq!(result["content"][0]["text"], "from text");
     }
 
     #[test]

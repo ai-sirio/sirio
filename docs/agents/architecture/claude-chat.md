@@ -850,11 +850,14 @@ own call is `mcp_call {tool, arguments, result_not_for_model: true}`.
 **What the widget receives.** The webview is built and the page read when the call is announced,
 but neither carries the call's arguments, and `ui/initialize`'s `hostContext` carries none. The
 view gets `tool-input` only once the call is known to have run: the slot keeps the input, and the
-input and the result go to the view together when a non-string `tool_use_result` arrives (the
-fold reports it as `McpToolItem::Returned`). A string `tool_use_result`, or none, is an error or a
-denial and cannot be told apart without reading CLI text: the fold reports `McpToolItem::NotRun`,
-the widget is closed with "the call did not run", and the view never gets the input. An
-interrupted call sends `tool-cancelled` with no input and closes the widget. This keeps the
+input and the result go to the view together when the call's result block arrives with `is_error`
+false, whatever shape the line's `tool_use_result` has (the fold reports `McpToolItem::Returned`).
+The result is rebuilt from the `tool_use_result` when it is an object (a structured result) or an
+array (the CLI 2.1.328 sends a text-only success as its content blocks), and from the block's text
+otherwise. A result block with `is_error` true is an error or a denial (the CLI sends a string
+`tool_use_result` with it): the fold reports `McpToolItem::NotRun`, the widget is closed with
+"the call did not run", and the view never gets the input. An interrupted call sends
+`tool-cancelled` with no input and closes the widget. This keeps the
 arguments of a call the user denied (or a deny rule blocked) from the widget's declared domains.
 
 **Isolation.** The widget's HTML is never the top page. Each widget has its own webview with two

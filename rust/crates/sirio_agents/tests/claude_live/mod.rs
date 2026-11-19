@@ -834,11 +834,13 @@ impl AppsRig {
         let global = global_claude_json(&key, &work);
         std::fs::write(home.join(".claude.json"), &global).unwrap();
         std::fs::write(config_dir.join(".claude.json"), &global).unwrap();
-        // The model's `show` call is allowed here, so the only ask of the run is the one for
-        // `act`, which the widget's call makes.
+        // The model's `show` and `note` calls are allowed here, so the asks of the run are the
+        // one for `act`, which the widget's call makes, and the one for `ask_me`, which the
+        // test rejects.
         std::fs::write(
             config_dir.join("settings.json"),
-            serde_json::json!({"permissions": {"allow": ["mcp__apps__show"]}}).to_string(),
+            serde_json::json!({"permissions": {"allow": ["mcp__apps__show", "mcp__apps__note"]}})
+                .to_string(),
         )
         .unwrap();
 
