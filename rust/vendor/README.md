@@ -227,9 +227,12 @@ The fourth is the link click. Upstream 0.1.4's `InteractiveText` click on a link
 calls `cx.open_url(url)` for every URL, so a `file:` link (Sirio draws the file paths a reply names
 as `file://` links) went to the system opener, which hands the file to whatever owns its type, and
 bezel arms that click on any mouse button. `render.rs`'s `is_file_url` now makes that click do
-nothing for a URL whose scheme is `file` in any letter case; every other URL opens as before.
-What a `file:` link does is the host's to decide: `sirio_ui`'s chat opens it through
-`ChatEvent::OpenFileAt`, and the file view and the change-request tab resolve it themselves before
-any `cx.open_url`. The bookmark chip and card clicks are not touched (they open a web URL).
+nothing for a URL whose scheme is `file` in any letter case, read the way a URL parser reads it
+(ASCII tab, LF and CR dropped, leading controls and spaces trimmed); every other URL opens as
+before. What a `file:` link does is the host's to decide: `sirio_ui`'s chat opens it through
+`ChatEvent::OpenFileAt`. The guard covers bezel's own click handler only; a host that calls
+`cx.open_url` itself is outside it (the known ones are `change_request_tab.rs`'s `open_links` and
+`file_view.rs`, which falls back to it for a link it did not resolve). The bookmark chip and card
+clicks are not touched (they open a web URL).
 The check is the unit test `only_a_file_link_never_reaches_the_system_opener` in `sirio_ui`'s
 `selectable_markdown.rs`. Bumping bezel past 0.1.4 means re-applying this change by hand.

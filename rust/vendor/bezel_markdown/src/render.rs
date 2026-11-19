@@ -852,16 +852,20 @@ fn text_element(
     painted_text(flat, text.text.len(), size, line_height, overlay, theme)
 }
 
+/// Whether `url` has the `file` scheme, in any letter case. It reads the URL the way
+/// a URL parser does: ASCII tab, LF and CR anywhere are dropped, then leading C0
+/// controls and spaces are trimmed, so `<` + space + `file:` is still a file URL.
+fn is_file_url(url: &str) -> bool {
+    let url: String = url.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let url = url.trim_start_matches(|c: char| c <= ' ');
+    url.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+}
+
 /// Shaped inline content with the editing overlay under it: the selection, the
 /// caret, the inline-code wash, and the layout a click resolves against.
 ///
 /// Takes a [`Flat`] rather than a [`Text`] because a table has to shape every
 /// cell to measure the columns before it can paint one.
-/// Whether `url` has the `file` scheme, in any letter case.
-fn is_file_url(url: &str) -> bool {
-    url.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
-}
-
 fn painted_text(
     flat: Flat,
     len: usize,
