@@ -690,8 +690,8 @@ pub(crate) mod testing {
                 .size(px(10.0))
                 .key_context(context)
                 .track_focus(&probe.focus)
-                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, _| {
-                    keys.borrow_mut().push(event.keystroke.unparse());
+                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
+                    keys.borrow_mut().push(event.keystroke.unparse(cx.platform_info().os));
                 }))
         }
     }

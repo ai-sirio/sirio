@@ -48,10 +48,11 @@ set -euo pipefail
 # with the two accessibility flags turned on there (under env -i they are off: no
 # desktop setting reaches the run), and stage ui notes whether this app holds a
 # connection on it (a note, not a check). The duplicate-id guard (the ping after
-# each error capture) means something only while bezel's accessibility adapter is
-# active: stage ui asserts the read's a11yActive (bezel's Window::is_a11y_active)
-# before the error captures. Whether the adapter opened its own connection on the
-# private AT-SPI bus is a note, not a check; docs/testing/update-card.md records
+# each error capture) means something only while the engine's (gpui-pre)
+# accessibility adapter is active: stage ui asserts the read's a11yActive
+# (gpui-pre's Window::is_a11y_active) before the error captures. Whether the
+# adapter opened its own connection on the private AT-SPI bus is a note, not a
+# check; docs/testing/update-card.md records
 # the runs. Chain and ui note whether a started sirio-host detached (a session
 # leader); the note is not asserted.
 #
@@ -575,7 +576,7 @@ for _ in $(seq 1 50); do curl -fsS -o /dev/null --max-time 1 "$MANIFEST_URL" 2>/
 curl -fsS -o /dev/null --max-time 1 "$MANIFEST_URL" || fail "the manifest server never came up"
 
 # ---- the session bus and the AT-SPI bus ----------------------------------
-# bezel's accessibility tree (through accesskit_unix) reaches AT-SPI over the
+# gpui-pre's accessibility tree (through accesskit_unix) reaches AT-SPI over the
 # session bus, and its duplicate-node panic only exists where that adapter is
 # active. A display-backed run therefore gets a private session bus and a private
 # AT-SPI bus (at-spi-bus-launcher), and never the user's: a run has no path to
@@ -1021,14 +1022,15 @@ sys.exit(0 if 0 <= one < two else 1)
   expect visible false
   ctl surface update act --action open
 
-  # The duplicate-id guard below means something only while bezel's accessibility
-  # adapter is active, so that is asserted before the error captures, not noted.
+  # The duplicate-id guard below means something only while the engine's
+  # (gpui-pre) accessibility adapter is active, so that is asserted before the
+  # error captures, not noted.
   wait_for a11yActive true surface update read
 
   # A failed apply and a refusal, drawn with the agent still at work: the card
   # carries the agent warning and the error together (spec 2.2). Both were once
   # one a11y node id in a debug build, which panicked ("Duplicate a11y node id",
-  # bezel-gpui window/a11y.rs); after each capture Sirio must answer.
+  # gpui window/a11y.rs); after each capture Sirio must answer.
   ctl surface update inject --status failed --version 99.1.0 --message "network unreachable"
   expect status apply-failed
   expect error "network unreachable"

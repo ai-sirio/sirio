@@ -7,7 +7,7 @@ use sirio_theme::Theme;
 use sirio_ui::changes::ChangesTab;
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
+    sirio_ui::app_platform::application().run(|cx: &mut App| {
         Theme::init(cx);
         // Evidence for the fonts pass: the families are resolved once at
         // runtime from what is installed, never hard-coded (P16).
@@ -25,6 +25,10 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // The focused window keeps its full frame rate under power-saving profiles, as on
+                // bezel 0.3.8; gpui-pre's inactive (30 fps) and thermal (60 fps)
+                // limits are accepted (engine swap design §5.6).
+                low_power_frame_interval: None,
                 ..Default::default()
             },
             |_, cx| cx.new(|cx| ChangesTab::new(cwd, cx)),

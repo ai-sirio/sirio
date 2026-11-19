@@ -1,7 +1,7 @@
 //! Opt-in export of GPUI's bounded foreground journal. Never records input text.
 
 use gpui::profiler::journal::{
-    ForegroundEvent, ForegroundJournalEntry, FrameStateChange, IntervalBoundary,
+    ForegroundEvent, ForegroundJournalEntry, FrameSkipReason, FrameStateChange, IntervalBoundary,
 };
 use perf_scheduler::Instant;
 use serde_json::{Value, json};
@@ -38,6 +38,12 @@ fn encode_entries(entries: &[ForegroundJournalEntry], origin: Instant) -> Vec<Va
                     row["dirty_ns"] = json!(frame.dirty_at.map(ns));
                     row["invalidations"] = json!(frame.invalidations);
                 }
+                ForegroundEvent::View(view) => {
+                    row["kind"] = json!("view");
+                    row["view"] = json!(view.name);
+                    row["phase"] = json!(view.phase.as_str());
+                    row["self_ns"] = json!(view.self_duration.as_nanos());
+                }
                 ForegroundEvent::Present(present) => {
                     row["kind"] = json!("present");
                     row["window"] = json!(present.window_id.as_u64());
@@ -50,8 +56,24 @@ fn encode_entries(entries: &[ForegroundJournalEntry], origin: Instant) -> Vec<Va
             }
             row
         }
+        ForegroundJournalEntry::PlatformSignal(signal) => json!({
+            "kind": "platform_signal", "window": signal.window_id.as_u64(),
+            "signal_ns": signal.signal_at.map(ns), "handled_ns": ns(signal.handled_at),
+            "source": match signal.source {
+                gpui::FrameRequestSource::NativeCallback => "native_callback",
+                gpui::FrameRequestSource::LocalSchedule => "local_schedule",
+            },
+        }),
+        ForegroundJournalEntry::ReentrantFrameSkipped { window_id, at } => json!({"kind": "reentrant_skip", "window": window_id.as_u64(), "at_ns": ns(*at)}),
         ForegroundJournalEntry::Discontinuity { lost } => json!({"kind": "lost", "count": lost}),
         ForegroundJournalEntry::Boundary(IntervalBoundary::Idle { ended_at }) => json!({"kind": "idle", "at_ns": ns(*ended_at)}),
+        ForegroundJournalEntry::Boundary(IntervalBoundary::FrameSkipped(skipped)) => json!({"kind": "frame_skipped", "window": skipped.window_id.as_u64(), "at_ns": ns(skipped.at), "reason": match skipped.reason {
+                FrameSkipReason::NoRenderNeeded => "no_render_needed",
+                FrameSkipReason::InactiveFrameRateLimit => "inactive_frame_rate_limit",
+                FrameSkipReason::ThermalFrameRateLimit => "thermal_frame_rate_limit",
+                FrameSkipReason::LowPowerFrameRateLimit => "low_power_frame_rate_limit",
+            }}),
+        ForegroundJournalEntry::Boundary(IntervalBoundary::PowerTransition { ended_at }) => json!({"kind": "power_transition", "at_ns": ns(*ended_at)}),
         ForegroundJournalEntry::Boundary(IntervalBoundary::Presented(presented)) => json!({
             "kind": "presented", "window": presented.frame.window_id.as_u64(),
             "dirty_ns": presented.frame.dirty_at.map(ns), "invalidations": presented.frame.invalidations,

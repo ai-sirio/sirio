@@ -10,7 +10,7 @@ publish = false
 # system, and only on macOS — everywhere else it answers "check manually".
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# The objc2 0.6 family gpui's own macOS backend (bezel-gpui-macos) links, so
+# The objc2 0.6 family gpui's own macOS backend (gpui-pre-macos) links, so
 # every one of these resolves to a copy already in the lockfile. `sirio`
 # stays on 0.5 for its tray; the two never exchange an Objective-C object.
 block2 = "0.6"

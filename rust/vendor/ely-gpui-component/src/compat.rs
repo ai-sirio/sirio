@@ -1,5 +1,23 @@
-use gpui::{App, HighlightStyle, ImageSource, SharedUri};
-use std::{ops::Range, path::Path};
+use gpui::{
+    Action, App, HighlightStyle, ImageSource, KeyBinding, KeyBindingContextPredicate, SharedUri,
+};
+use std::{ops::Range, path::Path, rc::Rc};
+
+/// A key binding whose keystrokes are read for the host's system: `secondary` is Command on the Mac
+/// and Control elsewhere. `KeyBinding::new` reads keystrokes with no system and panics on
+/// `secondary`, so bindings that name it, or that are built at run time, go through here.
+pub(crate) fn load_key(
+    cx: &App,
+    keystrokes: &str,
+    action: impl Action,
+    context: Option<&str>,
+) -> KeyBinding {
+    let context = context.map(|context| {
+        Rc::new(KeyBindingContextPredicate::parse(context).expect("a valid key context"))
+    });
+    KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx)
+        .unwrap_or_else(|error| panic!("bad key binding {keystrokes:?}: {error}"))
+}
 
 /// From upstream documents/blocks/media.rs.
 pub(crate) fn source(text: &str) -> ImageSource {

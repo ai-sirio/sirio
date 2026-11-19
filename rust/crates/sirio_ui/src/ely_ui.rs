@@ -203,7 +203,7 @@ mod tests {
     };
     use gpui::{
         Context, Entity, Focusable, KeyBinding, Modifiers, Pixels, Point, Render, ScrollDelta,
-        ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, actions, div, point,
+        ScrollEvent, TestAppContext, TouchPhase, VisualTestContext, actions, div, point,
         prelude::*, px,
     };
     use sirio_theme::Theme;
@@ -266,7 +266,7 @@ mod tests {
                     host.upped += 1;
                     cx.propagate();
                 }))
-                .on_scroll_wheel(cx.listener(|host, _, _, _| host.page_wheels += 1))
+                .on_scroll(cx.listener(|host, _, _, _| host.page_wheels += 1))
                 .when(self.shown, |page| {
                     page.child(div().w(px(300.0)).child(self.input.clone()))
                 })
@@ -637,11 +637,12 @@ mod tests {
     /// One wheel event of `by` pixels downward, with the pointer at `over`.
     fn wheel_down(cx: &mut VisualTestContext, over: Point<Pixels>, by: f32) {
         cx.simulate_mouse_move(over, None, Modifiers::none());
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: over,
             delta: ScrollDelta::Pixels(point(px(0.0), px(-by))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
     }

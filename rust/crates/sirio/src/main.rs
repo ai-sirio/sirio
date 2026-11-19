@@ -7,7 +7,7 @@ use gpui::{
     StatefulInteractiveElement, StyleRefinement, Task, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -740,6 +740,13 @@ fn clamp_first_visible(
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Whether `id` names one of the app's tabs (`pane-<n>`); a control session's is
+/// `pane-c<hex>`.
+fn is_tab_pane_id(id: &str) -> bool {
+    id.strip_prefix("pane-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// How long typing must pause before the breadcrumb's symbols are asked for again.
 const SYMBOLS_DEBOUNCE: Duration = Duration::from_secs(1);
 /// How long a server that said it is still indexing is given before the one
@@ -1406,6 +1413,11 @@ enum ControlAction {
     ReadPane {
         id: String,
         query: PaneQuery,
+        reply: ControlReply,
+    },
+    /// Publishes the app's own panes to the control registry now, rather than
+    /// at the workspace's next draw.
+    SyncPanes {
         reply: ControlReply,
     },
     PerfTerminalWrite {
@@ -2491,16 +2503,50 @@ impl AppControlHandler {
                 if self.panes.is_app_pane(&id) {
                     return self.app_pane(request, &id);
                 }
+                // The registry is published when the workspace draws, so a tab
+                // opened since a late frame (hidden, occluded, headless window)
+                // is not in it yet. When neither the registry nor the host
+                // answers ok for such an id, the registry is published now and
+                // the id answered from it, as it would be after the next frame.
+                let unpublished_tab =
+                    matches!(method, "panel.read" | "panel.state" | "panel.scrollback")
+                        && is_tab_pane_id(&id);
                 if self.host_terminal.client().is_none() {
+                    if unpublished_tab {
+                        match self.answer_after_sync(request, &id) {
+                            Ok(Some(response)) | Err(response) => return response,
+                            Ok(None) => {}
+                        }
+                    }
                     return Self::pane_error(request, self.panes.missing_pane_error(&id));
                 }
                 let response = self.host_request(request);
+                if !response.ok
+                    && unpublished_tab
+                    && let Ok(Some(published)) = self.answer_after_sync(request, &id)
+                {
+                    return published;
+                }
                 if method == "panel.close" {
                     self.refresh_control();
                 }
                 response
             }
         }
+    }
+
+    /// Publishes the app's panes from the GPUI thread, then answers `id` as an
+    /// app pane if it is one now. `Err` is the dispatch that failed.
+    fn answer_after_sync(
+        &self,
+        request: &ControlRequest,
+        id: &str,
+    ) -> Result<Option<ControlResponse>, ControlResponse> {
+        let synced = self.queue_action(request, |reply| ControlAction::SyncPanes { reply });
+        if !synced.ok {
+            return Err(synced);
+        }
+        Ok(self.panes.is_app_pane(id).then(|| self.app_pane(request, id)))
     }
 
     /// A `panel.*` call on one of the app's own panes: read and state come
@@ -7280,6 +7326,10 @@ impl SirioWorkspace {
                                             .map_err(|error| error.to_string()),
                                     };
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::SyncPanes { reply } => {
+                                    workspace.sync_control_panes(cx);
+                                    let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::PerfTerminalWrite { id, input, reply } => {
                                     let result = workspace.perf_terminal_write(&id, input, cx);
@@ -24860,10 +24910,11 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let os = cx.platform_info().os;
         let parsed = keys
             .split_whitespace()
             .map(|key| {
-                Keystroke::parse(key)
+                Keystroke::parse_with_os(key, os)
                     .map_err(|error| format!("'{key}' is not a keystroke: {error}"))
             })
             .collect::<Result<Vec<_>, _>>();
@@ -34334,6 +34385,10 @@ fn main() {
                     traffic_light_position: Some(point(px(12.), px(10.))),
                     ..Default::default()
                 }),
+                // The focused window keeps its full frame rate under power-saving profiles, as on
+                // bezel 0.3.8; gpui-pre's inactive (30 fps) and thermal (60 fps)
+                // limits are accepted (engine swap design §5.6).
+                low_power_frame_interval: None,
                 ..Default::default()
             },
             move |window, cx| {
@@ -36180,7 +36235,7 @@ done
 
     use gpui::{
         FocusHandle, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
-        ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+        ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, VisualTestContext,
     };
     use sirio_persistence::{AppSettings, AppearanceMode};
     use std::cell::{Cell, RefCell};
@@ -41978,11 +42033,12 @@ done
 
         let over = viewport.center();
         cx.simulate_mouse_move(over, None, Modifiers::none());
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: over,
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 
@@ -49619,11 +49675,12 @@ done
 
         let over = point(px(200.0), px(600.0));
         cx.simulate_mouse_move(over, None, Modifiers::none());
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: over,
             delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 
@@ -50295,6 +50352,7 @@ done
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
+            | ControlAction::SyncPanes { reply }
             | ControlAction::ShowSession { reply, .. }
             | ControlAction::PerfTerminalWrite { reply, .. }
             | ControlAction::FocusPane { reply, .. }

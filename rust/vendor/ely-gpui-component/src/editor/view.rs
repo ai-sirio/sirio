@@ -3,7 +3,7 @@ use std::{ops::Range, rc::Rc};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, DragMoveEvent, ElementInputHandler,
     EmptyView, EntityId, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent,
     StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, fill, font, point, px,
     size, uniform_list,
 };
@@ -517,8 +517,8 @@ impl Render for CodeEditor {
                 .size_full(),
             )
             // The list keeps to the vertical axis, so the sideways scroll is taken here.
-            .on_scroll_wheel(cx.listener(
-                |editor, event: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(
+                |editor, event: &ScrollEvent, window, cx| {
                     let delta = event.delta.pixel_delta(window.line_height());
                     if delta.x == Pixels::ZERO {
                         return;

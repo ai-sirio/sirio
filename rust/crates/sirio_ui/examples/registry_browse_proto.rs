@@ -10,7 +10,7 @@ use gpui::{
     Hsla, KeyDownEvent, MouseButton, Render, TitlebarOptions, Window, WindowBounds, WindowOptions,
     div, point, prelude::*, px, size,
 };
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use serde_json::Value;
 use sirio_agents::AgentAvailability;
 use sirio_theme::{Theme, ThemeMode};

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use sirio_theme::Theme;
 use sirio_ui::right_panel::RightPanel;
 

@@ -544,12 +544,23 @@ pub fn init(cx: &mut App) {
     } else {
         "ctrl-h"
     };
-    cx.bind_keys([
-        KeyBinding::new("secondary-f", Find, Some("FileEditor")),
+    let bindings = [
+        secondary_binding(cx, "secondary-f", Box::new(Find)),
         KeyBinding::new(replace, Replace, Some("FileEditor")),
-        KeyBinding::new("secondary-j", ToggleDrawer, Some("FileEditor")),
-        KeyBinding::new("secondary-shift-f", SearchInWorktree, Some("FileEditor")),
-    ]);
+        secondary_binding(cx, "secondary-j", Box::new(ToggleDrawer)),
+        secondary_binding(cx, "secondary-shift-f", Box::new(SearchInWorktree)),
+    ];
+    cx.bind_keys(bindings);
+}
+
+/// A `FileEditor` binding whose keystrokes name `secondary`, which is Command on the Mac and
+/// Control elsewhere. `KeyBinding::new` reads keystrokes with no system and panics on it.
+fn secondary_binding(cx: &App, keystrokes: &str, action: Box<dyn gpui::Action>) -> KeyBinding {
+    let context = std::rc::Rc::new(
+        gpui::KeyBindingContextPredicate::parse("FileEditor").expect("a valid key context"),
+    );
+    KeyBinding::load(keystrokes, action, Some(context), false, None, cx)
+        .unwrap_or_else(|error| panic!("bad key binding {keystrokes:?}: {error}"))
 }
 
 /// How many notification rows a tab keeps; the oldest are dropped past it.

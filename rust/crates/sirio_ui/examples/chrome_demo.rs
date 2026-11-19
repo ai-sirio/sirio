@@ -2,7 +2,7 @@ use gpui::{
     App, AppContext, Bounds, Context, Entity, Render, Window, WindowBounds, WindowDecorations,
     WindowOptions, div, prelude::*, px, size,
 };
-use gpui_platform::application;
+use sirio_ui::app_platform::application;
 use sirio_theme::{Theme, ThemeMode};
 use sirio_ui::sidebar::icons::SirioAssets;
 use sirio_ui::{status_bar::StatusBar, tab_bar::TabBar, titlebar::Titlebar};

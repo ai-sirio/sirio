@@ -4,6 +4,7 @@
 //! and do not edit it from a piece worktree — the integrator owns it.
 
 pub mod ansi_log;
+pub mod app_platform;
 pub mod browser;
 // `src/browser.rs` is compiled twice: once as this crate's `browser` module,
 // and once as a bare `mod browser;` inside the `browser_*` examples, whose

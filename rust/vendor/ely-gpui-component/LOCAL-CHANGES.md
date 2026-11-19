@@ -1183,3 +1183,25 @@ brought in.
   strip that would change the chat's bars. The sidebar keeps Sirio's own fading
   bar (`sirio_ui::scroll::bar_fading`).
 - **Disclosure / Collapsible / DotBadge**: documentation-only differences.
+
+## gpui-pre 0.3.12 compatibility
+
+The engine under Ely moved from bezel-gpui 0.3.8 to gpui-pre 0.3.12. Each source change
+the move forced, one bullet each. A sync with upstream must keep them.
+
+- **`compat::load_key`**: a key binding read for the host's system. gpui-pre's
+  `KeyBinding::new` parses its keystrokes with no operating system and panics on `secondary`,
+  and it takes a `&'static str`, so the bindings that name `secondary` or are built at run time
+  (`{word}-left`, `{word}-backspace`, ...) go through `KeyBinding::load` instead.
+- **`editor/keys.rs`**: 15 bindings (`secondary-*` and the `{word}-*` family) moved to
+  `load_key`; the plain literal ones stay on `KeyBinding::new`.
+- **`forms/text/actions.rs`**: 14 bindings, the same split.
+- **`typography/keys.rs`**: `Keystroke::parse(run-time str)` became `Keystroke::parse_with_os`.
+  `secondary` is already spelled out for the caller's `Platform` before the call, so the
+  operating system passed (`Platform` mapped to `OperatingSystem`) only completes it.
+- **`typography/select.rs`**: `Modifiers::secondary()` became `secondary(cx)`.
+- **`ScrollWheelEvent` is `ScrollEvent`**: the old name is a deprecated alias, so
+  `editor/view.rs`, `forms/text/actions.rs` and `motion/tests.rs` say `ScrollEvent`; the test's
+  literal gained `source: ScrollSource::Pointer`.
+- **`on_scroll_wheel` is `on_scroll`**: the old method is deprecated, so `editor/view.rs` and
+  `forms/text/actions.rs` call `on_scroll`; the handler is the same.

@@ -243,7 +243,8 @@ done
 # rust/vendor/gpui_linux is `exclude`d from the root workspace (see rust/Cargo.toml) because
 # it carries its own `[workspace]` table -- so none of the `cargo test -p <crate>` calls above,
 # nor a hypothetical `cargo test --workspace`, ever reach it. That crate is where the Wayland
-# XDND slow-provider fix lives (F-CORE-FILE-03A, see rust/vendor/README.md), and until now
+# XDND slow-provider fix and the child environment live (gpui-pre-linux 0.3.12 plus Sirio's
+# patches, see rust/vendor/README.md), and until now
 # nothing in either CI gate ran its regression tests. Run the whole crate, not just the
 # `pending_drop` tests the fix itself added, so a future change to anything else vendored in
 # there is covered too.
@@ -254,11 +255,15 @@ done
 # claim coverage this gate never actually exercised. So a genuine zero-tests run is SKIP, not
 # PASS, loud and named the same way the rust-std-not-installed precondition above is: a green
 # gate here only means pending_drop and friends actually ran on a host that is Linux/FreeBSD.
+#
+# The gpui-pre copy only compiles its tests with `--features test-support` (it turns on gpui's own
+# test support), so the stage passes it. Its power.rs tests start a real dbus-daemon
+# (rust/vendor/gpui_linux/src/linux/power.rs, TestBus::start), so the host needs dbus-daemon.
 run_gpui_linux_vendor_test_stage() {
-    local stage="cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked"
+    local stage="cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked --features test-support"
     local log="$LOG_DIR/gpui_linux_vendor_test.log"
-    if ! (cd "$ROOT/rust" && cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked) >"$log" 2>&1; then
-        fail_stage "$stage" "$log" "(cd rust && cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked)"
+    if ! (cd "$ROOT/rust" && cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked --features test-support) >"$log" 2>&1; then
+        fail_stage "$stage" "$log" "(cd rust && cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked --features test-support)"
     fi
     local total_passed
     total_passed=$(grep -oE '[0-9]+ passed' "$log" | awk '{s+=$1} END{print s+0}')

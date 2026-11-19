@@ -1,7 +1,10 @@
 mod dispatcher;
+mod display_connection;
 mod headless;
 mod keyboard;
 mod platform;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod power;
 mod system_notifications;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod text_system;
@@ -14,6 +17,7 @@ mod x11;
 mod xdg_desktop_portal;
 
 pub use dispatcher::*;
+pub(crate) use display_connection::{Backend, DisplayConnection, select_backend};
 pub(crate) use headless::*;
 pub(crate) use keyboard::*;
 pub(crate) use platform::*;
@@ -26,57 +30,59 @@ pub(crate) use x11::*;
 
 use std::rc::Rc;
 
-/// The environment every child process gpui starts (`xdg-open`, the URL
-/// opener) runs with, once the app has set it; unset, they inherit the
-/// process's own, as they always did.
+use gpui::WindowingModes;
+
+/// The environment every opener gpui starts (`xdg-open`, the desktop's file and link
+/// launchers) runs with, once the app has set it. Unset, they run as upstream starts them.
 static CHILD_ENVIRONMENT: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
 
-/// Sets the environment gpui's child processes run with: each is started with
-/// its inherited environment cleared and these pairs given instead. Set once,
-/// before the first link is opened; a later call is ignored.
+/// Sets the environment gpui's openers run with: each is started with its inherited
+/// environment cleared and exactly these pairs given instead (plus `XDG_ACTIVATION_TOKEN`
+/// when gpui has one). Set once, before the first link is opened; a later call is ignored.
 pub fn set_child_environment(env: Vec<(String, String)>) {
     let _ = CHILD_ENVIRONMENT.set(env);
 }
 
-/// Gives `command` the environment `set_child_environment` set, if any.
+/// Whether [`set_child_environment`] has been called.
+pub(crate) fn child_environment_is_set() -> bool {
+    CHILD_ENVIRONMENT.get().is_some()
+}
+
+/// Gives `command` the environment [`set_child_environment`] set, if any: its inherited
+/// environment is replaced by exactly those pairs, plus `XDG_ACTIVATION_TOKEN` if given.
+/// Unset, `command` is returned untouched.
 pub(crate) fn with_child_environment(
     mut command: std::process::Command,
+    activation_token: Option<&str>,
 ) -> std::process::Command {
     if let Some(env) = CHILD_ENVIRONMENT.get() {
-        command.env_clear().envs(env.iter().map(|(key, value)| (key, value)));
+        command
+            .env_clear()
+            .envs(env.iter().map(|(key, value)| (key, value)));
+        if let Some(token) = activation_token {
+            command.env("XDG_ACTIVATION_TOKEN", token);
+        }
     }
     command
 }
 
 /// Returns the default platform implementation for the current OS.
+///
+/// A windowed platform connects to the display server the process environment names, or starts
+/// headless when it names none, and can switch between those modes later. A headless platform
+/// stays headless.
 pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
-    #[cfg(feature = "x11")]
-    use anyhow::Context as _;
-
-    if headless {
-        return Rc::new(LinuxPlatform {
-            inner: HeadlessClient::new(),
-        });
+    if headless || std::env::var_os("ZED_HEADLESS").is_some() {
+        linux_platform(WindowingModes::HEADLESS)
+    } else {
+        linux_platform(WindowingModes::all())
     }
+}
 
-    match gpui::guess_compositor() {
-        #[cfg(feature = "wayland")]
-        "Wayland" => Rc::new(LinuxPlatform {
-            inner: WaylandClient::new(),
-        }),
-
-        #[cfg(feature = "x11")]
-        "X11" => Rc::new(LinuxPlatform {
-            inner: X11Client::new()
-                .context("Failed to initialize X11 client.")
-                .unwrap(),
-        }),
-
-        "Headless" => Rc::new(LinuxPlatform {
-            inner: HeadlessClient::new(),
-        }),
-        _ => unreachable!(
-            r#"At least one of the "wayland" or "x11" features must be enabled on gpui_linux or gpui_platform."#
-        ),
-    }
+/// Returns a platform that may switch among `allowed_modes`.
+///
+/// It starts windowed in the process's own environment, or headless if that names no allowed
+/// display server. Set another initial mode with [`gpui::Application::with_windowing`].
+pub fn linux_platform(allowed_modes: WindowingModes) -> Rc<dyn gpui::Platform> {
+    Rc::new(LinuxPlatform::new(allowed_modes))
 }

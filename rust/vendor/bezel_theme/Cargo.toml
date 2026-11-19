@@ -1,0 +1,68 @@
+# Local copy of the published `bezel-theme` crate (release 0.1.4), substituted in via the
+# `[patch.crates-io]` section of ../../Cargo.toml. See ../README.md for what changed and why.
+# Everything below mirrors the released manifest field-for-field except the `[workspace]` table
+# (so this path resolves as an independent workspace root rather than an implicit member of the
+# enclosing one), `publish = false`, and the `gpui` dependency, which is `gpui-pre =0.3.12`. `[package] name` stays `bezel-theme`; `[lib] name` stays `theme`.
+
+[workspace]
+
+[package]
+edition = "2024"
+publish = false
+rust-version = "1.85"
+name = "bezel-theme"
+version = "0.1.4"
+authors = ["clearloop <tianyi.gc@gmail.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Design tokens for gpui — an environment-driven theme with designed light and dark palettes"
+homepage = "https://github.com/crabtalk/bezel"
+readme = "README.md"
+keywords = [
+    "gpui",
+    "gui",
+    "ui",
+    "components",
+]
+categories = ["gui"]
+license = "MIT"
+repository = "https://github.com/crabtalk/bezel"
+resolver = "2"
+
+[lib]
+name = "theme"
+path = "src/lib.rs"
+
+[[test]]
+name = "appearance"
+path = "tests/appearance.rs"
+
+[[test]]
+name = "theme"
+path = "tests/theme.rs"
+
+[dependencies.gpui]
+version = "=0.3.12"
+package = "gpui-pre"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.tracing]
+version = "0.1"
+
+[dev-dependencies.serde_json]
+version = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies.objc]
+version = "0.2"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ['cfg(feature, values("cargo-clippy"))']

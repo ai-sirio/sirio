@@ -6050,7 +6050,7 @@ mod tests {
 
     use gpui::{
         Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
-        ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, size,
+        ScrollEvent, TestAppContext, TouchPhase, VisualTestContext, point, size,
     };
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -6288,11 +6288,12 @@ mod tests {
             "the sidebar tree viewport must stay inside the short window: tree={tree:?}"
         );
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(160.0), px(180.0)),
             delta: ScrollDelta::Pixels(point(px(0.0), px(-WHEEL_PAST_THE_END))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 

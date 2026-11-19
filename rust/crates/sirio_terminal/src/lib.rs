@@ -20,7 +20,7 @@ use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Corners, Element, ElementId, EventEmitter, Font,
     FontStyle, FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
-    Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine, Size,
+    Pixels, Point, RenderImage, ScrollDelta, ScrollEvent, ShapedLine, Size,
     StatefulInteractiveElement, StrikethroughStyle, Style, Styled, TextRun, UnderlineStyle, Window,
     anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
@@ -4004,7 +4004,7 @@ impl TerminalView {
     /// tracking on; otherwise the wheel moves Sirio's local viewport.
     fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         _: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
@@ -4937,7 +4937,7 @@ impl gpui::Render for TerminalView {
                 .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_mouse_down))
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_left_mouse_up))
                 .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_mouse_up))
-                .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+                .on_scroll(cx.listener(Self::on_scroll_wheel))
                 .on_mouse_move(cx.listener(Self::on_link_hover_move))
                 .on_key_down(cx.listener(Self::on_key_down))
                 .on_drop::<(PathBuf, String)>(move |payload: &(PathBuf, String), _, cx| {
@@ -11068,11 +11068,12 @@ mod view_tests {
         let body = cx
             .debug_bounds("terminal-drop-target")
             .expect("terminal is drawn");
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: body.center(),
             delta: ScrollDelta::Lines(point(0.0, 10.0)),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         assert!(
             pump_until(&terminal, &mut cx, &handle, |handle| {

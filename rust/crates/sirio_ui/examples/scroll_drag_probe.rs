@@ -30,7 +30,7 @@ impl Render for Root {
 }
 
 fn main() {
-    gpui_platform::application()
+    sirio_ui::app_platform::application()
         .with_assets(sirio_ui::ely::AppAssets)
         .run(|cx: &mut App| {
             if cfg!(debug_assertions) && std::env::var_os("SIRIO_REDUCED_MOTION").is_some() {
