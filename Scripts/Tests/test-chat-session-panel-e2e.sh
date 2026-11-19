@@ -5678,9 +5678,52 @@ def rpc(method, params):
     return response.get("result") or {}
 
 
+def remember(rows):
+    """The last non-empty xid of each widget, and whether it reached ready, from every live read:
+    a closed row carries no xid, so the window to check afterwards is the one remembered here."""
+    path = os.environ.get("MW_XIDS")
+    if not path:
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            memory = json.load(f)
+    except (FileNotFoundError, ValueError):
+        memory = {}
+    for row in rows:
+        entry = memory.setdefault(row["toolUseId"], {"xid": "", "ready": False})
+        if row["xid"]:
+            entry["xid"] = row["xid"]
+        if row["phase"] == "ready":
+            entry["ready"] = True
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(memory, f)
+
+
+def remembered_windows(display, count):
+    """(problems, states): every remembered window must now be gone or unmapped, and a widget that
+    reached ready must have had one."""
+    with open(os.environ["MW_XIDS"], encoding="utf-8") as f:
+        memory = json.load(f)
+    problems, states = [], []
+    if len(memory) != count:
+        problems.append(f"{len(memory)} widgets remembered, not {count}")
+    for key, entry in sorted(memory.items()):
+        if entry["ready"] and not entry["xid"]:
+            problems.append(f"{key} was ready and never showed an xid")
+            continue
+        if not entry["xid"]:
+            continue
+        viewable, line = window_state(display, entry["xid"])
+        states.append({"toolUseId": key, "xid": entry["xid"], "mapState": line})
+        if viewable:
+            problems.append(f"{key}: window {entry['xid']} is still viewable after close")
+    return problems, states
+
+
 def read(surface):
     result = rpc("surface.chat.read", {"surfaceId": surface})
     rows = json.loads(result.get("mcpWidgets") or "[]")
+    remember(rows)
     dock = json.loads(result["questionDock"]) if result.get("questionDock") else None
     chat = {k: v for k, v in result.items() if k not in ("sessionPanel", "mcpWidgets")}
     chat["transcript"] = json.loads(chat.get("transcript") or "[]")
@@ -5761,12 +5804,14 @@ elif command == "wait":
             sys.exit(1)
         time.sleep(0.3)
 elif command == "invariant":
-    # invariant SURFACE DISPLAY LABEL ARTIFACT: holds within 6 s of settling, or fails.
-    surface, display, label, artifact = sys.argv[2:6]
+    # invariant SURFACE DISPLAY LABEL ARTIFACT COUNT: holds within 6 s of settling, or fails.
+    surface, display, label, artifact, count = sys.argv[2:7]
     deadline = time.time() + 6
     while True:
         rows, dock, chat = read(surface)
         problems, windows = violations(rows, display)
+        if len(rows) != int(count):
+            problems.append(f"{len(rows)} widgets, not {count}")
         if not problems:
             record(artifact, label, rows, dock, windows)
             print(f"OK: the placement invariant holds at '{label}' for {len(rows)} widgets"
@@ -5779,6 +5824,18 @@ elif command == "invariant":
                 print("FAIL: " + problem, file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
+elif command == "remembered":
+    # remembered DISPLAY COUNT ARTIFACT: after close, the windows seen live are gone or unmapped.
+    display, count, artifact = sys.argv[2], int(sys.argv[3]), sys.argv[4]
+    problems, states = remembered_windows(display, count)
+    record(artifact, "remembered windows after close", [], None, states)
+    for state in states:
+        print(f"  remembered window {state['xid']} of {state['toolUseId']}: {state['mapState']}")
+    if problems:
+        for problem in problems:
+            print("FAIL: " + problem, file=sys.stderr)
+        sys.exit(1)
+    print(f"OK: the {len(states)} windows seen while the widgets lived are not viewable after close")
 elif command == "flood-end":
     # flood-end SURFACE SECONDS ARTIFACT DISPLAY: the flooded widget ends closed, for the rate limit,
     # with no card ever raised and no viewable window; the final row joins the artifact.
@@ -5801,17 +5858,21 @@ elif command == "flood-end":
     if row["error"] != "over the rate limit for 5 s":
         print("FAIL: the widget closed for another reason", file=sys.stderr)
         sys.exit(1)
-    viewable, line = window_state(display, row["xid"])
-    if viewable:
-        print("FAIL: the closed widget's window is still viewable", file=sys.stderr)
+    if row["mapped"] != "0":
+        print("FAIL: the closed widget is still mapped", file=sys.stderr)
         sys.exit(1)
+    problems, states = remembered_windows(display, 1)
+    if problems or not states:
+        print("FAIL: " + "; ".join(problems or ["no window was remembered"]), file=sys.stderr)
+        sys.exit(1)
+    line = states[0]["xid"] + " " + states[0]["mapState"]
     with open(artifact, encoding="utf-8") as f:
         data = json.load(f)
     data["finalRow"] = row
     data["finalWindow"] = line
     with open(artifact, "w", encoding="utf-8") as f:
         json.dump(data, f)
-    print(f"OK: the widget closed with '{row['error']}', raised no card, and its window is not viewable ({line})")
+    print(f"OK: the widget closed with '{row['error']}', raised no card, and its remembered window {line} is not viewable")
 elif command == "latency":
     # latency SURFACE SECONDS ARTIFACT: one surface.chat.read every 100 ms; each must answer in 1 s.
     surface, seconds, artifact = sys.argv[2], float(sys.argv[3]), sys.argv[4]
@@ -5854,6 +5915,8 @@ widget_chat() { # name [caps-given]
   : >>"$RUN_DIR/fixture-control.log"
   WIDGET_MARK=$(control_log_lines)
   WIDGET_ARTIFACT="$RUN_DIR/$name-steps.jsonl"
+  export MW_XIDS="$RUN_DIR/$name-xids.json"
+  rm -f "$MW_XIDS"
   trace_chat "$name" 150
 }
 stop_widget_logger() {
@@ -5862,7 +5925,7 @@ stop_widget_logger() {
 }
 # The placement invariant at a step, for every widget.
 widget_invariant() { # label
-  MW invariant "$SURFACE" "$DISPLAY_TARGET" "$1" "$WIDGET_ARTIFACT" || fail "the placement invariant failed at '$1'"
+  MW invariant "$SURFACE" "$DISPLAY_TARGET" "$1" "$WIDGET_ARTIFACT" "${WIDGET_COUNT:-2}" || fail "the placement invariant failed at '$1'"
 }
 widget_wait() { # desc seconds expr
   MW wait "$SURFACE" "$2" "$1" "$3" || fail "$1"
@@ -5886,6 +5949,7 @@ widget_control_lines() { # prints the control log lines after the mark
 }
 
 scenario_mcp_widget() {
+  WIDGET_COUNT=2
   widget_chat mcp_widget
   send_prompt mcp_widget
   # 1. two widgets, each with its own slot. One read judges them all, before card 1 (which the view
@@ -5893,7 +5957,7 @@ scenario_mcp_widget() {
   # the chat clamps it where it draws the box, so the box's own bounds (slotBottom - slotTop) are measured
   # against min(600, 0.8 x the viewport).
   widget_wait "two widgets are ready with input and result delivered, each in its own slot, with the server's CSP domains and the dropped one, the first as tall as min(600, 0.8 x the viewport)" 60 \
-    'len(w) == 2 and all(r["phase"] == "ready" and r["inputDelivered"] == "1" and r["resultDelivered"] == "1" and r["slotTop"] != "" and r["dockOpen"] == "0" for r in w) and {r["toolUseId"] for r in w} == {"toolu_show_1", "toolu_show_2"} and all(r["server"] == "apps" and r["tool"] == "show" and r["domains"] == "https://api.widget.test,https://cdn.widget.test" and r["dropped"] == "http://bad.widget.test" for r in w) and w[0]["height"] == "600" and abs((float(w[0]["slotBottom"]) - float(w[0]["slotTop"])) - min(600.0, 0.8 * (float(w[0]["viewportBottom"]) - float(w[0]["viewportTop"])))) <= 2.0'
+    'len(w) == 2 and all(r["phase"] == "ready" and r["inputDelivered"] == "1" and r["resultDelivered"] == "1" and r["slotTop"] != "" and r["dockOpen"] == "0" for r in w) and {r["toolUseId"] for r in w} == {"toolu_show_1", "toolu_show_2"} and all(r["server"] == "apps" and r["tool"] == "show" and r["domains"] == "https://api.widget.test,https://cdn.widget.test" and r["dropped"] == "http://bad.widget.test" for r in w) and w[0]["xid"] != "" and w[1]["xid"] != "" and w[0]["xid"] != w[1]["xid"] and w[0]["toolUseId"] != w[1]["toolUseId"] and float(w[0]["slotBottom"]) <= float(w[1]["slotTop"]) and w[0]["height"] == "600" and abs((float(w[0]["slotBottom"]) - float(w[0]["slotTop"])) - min(600.0, 0.8 * (float(w[0]["viewportBottom"]) - float(w[0]["viewportTop"])))) <= 2.0'
   widget_invariant "1 two widgets"
   # 2. card 1: click-only, Reject selected; the probes; keys do nothing; Escape denies
   widget_wait "card 1 is pending, click-only, with Reject selected and the dock open" 60 \
@@ -5972,19 +6036,19 @@ print(top - (vtop - (bottom - top) / 2))')
   # 7. the effort list is an overlay
   E2E rpc surface.chat.effort surfaceId="$SURFACE" action=open >/dev/null || fail "effort open failed"
   widget_wait "the effort list is open and every widget is unmapped" 15 \
-    'all(r["overlayOpen"] == "1" and r["mapped"] == "0" for r in w)'
+    'len(w) == 2 and all(r["overlayOpen"] == "1" and r["mapped"] == "0" for r in w)'
   widget_invariant "7 effort list open"
   E2E rpc surface.chat.effort surfaceId="$SURFACE" action=close >/dev/null || fail "effort close failed"
-  widget_wait "the effort list is closed" 15 'all(r["overlayOpen"] == "0" for r in w)'
+  widget_wait "the effort list is closed" 15 'len(w) == 2 and all(r["overlayOpen"] == "0" for r in w)'
   widget_invariant "7 effort list closed"
   # 8. a file tab in the chat's pane takes the chat off screen. A terminal tab does not: it opens in the
   # other pane of the split, so the chat stays on screen beside it (checked next, as a layout change).
   E2E rpc surface.editor.open path="$LINKED/CLAUDE.md" >/dev/null || fail "surface.editor.open failed"
   widget_wait "the chat's tab is off screen and every widget is unmapped" 15 \
-    'all(r["hidden"] == "1" and r["mapped"] == "0" for r in w)'
+    'len(w) == 2 and all(r["hidden"] == "1" and r["mapped"] == "0" for r in w)'
   widget_invariant "8 a file tab selected"
   show_chat
-  widget_wait "the chat is back and shows its widgets" 15 'all(r["hidden"] == "0" for r in w)'
+  widget_wait "the chat is back and shows its widgets" 15 'len(w) == 2 and all(r["hidden"] == "0" for r in w)'
   widget_invariant "8 chat selected"
   E2E rpc surface.terminal.open >/dev/null || fail "surface.terminal.open failed"
   local terminal
@@ -5993,13 +6057,14 @@ print(top - (vtop - (bottom - top) / 2))')
   sleep 2
   capture mcp-widget-terminal
   widget_wait "beside a terminal the chat is on screen and its widgets are still ready" 15 \
-    'all(r["hidden"] == "0" and r["phase"] == "ready" for r in w)'
+    'len(w) == 2 and all(r["hidden"] == "0" and r["phase"] == "ready" for r in w)'
   widget_invariant "8 terminal beside the chat"
   # 9. the CLI dies
   send_prompt die
   widget_wait "every entry is closed and unmapped after the CLI died" 40 \
     'len(w) == 2 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
   widget_invariant "9 the CLI died"
+  MW remembered "$DISPLAY_TARGET" 2 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived is still viewable after the CLI died"
   # after the steps
   [ ! -s "$WIDGET_LOGGER_LOG" ] || fail "the request logger saw $(wc -l <"$WIDGET_LOGGER_LOG") requests from the widget"
   echo "OK: the request logger is empty"
@@ -6031,6 +6096,7 @@ PY
 }
 
 scenario_mcp_widget_flood() {
+  WIDGET_COUNT=1
   widget_chat mcp_widget_flood
   send_prompt mcp_flood
   widget_wait "the flooding widget is ready" 60 'len(w) == 1 and w[0]["phase"] == "ready"'
