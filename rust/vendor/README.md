@@ -208,8 +208,8 @@ every request, where the engine Sirio ran on before installed `ReqwestClient::ne
 `=0.3.12`. It is a workspace member (`rust/Cargo.toml`'s `reqwest_client` workspace dependency
 names it by path), not a patch. Its TLS half stays on the bezel package: `http_client_tls` is
 still `bezel-zed-http-client-tls` 0.3.8 (`vendor/reqwest_client/Cargo.toml`), the one
-`bezel-zed-*` crate left in `rust/Cargo.lock`. `sirio_ui::app_platform::{application, headless}`
-(`rust/crates/sirio_ui/src/app_platform.rs`) wraps `gpui_platform::application()` / `headless()`
+`bezel-zed-*` crate left in `rust/Cargo.lock`. `sirio_ui::app_platform::application`
+(`rust/crates/sirio_ui/src/app_platform.rs`) wraps `gpui_platform::application()`
 and installs `ReqwestClient::new()` with no user agent, proxy override or extra header; every app,
 example and probe starts through it, so remote images load the same in each. A program that built
 its `Application` straight from `gpui_platform` would fail those fetches silently.
