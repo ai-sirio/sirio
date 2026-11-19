@@ -45,7 +45,6 @@ const MIN_HEIGHT: u32 = 80;
 const MAX_HEIGHT: u32 = 800;
 
 const NO_SESSION: &str = "The widget could not be loaded: the session is gone";
-const NO_WINDOW: &str = "The widget could not be opened here";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SlotPhase {
@@ -83,7 +82,8 @@ pub(super) struct Seen {
     pub(super) viewport: Bounds<Pixels>,
     pub(super) overlay_open: bool,
     pub(super) dock_open: bool,
-    pub(super) obscured: bool,
+    /// The host had the chat off screen or covered.
+    pub(super) hidden: bool,
 }
 
 /// What a slot's own state and its widget's last snapshot say, together.
@@ -116,6 +116,8 @@ pub(super) struct Slot {
     /// The CSP entries the host refused, `|`-separated.
     pub(super) dropped: String,
     pub(super) widget: Option<Entity<McpWidget>>,
+    /// The page's answer, held until the chat has a window to build the widget in.
+    pub(super) waiting_read: Option<(String, Result<serde_json::Value, String>)>,
     subscriptions: Vec<Subscription>,
     snapshot: RefCell<Option<WidgetSnapshot>>,
     seen: Cell<Seen>,
@@ -134,6 +136,7 @@ impl Slot {
             domains: String::new(),
             dropped: String::new(),
             widget: None,
+            waiting_read: None,
             subscriptions: Vec::new(),
             snapshot: RefCell::new(None),
             seen: Cell::new(Seen::default()),
@@ -202,8 +205,6 @@ pub(super) struct Widgets {
     disc: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The host covers the chat (a browser overlay is open).
     obscured: bool,
-    /// The host took this chat off screen; cleared by the next sweep, which is a paint.
-    unmapped: Cell<bool>,
     /// The viewport of the last sweep: the clamp for a widget's height reads it.
     viewport: Cell<Bounds<Pixels>>,
     /// The window the chat was last drawn in, which a new webview needs.
@@ -231,6 +232,11 @@ impl Widgets {
 
     pub(super) fn note_window(&mut self, window: AnyWindowHandle) {
         self.window = Some(window);
+    }
+
+    /// Whether a page was read for a slot that is waiting for a window to be built in.
+    pub(super) fn has_waiting_read(&self) -> bool {
+        self.slots.iter().any(|slot| slot.waiting_read.is_some())
     }
 
     /// The slot of a test, with no webview.
@@ -378,11 +384,16 @@ impl Chat {
         let UiToolRef { server, resource_uri, .. } = hit;
         cx.spawn(async move |this, cx| {
             let uri = resource_uri.clone();
-            let answer =
-                cx.background_spawn(async move { control.read_resource(&server, &uri) }).await;
+            let answer = cx
+                .background_spawn(async move { control.read_resource(&server, &uri) })
+                .await
+                .map_err(|error| format!("{error:#}"));
             let window = this.read_with(cx, |chat, _| chat.widgets.window).ok().flatten();
             let Some(window) = window else {
-                let _ = this.update(cx, |chat, cx| chat.fail_slot(&id, NO_WINDOW.to_owned(), cx));
+                // A chat that was never drawn (a prompt sent to a background tab) has no
+                // window yet: the first frame builds the widget from this answer.
+                let _ = this
+                    .update(cx, |chat, cx| chat.hold_read(&id, resource_uri.clone(), answer, cx));
                 return;
             };
             let _ = cx.update_window(window, |_, window, cx| {
@@ -399,7 +410,7 @@ impl Chat {
         &mut self,
         id: &str,
         uri: &str,
-        answer: anyhow::Result<serde_json::Value>,
+        answer: Result<serde_json::Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -411,7 +422,7 @@ impl Chat {
         if !waiting {
             return;
         }
-        let document = answer.map_err(|error| format!("{error:#}")).and_then(|contents| {
+        let document = answer.and_then(|contents| {
             widget_document(&contents, uri).map_err(|error| error.to_string())
         });
         let document = match document {
@@ -471,6 +482,43 @@ impl Chat {
         self.refresh_snapshot(id, cx);
         self.cap_live_widgets(cx);
         self.slot_changed(id, cx);
+    }
+
+    /// The read answered and the chat has no window yet: hold it for the first frame.
+    fn hold_read(
+        &mut self,
+        id: &str,
+        uri: String,
+        answer: Result<serde_json::Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self
+            .widgets
+            .slots
+            .iter_mut()
+            .find(|slot| slot.id == id && slot.phase == SlotPhase::Resolving)
+        else {
+            return;
+        };
+        slot.waiting_read = Some((uri, answer));
+        // A frame builds it; one may be due already, so ask for another.
+        cx.notify();
+    }
+
+    /// Builds the widgets whose page was read while the chat had no window.
+    pub(super) fn build_waiting_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ready: Vec<_> = self
+            .widgets
+            .slots
+            .iter_mut()
+            .filter_map(|slot| {
+                let (uri, answer) = slot.waiting_read.take()?;
+                Some((slot.id.clone(), uri, answer))
+            })
+            .collect();
+        for (id, uri, answer) in ready {
+            self.resource_read(&id, &uri, answer, window, cx);
+        }
     }
 
     /// The width the view is told it has: the reading column less its padding.
@@ -577,6 +625,8 @@ impl Chat {
     /// The transcript was replaced: the rows the slots belonged to are gone.
     pub(super) fn close_widgets(&mut self, cx: &mut Context<Self>) {
         self.widgets.slots.clear();
+        // Calls still being looked up have no row either; their answers land on nothing.
+        self.widgets.lookups.discard();
         self.widgets.records.borrow_mut().clear();
         self.widgets.disc.set(None);
         cx.notify();
@@ -589,7 +639,6 @@ impl Chat {
         if self.widgets.slots.is_empty() {
             return;
         }
-        self.widgets.unmapped.set(true);
         self.hide_widgets(cx);
     }
 
@@ -666,8 +715,8 @@ impl Chat {
         let widgets = &self.widgets;
         let records = std::mem::take(&mut *widgets.records.borrow_mut());
         let disc = widgets.disc.take();
-        // A paint means the chat is on screen again.
-        widgets.unmapped.set(false);
+        // A sweep is a paint, so the chat is on screen: only the host's overlays hide it.
+        let hidden = widgets.obscured;
         if widgets.slots.is_empty() {
             return Vec::new();
         }
@@ -687,7 +736,7 @@ impl Chat {
             seen.viewport = viewport;
             seen.overlay_open = overlay_open;
             seen.dock_open = dock_open;
-            seen.obscured = widgets.obscured;
+            seen.hidden = hidden;
             if placed.is_some() {
                 seen.slot = placed;
             }
@@ -696,7 +745,7 @@ impl Chat {
             let at = placed.filter(|bounds| {
                 !overlay_open
                     && !dock_open
-                    && !widgets.obscured
+                    && !hidden
                     && inside(&viewport, bounds)
                     && disc.is_none_or(|disc| !bounds.intersects(&disc))
             });
@@ -873,7 +922,6 @@ impl Chat {
     pub(super) fn widget_rows(&self) -> Vec<BTreeMap<String, String>> {
         let turns = segment_turns(&self.entries);
         let flag = |on: bool| if on { "1" } else { "0" }.to_owned();
-        let hidden = self.widgets.obscured || self.widgets.unmapped.get();
         let top = |bounds: Option<Bounds<Pixels>>| {
             bounds.map(|bounds| f32::from(bounds.top()).to_string()).unwrap_or_default()
         };
@@ -916,7 +964,7 @@ impl Chat {
                     ("viewportBottom".to_owned(), bottom(viewport)),
                     ("overlayOpen".to_owned(), flag(seen.overlay_open)),
                     ("dockOpen".to_owned(), flag(seen.dock_open)),
-                    ("hidden".to_owned(), flag(hidden)),
+                    ("hidden".to_owned(), flag(seen.hidden)),
                     ("xid".to_owned(), view.xid.map(|xid| xid.to_string()).unwrap_or_default()),
                     ("domains".to_owned(), slot.domains.clone()),
                     ("dropped".to_owned(), slot.dropped.clone()),
@@ -937,4 +985,55 @@ fn inside(outer: &Bounds<Pixels>, inner: &Bounds<Pixels>) -> bool {
         && inner.right() <= outer.right()
         && inner.top() >= outer.top()
         && inner.bottom() <= outer.bottom()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+    use serde_json::json;
+    use sirio_chat::{McpOrigin, UiToolRef};
+
+    use super::*;
+    use crate::chat::tests::refresh_frame;
+    use crate::chat::testing::{offline_chat, prepare};
+
+    fn tool() -> UiToolRef {
+        UiToolRef {
+            server: "s".into(),
+            origin: McpOrigin::User,
+            tool: "show".into(),
+            resource_uri: "ui://s/show".into(),
+        }
+    }
+
+    /// How it can fail, written first: a chat that was never drawn has no window, so a page
+    /// read for it either fails its slot for good, or is built inside the render that finds
+    /// the window, or waits for a frame that nothing asks for.
+    #[gpui::test]
+    async fn a_page_read_before_the_first_frame_waits_for_the_chat_to_be_drawn(
+        cx: &mut TestAppContext,
+    ) {
+        prepare(cx);
+        let (chat, cx) = cx.add_window_view(|_, cx| offline_chat(cx));
+        chat.update(cx, |chat, cx| {
+            let held = Held::new(json!({}));
+            chat.widgets.insert_test_slot(Slot::resolving("a".into(), 1, &tool(), held));
+            // The server named something that is not a widget page: building it fails at
+            // once, with no webview, which is how this test sees the build happen.
+            let contents = json!([{ "uri": "ui://s/show", "mimeType": "text/plain", "text": "x" }]);
+            // The harness drew the chat once already: forget the window it noted.
+            chat.widgets.window = None;
+            chat.hold_read("a", "ui://s/show".into(), Ok(contents), cx);
+            assert!(chat.widgets.window.is_none());
+            let slot = chat.widgets.slot("a").expect("the slot exists");
+            assert_eq!(slot.phase, SlotPhase::Resolving);
+            assert!(slot.waiting_read.is_some());
+        });
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            let slot = chat.widgets.slot("a").expect("the slot exists");
+            assert_eq!(slot.phase, SlotPhase::Failed);
+            assert!(slot.waiting_read.is_none());
+        });
+    }
 }

@@ -8306,6 +8306,14 @@ impl Render for Chat {
         crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
         self.widgets.note_window(window.window_handle());
+        if self.widgets.has_waiting_read() {
+            // A page was read before this chat had a window. `McpWidget::new` needs `&mut
+            // Window` and this render holds the chat, so the build runs after it.
+            let chat = cx.entity();
+            window.defer(cx, move |window, cx| {
+                chat.update(cx, |chat, cx| chat.build_waiting_widgets(window, cx));
+            });
+        }
         self.settle_background_popover(window, cx);
         // Read before any loader renews this view's lease.
         if sirio_perf::enabled() && crate::motion::Painter::of(cx).woken(cx) {

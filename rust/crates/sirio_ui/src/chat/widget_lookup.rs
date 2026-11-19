@@ -27,6 +27,10 @@
 //! 10. A hit on a list that already knows the tool still waits for a refresh, or a seeded
 //!     list is ignored.
 //! 11. The same call announced twice makes two records.
+//! 12. A refresh asked before a reconnect fails after it, and a call made after the reconnect
+//!     is ended with it, or the failure is held against the turn so later calls get no ask.
+//! 13. A transcript that was replaced leaves lookups behind: a refresh asked for the old rows
+//!     answers into the new ones and opens a slot for a call with no row.
 
 use serde_json::Value;
 
@@ -228,15 +232,25 @@ impl<L, R> Lookups<L, R> {
             return Vec::new();
         }
         let Some(flight) = self.flight.take() else { return Vec::new() };
-        let Some(list) = answer else {
-            self.failed = Some(flight.turn);
-            return self
-                .pending
-                .drain(..)
-                .map(|pending| Step::Miss { id: pending.id })
-                .collect();
-        };
         let current = flight.generation == self.generation;
+        let Some(list) = answer else {
+            // A failure that predates a reconnect says nothing of the servers as they are now:
+            // it is not held against the turn, and a call made after the reconnect asks again.
+            if current {
+                self.failed = Some(flight.turn);
+            }
+            let mut rest = Vec::new();
+            let mut steps = Vec::new();
+            for pending in std::mem::take(&mut self.pending) {
+                if !current && pending.joined == Some(self.generation) {
+                    rest.push(pending);
+                } else {
+                    steps.push(Step::Miss { id: pending.id });
+                }
+            }
+            self.restart_for(rest, flight.turn, &mut steps);
+            return steps;
+        };
         let mut steps = Vec::new();
         let mut rest = Vec::new();
         for pending in std::mem::take(&mut self.pending) {
@@ -259,12 +273,18 @@ impl<L, R> Lookups<L, R> {
         if current {
             self.list = List::Have(list);
         }
-        if !rest.is_empty() {
-            let turn = rest.iter().map(|pending| pending.turn).min().unwrap_or(flight.turn);
-            steps.push(self.start(turn));
-            self.pending = rest;
-        }
+        self.restart_for(rest, flight.turn, &mut steps);
         steps
+    }
+
+    /// Calls that joined a flight asked before a reconnect get a flight of their own.
+    fn restart_for(&mut self, rest: Vec<Pending>, turn: u64, steps: &mut Vec<Step<R>>) {
+        if rest.is_empty() {
+            return;
+        }
+        let turn = rest.iter().map(|pending| pending.turn).min().unwrap_or(turn);
+        steps.push(self.start(turn));
+        self.pending = rest;
     }
 
     /// A reconnect, toggle or reload: the list is old, the next lookup asks again.
@@ -272,6 +292,13 @@ impl<L, R> Lookups<L, R> {
         self.list = List::Stale;
         self.generation += 1;
         self.failed = None;
+    }
+
+    /// The transcript was replaced: every call being looked up has no row any more, and the
+    /// answer to a refresh asked for them lands on nothing. The stored list stays.
+    pub(super) fn discard(&mut self) {
+        self.pending.clear();
+        self.flight = None;
     }
 
     /// A new session: nothing of the old one stays.
@@ -490,6 +517,53 @@ mod tests {
         assert_eq!(misses(&steps), vec!["c"]);
         let steps = call(&mut machine, "d", "mcp__s__show", 8);
         assert_eq!(refreshes(&steps), 1);
+    }
+
+    #[test]
+    fn a_failure_that_predates_a_reconnect_does_not_end_a_later_call_or_block_the_turn() {
+        let mut machine = Machine::default();
+        let old = ticket_of(&call(&mut machine, "a", "mcp__s__show", 7));
+        machine.invalidate();
+        assert!(call(&mut machine, "b", "mcp__s__show", 7).is_empty());
+        let steps = machine.refreshed(old, None, find);
+        assert_eq!(misses(&steps), vec!["a"]);
+        let fresh = ticket_of(&steps);
+        assert!(machine.holds("b"));
+        let steps = machine.refreshed(fresh, Some(vec!["mcp__s__show"]), find);
+        assert_eq!(hits(&steps).len(), 1);
+        let steps = call(&mut machine, "c", "mcp__s__show", 7);
+        assert_eq!(hits(&steps).len(), 1);
+    }
+
+    #[test]
+    fn a_failure_that_predates_a_reconnect_is_not_held_against_the_turn() {
+        let mut machine = Machine::default();
+        let old = ticket_of(&call(&mut machine, "a", "mcp__s__show", 7));
+        machine.invalidate();
+        machine.refreshed(old, None, find);
+        let steps = call(&mut machine, "b", "mcp__s__show", 7);
+        assert_eq!(refreshes(&steps), 1);
+    }
+
+    #[test]
+    fn a_replaced_transcript_drops_the_lookups_and_their_answers() {
+        let mut machine = Machine::default();
+        let ticket = ticket_of(&call(&mut machine, "a", "mcp__s__show", 1));
+        assert!(machine.absorb("a", Update::Cancelled));
+        machine.discard();
+        assert!(!machine.holds("a"));
+        assert!(machine.refreshed(ticket, Some(vec!["mcp__s__show"]), find).is_empty());
+        let steps = call(&mut machine, "b", "mcp__s__show", 1);
+        assert_eq!(refreshes(&steps), 1);
+    }
+
+    #[test]
+    fn discarding_keeps_the_list_the_session_still_has() {
+        let mut machine = Machine::default();
+        call_seeded(&mut machine, "a", "mcp__s__show", vec!["mcp__s__show"]);
+        machine.discard();
+        let steps = call(&mut machine, "b", "mcp__s__show", 1);
+        assert_eq!(hits(&steps).len(), 1);
     }
 
     #[test]
