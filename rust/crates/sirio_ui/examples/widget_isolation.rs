@@ -32,7 +32,7 @@ mod linux {
     use webkit2gtk::{SettingsExt, WebViewExt};
     use sirio_ui::mcp_widget::{
         Inbox, WidgetInbox, WidgetPage, accepts_drops, build_widget_child, flush_x, new_secret,
-        pump_gtk, set_link_preconnect,
+        pump_gtk, set_link_features,
     };
     use wry::{
         Rect, WebView, WebViewExtUnix,
@@ -58,8 +58,9 @@ mod linux {
         /// The addresses of the hint probes (`preconnect`, `prefetch`, `ping`); each defaults to
         /// `logger`.
         hints: [String; 3],
-        /// `on` turns hyperlink auditing and DNS prefetching back on after the build, so the
-        /// control shows the probes can reach their loggers when production's settings are off.
+        /// `on` turns the link features (preconnect, prefetch, speculation rules) and the two
+        /// no-op settings (hyperlink auditing, DNS prefetching) back on after the build, so the
+        /// control shows the probes can reach their loggers when production's switches are off.
         auditing: bool,
     }
 
@@ -172,7 +173,7 @@ mod linux {
             {
                 settings.set_enable_hyperlink_auditing(true);
                 settings.set_enable_dns_prefetching(true);
-                set_link_preconnect(&settings, true);
+                let _ = set_link_features(&settings, true);
             }
             // As production does at `place`.
             let _ = webview.set_bounds(Rect {

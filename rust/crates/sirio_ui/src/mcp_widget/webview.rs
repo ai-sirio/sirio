@@ -242,10 +242,15 @@ pub fn build_widget_child(
     if let Some(settings) = WebViewExt::settings(&view) {
         settings.set_enable_webrtc(false);
         settings.set_enable_media_stream(false);
-        // `<a ping>` posts to a URL the page names, and DNS prefetching resolves names it picks.
+        // These two settings are documented no-ops on WebKitGTK 2.54.1 (an `<a ping>` is blocked
+        // by the CSP, and DNS prefetching has no working switch there). They are kept because
+        // they work on older engines.
         settings.set_enable_hyperlink_auditing(false);
         settings.set_enable_dns_prefetching(false);
-        set_link_preconnect(&settings, false);
+        // The engine's own hints: a CSP does not cover them, so each is switched off by feature.
+        for identifier in set_link_features(&settings, false) {
+            eprintln!("widget webview: the {identifier} feature could not be switched off");
+        }
     }
     view.drag_dest_unset();
     view.connect_context_menu(|_, _, _, _| true);
@@ -271,13 +276,19 @@ pub fn build_widget_child(
     Ok(webview)
 }
 
-/// Sets the engine's `LinkPreconnect` feature on `settings`: off for a widget, so
-/// `<link rel=preconnect>` opens no TCP connection (a CSP does not cover it); the proof's
-/// control turns it back on. The feature switch exists from WebKitGTK
-/// 2.42 and the `webkit2gtk` bindings in use do not expose it, so both functions are looked up
-/// at run time with `dlsym`: on an older WebKitGTK they are absent and the call does nothing.
-/// Returns the identifier it set (WebKitGTK 2.54.1 names it `LinkPreconnect`), or `None`.
-pub fn set_link_preconnect(settings: &webkit2gtk::Settings, enabled: bool) -> Option<String> {
+/// The engine features a widget's webview switches off: `<link rel=preconnect>` opens a TCP
+/// connection, `<link rel=prefetch>` fetches, and speculation rules prefetch, none of which a CSP
+/// covers. These are the identifiers WebKitGTK 2.54.1 lists (`SpeculationRulesPrefetchEnabled`
+/// is a preference key there, not a feature identifier).
+pub const LINK_FEATURES: [&str; 3] = ["LinkPreconnect", "LinkPrefetch", "SpeculationRulesPrefetch"];
+
+/// Sets each of [`LINK_FEATURES`] on `settings`: off for a widget; the proof's control turns
+/// them back on. The feature switch exists from WebKitGTK 2.42 and the `webkit2gtk` bindings in
+/// use do not expose it, so the functions are looked up at run time with `dlsym`: on an older
+/// WebKitGTK they are absent and nothing is set.
+/// Returns the identifiers it could not set: all of them without the API, else those the engine
+/// does not list.
+pub fn set_link_features(settings: &webkit2gtk::Settings, enabled: bool) -> Vec<&'static str> {
     use std::ffi::{CStr, c_char, c_int, c_void};
 
     use webkit2gtk::glib::object::ObjectType;
@@ -298,7 +309,7 @@ pub fn set_link_preconnect(settings: &webkit2gtk::Settings, enabled: bool) -> Op
         .iter()
         .any(|symbol| symbol.is_null())
     {
-        return None;
+        return LINK_FEATURES.to_vec();
     }
     // SAFETY: each symbol is the WebKitGTK 2.42+ function of that name, with the C signature
     // transmuted to here (webkit_settings_get_all_features, webkit_settings_set_feature_enabled,
@@ -318,9 +329,9 @@ pub fn set_link_preconnect(settings: &webkit2gtk::Settings, enabled: bool) -> Op
             std::mem::transmute(identifier_of);
         let list = all_features();
         if list.is_null() {
-            return None;
+            return LINK_FEATURES.to_vec();
         }
-        let mut set_to = None;
+        let mut missing = LINK_FEATURES.to_vec();
         for index in 0..list_length(list) {
             let feature = list_get(list, index);
             if feature.is_null() {
@@ -331,14 +342,13 @@ pub fn set_link_preconnect(settings: &webkit2gtk::Settings, enabled: bool) -> Op
                 continue;
             }
             let identifier = CStr::from_ptr(identifier).to_string_lossy().into_owned();
-            if identifier == "LinkPreconnect" {
+            if let Some(at) = missing.iter().position(|wanted| *wanted == identifier) {
                 set_enabled(settings.as_ptr().cast(), feature, c_int::from(enabled));
-                set_to = Some(identifier);
-                break;
+                missing.remove(at);
             }
         }
         list_unref(list);
-        set_to
+        missing
     }
 }
 

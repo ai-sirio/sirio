@@ -76,6 +76,11 @@
     hint("preconnect", PRECONNECT);
     hint("dns-prefetch", PRECONNECT);
     hint("prefetch", PREFETCH + "/prefetch");
+    var rules = document.createElement("script");
+    rules.type = "speculationrules";
+    rules.textContent = JSON.stringify(
+      { prefetch: [{ source: "list", urls: [PREFETCH + "/spec"] }] });
+    document.head.appendChild(rules);
     var anchor = document.createElement("a");
     anchor.href = "#pinged";
     anchor.setAttribute("ping", PING + "/ping");

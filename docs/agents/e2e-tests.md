@@ -569,13 +569,15 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 # proof (parent, IPC, network, devices, storage and navigation), run on the same kind of Xvfb.
 # Its logger listens on four 127.0.0.1 ports and counts raw TCP accepts (accepts.log) before it
 # reads a byte, so a bare preconnect, which sends no request line, cannot pass vacuously. The probe
-# view adds `<link rel=preconnect>` and `dns-prefetch` (one port), `<link rel=prefetch>` (one port)
-# and an `<a ping>` clicked by script (one port), each outside the view's connect-src. The run
-# (production's settings: hyperlink auditing and DNS prefetching off) must see no accept for
-# prefetch and ping; the control turns auditing back on and a permissive CSP, and its FACT lines show
-# which probes reach their logger (preconnect and ping do), so a 0 in the run is the settings, not a
-# dead probe. The run's preconnect check fails on any accept: the `LinkPreconnect` feature is turned
-# off through `dlsym`-resolved WebKitGTK 2.42+ functions.
+# view adds `<link rel=preconnect>` and `dns-prefetch` (one port), `<link rel=prefetch>` and a
+# speculation-rules prefetch (one port) and an `<a ping>` clicked by script (one port), each outside
+# the view's connect-src. The run must see no accept on any of them; the control opens the CSP and
+# turns the link features back on, and its checks and FACT lines show which probes reach their
+# logger, so a 0 in the run is the CSP or the switches, not a dead probe. `<a ping>` is stopped by
+# the CSP (the hyperlink auditing and DNS prefetching settings are documented no-ops on 2.54.1). The
+# raw TCP logger cannot see a DNS lookup, so the dns-prefetch probe proves only that no TCP connect
+# follows. `LinkPreconnect`, `LinkPrefetch` and `SpeculationRulesPrefetch` are turned off through
+# `dlsym`-resolved WebKitGTK 2.42+ functions.
 # Unverified, for a later enablement: macOS WKWebView and Windows WebView2 (view CSP header
 # enforcement, the incognito store, IPC in subframes, WebRTC off, the permission handler, drops;
 # on Windows wry's navigation handler sees only the top frame).

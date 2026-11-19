@@ -3,8 +3,8 @@
 # answers with one text content block only) and `ask_me` (no UI; the test does not allow it, so
 # the CLI asks and the test rejects). `show` and `act` name the widget `ui://apps/show.html`,
 # whose resource carries a csp with `.test` hosts. Every `initialize` the client sends is
-# logged as one JSON line, so the test can read the capabilities the CLI declared. Speaks only over stdin/stdout, opens no socket and uses
-# no credentials.
+# logged as one JSON line, so the test can read the capabilities the CLI declared. Speaks only
+# over stdin/stdout, opens no socket and uses no credentials.
 # usage: mcp_apps.py LOG_PATH
 import json
 import sys

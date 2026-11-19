@@ -11,6 +11,12 @@
 #            It shows the restrictive CSP is what blocks the network and the frames: the logger
 #            sees /fetch and /img, and no violation is reported.
 #
+# The hints a CSP does not cover (preconnect, prefetch, speculation rules) are switched off through
+# WebKitGTK's feature API (`set_link_features`); the control turns them back on. The `<a ping>` is
+# stopped by the CSP, and the hyperlink auditing and DNS prefetching settings are documented no-ops
+# on 2.54.1, kept for older engines. The raw TCP logger cannot see a DNS lookup, so the dns-prefetch
+# probe proves only that no TCP connect follows it.
+#
 # Incognito, the permission handler (deny) and the new-window handler are defence in depth over
 # engine and sandbox defaults that already hold in the control. On WebKitGTK 2.54.1:
 # custom-scheme storage is neither shared nor written to disk; permission requests end denied;
@@ -292,15 +298,21 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
     check(a.get("hints") == "added", "run: the preconnect, prefetch and ping probes were set up",
           str(a.get("hints")))
     # Raw TCP accepts, counted before any byte is read: a bare preconnect sends no request line.
+    # The dns-prefetch hint shares the preconnect port, and this probe cannot see a DNS lookup: it
+    # proves only that no TCP connect follows. `<a ping>` is blocked by the CSP (the hyperlink
+    # auditing setting is a documented no-op on 2.54.1); the control, whose CSP is open, shows the
+    # probe can reach its logger.
     for name, label in (("main", "any connection to the logger"),
-                        ("preconnect", "preconnect and dns-prefetch"),
-                        ("prefetch", "prefetch"), ("ping", "<a ping>")):
+                        ("preconnect", "preconnect, or a TCP connect after a dns-prefetch hint"),
+                        ("prefetch", "prefetch or speculation rules"),
+                        ("ping", "<a ping> (the CSP blocks it)")):
         check(run["tcpAccepts"][name] == 0, "run: no TCP connect for " + label,
               str(run["tcpAccepts"]))
     # --- the control ---------------------------------------------------------
-    # The control has hyperlink auditing, DNS prefetching and the LinkPreconnect feature on, so
-    # these show the probes can see a connect: a run of 0 is then the settings, not a dead probe.
-    for name, label in (("preconnect", "preconnect"), ("ping", "<a ping>")):
+    # The control has the CSP open and every feature of `set_link_features` on, so these show the
+    # probes can see a connect: a run of 0 is then the CSP or the switches, not a dead probe.
+    for name, label in (("preconnect", "preconnect"), ("prefetch", "prefetch or speculation rules"),
+                        ("ping", "<a ping>")):
         check(control["tcpAccepts"][name] >= 1, "control: a TCP connect reached the " + label
               + " logger", str(control["tcpAccepts"]))
     ca, cb = control["probeA"], control["probeB"]
@@ -328,8 +340,8 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
         print("FACT: control: storage reached disk under HOME: "
               + str(len(control["homeFilesWithProbe"]) >= 1).lower())
 
-    # The control runs the same hints with hyperlink auditing and DNS prefetching turned back on
-    # and a permissive CSP: what reaches its loggers is what production's settings and CSP stop.
+    # The control runs the same hints with the CSP open and the link features turned back on: what
+    # reaches its loggers is what production's CSP and feature switches stop.
     print("FACT: control: TCP accepts " + json.dumps(control["tcpAccepts"], sort_keys=True))
     print("FACT: control: request paths " + json.dumps(control["loggerPaths"]))
     print("FACT: control: window.open returns " + repr(ca.get("open")))

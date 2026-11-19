@@ -923,16 +923,20 @@ child, not Sirio's top-level) cannot keep keys from the page. Instead `build_wid
 connects `key-press-event` and `key-release-event` handlers that stop the event on the webview's
 top-level GtkWindow, which GTK runs before the WebView sees a key: keys typed with the pointer
 over a widget are dropped. (`browser.rs` still uses `focus_parent()` for its own child.) The webview cancels every
-file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and has
-hyperlink auditing (`<a ping>`) and DNS prefetching turned off. A message the view posts straight
+file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and the
+hyperlink auditing and DNS prefetching settings are off (documented no-ops on 2.54.1, kept for older
+engines: an `<a ping>` is stopped by the CSP, and DNS prefetching has no working switch there, a
+disclosed gap). A message the view posts straight
 to the IPC handler, outside its relay (no secret), closes the widget at the first one, with "the
 view posted outside its relay"; forged, oversized, over-cap and non-object messages (a message with the right secret whose payload is not a plain object is dropped, not forged) still count toward the
 50-a-second limit. `surface.chat.read` reports each widget's `forged` count, which stays `"0"` for
 a legitimate view. WebKitGTK opens a TCP connection for `<link rel=preconnect>` whatever the CSP says, so the
-`LinkPreconnect` feature is turned off on the widget's settings (`set_link_preconnect` in
-`webview.rs`). The webkit2gtk bindings in use have no feature API, so `webkit_settings_get_all_features`
+`LinkPreconnect`, `LinkPrefetch` and `SpeculationRulesPrefetch` features are turned off on the
+widget's settings (`set_link_features` in `webview.rs`; `SpeculationRulesPrefetchEnabled` is a
+preference key, not a feature identifier). When the API is missing or an identifier is not listed,
+one constant line per missing switch is logged. The webkit2gtk bindings in use have no feature API, so `webkit_settings_get_all_features`
 and `webkit_settings_set_feature_enabled` are resolved at run time with `dlsym`; on a WebKitGTK older
-than 2.42 they are absent and the gap stays. The widget's web process also runs without WebKitGTK's
+than 2.42 they are absent and those hints stay on. The widget's web process also runs without WebKitGTK's
 bubblewrap sandbox (a follow-up).
 
 **Placement.** A widget is mapped only when its slot was drawn this frame and lies wholly inside
