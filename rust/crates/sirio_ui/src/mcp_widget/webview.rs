@@ -123,23 +123,58 @@ fn accept_ipc(body: &str, secret: &str, inbox: &WidgetInbox) {
         inbox.dropped = inbox.dropped.saturating_add(1);
         return;
     }
-    let message = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            let object = value.as_object()?;
-            if object.len() != 2 || object.get("s")?.as_str()? != secret {
-                return None;
-            }
-            let message = object.get("m")?;
-            message.is_object().then(|| message.to_string())
-        });
+    // Only a missing or wrong secret is forged. A message with the right secret whose `m` is
+    // not a JSON object is the relay's own traffic gone wrong, not an attack: it is dropped, and
+    // still counts toward the rate.
+    let wrapped = serde_json::from_str::<serde_json::Value>(body).ok().and_then(|value| {
+        let object = value.as_object()?;
+        if object.len() != 2 || object.get("s")?.as_str()? != secret {
+            return None;
+        }
+        object.get("m").cloned()
+    });
     let mut inbox = inbox.borrow_mut();
-    match message {
+    match wrapped {
         None => inbox.forged = inbox.forged.saturating_add(1),
+        Some(message) if !message.is_object() => {
+            inbox.dropped = inbox.dropped.saturating_add(1);
+        }
         Some(_) if inbox.messages.len() >= INBOX_CAP => {
             inbox.dropped = inbox.dropped.saturating_add(1);
         }
-        Some(text) => inbox.messages.push_back(text),
+        Some(message) => inbox.messages.push_back(message.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // How it can fail, written first: an array `m` with the right secret is counted forged (and
+    // closes the widget); a string `m` with the right secret is counted forged; a wrong secret
+    // is not counted forged; a dropped `m` does not count toward the rate (it is neither queued
+    // nor counted dropped); an object `m` is not queued.
+    #[test]
+    fn only_a_missing_or_wrong_secret_is_forged_and_a_dropped_message_counts_toward_the_rate() {
+        let inbox: WidgetInbox = Rc::new(RefCell::new(Inbox::default()));
+        let post = |text: &str| accept_ipc(text, "s3cret", &inbox);
+        let state = || {
+            let inbox = inbox.borrow();
+            (inbox.messages.len(), inbox.forged, inbox.dropped)
+        };
+        post(r#"{"s":"s3cret","m":{"method":"ping"}}"#);
+        assert_eq!(state(), (1, 0, 0), "an object is queued");
+        post(r#"{"s":"s3cret","m":[1,2]}"#);
+        assert_eq!(state(), (1, 0, 1), "an array is dropped, not forged");
+        post(r#"{"s":"s3cret","m":"text"}"#);
+        assert_eq!(state(), (1, 0, 2), "a string is dropped, not forged");
+        post(r#"{"s":"s3cret","m":null}"#);
+        assert_eq!(state(), (1, 0, 3), "null is dropped, not forged");
+        post(r#"{"s":"wrong","m":{"method":"ping"}}"#);
+        assert_eq!(state(), (1, 1, 3), "a wrong secret is forged");
+        post(r#"{"m":{"method":"ping"}}"#);
+        post("not json");
+        assert_eq!(state(), (1, 3, 3), "a missing secret and a malformed body are forged");
     }
 }
 

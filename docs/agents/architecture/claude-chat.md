@@ -926,7 +926,7 @@ over a widget are dropped. (`browser.rs` still uses `focus_parent()` for its own
 file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and has
 hyperlink auditing (`<a ping>`) and DNS prefetching turned off. A message the view posts straight
 to the IPC handler, outside its relay (no secret), closes the widget at the first one, with "the
-view posted outside its relay"; forged, oversized and over-cap messages still count toward the
+view posted outside its relay"; forged, oversized, over-cap and non-object messages (a message with the right secret whose payload is not a plain object is dropped, not forged) still count toward the
 50-a-second limit. `surface.chat.read` reports each widget's `forged` count, which stays `"0"` for
 a legitimate view. WebKitGTK opens a TCP connection for `<link rel=preconnect>` whatever the CSP says, so the
 `LinkPreconnect` feature is turned off on the widget's settings (`set_link_preconnect` in

@@ -18,8 +18,12 @@ iframe{border:0;display:block;width:100%;height:100%}
   document.body.appendChild(frame);
   window.addEventListener("message", function (e) {
     if (e.source !== frame.contentWindow) return;
-    if (e.data === null || typeof e.data !== "object") return;
-    ipc.postMessage(JSON.stringify({ s: SECRET, m: e.data }));
+    // Only a plain object goes on: no null, array, string, class instance or other value.
+    const d = e.data;
+    if (d === null || typeof d !== "object" || Array.isArray(d)) return;
+    const proto = Object.getPrototypeOf(d);
+    if (proto !== Object.prototype && proto !== null) return;
+    ipc.postMessage(JSON.stringify({ s: SECRET, m: d }));
   });
   window.__sirioDeliver = function (t) {
     frame.contentWindow.postMessage(JSON.parse(t), VIEW_ORIGIN);
