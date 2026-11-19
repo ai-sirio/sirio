@@ -723,6 +723,10 @@ pub enum McpToolItem {
     /// The call's result, as an MCP `CallToolResult`: `content` is a list of blocks, the CLI's
     /// own `com.anthropic/` meta is gone, and `isError` is present only when it is true.
     Returned { result: serde_json::Value },
+    /// The call's answer was an error or a denial: the CLI's `tool_use_result` is then a string
+    /// (or absent), which cannot be told from a server's plain text without reading CLI text.
+    /// Sirio treats it as a call that did not run, and the answer's text goes nowhere.
+    NotRun,
     /// The turn ended with the call still open.
     Cancelled,
 }

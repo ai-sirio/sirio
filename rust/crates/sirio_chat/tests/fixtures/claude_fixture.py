@@ -1062,6 +1062,19 @@ def script_mcp_flood():
     trace_result(0.05, started)
 
 
+def script_mcp_denied():
+    """A `show` call that did not run: its `tool_use_result` is a string, as for a denial."""
+    started = time.time()
+    message_start("msg_denied_1")
+    trace_assistant("msg_denied_1", tool_use(
+        "toolu_denied_1", "mcp__apps__show", {"text": "secret-input"}))
+    message_end("tool_use", 40)
+    pause()
+    trace_result_line("toolu_denied_1", "Permission to use mcp__apps__show was denied",
+                      is_error=True, totals="Permission to use mcp__apps__show was denied")
+    trace_result(0.05, started)
+
+
 def trace_result(cost, started, interrupted=False):
     TRACE_COST["total"] = round(TRACE_COST["total"] + cost, 6)
     usage = {"claude-haiku-5-5": {
@@ -1505,6 +1518,7 @@ TRACE_SCRIPTS = {
     "subagent_text": script_subagent_text,
     "mcp_widget": script_mcp_widget,
     "mcp_flood": script_mcp_flood,
+    "mcp_denied": script_mcp_denied,
     "mcp_subagent": script_mcp_subagent,
 }
 

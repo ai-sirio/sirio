@@ -37,51 +37,56 @@ use serde_json::Value;
 /// What a call's lookup is waiting for, or has the answer to.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Update {
+    /// The call ran: its result, as the widget gets it.
     Returned(Value),
+    /// The call's answer was an error or a denial, which is not told apart: it did not run.
+    NotRun,
     Cancelled,
 }
 
-/// What a call said while it had no widget yet.
+/// What a call said while its widget could not take it yet. The input stays here until the
+/// call is known to have run: only then do the input and the result go to the view together.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Held {
     pub input: Value,
-    pub result: Option<Value>,
-    pub cancelled: bool,
+    pub outcome: Option<Update>,
 }
 
 /// One thing for a widget, in the order the protocol wants it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Delivery {
-    Input(Value),
-    Result(Value),
+    /// The input and the result of a call that ran.
+    Ran { input: Value, result: Value },
+    /// The call did not run: the widget is closed and never gets the input.
+    NotRun,
+    /// The call was interrupted: the widget is told, with no input, then closed.
     Cancelled,
 }
 
 impl Held {
     pub(super) fn new(input: Value) -> Self {
-        Self { input, result: None, cancelled: false }
+        Self { input, outcome: None }
     }
 
-    /// The first result is the call's; later ones are ignored, as the bridge does.
+    /// The first outcome is the call's; later ones are ignored, as the bridge does.
     pub(super) fn take(&mut self, update: Update) {
-        match update {
-            Update::Returned(result) => {
-                if self.result.is_none() {
-                    self.result = Some(result);
-                }
-            }
-            Update::Cancelled => self.cancelled = true,
+        if self.outcome.is_none() {
+            self.outcome = Some(update);
         }
     }
 
-    /// Everything held, input first, then the result, then a cancellation.
-    pub(super) fn deliveries(self) -> Vec<Delivery> {
-        let mut out = vec![Delivery::Input(self.input)];
-        out.extend(self.result.map(Delivery::Result));
-        if self.cancelled {
-            out.push(Delivery::Cancelled);
-        }
-        out
+    /// Whether the call has ended, one way or another.
+    pub(super) fn settled(&self) -> bool {
+        self.outcome.is_some()
+    }
+
+    /// What the widget gets, once the call has ended. Nothing while it is still open.
+    pub(super) fn delivery(self) -> Option<Delivery> {
+        Some(match self.outcome? {
+            Update::Returned(result) => Delivery::Ran { input: self.input, result },
+            Update::NotRun => Delivery::NotRun,
+            Update::Cancelled => Delivery::Cancelled,
+        })
     }
 }
 
@@ -402,21 +407,8 @@ mod tests {
         assert_eq!(found.len(), 1);
         let (_, held) = found[0];
         assert_eq!(held.input, json!({ "q": "a" }));
-        assert_eq!(held.result, Some(json!({ "content": [] })));
-        assert!(held.cancelled);
+        assert_eq!(held.outcome, Some(Update::Returned(json!({ "content": [] }))));
         assert!(!machine.holds("a"));
-    }
-
-    #[test]
-    fn what_a_call_held_reaches_the_widget_input_first() {
-        let mut held = Held::new(json!(1));
-        held.take(Update::Cancelled);
-        held.take(Update::Returned(json!(2)));
-        held.take(Update::Returned(json!(3)));
-        assert_eq!(
-            held.deliveries(),
-            vec![Delivery::Input(json!(1)), Delivery::Result(json!(2)), Delivery::Cancelled]
-        );
     }
 
     #[test]

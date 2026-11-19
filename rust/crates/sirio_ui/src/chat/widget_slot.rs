@@ -45,6 +45,9 @@ const LOADING_HEIGHT: u32 = 160;
 const MIN_HEIGHT: u32 = 80;
 const MAX_HEIGHT: u32 = 800;
 
+/// Why a slot closed when its call's answer was an error or a denial.
+const CALL_DID_NOT_RUN: &str = "the call did not run";
+const CALL_CANCELLED: &str = "the call was cancelled";
 const NO_SESSION: &str = "The widget could not be loaded: the session is gone";
 /// Why a slot closed when its CLI went away, and when it was replaced by a new process.
 pub(super) const SESSION_ENDED: &str = "the session ended";
@@ -333,6 +336,7 @@ impl Chat {
                 self.run_lookup_steps(steps, cx);
             }
             McpToolItem::Returned { result } => self.tell_call(&id, Update::Returned(result), cx),
+            McpToolItem::NotRun => self.tell_call(&id, Update::NotRun, cx),
             McpToolItem::Cancelled => self.tell_call(&id, Update::Cancelled, cx),
         }
     }
@@ -381,19 +385,49 @@ impl Chat {
         let Some(slot) = self.widgets.slots.iter_mut().find(|slot| slot.id == id) else {
             return;
         };
-        match slot.widget.clone() {
-            Some(widget) if slot.view().phase.is_live() => {
-                widget.update(cx, |widget, cx| match update {
-                    Update::Returned(result) => widget.tool_result(result, cx),
-                    Update::Cancelled => widget.tool_cancelled(cx),
+        // A slot whose call already ended has nothing left to hold, and a second answer is
+        // ignored, as the bridge does.
+        if let Some(held) = slot.held.as_mut() {
+            held.take(update);
+        }
+        self.flush_held(id, cx);
+    }
+
+    /// Gives a built widget what its call ended with. The input goes to the view only here, and
+    /// only for a call that ran, together with the result: until then it stays in the slot.
+    /// A call that did not run closes the widget, which never gets the input; an interrupted
+    /// call tells it, with no input, and closes it. A slot with no widget yet keeps the
+    /// outcome until `resource_read` builds one and calls this.
+    fn flush_held(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.widgets.slots.iter().position(|slot| slot.id == id) else {
+            return;
+        };
+        let slot = &mut self.widgets.slots[index];
+        let Some(widget) = slot.widget.clone() else { return };
+        if !slot.held.as_ref().is_some_and(Held::settled) {
+            return;
+        }
+        let delivery = slot.held.take().and_then(Held::delivery);
+        let Some(delivery) = delivery else { return };
+        if !slot.view().phase.is_live() {
+            return;
+        }
+        match delivery {
+            Delivery::Ran { input, result } => {
+                widget.update(cx, |widget, cx| {
+                    widget.tool_input(input, cx);
+                    widget.tool_result(result, cx);
                 });
                 self.refresh_snapshot(id, cx);
             }
-            Some(_) => {}
-            None => {
-                if let Some(held) = slot.held.as_mut() {
-                    held.take(update);
-                }
+            Delivery::NotRun => {
+                self.close_slot(index, CALL_DID_NOT_RUN.to_owned(), cx);
+                self.slot_changed(id, cx);
+            }
+            Delivery::Cancelled => {
+                widget.update(cx, |widget, cx| widget.tool_cancelled(cx));
+                self.close_slot(index, CALL_CANCELLED.to_owned(), cx);
+                self.slot_changed(id, cx);
             }
         }
     }
@@ -504,18 +538,11 @@ impl Chat {
         slot.phase = SlotPhase::Loading;
         slot.widget = Some(widget.clone());
         slot.subscriptions = subscriptions;
-        let held = slot.held.take();
-        // Input first, then the result, then a cancellation: the bridge holds them until the
-        // view has initialized.
-        for delivery in held.into_iter().flat_map(Held::deliveries) {
-            widget.update(cx, |widget, cx| match delivery {
-                Delivery::Input(input) => widget.tool_input(input, cx),
-                Delivery::Result(result) => widget.tool_result(result, cx),
-                Delivery::Cancelled => widget.tool_cancelled(cx),
-            });
-        }
         self.refresh_snapshot(id, cx);
         self.cap_live_widgets(cx);
+        // The call may have ended while the page was being read; the input still waits for
+        // that outcome, and goes only if the call ran.
+        self.flush_held(id, cx);
         self.slot_changed(id, cx);
     }
 

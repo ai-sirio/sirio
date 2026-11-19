@@ -385,14 +385,17 @@ impl Fold {
                         .position(|id| *id == result.tool_use_id)
                     {
                         self.mcp_announced.remove(at);
-                        let value = structured
-                            .cloned()
-                            .unwrap_or_else(|| serde_json::Value::String(result.text.clone()));
+                        // Only a structured, non-string `tool_use_result` shows the call ran:
+                        // an error or a denial arrives as a string.
+                        let item = match structured.filter(|value| !value.is_string()) {
+                            Some(value) => McpToolItem::Returned {
+                                result: sirio_claude::call_tool_result(value, result.is_error),
+                            },
+                            None => McpToolItem::NotRun,
+                        };
                         self.notices.push(SessionNotice::McpTool(McpToolUpdate {
                             id: result.tool_use_id.clone(),
-                            item: McpToolItem::Returned {
-                                result: sirio_claude::call_tool_result(&value, result.is_error),
-                            },
+                            item,
                         }));
                         returned = true;
                     }
@@ -2040,24 +2043,49 @@ mod tests {
         assert!(mcp_updates(&mut shut).is_empty(), "the gate is shut by default");
     }
 
+    // How it can fail, written first: a call whose answer is a string (an error or a denial)
+    // is reported as having run, so the widget gets the call's input; a call with no
+    // `tool_use_result` is reported as having run; a structured result is reported as not run.
     #[test]
-    fn an_errored_mcp_result_says_so_without_a_structured_result() {
-        use sirio_chat_vocab::McpToolItem::Returned;
+    fn an_mcp_result_is_run_only_when_its_tool_use_result_is_not_a_string() {
+        use sirio_chat_vocab::McpToolItem::{NotRun, Returned};
+        let with_result = |id: &str, structured: serde_json::Value| {
+            parse(json!({
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "tool_use_id": id,
+                                         "is_error": false, "content": "x"}]},
+                "tool_use_result": structured,
+            }))
+        };
         let mut fold = Fold::new();
         fold.set_mcp_apps(true);
-        fold.apply(mcp_call_line("toolu_a", "mcp__apps__show"));
+        for id in ["toolu_a", "toolu_b", "toolu_c", "toolu_d"] {
+            fold.apply(mcp_call_line(id, "mcp__apps__show"));
+        }
+        // An error and a denial arrive as a string, or as no structured result at all.
         fold.apply(mcp_result_line("toolu_a", true, "the server said no"));
+        fold.apply(with_result("toolu_b", json!("denied")));
+        fold.apply(with_result("toolu_c", json!({"structuredContent": {"n": 1}})));
+        fold.apply(mcp_result_line("toolu_d", false, "plain"));
         // A result nobody announced is not announced.
         fold.apply(mcp_result_line("toolu_unknown", false, "late"));
-        let updates = mcp_updates(&mut fold);
-        let [_, last] = updates.as_slice() else {
-            panic!("expected one call and one result, got {} updates", updates.len());
-        };
-        let Returned { result } = &last.item else {
-            panic!("the result follows the call");
-        };
-        assert_eq!(result["isError"], true);
-        assert_eq!(result["content"][0]["text"], "the server said no");
+        let outcomes: Vec<(String, bool)> = mcp_updates(&mut fold)
+            .into_iter()
+            .filter_map(|update| match update.item {
+                NotRun => Some((update.id, false)),
+                Returned { .. } => Some((update.id, true)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("toolu_a".to_string(), false),
+                ("toolu_b".to_string(), false),
+                ("toolu_c".to_string(), true),
+                ("toolu_d".to_string(), false),
+            ]
+        );
     }
 
     #[test]

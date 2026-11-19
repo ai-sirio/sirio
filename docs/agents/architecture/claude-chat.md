@@ -847,6 +847,16 @@ normalized form (`ui_tool_for`, `app_call_name`). The page is read with `mcp_rea
 is not UTF-8 or no item for the URI gives a one-line error on the row and no webview. A widget's
 own call is `mcp_call {tool, arguments, result_not_for_model: true}`.
 
+**What the widget receives.** The webview is built and the page read when the call is announced,
+but neither carries the call's arguments, and `ui/initialize`'s `hostContext` carries none. The
+view gets `tool-input` only once the call is known to have run: the slot keeps the input, and the
+input and the result go to the view together when a non-string `tool_use_result` arrives (the
+fold reports it as `McpToolItem::Returned`). A string `tool_use_result`, or none, is an error or a
+denial and cannot be told apart without reading CLI text: the fold reports `McpToolItem::NotRun`,
+the widget is closed with "the call did not run", and the view never gets the input. An
+interrupted call sends `tool-cancelled` with no input and closes the widget. This keeps the
+arguments of a call the user denied (or a deny rule blocked) from the widget's declared domains.
+
 **Isolation.** The widget's HTML is never the top page. Each widget has its own webview with two
 custom schemes, `sirio-widget-relay://<key>/` and `sirio-widget-view://<key>/`: the relay page is
 served once (the one-shot state is in that handler's closure) and holds the view in an iframe

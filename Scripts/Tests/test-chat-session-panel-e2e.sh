@@ -6069,12 +6069,19 @@ print(top - (vtop - (bottom - top) / 2))')
   widget_wait "beside a terminal the chat is on screen and its widgets are still ready" 15 \
     'len(w) == 2 and all(r["hidden"] == "0" and r["phase"] == "ready" for r in w)'
   widget_invariant "8 terminal beside the chat"
-  # 9. the CLI dies
+  # 9. a call that did not run: its tool_use_result is a string, as for a denial. The widget is closed
+  # with "the call did not run" and never gets the call's input (or a result), and the logger stays empty.
+  send_prompt mcp_denied
+  WIDGET_COUNT=3
+  widget_wait "the denied call's widget is closed with 'the call did not run' and got neither input nor result" 60 \
+    'len(w) == 3 and any(r["toolUseId"] == "toolu_denied_1" and r["phase"] == "closed" and r["error"] == "the call did not run" and r["inputDelivered"] == "0" and r["resultDelivered"] == "0" and r["mapped"] == "0" for r in w)'
+  widget_invariant "9 a denied call's widget"
+  # 10. the CLI dies
   send_prompt die
   widget_wait "every entry is closed and unmapped after the CLI died" 40 \
-    'len(w) == 2 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
-  widget_invariant "9 the CLI died"
-  MW remembered "$DISPLAY_TARGET" 2 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
+    'len(w) == 3 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
+  widget_invariant "10 the CLI died"
+  MW remembered "$DISPLAY_TARGET" 3 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
   # after the steps
   [ ! -s "$WIDGET_LOGGER_LOG" ] || fail "the request logger saw $(wc -l <"$WIDGET_LOGGER_LOG") requests from the widget"
   echo "OK: the request logger is empty"
@@ -6083,11 +6090,11 @@ import json, sys
 lines = [json.loads(line) for line in sys.stdin.read().splitlines()]
 reads = [l for l in lines if l.get("subtype") == "mcp_read_resource"]
 calls = [l for l in lines if l.get("subtype") == "mcp_call"]
-assert len(reads) == 2 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
+assert len(reads) == 3 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
 assert calls, "no mcp_call"
 assert all(l.get("tool") == "mcp__apps__act" and l.get("check_permissions") is True and l.get("result_not_for_model") is True for l in calls), "an mcp_call is not a gated act"
 assert not any("mcp_call_ask" in l for l in lines), "the fixture logged an mcp_call_ask"
-print(f"OK: the CLI heard 2 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
+print(f"OK: the CLI heard 3 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
     || fail "the control log is not what the widget run should leave"
   grep -qx 'mcp-apps-host 1' "$RUN_DIR/stub-calls.log" || fail "the CLI was not started with CLAUDE_CODE_MCP_APPS_HOST=1"
   echo "OK: the CLI was started with CLAUDE_CODE_MCP_APPS_HOST=1"
