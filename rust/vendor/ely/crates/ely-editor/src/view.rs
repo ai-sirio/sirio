@@ -589,8 +589,13 @@ impl Render for CodeEditor {
                     return;
                 }
                 // With no line wider than the column there is nothing to scroll sideways, so a
-                // horizontal wheel (Shift and the wheel) scrolls the rows, as upstream's list does.
+                // purely horizontal wheel (Shift and the wheel: no vertical delta) scrolls the rows,
+                // as gpui does for a list. With a vertical delta the list under `on_axis` already
+                // took it, and the horizontal drift of a trackpad swipe must not be added.
                 if editor.scroll_x_max <= Pixels::ZERO {
+                    if delta.y != Pixels::ZERO {
+                        return;
+                    }
                     let state = editor.scroll.0.borrow();
                     let handle = &state.base_handle;
                     let (at, reach) = (handle.offset(), handle.max_offset().y);

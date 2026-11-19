@@ -623,9 +623,13 @@ crate uses these crates before Task 8.
   multi-line selection; `scroll_sideways`, `horizontal_bar` (selector `code-editor-hbar`, thumb follows the
   pointer from the press through `bar_press`), the list in `on_axis` and the body's horizontal wheel;
   `offset_over_code` tests the gutter against `code_left` (this replaces Task 5's pre-#659
-  `metrics.left - metrics.advance`). Deviation from the old crate: when no line is wider than the column (`scroll_x_max` is zero) a horizontal
-  wheel (Shift and the wheel) scrolls the rows, by the wheel line the list uses (`metrics.wheel`), because
-  upstream's `ely-documents` test `document::tests::scroll::source_margins_scroll` requires it. `on_axis` is
+  `metrics.left - metrics.advance`). Deviation from the old crate: when no line is wider than the column (`scroll_x_max` is zero) a purely
+  horizontal wheel (Shift and the wheel, no vertical delta) scrolls the rows, as gpui does for a list; an event
+  with a vertical delta is left to the list, so a trackpad swipe's horizontal drift is not added. Upstream's
+  `ely-documents` test `document::tests::scroll::source_margins_scroll` requires the fallback. The wheel is
+  read in `metrics.wheel` units, the list's own text style, where the old crate used `window.line_height()`
+  at event time: the two differ (78 px against 57 px for three lines in that test), and the sideways branch
+  now steps by the same line the rows do. `on_axis` is
   `ely_core::layout::on_axis` (the editor's own `layout`
   module hides the crate-level name).
 - `crates/ely-editor/src/line.rs`: brackets by search, the needle looked for on each drawn line, washes and diagnostics by
@@ -637,6 +641,8 @@ crate uses these crates before Task 8.
 - `crates/ely-editor/src/moves.rs`: motions skip the fold scan while nothing is folded; `folds()` from the structure;
   `primary_row` answers the caret line directly while rows are lines (plus the typewriter pad).
 - `crates/ely-editor/src/ime.rs`: `measured` is `pub(super)`; the rows are asked by `Rows::row_of`.
+- `crates/ely-editor/src/lib.rs`: `mod sideways;`.
+- `crates/ely-editor/src/keys.rs`: the Fold key reads the cached `CodeEditor::folds()`.
 - `crates/ely-editor/src/sideways.rs` (new): `follow`.
 
 Outcomes:
@@ -651,13 +657,14 @@ Outcomes:
   `syntax::tests::a_one_character_edit_reads_only_its_own_line`.
 - Row 146: re-applied. Proof: `syntax::tests::one_pass_folds_match_the_pass_they_replace`.
 - Row 147: re-applied. Proof: `syntax::tests::one_line_answers_agree_with_the_folds_of_the_whole_text`.
-- Row 148: re-applied. Proof: `syntax::tests::an_edit_inside_a_line_does_not_read_the_file_again`.
+- Row 148: re-applied. Proof: unproven for the folds caching (`an_edit_inside_a_line_does_not_read_the_file_again` exercises row 156's nesting index and cannot fail if `CodeEditor::folds` recomputed every call); the bracket half is covered by row 145's tests.
 - Row 149: re-applied. Proof: unproven beyond the closure build; the old crate had no test of the needle on a
   line, and the window tests that draw an editor pass with either form. No Sirio E2E asserts the wash
   of the selected word's other appearances.
 - Row 150: re-applied. Proof: `layout::tests::rows_are_lines_only_when_nothing_adds_or_hides_a_row`
-  (the shortcut itself). The typewriter pad added to `Rows` is new and unproven: upstream has no typewriter
-  test, and none was written after the code.
+  (the shortcut itself). The typewriter pad added to `Rows` is new and unproven. `ely-documents` `look.rs`
+  `typewriter_keeps_the_source_caret_mid_view` drives `Rows::Lines { pad > 0 }` but is not a proof: it
+  asserts a relative +10 `top_line`, which a wrong pad shifts equally. No test was written after the code.
 - Row 151: re-applied. Proof: unproven (no test reads `primary_row` or counts fold scans); the window tests
   that move the caret (`tests::cursors_added_above_keep_climbing`) pass through it.
 - Row 152: re-applied as a removal, not dropped. Upstream calls `around` once, from `sticky`, and that
@@ -670,9 +677,10 @@ Outcomes:
   `anchors::tests::marks_look_their_lists_up_in_the_owners_order_and_follow_edits`.
 - Row 156: re-applied. Proofs: `syntax::tests::the_nesting_index_agrees_with_climbing_on_every_line`,
   `syntax::tests::the_nesting_index_follows_every_kind_of_edit`.
-- Rows 157, 158, 159, 160, 161, 162, 163, 164, 165, 166: re-applied. Proof (ran, for the wheel fallback of row 161): `ely-documents` `document::tests::scroll::source_margins_scroll`. Proof: runs at Task 8,
+- Rows 157, 158, 159, 160, 161, 162, 163, 164, 165, 166: re-applied. Proof: runs at Task 8,
   `Scripts/Tests/test-ely-editor-probe.sh` step 7 (the wheel right and Shift with the wheel move line 12
   while the gutter and the rows stay, a drag of the bar's thumb moves it, End and Home follow the caret).
   Unproven: the `code-editor-hbar` selector (no script reads it), the sticky header's shift and the
-  deleted-hunk and ghost rows' clip.
+  deleted-hunk and ghost rows' clip. The wheel fallback added to row 161 (a pure horizontal wheel scrolls the
+  rows while nothing is wide) has its proof (ran): `ely-documents` `document::tests::scroll::source_margins_scroll`.
 - Row 167: re-applied (`measured` is `pub(super)`). Proof: the closure build (`view.rs` calls it).
