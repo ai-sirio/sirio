@@ -305,9 +305,9 @@ The loop runs at 30 frames a second at most while a span runs (`Turn::is_moving`
 streaming, a tool running or a subagent working, not one waiting for the user), ticks once a second
 while the turn only waits, which keeps its clock and its "now" line moving with the marks held
 still, and asks for nothing when nothing paints it or when the turn has ended and the CLI does not
-show it as Live or Waiting (the paragraph below). Only the card follows that headline: the Trace
-tab's loop still stops once its turn has ended, whatever the CLI says. A folded card's title ticks once a second while it
-is painted and reads Live or Waiting.
+show it as Live or Waiting (the paragraph on the CLI's own session state, further down). Only the
+card follows that headline: the Trace tab's loop still stops once its turn has ended, whatever the
+CLI says. A folded card's title ticks once a second while it is painted and reads Live or Waiting.
 
 **A subagent's text is switched on by the `initialize` key, never by the flag.** This is the
 spec's A10 deviation "The switch is the `initialize` key". The CLI forwards a subagent's text and
@@ -351,10 +351,10 @@ one message share a message id. The final report arrives three times: as the las
 inside the `Agent` `tool_result` (in a hand-back frame) and, for a background agent, as
 `task_notification.summary`. The card draws the forwarded text once and never the `tool_result`'s
 (a failed card with no forwarded text is the exception: its error is all it has to say, so
-that is drawn). A background
-agent's end notice, with its summary at the foot of the transcript, stays as it is. A subagent's
-own subagent has its `Agent` call as a nested row in its parent's card, and its lines go into
-the outermost card in arrival order, each marked with its agent's name: no card nests in a card.
+that is drawn). A background agent's end notice, with its summary at the foot of the
+transcript, stays as it is. A subagent's own subagent has its `Agent` call as a nested row in its
+parent's card, and its lines go into the outermost card in arrival order, each marked with its
+agent's name: no card nests in a card.
 A background agent forwards its text and thinking on every version, with or without the key,
 after the turn's `result` and among `task_*` lines. Its card fills in place and stays running
 until its task ends (the first terminal `task_updated` or `task_notification`), so the link from

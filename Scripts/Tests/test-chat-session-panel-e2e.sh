@@ -799,10 +799,16 @@ def evaluate(expr, surface, p, c):
         return next((i for i, r in enumerate(c["transcript"]) if r.get("kind") == "tool" and r.get("id") == row_id), None)
 
     def drawn_index(row_id):
-        # The index the transcript draws a row at: consecutive tool rows are one box, drawn at
-        # the run's last row, so that is where a reveal of any of them lands.
+        # The index the transcript draws a row at: consecutive plain tool rows are one box,
+        # drawn at the run's last row, so that is where a reveal of any of them lands. A card
+        # (a row with `items`) is not a plain tool row: it is its own box and ends a run, as
+        # the app's `tool_call_run_bounds_inclusive` counts only `Entry::ToolCall`.
+        def plain(i):
+            row = c["transcript"][i]
+            return row.get("kind") == "tool" and "items" not in row
+
         at = row_index(row_id)
-        while at is not None and at + 1 < len(c["transcript"]) and c["transcript"][at + 1].get("kind") == "tool":
+        while at is not None and plain(at) and at + 1 < len(c["transcript"]) and plain(at + 1):
             at += 1
         return at
 
@@ -2376,6 +2382,8 @@ bg_agent_running() { # agent
 # under SIRIO_FIXTURE_FLOOR=1 (2.1.257) no line or ask names its agent.
 SUBAGENT_ODD='"First I read the file " + chr(0x27E8) + "U+202E" + chr(0x27E9) + "txt."'
 SUBAGENT_CARD='card("toolu_agent_text")'
+LANES_JSON='json.dumps({k: {"said": v.get("said"), "label": v.get("label"), "tag": v.get("tag")}
+  for k, v in lanes_of().items()})'
 subagent_text_run() { # name mode (forward|floor)
   local mode=$2
   trace_chat "$1"
@@ -2390,6 +2398,9 @@ subagent_text_run() { # name mode (forward|floor)
     "(lambda n: n[:4] == [('prompt', 'Read the notes and report.'), ('thought', 'Let me look first.', False), ('text', 'I will look. ' + $SUBAGENT_ODD), ('tool', 'toolu_sub_read', 'Completed')] and n[4][:2] == ('tool', 'toolu_sub_bash') and len(n) == 5)(norm(card_items('toolu_agent_text')))"
   check_panel "the lane says the sentence, and no hidden character reaches an item or the lane" \
     "lane('toolu_agent_text')['said'] == $SUBAGENT_ODD and chr(0x202E) not in json.dumps(card_items('toolu_agent_text'), ensure_ascii=False) and chr(0x202E) not in json.dumps(lane('toolu_agent_text'), ensure_ascii=False)"
+  # The lanes as read at the ask, where the check above verified `said`; kept for the artifact.
+  local lanes_ask
+  lanes_ask=$(find_panel "the lanes at the ask" "$LANES_JSON" 10)
   answer_permission allow_once
   # The Trace reads Live until the background agent ends, so the turn's end is the chat's status.
   wait_panel "the turn is over and the subagent's lane is done" 'c["status"] == "completed" and len(pending()) == 0 and lane("toolu_agent_text")["tag"] == "done"' 40
@@ -2407,7 +2418,7 @@ subagent_text_run() { # name mode (forward|floor)
     'T("toolu_agent_text") is not None and any(s["kind"] == "llm" and s["parent"] == "toolu_agent_text" for s in tab()["spans"]) and not any(s["id"].startswith("toolu_agent_text") and s["id"].endswith("/final") for s in tab()["spans"])'
   # A new turn adopts a new trace: the lanes of this one are kept for the artifact first.
   local lanes
-  lanes=$(find_panel "the first turn's lanes" 'json.dumps({k: {"said": v.get("said"), "label": v.get("label"), "tag": v.get("tag")} for k, v in lanes_of().items()})' 10)
+  lanes=$(find_panel "the first turn's lanes" "$LANES_JSON" 10)
   echo "step: the background agent has not written yet; a second turn runs first"
   send_prompt second
   wait_panel "the second turn is answered and complete" '"A second turn." in json.dumps(c["transcript"]) and c["status"] == "completed"' 30
@@ -2421,7 +2432,10 @@ subagent_text_run() { # name mode (forward|floor)
   capture "$1"
   local artifact="$OUT_DIR/$(echo "$1" | tr _ -)".json
   find_panel "the final items" \
-    'json.dumps({"mode": "'"$mode"'", "toolu_agent_text": card_items("toolu_agent_text"), "toolu_agent_bg": card_items("toolu_agent_bg"), "lanes_first_turn": json.loads(r"""'"$lanes"'""")}, indent=2, ensure_ascii=False)' 10 >"$artifact"
+    'json.dumps({"mode": "'"$mode"'", "toolu_agent_text": card_items("toolu_agent_text"),
+      "toolu_agent_bg": card_items("toolu_agent_bg"),
+      "lanes_at_ask": json.loads(r"""'"$lanes_ask"'"""),
+      "lanes_first_turn": json.loads(r"""'"$lanes"'""")}, indent=2)' 10 >"$artifact"
   [ -s "$artifact" ] || fail "no $artifact was written"
   echo "OK: $artifact holds the final items of both cards and the first turn's lanes"
   stop_app

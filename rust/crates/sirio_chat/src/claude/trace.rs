@@ -18,8 +18,9 @@
 //!   arrives as one `assistant` line per content block, all with the
 //!   message's `id`. A call runs from the agent's previous edge to the last
 //!   line of its message: it stays open while the lines come, and ends at
-//!   the agent's next message, its tool result, its return or the turn's
-//!   end. The latest sentence of each text block names the agent's lane.
+//!   the agent's next message, its `tool_use` line (a message that asks for
+//!   a tool is complete, so its call ends there), its tool result, its
+//!   return or the turn's end. The latest sentence of each text block names the agent's lane.
 //!   A last text-only message is the report itself, so the report is not
 //!   timed again; on a CLI that forwards nothing the report sends no line
 //!   at all, and the gap before the `Agent` result is that call;
@@ -84,7 +85,9 @@ struct Agent {
     /// block, and a tool call. A text-only latest message is the report.
     text_in_message: bool,
     tool_in_message: bool,
-    /// The id of the message those two flags describe.
+    /// The id of the latest message that opened a call. The two flags above
+    /// describe it until the agent's next tool result clears them; the id
+    /// stays, so a late line of that message does not reopen its call.
     latest_call: Option<String>,
 }
 
@@ -528,7 +531,8 @@ impl TraceFold {
 
     /// The model call a subagent's `assistant` line belongs to. It starts at
     /// the agent's previous edge and stays open: the message's next line
-    /// extends it, anything else ends it ([`Self::end_open_call`]).
+    /// extends it, anything else ends it ([`Self::end_open_call`]). A line
+    /// with a `tool_use` block ends it too: the message is complete there.
     fn subagent_call(
         &mut self,
         agent_id: &str,
@@ -2348,8 +2352,8 @@ mod tests {
     // first line (the call ends before the tool_use line); the call starts
     // at a later line instead of the agent's edge; the call ends twice, or
     // at the tool_result instead of its message's last line; the call
-    // ends before the tool_use line, so the thinking and text lines after
-    // are lost; the usage is lost or emitted early.
+    // ends before the tool_use line, so the thinking and text lines before
+    // it are lost; the usage is lost or emitted early.
     #[test]
     fn a_subagents_call_ends_at_its_messages_last_line() {
         let clock = Clock::new();

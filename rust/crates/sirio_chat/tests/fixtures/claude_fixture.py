@@ -145,9 +145,10 @@ HELD_HOOKS_LOCK = threading.Lock()
 HOOKS_DRAINING = False
 # The connector switch and the reloads, in the main-loop modes only; the other
 # three loops refuse `mcp_toggle`, `reload_plugins` and `reload_skills` as
-# unsupported subtypes. `--fixture-floor` (the flag `background_tasks` reads
-# too) is the 2.1.257 floor: no `capabilities` in the handshake, no `held` and
-# no `refuse_if_busy` handling. `--fixture-reload=<kind>` picks the
+# unsupported subtypes. `--fixture-floor` (the flag `background_tasks` and the
+# trace mode `subagent_text` read too) is the 2.1.257 floor: no `capabilities` in
+# the handshake, no `held` and no `refuse_if_busy` handling; in `subagent_text`
+# no line and no ask carries `agent_id`. `--fixture-reload=<kind>` picks the
 # `reload_plugins` answer (apply, held, busy, busy-text, refused, errors);
 # `--fixture-toggle=<kind>` makes every `mcp_toggle` fail (`refused` answers an
 # unsupported subtype, `missing` a server not found), except `unread`: the toggle
@@ -1815,7 +1816,8 @@ def state_main():
 # once, with no lines.
 # `--fixture-floor` is the floor (2.1.257): no `run_id` anywhere,
 # `get_task_output` refused, and on a stop the rows drain before the `task_*`
-# lines.
+# lines. In the trace mode `subagent_text` it means no line and no ask carries
+# `agent_id`.
 # `--fixture-request-log=<path>` appends every control request received, one
 # JSON line each, as received.
 # ---------------------------------------------------------------------------
