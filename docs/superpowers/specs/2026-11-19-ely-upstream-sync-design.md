@@ -219,8 +219,9 @@ rust/vendor/
   `examples/` are not taken. The vendor check of §5.6 compares that same set.
 - **Tests.**
   - `Scripts/ci.sh` runs `cargo nextest run --workspace` with no crate features. Upstream gates
-    most test modules on its crates' `test-support` feature, so CI does not run those tests, as
-    it does not run the old crate's feature-gated tests today.
+    its window suites on its crates' `test-support` feature, so CI does not run those. Its plain
+    `#[cfg(test)]` unit tests (about 190 modules across the eight crates) do run in CI; see §10
+    for this correction and what follows from it.
   - No Sirio manifest may enable an Ely crate's `test-support`. It turns on `gpui/leak-detection`,
     which would panic every Sirio gpui test that leaks a handle.
   - A Sirio-local test inside a vendored crate stays in a plain `#[cfg(test)]` module, as the
@@ -462,14 +463,15 @@ scenario red before and after the 2026-11-17 sync.
    - **CI wall time** of the PR's runs against the baseline: `pr.yml` 30 min 10 s (run
      44466550074), `macos-check.yml` 23 min 51 s (44450730490), `windows-check.yml` 8 min 52 s
      (44450730389).
-     - CI does not run the upstream suites (§5.1), so `pr.yml`'s growth is compile time.
+     - CI does not run the upstream window suites (§5.1), but it does run upstream's plain unit
+       tests (§10), so `pr.yml`'s growth is compile time plus their run time.
      - It is estimated before the PR: on this machine, time `cargo nextest run --workspace --no-run`
-       at the baseline and after the switch, and scale the delta by the baseline's ratio of CI time
-       to local time.
+       at the baseline and after the switch, add the featureless run time of the eight crates'
+       tests, and scale the total by the baseline's ratio of CI time to local time.
      - The real figure comes from the PR's first run.
-   - **If the estimate exceeds the bound** (§1.2): CI runs no upstream suites, so the first lever
-     of §1.2 has nothing to cut. The levers are the cuts of §5.3. Enzo gets the numbers before the
-     PR.
+   - **If the estimate exceeds the bound** (§1.2): the first lever of §1.2 is keeping upstream's
+     plain unit tests out of CI (gating them on `test-support`, §10); the next are the cuts of
+     §5.3. Enzo gets the numbers before the PR.
    - **Frame cost.** The editor and chat frame probes that exist today, compared with the baseline.
 6. **Other platforms.**
    - `macos-check.yml` builds and links the app.
@@ -527,3 +529,37 @@ above.
 - **Only `Cargo.toml`, `src/`, `icons/`, `assets/` and `LICENSE` are taken from each crate,** not
   upstream's `AGENTS.md` or `examples/` (§5.1).
 - **Commit type `refactor:`.** No version step; the PR merges after the 0.46.0 tag (Enzo's call, §1.2).
+
+## 10. Deviations found while building
+
+Recorded as they were found; each was ruled on in the build's ledger and, where it says so, agreed
+with Enzo through t2s.
+
+- **Upstream's unit tests run in CI (corrects §5.1 and §6.5).** The design assumed upstream gates
+  its tests on `test-support`. It gates its window suites, but about 190 plain `#[cfg(test)]` unit
+  test modules across the eight crates (core 107, documents 33, charts 19, editor 19, chat 9, git
+  7, collab 4, agent 1) compile and run in `Scripts/ci.sh`'s featureless `nextest --workspace`.
+  - They stay in CI: they are cheap and they catch breakage in Sirio's ports (t2s, 2026-11-19).
+    Their run time is part of the `pr.yml` estimate of §6.5.
+  - A few of those modules call `init_for_tests`, which upstream defines only under
+    `test-support`, so the featureless build did not compile from the import on. They are gated
+    like upstream's own `mod tests` (`LOCAL-CHANGES.md`, "Featureless test build"). From that fix
+    on, every task also checks `cargo nextest run --workspace --no-run` with no features.
+  - Three of them assert wall-clock budgets (`ely-documents` `tree/html_block.rs`,
+    `tree/sources.rs`, `tree/emoji.rs`) and fail under load. Sirio keeps wall-clock tests out of
+    its gate, so those three functions compile only with `test-support`: a `#[cfg]` on the
+    function, not an `#[ignore]`, so the two ignores of §9 stay the only ones and the three still
+    run in the closure check (t2s, 2026-11-19).
+- **The closure's upstream suites run on two test threads.** `ely-documents`'
+  `references_and_long_runs_read_as_a_browser_reads_them` has a 2 s budget that fails when the
+  whole closure runs in parallel in a debug build; at two threads all pass.
+- **Row 17 (dialog Enter) is absorbed, not re-applied.** Upstream confirms on the key-down `Enter`
+  action, so the release of a press made before the dialog opened cannot confirm it; the new test
+  of Task 3 was green on the verbatim code. Enter now confirms on press rather than on release, a
+  difference listed for Enzo (§6.4).
+- **`PromptInput::ready` never existed.** Send eligibility is the `ready` argument of
+  `PromptInput::custom`; the checklist named a method.
+- **Rebased before the switch.** The branch moved onto `main` at `993fca9f` (0.46.1 cycle, with
+  #812 and A11 #817) before the facade switch, and the baseline of §6 was re-taken on the rebased
+  commit before the switch, so the before/after comparison measures this step alone. The workspace
+  version is `main`'s; this step moves nothing.
