@@ -238,9 +238,14 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
               str(b.get("storageRead")))
         check(run["homeFilesWithProbe"] == [], "run: nothing reached disk under HOME",
               str(run["homeFilesWithProbe"]))
-        check(cb.get("storageRead") == "A", "control: B reads the storage A wrote",
-              str(cb.get("storageRead")))
-        check(len(control["homeFilesWithProbe"]) >= 1, "control: storage reached disk under HOME")
+        # On WebKitGTK 2.54.1 the localStorage of these custom-scheme origins is neither
+        # shared between webviews nor written to disk, even with incognito off (observed
+        # 2026-11-19). Storage isolation here therefore comes from the engine, and incognito
+        # is defence in depth. The control cannot show a leak, so these two are facts, not
+        # expectations.
+        print("FACT: control: B reads the storage A wrote: " + repr(cb.get("storageRead")))
+        print("FACT: control: storage reached disk under HOME: "
+              + str(len(control["homeFilesWithProbe"]) >= 1).lower())
 
 results["facts"] = {
     "ownIpc": (run["probeA"] or {}).get("ownIpc"),
