@@ -25,9 +25,11 @@ def text_of(message):
 def tool_use(index, tool_id, name, tool_input):
     return [
         ("content_block_start", {"type": "content_block_start", "index": index,
-                                 "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}}}),
+                                 "content_block": {"type": "tool_use", "id": tool_id,
+                                                   "name": name, "input": {}}}),
         ("content_block_delta", {"type": "content_block_delta", "index": index,
-                                 "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input)}}),
+                                 "delta": {"type": "input_json_delta",
+                                           "partial_json": json.dumps(tool_input)}}),
         ("content_block_stop", {"type": "content_block_stop", "index": index}),
     ]
 
@@ -55,7 +57,8 @@ class Handler(BaseHTTPRequestHandler):
         users = [m for m in messages if m.get("role") == "user"]
         first = text_of(users[0]) if users else ""
         history = json.dumps(messages)
-        message = {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+        message = {"id": "msg_1", "type": "message", "role": "assistant",
+                   "model": "claude-opus-5-5",
                    "content": [], "stop_reason": None, "stop_sequence": None,
                    "usage": {"input_tokens": 1, "output_tokens": 1}}
         delay, blocks, text, stop = 0, [], "ok", "end_turn"
@@ -63,8 +66,10 @@ class Handler(BaseHTTPRequestHandler):
             # The subagent's own first request; its follow-ups (none expected) say "ok".
             if "tool_result" not in history:
                 text = "Sub here. Done."
-        elif "toolu_sub1" not in history and ("run sub false" in first or "run sub omitted" in first):
-            tool_input = {"description": "sub", "prompt": "sub task", "subagent_type": "general-purpose"}
+        elif "toolu_sub1" not in history and (
+                "run sub false" in first or "run sub omitted" in first):
+            tool_input = {"description": "sub", "prompt": "sub task",
+                          "subagent_type": "general-purpose"}
             if "run sub false" in first:
                 tool_input["run_in_background"] = False
             blocks = tool_use(0, "toolu_sub1", "Agent", tool_input)

@@ -350,7 +350,8 @@ A subagent never streams partials: each `assistant` line is one content block, a
 one message share a message id. The final report arrives three times: as the last forwarded text,
 inside the `Agent` `tool_result` (in a hand-back frame) and, for a background agent, as
 `task_notification.summary`. The card draws the forwarded text once and never the `tool_result`'s
-(a failed card is the exception: its error is all it has to say, so that is drawn). A background
+(a failed card with no forwarded text is the exception: its error is all it has to say, so
+that is drawn). A background
 agent's end notice, with its summary at the foot of the transcript, stays as it is. A subagent's
 own subagent has its `Agent` call as a nested row in its parent's card, and its lines go into
 the outermost card in arrival order, each marked with its agent's name: no card nests in a card.

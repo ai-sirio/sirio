@@ -1651,7 +1651,8 @@ fn subagent_text_reaches_stdout(
 /// It uses no credential and no network beyond 127.0.0.1, but launches a real CLI, so it is
 /// `#[ignore]`d and stays off CI:
 ///
-///     cargo nextest run -p sirio_agents --test acp_conformance --run-ignored only -E 'test(=claude_forwards_a_subagents_text_under_sirios_initialize)'
+///     cargo nextest run -p sirio_agents --test acp_conformance --run-ignored only \
+///         -E 'test(=claude_forwards_a_subagents_text_under_sirios_initialize)'
 ///
 /// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
 /// `python3`.
@@ -1675,7 +1676,7 @@ fn claude_forwards_a_subagents_text_under_sirios_initialize() {
     let scratch = claude_live::Scratch::new("subagent-text", &real_home);
     let version_text = claude_live::version_text(&claude, &scratch.root);
     let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
-        panic!("claude reported an unreadable version: {version_text:?}");
+        panic!("claude reported an unreadable version");
     };
     if !version.meets_floor() {
         eprintln!("SKIP: claude {version} is below the claimed floor");
