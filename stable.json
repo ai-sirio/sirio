@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.45.0",
-  "notes": "Claude Code's `/ide` now connects to Sirio: Claude sees your selection and\nyour diagnostics, and proposes each edit as a diff you accept or reject in\nSirio. A native Claude chat also lists the hooks Claude Code loaded, says\nwhich usage limit is near, and shows `/usage`.\n\n**Sirio is the IDE for Claude Code**\n\nEvery Claude Code running in one of Sirio's terminals can connect to Sirio\nwith `/ide`:\n\n- Claude sees the selection in Sirio's editor, and **Send selection to\n  agent** gives it the file and lines as `@file#L10-20`.\n- Claude reads the diagnostics of Sirio's language servers.\n- Each edit Claude proposes opens as a diff in a **Proposal** tab, with\n  **Accept**, **Reject**, **Edit** and **Reject with comments**. Nothing\n  answers a proposal without you: closing the tab, quitting Sirio, a lost\n  connection or removing the worktree never accepts it.\n\nThe bridge is on by default. To turn it off, use **Connect Claude Code to\nSirio (/ide)** in Settings, under AI Providers, Claude. If Sirio was\nclosed for more than a few seconds, restart Claude Code in that terminal: it\nstops retrying the connection after about 20 seconds, and `/ide` does not\nbring it back.\n\n**Hooks in the session panel**\n\nThe session panel of a native Claude chat has a read-only **Hooks** card. It\nlists the hooks Claude Code loaded for the session, grouped by event, each\nwith where it comes from (User, Project, Local, a plugin, the session or\nyour organization), its matcher and, unfolded, its command. A hook that\ndoes not run is marked disabled, and a note says why when your\norganization's policy or a mode limits hooks.\n\n**Usage limits and `/usage`**\n\nThe usage-limit line in a native Claude chat now says which limit it is, how\nfull it is and when it resets, for example *Approaching the 5-hour usage\nlimit: 92% used, resets at 15:15.* or *Weekly usage limit reached, resets at\nThu 15:15.* When extra usage runs out, it names the budget: your individual\nspend limit, your team's pooled budget or your channel's monthly spend\nlimit. It used to read *Usage limit reached* even for a warning.\n\n`/usage` and the other commands Claude Code answers on its own now show\ntheir answer in the chat. On a claude.ai subscription, `/usage` shows a\n**Usage** card with the plan's limits.\n\n**Fix**\n\nClicking the sidebar no longer draws a blue outline around the whole list.",
+  "version": "0.46.0",
+  "notes": "A native Claude chat now shows what a subagent says and thinks, and on\nLinux it shows MCP Apps widgets inline. Sirio also runs on a new version of\nits UI engine.\n\n**Subagents in the chat**\n\nWhen Claude starts a subagent, the call is now a folded **Task** card instead\nof a plain tool row. Unfold it to read the subagent's prompt, its text, its\ntool calls and their results, in the order they arrived. Its thinking is\nthere too, folded. File paths in a subagent's text open in Sirio's editor.\nIn the Trace, a subagent's lane is labelled with the last thing it said.\n\n**MCP Apps widgets (Linux)**\n\nAn MCP server can ship a small HTML view for a tool, called an MCP App. In a\nnative Claude chat on Linux, Sirio now shows that view inline in the\ntranscript, under the tool call. This works under X11, and on a Wayland\ndesktop where Sirio runs through XWayland, its default there.\n\n- The widget runs in an isolated web view. It reaches only the domains its\n  server declares, and it cannot open windows, download files or ask for\n  permissions.\n- When a widget wants to call one of its server's tools, Sirio asks you\n  first with a card in the transcript. The card answers only to a click,\n  starts on **Reject**, and arms **Allow** only once you have seen the\n  arguments.\n- A widget's buttons take clicks. Typing into a widget does not work yet.\n\nOn macOS, on Windows and on native Wayland, the call still shows as the\nplain tool row.\n\n**A new engine**\n\nSirio now draws its windows with gpui-pre 0.3.12 instead of bezel-gpui\n0.3.8. Nothing should look different. If something does, please open an\nissue.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.45.0/Sirio-0.45.0.dmg",
-      "sha256": "88b6c5b18c0111054ac03538ba13206ce04feca3fe9a56b1d695d7b1d627d092",
-      "signature": "L5oUyAGjem42Ar9pQevdmE9kYHJelVsl2oFOmuuZheAHxJzk/8hENQYro5cqWo5VuK5i0HabT2mvozVYlq4dAQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.0/Sirio-0.46.0.dmg",
+      "sha256": "3cbd373b2a901ff2773189b3b436fb703e09a756a7a6a91b40d97d3f6b6fb230",
+      "signature": "u8kVF0Vut/i7o1Tpfy7pzLOWKI/lrPTX6V1BJBEN0p2vzSNtgeOmHKNkULYtz873AFak0vqdyDj8uZxXA+9XCQ=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.45.0/Sirio-0.45.0-x86_64.AppImage",
-      "sha256": "97d45695af43096e9e157a8452f430373f813a5c58b78efc781c9913cd9ea98b",
-      "signature": "2NEgg/2J7FZnE6INU88qDZ7bHKZALIdZf2V5l/9JB4+8FJjRuhZU4S+xcc2Fl1aIwsSPORwRKo2g0TF7uZYuCQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.0/Sirio-0.46.0-x86_64.AppImage",
+      "sha256": "d1a7ccc5b06ca0d6acfe76b219af39f347e104c533a41908f2afbf3b8789c516",
+      "signature": "qd6VAQoFYqJukFEOGrSOhhPBxDaMvnHgHR/bh1A8ep8enRaG9cdwzutOKikZaVzMjKMdG9cr8mk+UCcaRL0ZAw=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.45.0/SirioSetup-0.45.0.exe",
-      "sha256": "4b2d0624cd6b2b02c5997b87f53773691705d92610e9e903bc9396bb969a362e",
-      "signature": "LzIIiq7nAU3s3ITIpbxwqAW5So8P1fOsViXg2BiGOSsggx4unWU5UNBdamxqPjFwHOLkwkBFANNuwAO/Zxx4BA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.0/SirioSetup-0.46.0.exe",
+      "sha256": "0c26b703ed714611e002b6b1635f19d998f267f3c325b40e9f530c9f0b3d0b7c",
+      "signature": "tDRdNgWlt5DR51o9cqqMo2tTLFUsv/m35rb5+K9EdaqgcveMI0Idiya3azwsYuAao8K3fJGtLGMjWbF9VAfIBw=="
     }
   }
 }
