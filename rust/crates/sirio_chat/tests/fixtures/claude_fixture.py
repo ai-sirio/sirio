@@ -1074,6 +1074,18 @@ def script_mcp_forge():
     trace_result(0.05, started)
 
 
+def script_mcp_idle():
+    """A `show` call whose widget does nothing by itself but offers a button (text "idle")."""
+    started = time.time()
+    message_start("msg_idle_1")
+    trace_assistant("msg_idle_1", tool_use(
+        "toolu_idle_1", "mcp__apps__show", {"text": "idle"}))
+    message_end("tool_use", 40)
+    pause()
+    mcp_widget_result("toolu_idle_1")
+    trace_result(0.05, started)
+
+
 def script_mcp_denied():
     """A `show` call that did not run: its `tool_use_result` is a string, as for a denial."""
     started = time.time()
@@ -1532,6 +1544,7 @@ TRACE_SCRIPTS = {
     "mcp_flood": script_mcp_flood,
     "mcp_denied": script_mcp_denied,
     "mcp_forge": script_mcp_forge,
+    "mcp_idle": script_mcp_idle,
     "mcp_subagent": script_mcp_subagent,
 }
 

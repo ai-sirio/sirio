@@ -548,13 +548,14 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     `widget-slot-crop.png` (the X geometry check passed while the slot was black: the
 #                     webview stayed 1x1 when `set_bounds` ran before `set_visible(true)`).
 #                     The steps are the card open, a real click
-#                     inside widget 1, the X focus set on its window (as a window manager would; a bare
-#                     Xvfb has none) and real typing (the view counts `keydown` events in the capture
-#                     phase and reports the count in its height, 600 plus the count: it must read 600,
-#                     and the composer must stay empty). Known limit: on a bare Xvfb the page gets no
-#                     input event at all, even with the handler disabled, so this step does not bite
-#                     there; it needs a window manager to,
-#                     a real click inside widget 1 then one in the composer then real typing (the
+#                     inside widget 1 (the page fills its slot, checked on pixels above), a third
+#                     widget whose view has a real button (a real click on it raises the card for its
+#                     `report` call, rejected over the verb) and real typing with the pointer over it
+#                     (the view counts `keydown` events in the capture phase and reports the count in
+#                     its height, 120 plus the count: it must read 120). Known limit: the count stays 0
+#                     with the key handler disabled too (keys typed over a widget reach Sirio's own
+#                     window), so that part cannot tell the handler's work from its absence.
+#                     Also a real click inside widget 1 then one in the composer then real typing (the
 #                     composer still takes the keys), a half scroll and back, a folded turn,
 #                     the effort list, a file tab over the chat, a terminal beside it, a call whose
 #                     `tool_use_result` is a string (the fixture's `mcp_denied` turn: its widget is

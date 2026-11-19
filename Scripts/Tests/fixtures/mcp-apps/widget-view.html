@@ -153,6 +153,19 @@
       name: "act", arguments: { step: 2, got: got, second: codeOf(second) } });
   }
 
+  // A real button at a known place (10,10 to 110,50 in the view): a click on it asks the host for
+  // the `report` tool, which raises a card.
+  function offerButton() {
+    var button = document.createElement("button");
+    button.id = "go";
+    button.textContent = "Go";
+    button.style.cssText = "position:absolute;left:10px;top:10px;width:100px;height:40px";
+    button.addEventListener("click", function () {
+      call("tools/call", { name: "report", arguments: { clicked: true } });
+    });
+    document.body.appendChild(button);
+  }
+
   // Posts straight to the IPC handler, outside the relay: Sirio closes the widget for it.
   function forge() {
     var wk = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc;
@@ -191,6 +204,7 @@
     if (text === "hi") { await hi(); }
     else if (text === "flood") { await flood(); }
     else if (text === "forge") { forge(); }
+    else if (text === "idle") { offerButton(); }
   });
 })();
 </script>

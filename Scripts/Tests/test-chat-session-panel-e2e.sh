@@ -5835,24 +5835,6 @@ elif command == "dock-row":
         time.sleep(0.03)
     print("FAIL: no click-only card with a painted " + option + " row", file=sys.stderr)
     sys.exit(1)
-elif command == "x-focus":
-    # x-focus DISPLAY WINDOW_ID|pointer: XSetInputFocus on that window, or back to PointerRoot, the
-    # state a bare Xvfb starts in (xdotool cannot set it).
-    import ctypes
-    x11 = ctypes.CDLL("libX11.so.6")
-    x11.XOpenDisplay.restype = ctypes.c_void_p
-    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-    display = x11.XOpenDisplay(sys.argv[2].encode())
-    if not display:
-        print("FAIL: cannot open the display", file=sys.stderr)
-        sys.exit(1)
-    target = 1 if sys.argv[3] == "pointer" else int(sys.argv[3], 0)
-    x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-    x11.XSetInputFocus(display, target, 1, 0)
-    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    x11.XSync(display, 0)
-    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
-    x11.XCloseDisplay(display)
 elif command == "pixels":
     # pixels IMAGE R G B TOL: the fraction of the image's pixels within TOL of the colour.
     raw = subprocess.run(["convert", sys.argv[2], "-depth", "8", "rgb:-"], capture_output=True, check=True).stdout
@@ -6123,28 +6105,8 @@ print(x, int(top) + int(sys.argv[3]), w, int(bottom - top))' "$DISPLAY_TARGET" "
   echo "  widget 1's slot ${px_w}x${px_h} at $px_x,$px_y: $px_frac of its pixels are the view's colour"
   python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= 0.9 else 1)' "$px_frac" || fail "widget 1's page does not fill its slot: only $px_frac of its pixels are the view's colour"
   echo "OK: widget 1's page fills its slot ($px_frac of the slot is the view's colour); crop: $OUT_DIR/widget-slot-crop.png"
-  # 5a. A widget takes no keyboard input (after 5's scroll puts widget 1 whole in the viewport, so it is
-  # mapped). A real click inside the first widget gives its window GTK focus; then real keys are typed with
-  # the pointer resting there. The view counts `keydown` events in the capture phase and reports the count
-  # through its height (600 plus the count), so it must still read 600. With no window manager here nothing
-  # gives the widget the X input focus on a click (it stays PointerRoot, and WebKit sees an inactive window),
-  # so the step sets it as a window manager would (`MW x-focus`), and puts it back to PointerRoot after.
-  local xid4 geo4 wx4 wy4 ww4 wh4
-  xid4=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["xid"])')
-  [ -n "$xid4" ] || fail "the first widget has no window to click in"
-  geo4=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$xid4" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} /Width:/ {w=$NF} /Height:/ {h=$NF} END {print x, y, w, h}')
-  read -r wx4 wy4 ww4 wh4 <<<"$geo4"
-  echo "step: a real click inside widget 1, the X focus on its window, then real keys with the pointer over it"
-  click_at $(( wx4 + ww4 / 2 )) $(( wy4 + wh4 / 2 ))
-  MW x-focus "$DISPLAY_TARGET" "$xid4" || fail "could not set the X input focus to the widget's window"
-  type_text keymark
-  sleep 1
-  MW x-focus "$DISPLAY_TARGET" pointer || fail "could not give the X input focus back to the pointer"
-  widget_wait "no key reached widget 1: its keydown count, carried in its height, is 0" 10 'w[0]["height"] == "600"'
-  wait_panel "the composer holds no marker either" 'c["composerText"] == ""' 10
   # 5b. the composer still gets keys after a click in a widget: a real click inside the first widget, then
-  # one in the composer, then real keys. (The widget gets none, see 5a; this proves the composer is not
-  # left without them.)
+  # one in the composer, then real keys.
   local xid geo wx wy ww wh cx cy
   xid=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["xid"])')
   [ -n "$xid" ] || fail "the first widget has no window to click in"
@@ -6209,26 +6171,63 @@ print(top - (vtop - (bottom - top) / 2))')
   widget_wait "beside a terminal the chat is on screen and its widgets are still ready" 15 \
     'len(w) == 2 and all(r["hidden"] == "0" and r["phase"] == "ready" for r in w)'
   widget_invariant "8 terminal beside the chat"
+  # 8b. a widget takes a click. A third widget's view has a real button (10,10 to 110,50 in the view); a real
+  # click on it, at screen coordinates from the widget's X window, makes the view ask for the `report` tool,
+  # and the card for that call appears (rejected over the verb, so nothing runs). Then, with the pointer
+  # still over the widget, a marker is typed: the page's keydown count (carried in its height, 120 plus the
+  # count) stays 0. The count stays 0 with the key handler disabled too (checked in round 4: keys typed over
+  # a widget go to Sirio's own window), so this step cannot tell the handler's work from its absence.
+  send_prompt mcp_idle
+  WIDGET_COUNT=3
+  widget_wait "the third widget is ready" 60 'len(w) == 3 and any(r["toolUseId"] == "toolu_idle_1" and r["phase"] == "ready" for r in w)'
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels=100000 >/dev/null || fail "scrollBy to the bottom failed"
+  widget_wait "the third widget is drawn and mapped at the end of the list" 30 \
+    'len(w) == 3 and any(r["toolUseId"] == "toolu_idle_1" and r["phase"] == "ready" and r["mapped"] == "1" for r in w)'
+  sleep 1
+  local idle_geo ix iy
+  idle_geo=$(MW read "$SURFACE" | python3 -c '
+import json, subprocess, sys
+r = next(r for r in json.load(sys.stdin)["mcpWidgets"] if r["toolUseId"] == "toolu_idle_1")
+geo = subprocess.run(["xwininfo", "-display", sys.argv[1], "-id", r["xid"]], capture_output=True, text=True).stdout
+x = int([l for l in geo.splitlines() if "Absolute upper-left X" in l][0].split()[-1])
+y = int([l for l in geo.splitlines() if "Absolute upper-left Y" in l][0].split()[-1])
+print(x, y)' "$DISPLAY_TARGET")
+  read -r ix iy <<<"$idle_geo"
+  echo "step: a real click on the button of the third widget (window at $ix,$iy)"
+  click_at $(( ix + 60 )) $(( iy + 30 ))
+  widget_wait "the click on the widget's button raised a card for its call" 20 \
+    'd and d["clickOnly"] is True and any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="$(widget_card_id)" optionId=reject_once >/dev/null \
+    || fail "reject_once on the button's card failed"
+  widget_wait "the button's card is closed and the third widget is mapped again" 15 \
+    'not d and any(r["toolUseId"] == "toolu_idle_1" and r["mapped"] == "1" for r in w)'
+  sleep 1
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove $(( ix + 60 )) $(( iy + 30 )) || fail "xdotool could not move over the widget"
+  type_text keymark
+  sleep 1
+  widget_wait "no key reached the third widget: its keydown count, carried in its height, is 0" 10 \
+    'any(r["toolUseId"] == "toolu_idle_1" and r["height"] == "120" for r in w)'
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool key --repeat 14 --delay 40 BackSpace || fail "xdotool could not clear the composer"
   # 9. a call that did not run: its tool_use_result is a string, as for a denial. The widget is closed
   # with "the call did not run" and never gets the call's input (or a result), and the logger stays empty.
   send_prompt mcp_denied
-  WIDGET_COUNT=3
+  WIDGET_COUNT=4
   widget_wait "the denied call's widget is closed with 'the call did not run' and got neither input nor result" 60 \
-    'len(w) == 3 and any(r["toolUseId"] == "toolu_denied_1" and r["phase"] == "closed" and r["error"] == "the call did not run" and r["inputDelivered"] == "0" and r["resultDelivered"] == "0" and r["mapped"] == "0" for r in w)'
+    'len(w) == 4 and any(r["toolUseId"] == "toolu_denied_1" and r["phase"] == "closed" and r["error"] == "the call did not run" and r["inputDelivered"] == "0" and r["resultDelivered"] == "0" and r["mapped"] == "0" for r in w)'
   widget_invariant "9 a denied call's widget"
   # 10. a view that posts straight to the IPC handler, outside its relay, is closed at the first such
   # message; the widgets that never did have a forged count of 0 throughout.
   send_prompt mcp_forge
-  WIDGET_COUNT=4
+  WIDGET_COUNT=5
   widget_wait "the forging widget is closed with 'the view posted outside its relay', its forged count is 1 and every other widget's is 0" 60 \
-    'len(w) == 4 and any(r["toolUseId"] == "toolu_forge_1" and r["phase"] == "closed" and r["error"] == "the view posted outside its relay" and r["forged"] == "1" and r["mapped"] == "0" for r in w) and all(r["forged"] == "0" for r in w if r["toolUseId"] != "toolu_forge_1")'
+    'len(w) == 5 and any(r["toolUseId"] == "toolu_forge_1" and r["phase"] == "closed" and r["error"] == "the view posted outside its relay" and r["forged"] == "1" and r["mapped"] == "0" for r in w) and all(r["forged"] == "0" for r in w if r["toolUseId"] != "toolu_forge_1")'
   widget_invariant "10 a forging widget closed"
   # 11. the CLI dies
   send_prompt die
   widget_wait "every entry is closed and unmapped after the CLI died" 40 \
-    'len(w) == 4 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
+    'len(w) == 5 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
   widget_invariant "11 the CLI died"
-  MW remembered "$DISPLAY_TARGET" 4 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
+  MW remembered "$DISPLAY_TARGET" 5 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
   # after the steps
   [ ! -s "$WIDGET_LOGGER_LOG" ] || fail "the request logger saw $(wc -l <"$WIDGET_LOGGER_LOG") requests from the widget"
   echo "OK: the request logger is empty"
@@ -6237,11 +6236,11 @@ import json, sys
 lines = [json.loads(line) for line in sys.stdin.read().splitlines()]
 reads = [l for l in lines if l.get("subtype") == "mcp_read_resource"]
 calls = [l for l in lines if l.get("subtype") == "mcp_call"]
-assert len(reads) == 4 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
+assert len(reads) == 5 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
 assert calls, "no mcp_call"
 assert all(l.get("tool") == "mcp__apps__act" and l.get("check_permissions") is True and l.get("result_not_for_model") is True for l in calls), "an mcp_call is not a gated act"
 assert not any("mcp_call_ask" in l for l in lines), "the fixture logged an mcp_call_ask"
-print(f"OK: the CLI heard 4 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
+print(f"OK: the CLI heard 5 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
     || fail "the control log is not what the widget run should leave"
   grep -qx 'mcp-apps-host 1' "$RUN_DIR/stub-calls.log" || fail "the CLI was not started with CLAUDE_CODE_MCP_APPS_HOST=1"
   echo "OK: the CLI was started with CLAUDE_CODE_MCP_APPS_HOST=1"
