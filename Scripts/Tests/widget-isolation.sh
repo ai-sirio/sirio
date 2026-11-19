@@ -6,10 +6,16 @@
 # network, devices and storage, and reports what happened. This script runs it twice and judges
 # the reports:
 #
-#   run      CSP header on,  incognito on   -- what production ships. Every escape must fail.
-#   control  CSP header off, incognito off  -- the same probes with the protections removed.
-#            Each protection must visibly matter here: if the control does not leak, the
-#            run's "blocked" proves nothing.
+#   run      restrictive view CSP, incognito on   -- what production ships.
+#   control  permissive view CSP,  incognito off  -- the same probes, with the CSP loosened.
+#            It shows the restrictive CSP is what blocks the network and the frames: the logger
+#            sees /fetch and /img, and no violation is reported.
+#
+# Incognito, the permission handler (deny) and the new-window handler are defence in depth over
+# engine and sandbox defaults that already hold in the control. On WebKitGTK 2.54.1:
+# custom-scheme storage is neither shared nor written to disk; permission requests end denied;
+# window.open in a sandboxed iframe without allow-popups returns null. The run checks those
+# outcomes, not their cause; the control prints them as FACT lines.
 #
 # The probe's second view (B) shares A's origin and reads the storage A wrote.
 #
@@ -88,7 +94,7 @@ with open(port_path, "w") as port:
 server.serve_forever()
 PY
 
-run_once() { # name csp incognito
+run_once() { # name csp(on=restrictive, off=permissive) incognito
     local name="$1" csp="$2" incognito="$3"
     local dir="$OUT_DIR/$name" home="$TMP/home-$name"
     mkdir -p "$dir" "$home/data" "$home/cache" "$home/config"
@@ -204,7 +210,8 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
     for key, want in (("parentDocument", "blocked"), ("frameElement", "null"),
                       ("parentIpc", "blocked"), ("rtc", "absent"), ("fetch", "blocked"),
                       ("img", "blocked"), ("open", "null")):
-        check(a.get(key) == want, "run: " + key + " is " + want, str(a.get(key)))
+        label = {"open": "window.open from the view returns null"}.get(key, key + " is " + want)
+        check(a.get(key) == want, "run: " + label, str(a.get(key)))
     seen = {first_token(v) for v in a.get("violations", [])}
     for directive in ("connect-src", "img-src", "frame-src"):
         check(directive in seen, "run: a " + directive + " violation was reported", str(seen))
@@ -212,7 +219,7 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
         if a.get(key) == "absent":
             ok("run: " + key + " is absent in this engine")
         else:
-            check(a.get(key) == "denied", "run: " + key + " is denied", str(a.get(key)))
+            check(a.get(key) == "denied", "run: " + key + " ends denied", str(a.get(key)))
     check(run["acceptsDrops"] == [False], "run: the webview accepts no drops",
           str(run["acceptsDrops"]))
     check(run["forgedMethodsAccepted"] == 0, "run: no forged message was accepted")
@@ -234,9 +241,9 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
     if not storage_ok:
         ok("storage is unavailable to the view")
     else:
-        check(b.get("storageRead") is None, "run: B reads no storage A wrote",
+        check(b.get("storageRead") is None, "run: B reads null from the storage A wrote to",
               str(b.get("storageRead")))
-        check(run["homeFilesWithProbe"] == [], "run: nothing reached disk under HOME",
+        check(run["homeFilesWithProbe"] == [], "run: no storage file under HOME holds the probe value",
               str(run["homeFilesWithProbe"]))
         # On WebKitGTK 2.54.1 the localStorage of these custom-scheme origins is neither
         # shared between webviews nor written to disk, even with incognito off (observed
@@ -246,6 +253,11 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
         print("FACT: control: B reads the storage A wrote: " + repr(cb.get("storageRead")))
         print("FACT: control: storage reached disk under HOME: "
               + str(len(control["homeFilesWithProbe"]) >= 1).lower())
+
+    print("FACT: control: window.open returns " + repr(ca.get("open")))
+    print("FACT: control: geolocation is " + repr(ca.get("geolocation"))
+          + " (code " + repr(ca.get("geolocationCode")) + ")")
+    print("FACT: control: notification is " + repr(ca.get("notification")))
 
 results["facts"] = {
     "ownIpc": (run["probeA"] or {}).get("ownIpc"),

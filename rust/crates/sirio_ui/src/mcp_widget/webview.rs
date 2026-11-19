@@ -37,12 +37,12 @@ const MAX_IPC_BYTES: usize = 1 << 20;
 const INBOX_CAP: usize = 64;
 
 /// What one widget webview serves. `key`: 16 lowercase hex chars; `secret`: 32 lowercase hex
-/// chars from getrandom. `view_csp: None` exists only for the proof's control run.
+/// chars from getrandom. `view_csp` is always sent; the proof's control passes a permissive one.
 pub struct WidgetPage {
     pub key: String,
     pub secret: String,
     pub html: String,
-    pub view_csp: Option<String>,
+    pub view_csp: String,
 }
 
 /// 32 lowercase hex chars from the system's random source.
@@ -96,15 +96,12 @@ fn not_found() -> Response<Cow<'static, [u8]>> {
         .expect("a static response is valid")
 }
 
-fn html_response(body: String, csp: Option<&str>) -> Response<Cow<'static, [u8]>> {
-    let mut builder = Response::builder()
+fn html_response(body: String, csp: &str) -> Response<Cow<'static, [u8]>> {
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "no-store");
-    if let Some(csp) = csp {
-        builder = builder.header("Content-Security-Policy", csp);
-    }
-    builder
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("Content-Security-Policy", csp)
         .body(Cow::Owned(body.into_bytes()))
         .unwrap_or_else(|_| not_found())
 }
@@ -183,13 +180,13 @@ pub fn build_widget_child(
                 if !addresses(&request, &relay_page.key) || served.swap(true, Ordering::SeqCst) {
                     return not_found();
                 }
-                html_response(relay_document(&relay_page), Some(&relay_csp(&relay_page.key)))
+                html_response(relay_document(&relay_page), &relay_csp(&relay_page.key))
             })
             .with_custom_protocol(VIEW_SCHEME.to_owned(), move |_, request| {
                 if !addresses(&request, &view_page.key) {
                     return not_found();
                 }
-                html_response(view_page.html.clone(), view_page.view_csp.as_deref())
+                html_response(view_page.html.clone(), &view_page.view_csp)
             })
             .with_navigation_handler(move |target| target == nav_relay || target == nav_view)
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)

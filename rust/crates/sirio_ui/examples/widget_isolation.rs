@@ -44,6 +44,10 @@ mod linux {
         media-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; \
         base-uri 'none'; form-action 'none'";
 
+    /// The control's view CSP: permissive, so the restrictive one is what the run shows blocking.
+    const CONTROL_CSP: &str = "default-src * 'unsafe-inline' data: blob:";
+
+    /// `csp`: true sends `VIEW_CSP`, false sends `CONTROL_CSP`.
     struct Args {
         logger: String,
         html: String,
@@ -144,7 +148,7 @@ mod linux {
                 key: self.key.clone(),
                 secret: new_secret(),
                 html,
-                view_csp: self.args.csp.then(|| VIEW_CSP.to_owned()),
+                view_csp: if self.args.csp { VIEW_CSP } else { CONTROL_CSP }.to_owned(),
             });
             let inbox: WidgetInbox = Rc::new(std::cell::RefCell::new(Inbox::default()));
             let webview =
