@@ -920,9 +920,10 @@ Each item is laid out the same way:
       widget sits beside a card it could imitate, or under the pointer when the card arrives. The
       dock's rows already ignore input for half a second after a question appears.
     - A widget's ask goes through the same dock as any other permission. It is not persisted, and
-      it lapses into Reject at the permission timeout. Every way a card can close without Allow
-      (Escape, dismiss, the timeout, the turn ending, the chat closing) answers the view with a
-      denial, so the view never waits forever.
+      it lapses into Reject at the permission timeout, timed by Sirio itself. Every way a card can
+      close without Allow (Escape, dismiss, the timeout, the session ending, the chat closing)
+      answers the view with a denial, so the view never waits forever. The end of a model turn
+      does not close it: a widget mostly acts after the turn.
   - **Not persisted.** As in A10, a restored chat shows the plain tool row.
   - **No webview, no widget.** Where Sirio has no webview, it sets no variable and draws the plain
     row. That covers a Wayland session that stays native (`SIRIO_FORCE_X11` set off, or no usable
