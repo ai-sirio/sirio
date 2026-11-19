@@ -39,6 +39,7 @@ pub struct MessageAvatar {
     role: Role,
     name: SharedString,
     picture: Option<SharedString>,
+    content: Option<AnyElement>,
 }
 
 impl MessageAvatar {
@@ -49,7 +50,14 @@ impl MessageAvatar {
             role,
             name: name.into(),
             picture: None,
+            content: None,
         }
+    }
+
+    /// A host-owned identity mark, rendered without replacing its geometry.
+    pub fn content(mut self, content: impl IntoElement) -> Self {
+        self.content = Some(content.into_any_element());
+        self
     }
 
     /// A person's picture, a file or a web address.
@@ -61,6 +69,9 @@ impl MessageAvatar {
 
 impl RenderOnce for MessageAvatar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        if let Some(content) = self.content {
+            return content;
+        }
         let theme = cx.theme();
         let colors = theme.colors.clone();
         match self.role {
@@ -285,7 +296,9 @@ impl RenderOnce for MessageBubble {
                 .py_1()
                 .text_size(theme.text_size(TextSize::Xs))
                 .text_color(colors.fg_muted)
-                .child(body.text_size(theme.text_size(TextSize::Xs)))
+                // A flex item is never narrower than its unbroken text unless told so: a
+                // long line would run off both sides of the centre instead of wrapping.
+                .child(body.min_w_0().text_size(theme.text_size(TextSize::Xs)))
                 .into_any_element(),
             Role::User => div()
                 .flex()
@@ -353,6 +366,7 @@ impl RenderOnce for MessageBubble {
 pub struct ChatContainer {
     messages: AnyElement,
     composer: Option<AnyElement>,
+    full_bleed: bool,
 }
 
 impl ChatContainer {
@@ -361,6 +375,7 @@ impl ChatContainer {
         Self {
             messages: messages.into_any_element(),
             composer: None,
+            full_bleed: false,
         }
     }
 
@@ -369,12 +384,21 @@ impl ChatContainer {
         self.composer = Some(composer.into_any_element());
         self
     }
+
+    /// Hands the composer the whole width of the frame: no side or bottom
+    /// padding and no reading-column cap, for a composer that draws its own
+    /// edge to edge band.
+    pub fn composer_full_bleed(mut self) -> Self {
+        self.full_bleed = true;
+        self
+    }
 }
 
 impl RenderOnce for ChatContainer {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let column = theme.container_width(ContainerSize::Md);
+        let full_bleed = self.full_bleed;
         div()
             .size_full()
             .flex()
@@ -382,6 +406,9 @@ impl RenderOnce for ChatContainer {
             .bg(theme.colors.bg)
             .child(div().flex_1().min_h_0().child(self.messages))
             .children(self.composer.map(|composer| {
+                if full_bleed {
+                    return div().flex_none().w_full().child(composer);
+                }
                 div()
                     .flex_none()
                     .w_full()

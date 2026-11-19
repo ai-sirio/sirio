@@ -308,3 +308,123 @@ Outcomes:
 - Row 7, re-decided: Inter and JetBrains Mono are not bundled: `ely-core`'s `fonts` feature is off by
   default here (see Manifests), and Sirio's facade does not call upstream's `init`. IBM Plex Sans (for
   svg text) stays, as upstream always embeds it.
+
+## ely-chat and ely-agent hooks (Task 4)
+
+Sirio's local changes to the old crate's `chat` and `agent` parts, carried onto upstream's `ely-chat`
+and `ely-agent`. Proofs named "runs at Task 8" are Sirio-side tests: no Sirio crate uses these crates
+before Task 8. Where a row has no named proof of its own, the upstream tests that exercise the
+unchanged default path are named: they ran green on this code (each alone, 1 test:
+`ely-chat` `tests::the_reasoning_opens_from_the_keyboard` and
+`tests::compose::enter_sends_and_shift_enter_breaks_the_line`; `ely-agent`
+`tests::the_prompt_walks_deny_always_then_once` and
+`tests::control::enter_sends_a_written_answer_and_skips_a_blank_one`). Sirio's own tests live in
+`sirio_ui` (`chat::ely_tests`, `chat::band_tests`, `chat::tests`).
+
+### Expansion (row 27)
+
+- `crates/ely-chat/src/expansion.rs` (new): `Toggle`, `Press`, `resolve`, as in the old crate, but
+  `pub` (`#[doc(hidden)] pub mod expansion` in `lib.rs`, with docs because of `deny(missing_docs)`):
+  `ely-agent` calls it across the crate boundary. It lives in `ely-chat`, not `ely-core`, because
+  `ely-agent` already depends on `ely-chat` and `ely-core` itself has no use for it; so no other
+  closure crate gains a dependency.
+- Row 27: re-applied. Proof: runs at Task 8, `chat::ely_tests::ely_tool_and_thought_expansion_survives_virtualization`
+  (host-controlled open state of a tool card and a thinking block).
+
+### Composer (rows 33, 37 to 45; `crates/ely-chat/src/composer.rs`)
+
+- `SendButton::variant` (default `Primary`, stop takes the same variant); the control is wrapped in a
+  `flex_none` div with debug selector `send`, and an inner selector `stop-glyph` while busy or
+  `send-ready` while ready (rows 33, 43). Upstream's stop was `Secondary`; the default send path now
+  draws the same, since the stop square takes `self.variant` (Primary by default): a visible change
+  for any host that does not call `variant` (Sirio always does, through `PromptInput::custom`).
+- `InputHint` is no longer a unit struct: `InputHint::new().enter(..)`, `Default` (row 45). Upstream's
+  doctest `InputHint;` becomes `InputHint::new().enter("to queue ·")`.
+- `PromptInput::{custom, band, send_probe, trailing}` and the fields behind them; the shell has the
+  debug selector `ely-prompt-input`, the theme's `surface` fill and a text colour so unstyled content
+  is not gpui's default black; custom mode takes no `Enter` action and offers no completion rows;
+  `ready` and `focused` are `Option`s so `custom` supplies them (rows 37 to 42, 44). `PromptInput::new`
+  keeps upstream's behaviour (readiness from the field's text, Enter sends, `/` and `@` offer rows).
+- `PromptInput::custom` draws send and stop in `ButtonVariant::Subtle`; the card border is `border`
+  in both focus states; the tool row wraps unless the band is set (row 39). The band: full width, 1px
+  top rule, no radius, `surface` fill, 12px sides, 10px above and 8px below, content in a centred
+  column at most `column`, the tool row never wraps (row 40).
+- Row 38 (`ready`): in the old crate the host-supplied eligibility was the `ready` argument of
+  `custom`; there is no separate `ready` method on either side. Re-applied as that argument.
+- Outcomes: rows 33, 37 to 45 re-applied. Proofs: runs at Task 8,
+  `chat::band_tests::composer_band_spans_the_chat_column_on_one_row` (rows 40, 41, 42, 43, 39),
+  `chat::band_tests::narrow_row_fits_from_its_measured_minimum` (rows 40, 42),
+  `chat::ely_tests::ely_composer_enter_respects_completion_and_ime` (rows 37, 43),
+  `chat::ely_tests::ely_composer_sends_an_attachment_without_text` (rows 38, 43, `send-ready`).
+  Rows 33 (`variant`), 44 and 45 (`enter`): unproven (no Sirio test asserts the button variant, the
+  card's text colour, or the hint's Enter wording). The default constructor stays proven by
+  `tests::compose::enter_sends_and_shift_enter_breaks_the_line` (ran, 1 test).
+
+### Messages (rows 22, 23, 171; `crates/ely-chat/src/message.rs`)
+
+- `MessageAvatar::content` returns the host's element before the role avatar (row 22).
+- `ChatContainer::composer_full_bleed` gives the composer the whole width, no padding, no cap
+  (row 23).
+- The `Role::System` body is `min_w_0` (row 171).
+- Outcomes: all re-applied. Proofs: row 22 unproven (the agent mark is drawn by
+  `sirio_ui/src/chat/transcript.rs`, no test asserts it); row 23 runs at Task 8,
+  `chat::band_tests::composer_band_spans_the_chat_column_on_one_row` (the band spans the column only
+  with a full-bleed container); row 171 unproven (no test draws a long unbroken system line).
+
+### Status and thinking (rows 28 (status part), 30, 31, 32; `crates/ely-chat/src/status.rs`)
+
+- `ThinkingIndicator::glyph` replaces the sparkles (row 31); upstream's `label` is `Option` with the
+  i18n default and stays.
+- `ThinkingBlock::{body, expanded, header_selector, label, thinking_glyph}` (rows 28, 30, 32): `expanded`
+  goes through `expansion::resolve`; `label` is the honest label shown muted when thinking is over and
+  no duration was measured; `body` replaces the streamed reasoning. Upstream's header accessibility
+  (`role(Button)`, `aria_label`, `aria_expanded`, tab stop, focus ring) is kept. The old
+  `log::info!("thinking block: open ..")` line is gone with the keyed-state toggle.
+- Outcomes: rows 28 (this part), 30, 31, 32 re-applied. Proofs: row 28 runs at Task 8,
+  `chat::ely_tests::ely_tool_and_thought_expansion_survives_virtualization` (host toggles through
+  `header_selector`); rows 30, 31, 32 unproven (no Sirio test asserts the label or the glyph; the
+  default path is covered by `tests::the_reasoning_opens_from_the_keyboard`, ran, 1 test).
+
+### Attachments (row 46; `crates/ely-chat/src/attach.rs`)
+
+- `AttachmentChip::remove_selector`: a debug selector on a `flex_none` wrapper around the remove
+  button (the wrapper is always present, as before).
+- Row 46: re-applied. Proof: runs at Task 8, `chat::tests::attach_control_accepts_one_image_and_rejects_the_rest`
+  (clicks `attachment-remove-0`).
+
+### Tools, requests and questions (rows 28, 29, 34, 35, 36; `crates/ely-agent/src/`)
+
+- `tools.rs`: `ToolCallCard::{body, expanded, header_selector}` and `ToolCallGroup::{expanded,
+  header_selector, status}`; the card's header is interactive when it has a body, arguments, a result
+  or host control; a group with a `status` draws a `step_mark` in place of the wrench. The shared
+  `header` helper now takes `Option<(bool, Press)>` (the open state it shows and the press), not
+  upstream's `Option<Entity<bool>>`, and keeps upstream's `role(Button)`, `aria_label` and
+  `aria_expanded`; the keyed-state toggle (and its log line) now lives in `expansion::resolve`.
+- `permission.rs`: `PermissionPrompt::{custom, header_selector, body, action}`; in custom mode only
+  the supplied actions render, and the built-in buttons exist only with an `on_answer`; the built-in
+  "Always allow" is wrapped in a div with selector `ely-request-always` (row 36).
+- `control.rs`: `HumanInputRequest::{custom, header_selector, body, action}`; no Ely field and no
+  default Reply in custom mode, choices only with an `on_answer`.
+- Outcomes: rows 28, 29, 34, 35, 36 re-applied. Proofs: runs at Task 8,
+  `chat::ely_tests::ely_tool_and_thought_expansion_survives_virtualization` (rows 28, 29 header
+  selector and host-owned state), `chat::ely_tests::ely_request_sends_only_the_advertised_option_id`
+  (rows 34, 35, 36: asserts `ely-request-always` is absent in custom mode);
+  `chat::ely_tests::ely_expired_request_cannot_answer_the_next_request` (row 34). The `status` of
+  row 29 has no test of its own (unproven); the built-in `PermissionPrompt::new` and
+  `HumanInputRequest::new` paths are proven by the ran tests above
+  (`tests::the_prompt_walks_deny_always_then_once`,
+  `tests::control::enter_sends_a_written_answer_and_skips_a_blank_one`).
+
+### Row 20 (stream)
+
+Re-decided: the old crate left `StreamingMarkdown` out. Upstream exports it from
+`ely-chat/src/stream.rs` and `lib.rs`; both are verbatim and it comes along, unused by Sirio.
+No proof needed (nothing changed).
+
+- `crates/ely-chat/src/lib.rs`: `#[doc(hidden)] pub mod expansion;`
+- `crates/ely-chat/src/expansion.rs`, `crates/ely-chat/src/composer.rs`,
+  `crates/ely-chat/src/message.rs`, `crates/ely-chat/src/status.rs`, `crates/ely-chat/src/attach.rs`
+- `crates/ely-agent/src/tools.rs`, `crates/ely-agent/src/permission.rs`, `crates/ely-agent/src/control.rs`
+
+No local API was renamed: no closure crate calls any of the changed signatures (`ely-chat` has
+`src/tests/compose.rs` calling `PromptInput::new`, which keeps its signature).

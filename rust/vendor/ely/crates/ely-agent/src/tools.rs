@@ -1,34 +1,35 @@
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    AnyElement, App, Div, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
+    AnyElement, App, Div, ElementId, FontWeight, InteractiveElement, IntoElement,
     MouseButton, ParentElement, RenderOnce, Role, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, div, prelude::*, transparent_black,
 };
 use smallvec::SmallVec;
 
 use crate::{
-    chat::{CodeBlock, StepState, step_mark},
+    chat::{CodeBlock, StepState, expansion, step_mark},
     primitives::{Disclosure, FocusRing, Icon, IconName, Severity},
     theme::{ActiveTheme, IconSize, Radius, TextSize},
     typography::{Ellipsis, format::took, tabular},
 };
 
-/// A row that opens a body through `toggle`: a Tab stop while it has one.
+/// A row that opens a body through `toggle`, which carries the open state it shows: a Tab stop
+/// while it has one.
 fn header(
     id: ElementId,
     name: SharedString,
-    toggle: Option<Entity<bool>>,
+    toggle: Option<(bool, expansion::Press)>,
     cx: &App,
 ) -> Stateful<Div> {
-    let open = toggle.as_ref().map(|state| *state.read(cx));
     let theme = cx.theme();
     div()
         .id(id.clone())
-        .when(open.is_some(), |row| {
-            row.role(Role::Button).aria_label(name)
+        .when_some(toggle.as_ref(), |row, (open, _)| {
+            row.role(Role::Button)
+                .aria_label(name)
+                .aria_expanded(*open)
         })
-        .when_some(open, |row, open| row.aria_expanded(open))
         .w_full()
         .flex()
         .items_center()
@@ -38,18 +39,12 @@ fn header(
         .rounded(theme.radius(Radius::Md))
         .border_1()
         .border_color(transparent_black())
-        .when_some(toggle, |row, state| {
+        .when_some(toggle, |row, (_, press)| {
             row.tab_index(0)
                 .focus_ring(cx)
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .on_click(move |_, _, cx| {
-                    state.update(cx, |open, cx| {
-                        *open = !*open;
-                        log::info!("tool call: open {open}");
-                        cx.notify();
-                    })
-                })
+                .on_click(move |_, window, cx| press(window, cx))
         })
 }
 
@@ -74,6 +69,9 @@ pub struct ToolCallCard {
     took: Option<Duration>,
     arguments: Option<SharedString>,
     result: Option<SharedString>,
+    body: Option<AnyElement>,
+    controlled: Option<(bool, expansion::Toggle)>,
+    header_selector: Option<SharedString>,
 }
 
 impl ToolCallCard {
@@ -87,7 +85,32 @@ impl ToolCallCard {
             took: None,
             arguments: None,
             result: None,
+            body: None,
+            controlled: None,
+            header_selector: None,
         }
+    }
+
+    /// Render the host's rich, selectable body.
+    pub fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+
+    /// Expansion belongs to the host; no keyed state is created in this mode.
+    pub fn expanded(
+        mut self,
+        open: bool,
+        toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.controlled = Some((open, Rc::new(toggle)));
+        self
+    }
+
+    /// A stable selector on the actual interactive header.
+    pub fn header_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.header_selector = Some(selector.into());
+        self
     }
 
     /// A few words on what the call touched, such as a path or a query.
@@ -117,9 +140,9 @@ impl ToolCallCard {
 
 impl RenderOnce for ToolCallCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state((self.id.clone(), "open"), cx, |_, _| false);
-        let open = *state.read(cx);
-        let opens = self.arguments.is_some() || self.result.is_some();
+        let controlled = self.controlled.is_some();
+        let (open, press) = expansion::resolve(&self.id, self.controlled, window, cx);
+        let opens = self.body.is_some() || self.arguments.is_some() || self.result.is_some();
         let failed = self.status == StepState::Failed;
         let mark = step_mark((self.id.clone(), "mark").into(), self.status, window, cx);
         let theme = cx.theme();
@@ -141,9 +164,12 @@ impl RenderOnce for ToolCallCard {
                 header(
                     (self.id.clone(), "header").into(),
                     self.name.clone(),
-                    opens.then_some(state),
+                    (opens || controlled).then_some((open, press)),
                     cx,
                 )
+                .when_some(self.header_selector, |row, selector| {
+                    row.debug_selector(move || selector.to_string())
+                })
                 .child(mark)
                 .child(
                     div()
@@ -169,6 +195,9 @@ impl RenderOnce for ToolCallCard {
                 }),
             )
             .when(open && opens, |card| {
+                if let Some(body) = self.body {
+                    return card.child(body);
+                }
                 card.child(
                     div()
                         .flex()
@@ -225,6 +254,9 @@ pub struct ToolCallGroup {
     id: ElementId,
     label: SharedString,
     calls: SmallVec<[AnyElement; 4]>,
+    controlled: Option<(bool, expansion::Toggle)>,
+    header_selector: Option<SharedString>,
+    status: Option<StepState>,
 }
 
 impl ToolCallGroup {
@@ -234,7 +266,32 @@ impl ToolCallGroup {
             id: id.into(),
             label: label.into(),
             calls: SmallVec::new(),
+            controlled: None,
+            header_selector: None,
+            status: None,
         }
+    }
+
+    /// Expansion belongs to the host; no keyed state is created in this mode.
+    pub fn expanded(
+        mut self,
+        open: bool,
+        toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.controlled = Some((open, Rc::new(toggle)));
+        self
+    }
+
+    /// A stable selector on the actual interactive header.
+    pub fn header_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.header_selector = Some(selector.into());
+        self
+    }
+
+    /// Keep a reported failure or running state visible while collapsed.
+    pub fn status(mut self, status: StepState) -> Self {
+        self.status = Some(status);
+        self
     }
 }
 
@@ -246,8 +303,10 @@ impl ParentElement for ToolCallGroup {
 
 impl RenderOnce for ToolCallGroup {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state((self.id.clone(), "open"), cx, |_, _| false);
-        let open = *state.read(cx);
+        let (open, press) = expansion::resolve(&self.id, self.controlled, window, cx);
+        let mark = self
+            .status
+            .map(|status| step_mark((self.id.clone(), "mark").into(), status, window, cx));
         let theme = cx.theme();
         let colors = theme.colors.clone();
         div()
@@ -259,17 +318,21 @@ impl RenderOnce for ToolCallGroup {
                 header(
                     (self.id.clone(), "header").into(),
                     self.label.clone(),
-                    Some(state),
+                    Some((open, press)),
                     cx,
                 )
+                .when_some(self.header_selector, |row, selector| {
+                    row.debug_selector(move || selector.to_string())
+                })
                 .px_1()
                 .py_0p5()
                 .text_color(colors.fg_muted)
-                .child(
+                .child(mark.unwrap_or_else(|| {
                     Icon::new(IconName::Wrench)
                         .size(IconSize::Sm)
-                        .color(colors.fg_subtle),
-                )
+                        .color(colors.fg_subtle)
+                        .into_any_element()
+                }))
                 .child(div().flex_1().min_w_0().child(Ellipsis::new(self.label)))
                 .child(Disclosure::new((self.id.clone(), "chevron"), open).size(IconSize::Sm)),
             )

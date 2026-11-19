@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ElementId, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString,
-    Styled, Window, div,
+    AnyElement, App, ElementId, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
+    SharedString, Styled, Window, div, prelude::*,
 };
 
 use super::line::{OnText, send_line};
@@ -30,10 +30,13 @@ use crate::{
 pub struct HumanInputRequest {
     id: ElementId,
     question: SharedString,
-    field: Entity<TextInput>,
+    field: Option<Entity<TextInput>>,
     choices: Vec<SharedString>,
     answered: Option<SharedString>,
-    on_answer: OnText,
+    on_answer: Option<OnText>,
+    body: Option<AnyElement>,
+    actions: Vec<AnyElement>,
+    header_selector: Option<SharedString>,
 }
 
 impl HumanInputRequest {
@@ -47,11 +50,44 @@ impl HumanInputRequest {
         Self {
             id: id.into(),
             question: question.into(),
-            field: field.clone(),
+            field: Some(field.clone()),
             choices: Vec::new(),
             answered: None,
-            on_answer: Rc::new(on_answer),
+            on_answer: Some(Rc::new(on_answer)),
+            body: None,
+            actions: Vec::new(),
+            header_selector: None,
         }
+    }
+
+    /// Use the host's existing editor and protocol actions without an Ely field.
+    pub fn custom(id: impl Into<ElementId>, question: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            question: question.into(),
+            field: None,
+            choices: Vec::new(),
+            answered: None,
+            on_answer: None,
+            body: None,
+            actions: Vec::new(),
+            header_selector: None,
+        }
+    }
+    /// A debug selector on the real header text, for hosts that find it in tests.
+    pub fn header_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.header_selector = Some(selector.into());
+        self
+    }
+    /// A host-drawn body, shown under the question.
+    pub fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+    /// A host-drawn action; in custom mode these are the only controls the card shows.
+    pub fn action(mut self, action: impl IntoElement) -> Self {
+        self.actions.push(action.into_any_element());
+        self
     }
 
     /// Answers to pick with a press.
@@ -70,13 +106,14 @@ impl HumanInputRequest {
 impl RenderOnce for HumanInputRequest {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let asking = self.answered.is_none();
-        let choices = (asking && !self.choices.is_empty()).then(|| {
+        let choices = (asking && !self.choices.is_empty() && self.on_answer.is_some()).then(|| {
             div()
                 .flex()
                 .flex_wrap()
                 .gap_2()
                 .children(self.choices.iter().enumerate().map(|(ix, choice)| {
-                    let (answer, picked) = (self.on_answer.clone(), choice.clone());
+                    let (answer, picked) =
+                        (self.on_answer.as_ref().unwrap().clone(), choice.clone());
                     Button::new((self.id.clone(), format!("choice-{ix}")), choice.clone())
                         .variant(ButtonVariant::Secondary)
                         .size(ControlSize::Sm)
@@ -86,17 +123,25 @@ impl RenderOnce for HumanInputRequest {
                         })
                 }))
         });
-        let line = asking.then(|| {
-            send_line(
-                &self.field,
-                Button::new((self.id.clone(), "reply"), "Reply").variant(ButtonVariant::Primary),
-                self.on_answer.clone(),
-                "human input",
-                cx,
-            )
-        });
+        let line = if asking && self.body.is_none() {
+            self.field
+                .as_ref()
+                .zip(self.on_answer.as_ref())
+                .map(|(field, on_answer)| {
+                    send_line(
+                        field,
+                        Button::new((self.id.clone(), "reply"), "Reply")
+                            .variant(ButtonVariant::Primary),
+                        on_answer.clone(),
+                        "human input",
+                        cx,
+                    )
+                })
+        } else {
+            None
+        };
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         div()
             .flex()
             .flex_col()
@@ -125,6 +170,9 @@ impl RenderOnce for HumanInputRequest {
                             .min_w_0()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.fg)
+                            .when_some(self.header_selector, |title, selector| {
+                                title.debug_selector(move || selector.to_string())
+                            })
                             .child(self.question),
                     ),
             )
@@ -143,8 +191,20 @@ impl RenderOnce for HumanInputRequest {
                     )
                     .child(div().flex_1().min_w_0().child(answer))
             }))
+            .children(self.body)
             .children(choices)
             .children(line)
+            .when(asking && !self.actions.is_empty(), |card| {
+                card.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(self.actions),
+                )
+            })
     }
 }
 

@@ -14,6 +14,8 @@ mod cite;
 mod code;
 mod composer;
 mod conversations;
+#[doc(hidden)]
+pub mod expansion;
 mod list;
 mod media;
 mod message;
