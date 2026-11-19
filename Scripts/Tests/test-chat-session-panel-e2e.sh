@@ -1,7 +1,3 @@
-  # Hand the X focus back to PointerRoot (the state before the step), then check nothing leaked to the
-  # composer either.
-  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool windowfocus --sync "$(DISPLAY="$DISPLAY_TARGET" xdotool getactivewindow 2>/dev/null || echo "$xid4")" >/dev/null 2>&1 || true
-  widget_wait "the composer holds no marker either" 5 '"keymark" not in c["composerText"]'
 #!/bin/bash
 set -euo pipefail
 
@@ -6175,8 +6171,8 @@ print(top - (vtop - (bottom - top) / 2))')
   # click on it, at screen coordinates from the widget's X window, makes the view ask for the `report` tool,
   # and the card for that call appears (rejected over the verb, so nothing runs). Then, with the pointer
   # still over the widget, a marker is typed: the page's keydown count (carried in its height, 120 plus the
-  # count) stays 0. The count stays 0 with the key handler disabled too: keys typed over
-  # a widget go to Sirio's own window, so this step cannot tell the handler's work from its absence.
+  # count) stays 0. The count stayed 0 with the key handler disabled too (no run has seen a key reach the
+  # page, handler on or off), so this step cannot tell the handler's work from its absence.
   send_prompt mcp_idle
   WIDGET_COUNT=3
   widget_wait "the third widget is ready" 60 'len(w) == 3 and any(r["toolUseId"] == "toolu_idle_1" and r["phase"] == "ready" for r in w)'

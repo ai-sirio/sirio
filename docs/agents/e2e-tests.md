@@ -553,8 +553,9 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     `report` call, rejected over the verb) and real typing with the pointer over it
 #                     (the view counts `keydown` events in the capture phase and reports the count in
 #                     its height, 120 plus the count: it must read 120). Known limit: the count stays 0
-#                     with the key handler disabled too (keys typed over a widget reach Sirio's own
-#                     window), so that part cannot tell the handler's work from its absence.
+#                     with the key handler disabled too (no run has seen a key reach the
+#                     page, handler on or off), so that part cannot tell the handler's work
+#                     from its absence.
 #                     Also a real click inside widget 1 then one in the composer then real typing (the
 #                     composer still takes the keys), a half scroll and back, a folded turn,
 #                     the effort list, a file tab over the chat, a terminal beside it, a call whose
@@ -562,7 +563,7 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     closed with "the call did not run" and never got input or result), a view that
 #                     posts straight to the IPC handler (`mcp_forge`: closed with "the view posted
 #                     outside its relay", `forged` "1" while every other widget's is "0"), and a dead
-#                     CLI. It also checks the CLI heard four mcp_read_resource and only gated
+#                     CLI. It also checks the CLI heard five mcp_read_resource and only gated
 #                     mcp_calls for `act`, and writes mcp-widget.json to the out dir.
 #   mcp_widget_flood  a widget posting pings at about 125k a second for 3 s: surface.chat.read answers
 #                     within 1000 ms throughout; within 30 s the widget's row is closed with "over the

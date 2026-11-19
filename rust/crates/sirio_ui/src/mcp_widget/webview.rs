@@ -256,9 +256,9 @@ pub fn build_widget_child(
     view.connect_context_menu(|_, _, _, _| true);
     // The page takes no keyboard input in this version: a key press or release that reaches the
     // top-level GtkWindow is stopped before the WebView sees it. Measured on a bare X server and
-    // under a window manager: with this handler disabled the page still counts no keydown, because
-    // a key typed with the pointer over a widget goes to Sirio's own window (the composer), not to
-    // the page. So the handler is a guard for the case where GTK does get a key; no test shows it
+    // under a window manager: with this handler disabled the page still counted no keydown after a
+    // click in it, and what keeps keys out is not identified (Sirio's browser, embedded the same
+    // way, does take keys). So the handler is a guard for any key GTK does get; no test shows it
     // stopping one.
     if let Some(toplevel) = view.toplevel().and_then(|top| top.downcast::<gtk::Window>().ok()) {
         toplevel.connect_key_press_event(|_, _| gtk::glib::Propagation::Stop);

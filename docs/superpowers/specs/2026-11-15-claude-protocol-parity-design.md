@@ -873,10 +873,10 @@ Each item is laid out the same way:
       a name outside the declared domains; this is a disclosed gap with a follow-up for a
       DNS-level probe. A widget receives no keyboard input in this version: its webview's
       top-level window stops every key event that reaches it before the page sees it. Measured
-      on a bare X server and under a window manager, a key typed while the pointer rests over a
-      widget, even after a click in it, goes to Sirio's own window, so it reaches the composer
-      like any other key and never the page; the stop is a guard for any path that would hand
-      GTK a key (deviation, 2026-11-19, security re-review).
+      on a bare X server and under a window manager, the page counted no key typed over it, even
+      after a click in it and with the stop disabled; what keeps keys out is not identified, so
+      the stop is the designed guard, and no test shows it stopping a key (deviation,
+      2026-11-19, security re-review).
   - **The CSP, and the rest of "no network".** Sirio's protocol handler sends the CSP as a
     response header, never a meta tag, built from the spec's restrictive default (S275-S284) plus
     the declared domains, where `R` is `resourceDomains` and `C` is `connectDomains`:

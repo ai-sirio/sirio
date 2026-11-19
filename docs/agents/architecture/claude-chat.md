@@ -917,9 +917,9 @@ calls are refused with no card for 10 s, and after three in a row the widget is 
 resets the count. Asks are never persisted.
 
 **What the webview does and does not do.** A widget takes no keyboard input in this version.
-Measured on a bare X server and under a window manager, a key typed while the pointer rests over a
-widget, even after a click in it, goes to Sirio's own window and reaches the composer, never the
-page. `build_widget_child` also connects `key-press-event` and `key-release-event` handlers that
+Measured on a bare X server and under a window manager, the page counted no key typed over it,
+even after a click in it and with the guard below disabled; what keeps keys out is not
+identified (Sirio's browser, embedded the same way, does take keys). `build_widget_child` connects `key-press-event` and `key-release-event` handlers that
 stop the event on the webview's top-level GtkWindow, which GTK runs before the WebView sees a key:
 a guard for any path that would hand GTK a key; no test shows it stopping one. Nothing calls wry's
 `focus_parent()` for a widget: it focuses the widget's own X child, not Sirio's top-level
