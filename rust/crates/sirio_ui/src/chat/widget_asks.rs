@@ -248,14 +248,15 @@ impl Chat {
         else {
             return;
         };
-        // A second Allow while the call runs does nothing; a Reject always denies.
+        // A second Allow while the call runs does nothing; a Reject always denies, and leaves a
+        // card that already says Allow as it is: the call was sent and cannot be recalled.
         if self.widgets.asks.open[position].calling && !option.is_rejection {
             return;
         }
         let found = self.entries.iter_mut().enumerate().rev().find_map(|(index, entry)| match entry
         {
             Entry::Permission { request_id: id, resolved, expired: false, .. }
-                if *id == request_id && (resolved.is_none() || option.is_rejection) =>
+                if *id == request_id && resolved.is_none() =>
             {
                 *resolved = Some(option.label.clone());
                 Some(index)
@@ -820,8 +821,10 @@ mod tests {
         assert_eq!(outcomes(&answers).len(), 2);
         assert_eq!(denied(&answers, "once"), 1);
 
-        // A Reject while the call runs denies it, shows the card as Reject, and the late
-        // result of the held call is dropped.
+        // A Reject while the call runs denies the widget once and drops the late result, but
+        // the card keeps reading Allow: the call was sent and cannot be recalled.
+        // How it can fail, written first: the card is relabelled Reject though the call runs;
+        // the widget is not denied; it is denied twice; the late result reaches the widget.
         chat.update(cx, |chat, cx| {
             let request = open(chat, "reject", cx);
             let allow = option(chat, request, false);
@@ -831,9 +834,9 @@ mod tests {
             assert!(chat.control_permission(request, "reject_once", cx).is_ok());
             let shown = chat.entries.iter().any(|entry| {
                 matches!(entry, Entry::Permission { request_id: id, resolved: Some(label), .. }
-                    if *id == request && label == "Reject")
+                    if *id == request && *label == allow.label)
             });
-            assert!(shown, "the card reads Reject");
+            assert!(shown, "the card still reads Allow");
             chat.widget_call_returned(request, Ok(json!({"late": true})), cx);
         });
         assert_eq!(outcomes(&answers).len(), 3);

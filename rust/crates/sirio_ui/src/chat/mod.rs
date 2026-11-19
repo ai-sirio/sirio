@@ -1053,6 +1053,11 @@ struct QuestionDockState {
     shown_at: Option<std::time::Instant>,
     /// Where each row was last painted, in window pixels, by row index.
     row_bounds: Rc<RefCell<BTreeMap<usize, Bounds<Pixels>>>>,
+    /// The scroll of the question's body, to know whether its end has been seen.
+    body_scroll: ScrollHandle,
+    /// The last mouse press on a row of the dock: request, step, row and when it began. A
+    /// widget's card counts a click only if its press began after the dock armed.
+    press: Option<(u64, usize, usize, std::time::Instant)>,
 }
 
 /// A tool call nested inside a subagent task card.
@@ -3058,6 +3063,8 @@ impl Chat {
                 for_request: None,
                 shown_at: None,
                 row_bounds: Rc::default(),
+                body_scroll: ScrollHandle::new(),
+                press: None,
             },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
@@ -6649,6 +6656,10 @@ impl Chat {
     /// rides the selected-option channel; the transcript records it as the
     /// answer, and the pending state ends.
     fn answer_question_text(&mut self, request_id: u64, text: &str, cx: &mut Context<Self>) {
+        // A widget's card has no text row, and its answers never go to the CLI as a permission.
+        if request_id >= WIDGET_ASK_BASE {
+            return;
+        }
         if self.open_elicitation_index(request_id).is_some() {
             self.answer_elicitation_text(request_id, text, cx);
             return;

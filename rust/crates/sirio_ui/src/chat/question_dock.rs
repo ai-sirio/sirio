@@ -7,7 +7,8 @@
 use crate::text_selection::selectable_text;
 use ely_gpui_component::agent::{HumanInputRequest, PermissionPrompt};
 use gpui::{
-    AnyElement, Context, Focusable, KeyDownEvent, Window, actions, canvas, div, prelude::*, px,
+    AnyElement, Context, Focusable, KeyDownEvent, MouseButton, Window, actions, canvas, div,
+    point, prelude::*, px,
 };
 use serde_json::Value;
 use sirio_chat::{
@@ -634,6 +635,7 @@ impl Chat {
             "selected": clamp_selection(selected, view.rows.len()),
             "digits": view.digits,
             "clickOnly": view.click_only,
+            "allowArmed": if self.allow_armed(&view) { "1" } else { "0" },
             "rowBounds": (0..view.rows.len())
                 .map(|index| match self.question_dock.row_bounds.borrow().get(&index) {
                     Some(bounds) => serde_json::json!({
@@ -669,6 +671,8 @@ impl Chat {
             {
                 self.question_dock.for_request = Some((view.request_id, view.step));
                 self.question_dock.shown_at = Some(cx.background_executor().now());
+                self.question_dock.press = None;
+                self.question_dock.body_scroll.set_offset(point(px(0.0), px(0.0)));
                 self.question_dock.selected = self
                     .entries
                     .get(view.entry_index)
@@ -738,6 +742,50 @@ impl Chat {
                     .saturating_duration_since(shown_at)
                     >= DOCK_ARMING_DELAY
             })
+    }
+
+    /// Whether the body of the open question fits its box or has been scrolled to its end: the
+    /// user has had the chance to read all of it. The scroll extent is known once the dock has
+    /// been laid out, which `dock_armed`'s delay guarantees before it matters.
+    fn body_seen(&self) -> bool {
+        let scroll = &self.question_dock.body_scroll;
+        let max = f32::from(scroll.max_offset().y);
+        let at = -f32::from(scroll.offset().y);
+        max <= 1.0 || at >= max - 1.0
+    }
+
+    /// Whether Allow on a widget's card is armed: the arguments have been seen. Any other
+    /// question has no such rule.
+    pub(super) fn allow_armed(&self, view: &QuestionView) -> bool {
+        !view.click_only || self.body_seen()
+    }
+
+    /// An Allow row of a widget's card whose arguments have not been seen: it answers nothing.
+    fn row_is_inert(&self, view: &QuestionView, row: &DockRow) -> bool {
+        matches!(row, DockRow::Option(option) if !option.is_rejection)
+            && !self.allow_armed(view)
+    }
+
+    /// A pointer click on row `index`. A widget's card counts it only when its press began on
+    /// that same row after the card armed: a press that began earlier, or elsewhere, is a
+    /// click the widget may have steered, and does nothing.
+    fn click_dock_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = question_view(&self.entries) else {
+            return;
+        };
+        if view.click_only {
+            let pressed = self.question_dock.press.take();
+            let deliberate = self.question_dock.shown_at.is_some_and(|shown_at| {
+                pressed.is_some_and(|(request, step, row, at)| {
+                    (request, step, row) == (view.request_id, view.step, index)
+                        && at.saturating_duration_since(shown_at) >= DOCK_ARMING_DELAY
+                })
+            });
+            if !deliberate {
+                return;
+            }
+        }
+        self.activate_dock_row(index, window, cx);
     }
 
     /// Enter in the answer field of `request_id`. An open elicitation takes
@@ -892,6 +940,8 @@ impl Chat {
             .any(|row| matches!(row, DockRow::Option(_)));
         let digits = view.digits;
         let click_only = view.click_only;
+        let allow_armed = self.allow_armed(&view);
+        let body_scroll = self.question_dock.body_scroll.clone();
         let row_bounds = self.question_dock.row_bounds.clone();
         row_bounds.borrow_mut().clear();
 
@@ -922,6 +972,11 @@ impl Chat {
                         .child(label)
                 });
                 let click_entity = entity.clone();
+                let press_entity = entity.clone();
+                // An Allow whose arguments were not seen is drawn as not armed.
+                let inert = click_only
+                    && !allow_armed
+                    && matches!(&row, DockRow::Option(option) if !option.is_rejection);
                 // Where this row is painted, for a test or the E2E to click on.
                 let probe = {
                     let row_bounds = row_bounds.clone();
@@ -961,15 +1016,22 @@ impl Chat {
                             hover_entity.update(cx, |chat, cx| chat.select_dock_row(index, cx));
                         }
                     })
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        press_entity.update(cx, |chat, cx| {
+                            let now = cx.background_executor().now();
+                            chat.question_dock.press = Some((request_id, step, index, now));
+                        });
+                    })
                     .on_click(move |_, window, cx| {
                         click_entity.update(cx, |chat, cx| {
                             if question_view(&chat.entries).is_some_and(|view| {
                                 view.request_id == request_id && view.step == step
                             }) {
-                                chat.activate_dock_row(index, window, cx);
+                                chat.click_dock_row(index, window, cx);
                             }
                         });
                     })
+                    .when(inert, |row| row.opacity(0.45))
                     .child(probe)
                     .children(badge);
                 match row {
@@ -1061,6 +1123,7 @@ impl Chat {
                 body.child(
                     div()
                         .id(("question-dock-body", request_id as usize))
+                        .track_scroll(&body_scroll)
                         .debug_selector(|| "question-dock-body".into())
                         .max_h(px(DOCK_BODY_MAX_HEIGHT))
                         .overflow_y_scroll()
@@ -1096,7 +1159,9 @@ impl Chat {
                     .justify_end()
                     .text_size(typography.caption2)
                     .text_color(theme.ely.fg_subtle)
-                    .child(if click_only {
+                    .child(if click_only && !allow_armed {
+                        "Scroll to the end to allow · esc reject"
+                    } else if click_only {
                         "click to answer · esc reject"
                     } else {
                         "↑↓ select · ⏎ confirm · esc cancel"
@@ -1168,6 +1233,9 @@ impl Chat {
         if matches!(row, DockRow::Option(_) | DockRow::Skip) && !self.dock_armed(&view, cx) {
             return;
         }
+        if self.row_is_inert(&view, &row) {
+            return;
+        }
         self.question_dock.selected = index;
         if matches!(
             self.entries.get(view.entry_index),
@@ -1201,6 +1269,10 @@ impl Chat {
             .ok_or_else(|| format!("request {request_id} is not the open question"))?;
         match act {
             ElicitationAct::Row(number) => {
+                // A widget's card answers to a pointer only: this verb is a digit key.
+                if view.click_only {
+                    return Err("a widget's card answers to a click only".to_string());
+                }
                 let index = number
                     .checked_sub(1)
                     .filter(|index| *index < view.rows.len())
@@ -2252,5 +2324,137 @@ mod tests {
         });
         assert_eq!(said(), 2);
         assert_eq!(answers.borrow()[1].2, AskOutcome::Denied);
+    }
+
+    // How it can fail, written first. A widget can steer a click onto Allow (an early press, a
+    // press on another row, a page that makes the pointer land there) and its arguments can
+    // run below the fold of the capped body.
+    //
+    // 1. A press that began before the card armed, released after it, answers.
+    // 2. A press on Reject released on Allow answers Allow.
+    // 3. Allow answers while the body has not been scrolled to its end.
+    // 4. Reject is inert before the scroll, so a card cannot be refused without scrolling.
+    // 5. `Row(n)`, which is a digit key, approves a click-only card.
+    // 6. `allowArmed` reads "1" while the body is cut, or "0" for a body that fits.
+    #[gpui::test]
+    async fn a_widget_card_counts_only_a_deliberate_click_on_arguments_the_user_has_seen(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::chat::testing::{offline_chat, prepare};
+        use crate::chat::tests::refresh_frame;
+        use crate::chat::widget_lookup::Held;
+        use crate::chat::widget_slot::Slot;
+        use crate::mcp_widget::AskOutcome;
+        use gpui::Modifiers;
+        use sirio_chat::{McpOrigin, McpServer, McpState, McpTool, UiToolRef};
+
+        prepare(cx);
+        let (chat, cx) = cx.add_window_view(|_, cx| offline_chat(cx));
+        let answers = chat.update(cx, |chat, _| {
+            chat.widgets.seed_test_servers(vec![McpServer {
+                name: "s".into(),
+                status: McpState::Connected,
+                origin: McpOrigin::User,
+                tools: vec![McpTool { name: "do".into(), ui: None }],
+            }]);
+            let hit = UiToolRef {
+                server: "s".into(),
+                origin: McpOrigin::User,
+                tool: "show".into(),
+                resource_uri: "ui://s/show".into(),
+            };
+            chat.widgets
+                .insert_test_slot(Slot::resolving("a".into(), 1, &hit, Held::new(Value::Null)));
+            chat.widgets.asks.answers.clone()
+        });
+        let said = || answers.borrow().len();
+        let dock = |cx: &mut gpui::VisualTestContext| -> Value {
+            let text = chat.read_with(cx, |chat, _| chat.question_dock_json());
+            serde_json::from_str(&text).expect("the dock reads as JSON")
+        };
+        let long = || {
+            let fields: serde_json::Map<String, Value> = (0..60)
+                .map(|n| (format!("key{n:02}"), Value::String("a value".to_owned())))
+                .collect();
+            Value::Object(fields)
+        };
+        let center = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            cx.debug_bounds(selector).expect("the row is drawn").center()
+        };
+
+        // A card whose arguments fit is armed for Allow; a press that began before the card
+        // armed does nothing when released after it.
+        chat.update(cx, |chat, cx| {
+            chat.widget_asked("a", 1, "do".into(), serde_json::json!({"k": "v"}), cx);
+        });
+        refresh_frame(cx);
+        assert_eq!(dock(cx)["allowArmed"], "1");
+        let allow = center(cx, "permission-option-allow_once");
+        let reject = center(cx, "permission-option-reject_once");
+        cx.simulate_mouse_down(allow, gpui::MouseButton::Left, Modifiers::none());
+        cx.executor().advance_clock(DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_mouse_up(allow, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 0, "a press before arming is no click");
+
+        // A press on Reject released on Allow is not a click on Allow.
+        cx.simulate_mouse_down(reject, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(allow, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 0, "a press on another row is no click");
+
+        // `Row(n)` is a key, and a click-only card refuses it.
+        let request = chat.read_with(cx, |chat, _| {
+            question_view(&chat.entries).expect("the card is open").request_id
+        });
+        let refused = cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| {
+                chat.elicitation_act(request, ElicitationAct::Row(2), window, cx)
+            })
+        });
+        assert!(refused.is_err());
+        assert_eq!(said(), 0);
+
+        // The same press and release on Allow, both after arming, answers.
+        cx.simulate_click(allow, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 1);
+        assert!(matches!(answers.borrow()[0].2, AskOutcome::Result(_)));
+
+        // Arguments longer than the body's box: Allow is inert until the end is scrolled to,
+        // and Reject is not.
+        chat.update(cx, |chat, cx| chat.widget_asked("a", 2, "do".into(), long(), cx));
+        refresh_frame(cx);
+        cx.executor().advance_clock(DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert_eq!(dock(cx)["allowArmed"], "0");
+        let at = center(cx, "permission-option-allow_once");
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 1, "Allow answers nothing before the end is seen");
+        chat.read_with(cx, |chat, _| {
+            let max = chat.question_dock.body_scroll.max_offset();
+            chat.question_dock.body_scroll.set_offset(gpui::point(max.x, -max.y));
+        });
+        assert_eq!(dock(cx)["allowArmed"], "1");
+        let at = center(cx, "permission-option-allow_once");
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 2, "Allow answers once the end is seen");
+
+        // Reject answers before any scroll.
+        chat.update(cx, |chat, cx| chat.widget_asked("a", 3, "do".into(), long(), cx));
+        refresh_frame(cx);
+        cx.executor().advance_clock(DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert_eq!(dock(cx)["allowArmed"], "0");
+        let at = center(cx, "permission-option-reject_once");
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 3);
+        assert_eq!(answers.borrow()[2].2, AskOutcome::Denied);
     }
 }

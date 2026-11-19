@@ -5813,6 +5813,24 @@ elif command == "wait":
             print("FAIL: " + desc, file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
+elif command == "dock-row":
+    # dock-row SURFACE OPTION SECONDS: polls every 30 ms until the dock shows a click-only card with
+    # the option's row painted, then prints that row's centre in window pixels, as fast as it can:
+    # the caller presses on it before the card arms (500 ms after it appears).
+    surface, option, seconds = sys.argv[2], sys.argv[3], float(sys.argv[4])
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        result = rpc("surface.chat.read", {"surfaceId": surface})
+        dock = json.loads(result["questionDock"]) if result.get("questionDock") else None
+        if dock and dock.get("clickOnly") is True:
+            ids = [o["id"] for o in dock["options"]]
+            bounds = dock["rowBounds"][ids.index(option)] if option in ids else None
+            if bounds:
+                print(int(bounds["x"] + bounds["w"] / 2), int(bounds["y"] + bounds["h"] / 2))
+                sys.exit(0)
+        time.sleep(0.03)
+    print("FAIL: no click-only card with a painted " + option + " row", file=sys.stderr)
+    sys.exit(1)
 elif command == "invariant":
     # invariant SURFACE DISPLAY LABEL ARTIFACT COUNT: holds within 6 s of settling, or fails.
     surface, display, label, artifact, count = sys.argv[2:7]
@@ -5989,14 +6007,47 @@ scenario_mcp_widget() {
   widget_wait "Escape closed card 1" 15 'not d and not any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
   widget_invariant "2 card 1 denied"
   # 3. card 2 after the cooldown
+  # 3a. a press that begins before card 2 arms does not count when it is released after it (500 ms): the
+  # press goes down on the Allow row as soon as the row is painted, and the release comes 0.7 s later.
+  # The card must still be pending. (A real press moves Sirio's keyboard focus to the composer on this
+  # window-manager-less display, so it comes at the step that needs no key afterwards.)
+  local early origin ex ey
+  origin=$(window_origin)
+  early=$(MW dock-row "$SURFACE" allow_once 60) || fail "card 2 did not show a painted Allow row"
+  ex=$(( ${early% *} + ${origin% *} ))
+  ey=$(( ${early#* } + ${origin#* } ))
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$ex" "$ey" mousedown 1 sleep 0.7 mouseup 1 \
+    || fail "xdotool could not press on the Allow row"
+  echo "step: a real press on the Allow row before card 2 armed, released 0.7 s later"
+  widget_wait "card 2 is still pending after a press that began before it armed" 5 \
+    'd and d["clickOnly"] is True and any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
   widget_wait "card 2 arrives with the unsupported codes, the escape and one ask at a time" 60 \
     'd and all(s in norm(d["body"]) for s in ["\"step\":1", "\"codes\":[-32601,-32601,-32601]", "\"escaped\":-32000"]) and set(w[0]["refused"].split("|")) >= {"tools/call:ping:not a tool of this server", "tools/call:model_only:not callable from a widget", "tools/call:act:one ask at a time"}'
   widget_invariant "3 card 2 open"
+  # Card 2's body (ten lines) is cut by the dock's box, so Allow is not armed: a real click on it, long
+  # after the card armed, does nothing. A real wheel over the body scrolls it to its end, which arms Allow.
+  widget_wait "card 2's body is cut by its box, so Allow is not armed" 10 'd and d["allowArmed"] == "0"'
+  sleep 0.6
+  echo "step: a real click on the Allow row, before the body was scrolled to its end"
+  click_at_window "$(dock_row_xy allow_once)"
+  widget_wait "card 2 is still pending after a click on its unarmed Allow" 5 \
+    'd and d["allowArmed"] == "0" and any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  local wheel
+  wheel=$(MW read "$SURFACE" | python3 -c '
+import json, sys
+b = json.load(sys.stdin)["questionDock"]["rowBounds"][0]
+print(int(b["x"] + b["w"] / 2), int(b["y"] - 60))')
+  origin=$(window_origin)
+  echo "step: a real wheel over the card's body ($wheel)"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove $(( ${wheel% *} + ${origin% *} )) $(( ${wheel#* } + ${origin#* } )) \
+    click --repeat 8 --delay 100 5 || fail "xdotool could not scroll the card's body"
+  widget_wait "scrolled to its end, card 2's Allow is armed" 10 'd and d["allowArmed"] == "1"'
   sleep 0.6
   echo "step: a real click on the Allow row"
   click_at_window "$(dock_row_xy allow_once)"
   # 4. card 3: the result of the call that card 2 allowed came back through bypass
-  widget_wait "card 3 carries the allowed call's n" 40 'd and "\"got\":42" in norm(d["body"])'
+  widget_wait "card 3 carries the allowed call's n, and its Allow is not armed until its body is scrolled" 40 \
+    'd and d["allowArmed"] == "0" and "\"got\":42" in norm(d["body"])'
   widget_invariant "4 card 3 open"
   sleep 0.6
   E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="$(widget_card_id)" optionId=reject_once >/dev/null \

@@ -187,18 +187,20 @@ enum McpCallAsk {
     Answer(serde_json::Value),
 }
 
-/// Reads a raw control request as the ask of an `mcp_call`, by the `toolu_mcp_call_` prefix on
-/// its tool-use id, and answers it: allowed when a grant covers exactly its tool and input,
+/// Reads a raw control request as the ask of an `mcp_call`, by the `can_use_tool` subtype and the
+/// `toolu_mcp_call_` prefix on its tool-use id, and answers it: allowed when a grant covers exactly its tool and input,
 /// denied otherwise, including when it is too malformed to parse. Nothing but a grant allows it.
 fn mcp_call_ask(
     value: &serde_json::Value,
     approvals: &mut WidgetApprovals,
     now: std::time::Instant,
 ) -> McpCallAsk {
-    let is_mcp_call = value
-        .pointer("/request/tool_use_id")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|id| id.starts_with(MCP_CALL_ASK_PREFIX));
+    let is_mcp_call = value.pointer("/request/subtype").and_then(serde_json::Value::as_str)
+        == Some("can_use_tool")
+        && value
+            .pointer("/request/tool_use_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id.starts_with(MCP_CALL_ASK_PREFIX));
     if !is_mcp_call {
         return McpCallAsk::Other;
     }
@@ -2615,7 +2617,8 @@ mod tests {
     // Failure list for the ask of an `mcp_call`: an ask with a `toolu_mcp_call_` id but no
     // `tool_name` left unanswered or sent on to the card path; one answered with the wrong
     // request id; an ask that was not granted being allowed; a granted one allowed twice; an
-    // ordinary ask taken for one of these.
+    // ordinary ask taken for one of these; a control request of another subtype that carries
+    // such an id taken for one, and answered with a permission verdict.
     #[test]
     fn every_mcp_call_ask_is_answered_and_only_a_granted_one_is_allowed() {
         let now = std::time::Instant::now();
@@ -2658,5 +2661,14 @@ mod tests {
         let ordinary =
             ask(serde_json::json!({"subtype": "can_use_tool", "tool_use_id": "toolu_1"}));
         assert!(matches!(mcp_call_ask(&ordinary, &mut approvals, now), McpCallAsk::Other));
+        // Nor is a request of another subtype, whatever id it carries.
+        let other_subtype = ask(serde_json::json!({
+            "subtype": "hook_callback", "tool_name": "mcp__apps__act", "input": input,
+            "tool_use_id": "toolu_mcp_call_01234567"
+        }));
+        assert!(matches!(
+            mcp_call_ask(&other_subtype, &mut approvals, now),
+            McpCallAsk::Other
+        ));
     }
 }
