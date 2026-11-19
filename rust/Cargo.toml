@@ -9,6 +9,14 @@ exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/gpui_macos", "ven
 members = [
     "vendor/ely-palette",
     "vendor/ely-gpui-component",
+    "vendor/ely/crates/ely-core",
+    "vendor/ely/crates/ely-chat",
+    "vendor/ely/crates/ely-agent",
+    "vendor/ely/crates/ely-editor",
+    "vendor/ely/crates/ely-git",
+    "vendor/ely/crates/ely-documents",
+    "vendor/ely/crates/ely-collab",
+    "vendor/ely/crates/ely-charts",
     "vendor/reqwest_client",
     "crates/sirio_perf",
     "crates/sirio_env",
@@ -57,6 +65,14 @@ publish = false
 [workspace.dependencies]
 ely-palette = { path = "vendor/ely-palette" }
 ely-gpui-component = { path = "vendor/ely-gpui-component", default-features = false, features = ["sirio-chat"] }
+ely-core = { path = "vendor/ely/crates/ely-core", version = "0.3.0", default-features = false }
+ely-chat = { path = "vendor/ely/crates/ely-chat", version = "0.2.0" }
+ely-agent = { path = "vendor/ely/crates/ely-agent", version = "0.2.0" }
+ely-editor = { path = "vendor/ely/crates/ely-editor", version = "0.2.0" }
+ely-git = { path = "vendor/ely/crates/ely-git", version = "0.2.0" }
+ely-documents = { path = "vendor/ely/crates/ely-documents", version = "0.2.0" }
+ely-collab = { path = "vendor/ely/crates/ely-collab", version = "0.2.0" }
+ely-charts = { path = "vendor/ely/crates/ely-charts", version = "0.2.0" }
 # GPUI used to be an absolute path into a zed checkout on one particular Mac, which meant the
 # workspace failed to resolve — not to build, to *resolve* — anywhere else, taking all thirteen
 # crates down with it even though only four of them touch GPUI. Now that Sirio targets Linux as

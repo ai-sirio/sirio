@@ -1,0 +1,31 @@
+[package]
+name = "ely-collab"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "Ely's collaboration components for GPUI: presence, comments, cursors and shared editing."
+repository = "https://github.com/ELY-Open-Source/Ely-GPUI-Components"
+homepage = "https://elygpui.com"
+readme = "README.md"
+keywords = ["gpui", "ui", "components", "widgets", "gui"]
+categories = ["gui"]
+
+[features]
+test-support = ["ely-core/test-support", "gpui/test-support", "gpui/leak-detection"]
+
+[dependencies]
+ely-core.workspace = true
+ely-documents.workspace = true
+gpui.workspace = true
+jiff = "0.2"
+log = "0.4"
+similar = { version = "3.2", default-features = false, features = ["std", "text", "inline", "unicode"] }
+smallvec = "1"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+similar = { version = "3.2", default-features = false, features = ["wasm32_web_time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }
