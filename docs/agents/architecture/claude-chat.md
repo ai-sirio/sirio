@@ -884,8 +884,9 @@ only reject a widget's card (`reject_once`); any other option is refused with an
 row's `rowBounds` from the last paint. Arguments over 4000 characters, a tool the server does not
 list, one hidden from apps, an ambiguous name and a name the CLI would rewrite are refused with no
 card (and a note in the widget's `refused` list). Allow runs `mcp_call` off the UI thread and
-answers the widget with the result, and a second choice while that call runs does nothing. Every
-other end answers the widget `Denied` exactly once. A Reject (a click, or `reject_once` from the
+answers the widget with the result, and a second Allow while that call runs does nothing; a Reject
+or any close denies it, and the call's late result is dropped. Every other end answers the widget
+`Denied` exactly once. A Reject (a click, or `reject_once` from the
 control verb) marks the card resolved; the other ends show it expired: Escape, a dismiss, the
 UI-side timer at `PERMISSION_TIMEOUT` (5 min), the widget being closed (the cap, a flood, three denials, its own close), the CLI going away (a
 transport error, a deadline, the event stream closing, even between turns), a restart, a new
