@@ -726,3 +726,27 @@ budget for 256 KiB of `&`: it took 3.3 s in the full run and 2.6 s alone under l
 at `--test-threads 2`, so on this machine it sits at its budget and `ci.sh` may fail on it. That test
 is upstream's own and is not touched here. With `--features test-support` the same two crates run 617
 tests, all passing (2 ignored), that test included (1.59 s).
+
+## Wall-clock tests off the featureless build
+
+`Scripts/ci.sh` runs `cargo nextest run --workspace` with no features, so upstream's plain `#[cfg(test)]`
+unit tests run in Sirio's gate. Three of them in `ely-documents` assert a wall-clock budget, timed with
+`web_time::Instant::now()` and `elapsed()`, and fail under load: `html_block` took 3.3 s against its 2 s
+budget in the full run. The project keeps wall-clock tests out of its gate. Each of the three test
+functions takes `#[cfg(feature = "test-support")]` above its `#[test]`, so it compiles only with the
+crate's `test-support` feature. The closure check runs with `--features test-support`, so it still runs
+them. This is not an `#[ignore]`: the spec's two ignores (see "Ignored tests" above) are untouched.
+
+Changed paths (one attribute line each, on the test function only):
+
+- `crates/ely-documents/src/tree/html_block.rs`: `tree::html_block::tests::references_and_long_runs_read_as_a_browser_reads_them`.
+- `crates/ely-documents/src/tree/sources.rs`: `tree::sources::tests::a_long_paragraph_reads_back_in_one_pass`.
+- `crates/ely-documents/src/tree/emoji.rs`: `tree::emoji::tests::long_runs_scan_in_linear_time`.
+
+Why: `ci.sh` runs upstream's plain unit tests featureless, and these three assert wall-clock budgets that
+fail under load. The crate's other timing tests go through `clock::spent`, which reads the thread's CPU
+time, not the wall clock, so they stay as they are.
+
+Outcome: local change. Proof: `cd rust && cargo nextest list -p ely-documents` (no features) lists none
+of the three names, and `cd rust && cargo nextest run -p ely-documents --features test-support -E
+'test(=<full::path::name>)' --test-threads 2` runs each one, exactly once.

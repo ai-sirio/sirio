@@ -171,6 +171,7 @@ mod tests {
         assert_eq!(emoji("é :smile: 中"), "é 😄 中");
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn long_runs_scan_in_linear_time() {
         let colons = ":zq".repeat(1 << 16);

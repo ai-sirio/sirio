@@ -420,6 +420,7 @@ mod tests {
         assert!(large < small * 8, "{small:?} then {large:?}");
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn references_and_long_runs_read_as_a_browser_reads_them() {
         let line = html("<div>&notit; &amp &ampx &lt3 &nope;</div>").expect("text");

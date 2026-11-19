@@ -376,6 +376,7 @@ mod tests {
         assert_eq!(inline.drawn_at(source, star), inline.text.find('*'));
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn a_long_paragraph_reads_back_in_one_pass() {
         let source = "x".repeat(40_000);
