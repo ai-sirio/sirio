@@ -323,5 +323,5 @@ pub(crate) fn selectable(body: Div, state: Entity<Selection>, on_menu: OnMenu, c
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests;

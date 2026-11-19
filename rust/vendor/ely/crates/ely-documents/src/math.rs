@@ -282,5 +282,5 @@ pub(crate) fn failed(error: &MathError, source: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests;

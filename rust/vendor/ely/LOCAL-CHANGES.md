@@ -684,3 +684,45 @@ Outcomes:
   deleted-hunk and ghost rows' clip. The wheel fallback added to row 161 (a pure horizontal wheel scrolls the
   rows while nothing is wide) has its proof (ran): `ely-documents` `document::tests::scroll::source_margins_scroll`.
 - Row 167: re-applied (`measured` is `pub(super)`). Proof: the closure build (`view.rs` calls it).
+
+## Featureless test build
+
+`Scripts/ci.sh` runs `cargo nextest run --workspace` with no features. Upstream always tests with
+`test-support`: its own `mod tests` and `init_for_tests` are gated `all(test, feature = "test-support")`.
+Seven plain `#[cfg(test)]` modules in `ely-git` and `ely-documents` call `init_for_tests`,
+`gpui::TestAppContext` or `#[gpui::test]`, which exist only with that feature, so the featureless
+build did not compile. Each of the seven takes upstream's gate, `#[cfg(all(test, feature = "test-support"))]`,
+in place of `#[cfg(test)]`; nothing else in them changes. With test-support on, `test` is on too, so
+the modules compiled in a test-support build are the same as before.
+
+Changed paths (each is one attribute line):
+
+- `crates/ely-git/src/rows.rs`: inline `mod tests` (was line 134).
+- `crates/ely-documents/src/templates.rs`: inline `mod tests` (was line 351).
+- `crates/ely-documents/src/render/math_text.rs`: inline `mod tests` (was line 306).
+- `crates/ely-documents/src/math.rs`: `mod tests;` (was line 285), whose file is `math/tests.rs`.
+- `crates/ely-documents/src/modes.rs`: `mod tests;` (was line 491), whose file is `modes/tests.rs`.
+- `crates/ely-documents/src/render.rs`: `mod tests;` (was line 540), whose file is `render/tests.rs`.
+- `crates/ely-documents/src/render/select.rs`: `mod tests;` (was line 326), whose file is
+  `render/select/tests.rs`.
+
+Why: `ci.sh` runs `nextest --workspace` with no features; upstream always tests with test-support.
+
+Cost: the 17 plain `#[test]` functions in these modules (2 in `rows.rs`, 1 in `templates.rs`, 1 in
+`math_text.rs`, 10 in `math/tests.rs`, 2 in `modes/tests.rs`, 1 in `render/select/tests.rs`) now run
+only under test-support. No CI job runs the ely crates with test-support (`Scripts/ci-linux.sh`
+enables it for the gpui copy only), so `ci.sh` no longer runs them. The gpui tests in the same
+modules could not compile featureless before and still cannot. Moving the gate onto the gpui tests
+alone, so the 17 run again, is the follow-up if they must run in CI; it is not done here, because the
+task fixes the gate on the module.
+
+Outcome: local change, re-decided against the featureless build. Proof: `cd rust && cargo nextest run
+-p ely-git -p ely-documents --no-run` and `cargo nextest run -p ely-core -p ely-chat -p ely-agent
+-p ely-editor -p ely-collab -p ely-charts --no-run` both exit 0 with no error and no warning; the
+second needed no further gate. The featureless run of `ely-git` and `ely-documents` (`--no-fail-fast`)
+runs 186 tests: 185 pass, one fails, and 2 are ignored (the step-2 pair). The failure is
+`tree::html_block::tests::references_and_long_runs_read_as_a_browser_reads_them`, a 2 s wall-clock
+budget for 256 KiB of `&`: it took 3.3 s in the full run and 2.6 s alone under load, and 1.97 s alone
+at `--test-threads 2`, so on this machine it sits at its budget and `ci.sh` may fail on it. That test
+is upstream's own and is not touched here. With `--features test-support` the same two crates run 617
+tests, all passing (2 ignored), that test included (1.59 s).

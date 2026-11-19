@@ -488,5 +488,5 @@ fn visual(
         .into_any_element()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests;

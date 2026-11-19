@@ -537,5 +537,5 @@ impl RenderOnce for MarkdownRenderer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests;

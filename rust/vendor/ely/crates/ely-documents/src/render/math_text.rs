@@ -303,7 +303,7 @@ fn place(
     Some((start, last.x + glue - start.x))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

@@ -131,7 +131,7 @@ pub(super) fn spoken(line: &DiffLine) -> SharedString {
     format!("{number}{sign}{}", line.text).into()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     #[gpui::test]
     fn each_file_colors_as_its_kind_reads(cx: &mut gpui::TestAppContext) {
