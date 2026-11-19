@@ -232,7 +232,8 @@ impl CodeEditor {
             Default::default()
         };
         // A one-pixel fill, not a zero-width box with a border: Sirio's renderer
-        // (bezel-gpui-wgpu) paints nothing for a box of no width.
+        // (gpui-pre's `Scene::insert_primitive` drops a primitive with empty bounds) paints
+        // nothing for a box of no width.
         let rulers = self.options.rulers.iter().map(|column| {
             div()
                 .absolute()

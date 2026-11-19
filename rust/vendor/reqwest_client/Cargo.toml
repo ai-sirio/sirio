@@ -19,7 +19,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "reqwest_client from zed-industries/zed, republished for the bezel gpui fork"
+description = "reqwest_client from zed-industries/zed, vendored by Sirio for its gpui-pre engine"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/crabtalk/zed"
@@ -83,7 +83,7 @@ features = [
 ]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.http_client_tls]
-version = "0.3.8"
+version = "=0.3.8"
 package = "bezel-zed-http-client-tls"
 
 [lints.clippy]

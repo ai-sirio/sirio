@@ -17,8 +17,3 @@ use reqwest_client::ReqwestClient;
 pub fn application() -> gpui::Application {
     gpui_platform::application().with_http_client(Arc::new(ReqwestClient::new()))
 }
-
-/// A headless `Application`, with the HTTP client installed.
-pub fn headless() -> gpui::Application {
-    gpui_platform::headless().with_http_client(Arc::new(ReqwestClient::new()))
-}

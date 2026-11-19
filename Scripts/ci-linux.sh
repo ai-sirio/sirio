@@ -257,7 +257,8 @@ done
 # gate here only means pending_drop and friends actually ran on a host that is Linux/FreeBSD.
 #
 # The gpui-pre copy only compiles its tests with `--features test-support` (it turns on gpui's own
-# test support), so the stage passes it.
+# test support), so the stage passes it. Its power.rs tests start a real dbus-daemon
+# (rust/vendor/gpui_linux/src/linux/power.rs, TestBus::start), so the host needs dbus-daemon.
 run_gpui_linux_vendor_test_stage() {
     local stage="cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked --features test-support"
     local log="$LOG_DIR/gpui_linux_vendor_test.log"

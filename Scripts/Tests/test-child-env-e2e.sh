@@ -23,12 +23,13 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #     (`display_backend.rs`, `SIRIO_FORCE_X11` unset), and a link must not lose the user's
 #     Wayland session because Sirio runs on X11.
 # Spawn sites: the vendored engine (rust/vendor/gpui_linux/src/linux/platform.rs) applies the
-# child environment at three places: open_uri_internal (:755, `open::commands`, reached by every
-# `cx.open_url`, which is what a web link click calls), reveal_path_internal (:811) and
-# open_with_system (:533, `xdg-open`). Only the first is reachable from Sirio: nothing in
+# child environment at three places: open_uri_internal (:1212, `open::commands`, reached by every
+# `cx.open_url`, which is what a web link click calls), reveal_path_internal (:1247) and
+# open_with_system (:951, `xdg-open`). Only the first is reachable from Sirio: nothing in
 # rust/crates or the vendored Ely calls `reveal_path` or `open_with_system` (the file views'
 # "Reveal in file manager" runs its own `sirio_env::command("xdg-open")`, sirio_ui/src/editor.rs:1288),
-# so this one click covers every spawn the app can start through the engine. A re-applied
+# so this one click covers every link or file opener the app can start through the engine (the
+# restart path spawns without the child environment, outside the spec's §5.3.2). A re-applied
 # set_child_environment that misses the two unreachable sites cannot be seen by any E2E.
 # With `set_child_environment` removed from main.rs the script must go red on a mount entry;
 # that mutation is made by hand (rebuild, run, restore), not by a flag.
