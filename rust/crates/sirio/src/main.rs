@@ -34335,6 +34335,9 @@ fn main() {
                     traffic_light_position: Some(point(px(12.), px(10.))),
                     ..Default::default()
                 }),
+                // The focused window keeps its full frame rate under power-saving profiles, as on
+                // bezel 0.3.8; gpui-pre's inactive (30 fps) and thermal (60 fps) limits are accepted.
+                low_power_frame_interval: None,
                 ..Default::default()
             },
             move |window, cx| {
