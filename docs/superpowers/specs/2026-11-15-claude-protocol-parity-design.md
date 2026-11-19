@@ -866,10 +866,16 @@ Each item is laid out the same way:
       placed. Its permission handler denies every request. It accepts no dropped files, so a
       file dragged toward the composer never reaches the view, and it shows no context menu.
       It opens no file chooser and no HTTP authentication prompt: both requests are cancelled.
-      Hyperlink auditing (`<a ping>`) and DNS prefetching are off. A click in a widget does not
-      keep the keyboard: a press anywhere else in the chat, and hiding or closing the widget,
-      hand focus back to Sirio's window, so keys meant for the composer never reach the view
-      (deviation, 2026-11-19, from the security review).
+      LinkPreconnect, link prefetch and speculation-rules prefetch are turned off through
+      WebKitGTK's feature switches (2.42 and later; on 2.38-2.41 they stay on, a disclosed gap).
+      An `<a ping>` is blocked by the CSP. DNS prefetching has no working switch on
+      WebKitGTK 2.54 (the setting is a no-op), so a `<link rel=dns-prefetch>` may still resolve
+      a name outside the declared domains; this is a disclosed gap with a follow-up for a
+      DNS-level probe. A widget receives no keyboard input in this version: its webview's
+      top-level window swallows every key event before the page sees it. Under X11 a key typed
+      while the pointer rests over a widget goes to the widget's window, so handing focus back
+      to Sirio cannot keep keys from the view; such keys are dropped instead (deviation,
+      2026-11-19, security re-review).
   - **The CSP, and the rest of "no network".** Sirio's protocol handler sends the CSP as a
     response header, never a meta tag, built from the spec's restrictive default (S275-S284) plus
     the declared domains, where `R` is `resourceDomains` and `C` is `connectDomains`:
