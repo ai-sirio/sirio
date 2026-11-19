@@ -821,13 +821,17 @@ Each item is laid out the same way:
     non-`ui://` and oversized values. A server is its `name` with its `source`.
   - **What the widget receives.** `tool-input` is the `tool_use` input, whole: Sirio sends no
     partial input. `tool-result` is rebuilt from the user line's `tool_use_result` as
-    `{content: [{type: "text", text}], structuredContent, _meta}`, without `com.anthropic/*` keys.
+    `{content: [{type: "text", text}], structuredContent, _meta}`, without `com.anthropic/*` keys;
+    a text-only result, which 2.1.328 gives as a list of content blocks, becomes
+    `{content: <that list>}`.
     Sirio sends `tool-input` only once the call is known to have run: the input and the result go
-    to the view together, when a non-string `tool_use_result` arrives. A string `tool_use_result`
-    (an error or a denial, which Sirio cannot tell apart without reading CLI text) closes the
-    widget with "the call did not run", and the view never gets the input. An interrupted call
-    sends `tool-cancelled`, with no input, and closes the widget. The webview may load and the
-    resource may be read before then; neither carries the call's arguments, and neither does
+    to the view together, when the call's `tool_result` block is not an error. An error or a
+    denial (`is_error: true`, which 2.1.328 pairs with a string `tool_use_result`; Sirio cannot
+    tell the two apart without reading CLI text) closes the widget with "the call did not run",
+    and the view never gets the input. The live test checks both shapes on the wire. An
+    interrupted call sends `tool-cancelled`, with no input, and closes the widget. The webview
+    may load and the resource may be read before then; neither carries the call's arguments,
+    and neither does
     `ui/initialize`. (Deviation, 2026-11-19, from the security review: a user who denies the
     model's call, or a deny rule, must keep its arguments from the server's declared domains.)
     When the server returns `structuredContent`, the
