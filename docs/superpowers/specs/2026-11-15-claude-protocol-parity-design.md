@@ -810,8 +810,12 @@ Each item is laid out the same way:
     (for a `claude.ai ` server the CLI also collapses runs of `_` and trims them at both ends),
     then `__` and the tool, which the CLI normalizes the same way. `mcp_call` routes on the first
     `__` after `mcp__`, so Sirio keeps a mapping only when splitting the rebuilt name there gives
-    back exactly that server part and that tool part, and when no other (server, tool) pair in
-    `mcp_status` rebuilds to the same name. Otherwise there is no widget. The URI is
+    back exactly that server part and that tool part, and when no other server in `mcp_status`,
+    whatever its state, has the same normalized name: the CLI runs the call on the first
+    connected server whose normalized name matches. A widget may call only a tool whose name is
+    already its own normalized form, because for a tool hidden from the model the CLI may send
+    the server the normalized name. Otherwise there is no widget, or the call is refused. The
+    URI is
     `_meta.ui.resourceUri`, else the deprecated flat `ui/resourceUri`; the CLI already drops
     non-`ui://` and oversized values. A server is its `name` with its `source`.
   - **What the widget receives.** `tool-input` is the `tool_use` input, whole: Sirio sends no
@@ -847,7 +851,8 @@ Each item is laid out the same way:
     message the iframe posts straight to the IPC handler is dropped (coordinator's condition,
     2026-11-19).
     - Each webview is built hidden, unfocused, with autoplay off, at 1×1, and is shown only when
-      placed. Its permission handler denies every request.
+      placed. Its permission handler denies every request. It accepts no dropped files, so a
+      file dragged toward the composer never reaches the view, and it shows no context menu.
   - **The CSP, and the rest of "no network".** Sirio's protocol handler sends the CSP as a
     response header, never a meta tag, built from the spec's restrictive default (S275-S284) plus
     the declared domains, where `R` is `resourceDomains` and `C` is `connectDomains`:
@@ -924,6 +929,10 @@ Each item is laid out the same way:
       close without Allow (Escape, dismiss, the timeout, the session ending, the chat closing)
       answers the view with a denial, so the view never waits forever. The end of a model turn
       does not close it: a widget mostly acts after the turn.
+    - An open card keeps the composer off, so a widget must not be able to ask without end.
+      After a denial, that widget's calls are refused with no card for 10 seconds; after three
+      denials in a row the widget is closed. A widget whose messages hit the rate limit for 5
+      seconds in a row is closed too.
   - **Not persisted.** As in A10, a restored chat shows the plain tool row.
   - **No webview, no widget.** Where Sirio has no webview, it sets no variable and draws the plain
     row. That covers a Wayland session that stays native (`SIRIO_FORCE_X11` set off, or no usable
