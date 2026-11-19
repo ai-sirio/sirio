@@ -520,6 +520,39 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 
+# MCP Apps widgets (A11): a tool with a UI shows its widget inline in the native Claude chat, in a
+# wry webview over the tool row. Widgets exist on Linux under X11 only, so these three scenarios
+# need a framed run on a private Xvfb of your own (never $DISPLAY or :0), at --window-size
+# 2200x1000, with Mesa's lavapipe:
+#   Xvfb :97 -screen 0 2400x1200x24 &      # keep its exact PID; kill that PID when done
+#   Scripts/Tests/test-chat-session-panel-e2e.sh --display :97 --window-size 2200x1000 \
+#     --out-dir DIR --only mcp_widget      # then mcp_widget_flood, then mcp_widget_gate
+# They run the trace stub with the fixture's MCP Apps knobs (SIRIO_FIXTURE_MCP_APPS=1, _WIDGET_HTML,
+# _START_BYPASS, _EFFORT_LADDER, _MCP_APPS_CAPS, _STRAY_MCP_ASK) and serve the hand-written view
+# Scripts/Tests/fixtures/mcp-apps/widget-view.html, which talks JSON-RPC to its parent and probes
+# for escapes against a request logger on 127.0.0.1 that must stay empty. The widgets are read
+# from the `mcpWidgets` key of `surface.chat.read`, the dock's `clickOnly`, `selected` and
+# `rowBounds` give the card, and the debug-only `surface.chat.transcript` scrolls the list or folds a turn.
+#   mcp_widget        two widgets, each with its own slot; a card that only a real click allows (Return,
+#                     1, Down and Return do nothing, Escape denies, a real X click on the Allow row
+#                     runs the call); and at every step the placement invariant: `mapped` is "1"
+#                     exactly when the slot is drawn wholly inside the list's viewport with no overlay,
+#                     dock question or hidden tab, and `xwininfo -id <xid>` says IsViewable exactly then
+#                     (no window counts as not viewable). The steps are the card open, a half scroll
+#                     and back, a folded turn, the effort list, a file tab over the chat, a terminal beside it,
+#                     and a dead CLI. It also checks the CLI heard two mcp_read_resource and only
+#                     gated mcp_calls for `act`, and writes mcp-widget.json to the out dir.
+#   mcp_widget_flood  a widget posting pings for 3 s: surface.chat.read answers within 1000 ms
+#                     throughout, and the widget gets some but not all of its answers; writes
+#                     mcp-widget-flood.json with the latencies.
+#   mcp_widget_gate   the CLI lists `_meta.ui` and serves the resource but reports no capability:
+#                     the rows are plain, no widget exists, and the CLI hears no read or call.
+# Scripts/Tests/widget-isolation.sh --display :97 --out-dir DIR is the webview's own isolation
+# proof (parent, IPC, network, devices, storage and navigation), run on the same kind of Xvfb.
+# Unverified, for a later enablement: macOS WKWebView and Windows WebView2 (view CSP header
+# enforcement, the incognito store, IPC in subframes, WebRTC off, the permission handler, drops;
+# on Windows wry's navigation handler sees only the top frame).
+
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
 # control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and
 # light) prove a chat asks its agent for High at start and again after a relaunch, and that the
