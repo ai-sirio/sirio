@@ -822,8 +822,15 @@ Each item is laid out the same way:
   - **What the widget receives.** `tool-input` is the `tool_use` input, whole: Sirio sends no
     partial input. `tool-result` is rebuilt from the user line's `tool_use_result` as
     `{content: [{type: "text", text}], structuredContent, _meta}`, without `com.anthropic/*` keys.
-    A string `tool_use_result` (an error or a denial) becomes `{content: [text], isError: true}`.
-    An interrupted call sends `tool-cancelled`. When the server returns `structuredContent`, the
+    Sirio sends `tool-input` only once the call is known to have run: the input and the result go
+    to the view together, when a non-string `tool_use_result` arrives. A string `tool_use_result`
+    (an error or a denial, which Sirio cannot tell apart without reading CLI text) closes the
+    widget with "the call did not run", and the view never gets the input. An interrupted call
+    sends `tool-cancelled`, with no input, and closes the widget. The webview may load and the
+    resource may be read before then; neither carries the call's arguments, and neither does
+    `ui/initialize`. (Deviation, 2026-11-19, from the security review: a user who denies the
+    model's call, or a deny rule, must keep its arguments from the server's declared domains.)
+    When the server returns `structuredContent`, the
     CLI puts its JSON in place of the server's content blocks, so the widget never sees those
     blocks. The `_meta` is otherwise passed whole: it is the widget's own server's output.
   - **Reading the resource.** `mcp_read_resource {serverName, uri}` is not bound to the tool that
@@ -854,6 +861,11 @@ Each item is laid out the same way:
     - Each webview is built hidden, unfocused, with autoplay off, at 1×1, and is shown only when
       placed. Its permission handler denies every request. It accepts no dropped files, so a
       file dragged toward the composer never reaches the view, and it shows no context menu.
+      It opens no file chooser and no HTTP authentication prompt: both requests are cancelled.
+      Hyperlink auditing (`<a ping>`) and DNS prefetching are off. A click in a widget does not
+      keep the keyboard: a press anywhere else in the chat, and hiding or closing the widget,
+      hand focus back to Sirio's window, so keys meant for the composer never reach the view
+      (deviation, 2026-11-19, from the security review).
   - **The CSP, and the rest of "no network".** Sirio's protocol handler sends the CSP as a
     response header, never a meta tag, built from the spec's restrictive default (S275-S284) plus
     the declared domains, where `R` is `resourceDomains` and `C` is `connectDomains`:
@@ -890,7 +902,14 @@ Each item is laid out the same way:
     approve a call. Escape rejects it. The control verb `surface.chat.permission` may reject it
     and is refused any other option, since a denial grants nothing (deviation, 2026-11-19: the
     E2E closes cards through that verb). A second Allow while the call runs does nothing; a
-    Reject or any close in that time denies it, and the call's late answer is dropped.
+    Reject or any close in that time denies it, and the call's late answer is dropped. The card
+    keeps showing Allow then, since the call was sent and cannot be recalled.
+
+    Two rules keep a widget from steering a click onto Allow (deviation, 2026-11-19, from the
+    security review). A click counts only when its press began on that row after the card
+    armed; a press that began earlier, or on another row, does nothing. And Allow arms only
+    once the arguments have been scrolled to their end, or when they fit without scrolling, so
+    "the card always shows the whole call" holds for what the user has actually seen.
 
     On Allow, Sirio sends `mcp_call {tool, arguments, result_not_for_model: true}`. Where
     `mcp_call_check_permissions_v1` is advertised (2.1.319 and later), it adds
