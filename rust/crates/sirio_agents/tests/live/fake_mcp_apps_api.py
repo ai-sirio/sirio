@@ -58,10 +58,14 @@ class H(BaseHTTPRequestHandler):
             stop = "end_turn"
         for e, d in [
             ("message_start", {"type": "message_start", "message": msg}),
-            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": block}),
+            ("content_block_start",
+             {"type": "content_block_start", "index": 0, "content_block": block}),
             ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": delta}),
             ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 1}}),
+            ("message_delta",
+             {"type": "message_delta",
+              "delta": {"stop_reason": stop, "stop_sequence": None},
+              "usage": {"output_tokens": 1}}),
             ("message_stop", {"type": "message_stop"}),
         ]:
             self.wfile.write(sse(e, d))

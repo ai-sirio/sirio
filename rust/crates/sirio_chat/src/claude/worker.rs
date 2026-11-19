@@ -188,8 +188,9 @@ enum McpCallAsk {
 }
 
 /// Reads a raw control request as the ask of an `mcp_call`, by the `can_use_tool` subtype and the
-/// `toolu_mcp_call_` prefix on its tool-use id, and answers it: allowed when a grant covers exactly its tool and input,
-/// denied otherwise, including when it is too malformed to parse. Nothing but a grant allows it.
+/// `toolu_mcp_call_` prefix on its tool-use id, and answers it: allowed when a grant covers
+/// exactly its tool and input, denied otherwise, including when it is too malformed to parse.
+/// Nothing but a grant allows it.
 fn mcp_call_ask(
     value: &serde_json::Value,
     approvals: &mut WidgetApprovals,

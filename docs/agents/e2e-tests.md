@@ -534,24 +534,43 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 # from the `mcpWidgets` key of `surface.chat.read`, the dock's `clickOnly`, `selected` and
 # `rowBounds` give the card, and the debug-only `surface.chat.transcript` scrolls the list or folds a turn.
 #   mcp_widget        two widgets, each with its own slot; a card that only a real click allows (Return,
-#                     1, Down and Return do nothing, Escape denies, a real X click on the Allow row
-#                     runs the call); and at every step the placement invariant: `mapped` is "1"
+#                     1, Down and Return do nothing, Escape denies; a real press on the Allow row
+#                     that begins before card 2 armed and is released 0.7 s later leaves it pending; a
+#                     real click on its Allow before the body is scrolled to its end does nothing
+#                     (`allowArmed` "0"); a real wheel over the body arms it, and a real X click on
+#                     the Allow row then runs the call); and at every step the placement invariant: `mapped` is "1"
 #                     exactly when the slot is drawn wholly inside the list's viewport with no overlay,
 #                     dock question or hidden tab, and `xwininfo -id <xid>` says IsViewable exactly then
-#                     (no window counts as not viewable). The steps are the card open, a half scroll
-#                     and back, a folded turn, the effort list, a file tab over the chat, a terminal beside it,
-#                     and a dead CLI. It also checks the CLI heard two mcp_read_resource and only
-#                     gated mcp_calls for `act`, and writes mcp-widget.json to the out dir.
+#                     (no window counts as not viewable). The steps are the card open, a real click
+#                     inside widget 1 then one in the composer then real typing (the composer
+#                     takes the keys; on a window-manager-less Xvfb the X focus is PointerRoot, so this
+#                     step cannot prove the hand-back itself), a half scroll and back, a folded turn,
+#                     the effort list, a file tab over the chat, a terminal beside it, a call whose
+#                     `tool_use_result` is a string (the fixture's `mcp_denied` turn: its widget is
+#                     closed with "the call did not run" and never got input or result), a view that
+#                     posts straight to the IPC handler (`mcp_forge`: closed with "the view posted
+#                     outside its relay", `forged` "1" while every other widget's is "0"), and a dead
+#                     CLI. It also checks the CLI heard four mcp_read_resource and only gated
+#                     mcp_calls for `act`, and writes mcp-widget.json to the out dir.
 #   mcp_widget_flood  a widget posting pings at about 125k a second for 3 s: surface.chat.read answers
 #                     within 1000 ms throughout; within 30 s the widget's row is closed with "over the
 #                     rate limit for 5 s" (the host's IPC backlog keeps it over 50 a second for 5 s of host
-#                     time), no card ever appeared, the CLI heard no mcp_call, and the window it had is gone within 3 s;
+#                     time), no card ever appeared, its `forged` count is "0", the CLI heard no mcp_call, and the window it had is gone within 3 s;
 #                     mcp-widget-flood.json has the latencies and the final row. The per-second cut is
 #                     covered by the bridge test a_flood_is_cut_at_fifty_a_second.
 #   mcp_widget_gate   the CLI lists `_meta.ui` and serves the resource but reports no capability:
 #                     the rows are plain, no widget exists, and the CLI hears no read or call.
 # Scripts/Tests/widget-isolation.sh --display :97 --out-dir DIR is the webview's own isolation
 # proof (parent, IPC, network, devices, storage and navigation), run on the same kind of Xvfb.
+# Its logger listens on four 127.0.0.1 ports and counts raw TCP accepts (accepts.log) before it
+# reads a byte, so a bare preconnect, which sends no request line, cannot pass vacuously. The probe
+# view adds `<link rel=preconnect>` and `dns-prefetch` (one port), `<link rel=prefetch>` (one port)
+# and an `<a ping>` clicked by script (one port), each outside the view's connect-src. The run
+# (production's settings: hyperlink auditing and DNS prefetching off) must see no accept for
+# prefetch and ping; the control turns auditing back on and a permissive CSP, and its FACT lines show
+# which probes reach their logger (ping does). Preconnect connects in the run too: that is a KNOWN
+# GAP, printed as such and listed in widget-isolation.json under `knownGaps`, because the webkit2gtk
+# bindings in use expose no `LinkPreconnect` feature switch.
 # Unverified, for a later enablement: macOS WKWebView and Windows WebView2 (view CSP header
 # enforcement, the incognito store, IPC in subframes, WebRTC off, the permission handler, drops;
 # on Windows wry's navigation handler sees only the top frame).

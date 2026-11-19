@@ -376,8 +376,11 @@ fn global_claude_json(key: &str, work: &Path) -> String {
     let key_tail = &key[key.len() - 20..];
     let work_text = work.display().to_string();
     format!(
-        r#"{{"hasCompletedOnboarding":true,"theme":"dark","hasSeenAutoDefaultNotice":true,"hasResetAutoModeOptInForDefaultOffer":true,"customApiKeyResponses":{{"approved":["{key_tail}"],"rejected":[]}},
-"projects":{{{work_text:?}:{{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}}}}"#
+        r#"{{"hasCompletedOnboarding":true,"theme":"dark","hasSeenAutoDefaultNotice":true,
+"hasResetAutoModeOptInForDefaultOffer":true,
+"customApiKeyResponses":{{"approved":["{key_tail}"],"rejected":[]}},
+"projects":{{{work_text:?}:{{"hasTrustDialogAccepted":true,
+"hasCompletedProjectOnboarding":true}}}}}}"#
     )
 }
 
@@ -865,8 +868,10 @@ impl AppsRig {
         let script = format!(
             "#!/bin/sh\nexec /usr/bin/env -i \\\n\
              PATH={ISOLATED_PATH} HOME='{home}' CLAUDE_CONFIG_DIR='{config}' TMPDIR='{tmp}' \\\n\
-             LANG=C.UTF-8 TERM=dumb HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 \\\n\
-             NO_PROXY=127.0.0.1,localhost ANTHROPIC_API_KEY='{key}' ANTHROPIC_AUTH_TOKEN='{token}' ANTHROPIC_BASE_URL='{base_url}' \\\n\
+             LANG=C.UTF-8 TERM=dumb HTTPS_PROXY=http://127.0.0.1:9 \
+             HTTP_PROXY=http://127.0.0.1:9 \\\n\
+             NO_PROXY=127.0.0.1,localhost ANTHROPIC_API_KEY='{key}' \
+             ANTHROPIC_AUTH_TOKEN='{token}' ANTHROPIC_BASE_URL='{base_url}' \\\n\
              DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \\\n\
              CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 ENABLE_TOOL_SEARCH=false \\\n\
              {passthrough}\\\n\

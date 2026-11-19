@@ -7118,8 +7118,10 @@ impl Chat {
         }));
     }
 
-    /// Every path that drops the client comes here: with no CLI behind them, widget asks are
-    /// denied, their cards expire and the widgets close.
+    /// The CLI went away under a live chat: a transport error, a deadline, or a prompt that
+    /// failed to send. With no CLI behind them, widget asks are denied, their cards expire and
+    /// the widgets close. A closed event stream (`event_source_closed`) and a new connection
+    /// (`start_connection`) drop the client on their own paths and close the widgets there.
     fn lose_client(&mut self, cx: &mut Context<Self>) {
         self.client.take();
         self.expire_unanswered(WidgetAsks::Deny, cx);

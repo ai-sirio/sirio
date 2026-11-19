@@ -36,9 +36,14 @@ while [[ $# -gt 0 ]]; do
         *) echo "FAIL: unknown argument $1" >&2; exit 2 ;;
     esac
 done
-[[ -n "$DISPLAY_ARG" && -n "$OUT_DIR" ]] || { echo "FAIL: --display and --out-dir are required" >&2; exit 2; }
+[[ -n "$DISPLAY_ARG" && -n "$OUT_DIR" ]] || {
+    echo "FAIL: --display and --out-dir are required" >&2
+    exit 2
+}
 case "$DISPLAY_ARG" in
-    :0|:0.*|:94|:94.*|:120|:120.*|:121|:121.*) echo "FAIL: refusing display $DISPLAY_ARG" >&2; exit 2 ;;
+    :0|:0.*|:94|:94.*|:120|:120.*|:121|:121.*)
+        echo "FAIL: refusing display $DISPLAY_ARG" >&2
+        exit 2 ;;
 esac
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
@@ -131,7 +136,8 @@ for name, listener in listeners:
 serve(*listeners[-1])
 PY
 
-run_once() { # name csp(on=restrictive, off=permissive) incognito auditing(off=production's settings)
+# name csp(on=restrictive, off=permissive) incognito auditing(off=production's settings)
+run_once() {
     local name="$1" csp="$2" incognito="$3" auditing="$4"
     local dir="$OUT_DIR/$name" home="$TMP/home-$name"
     mkdir -p "$dir" "$home/data" "$home/cache" "$home/config"
@@ -146,7 +152,10 @@ run_once() { # name csp(on=restrictive, off=permissive) incognito auditing(off=p
         kill -0 "$LOGGER_PID" 2>/dev/null || { echo "FAIL: the logger died" >&2; exit 1; }
         sleep 0.1
     done
-    [[ -s "$TMP/port-$name.ping" ]] || { echo "FAIL: the logger never announced its ports" >&2; exit 1; }
+    [[ -s "$TMP/port-$name.ping" ]] || {
+        echo "FAIL: the logger never announced its ports" >&2
+        exit 1
+    }
     local port; port="$(cat "$TMP/port-$name.main")"
     local pre; pre="$(cat "$TMP/port-$name.preconnect")"
     local pref; pref="$(cat "$TMP/port-$name.prefetch")"
@@ -314,7 +323,8 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
     else:
         check(b.get("storageRead") is None, "run: B reads null from the storage A wrote to",
               str(b.get("storageRead")))
-        check(run["homeFilesWithProbe"] == [], "run: no storage file under HOME holds the probe value",
+        check(run["homeFilesWithProbe"] == [],
+              "run: no storage file under HOME holds the probe value",
               str(run["homeFilesWithProbe"]))
         # On WebKitGTK 2.54.1 the localStorage of these custom-scheme origins is neither
         # shared between webviews nor written to disk, even with incognito off (observed

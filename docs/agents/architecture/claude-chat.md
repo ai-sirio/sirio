@@ -889,22 +889,43 @@ can be shown, becomes a card in the question dock: id from `WIDGET_ASK_BASE` (`1
 `Widget · <server> · <tool>`, the arguments pretty-printed and shown whole, and two rows, Reject
 (`reject_once`, preselected) and Allow (`allow_once`), never Always allow, in every permission mode,
 including bypass. Only a click approves: Enter, the arrows and the digits do nothing, a click answers
-once the dock is armed (500 ms), and Escape denies. The control verb `surface.chat.permission` can
-only reject a widget's card (`reject_once`); any other option is refused with an error. `surface.chat.read` reports `clickOnly` and each
-row's `rowBounds` from the last paint. Arguments over 4000 characters, a tool the server does not
+once the dock is armed (500 ms) and only when its press began on that row after the card armed (a
+press that began earlier, or on another row, does nothing), and Escape denies. Allow is inert, drawn
+dimmed with the hint "Scroll to the end to allow", until the body (the arguments and the card's
+details) has been scrolled to its end or fits its box; Reject is never inert. The control verb
+`surface.chat.permission` can only reject a widget's card (`reject_once`); any other option is
+refused with an error, and `surface.chat.elicitation` `Row(n)` is refused on it. `surface.chat.read`
+reports `clickOnly`, `allowArmed` (`"1"`/`"0"`) and each row's `rowBounds` from the last paint. Arguments over 4000 characters, a tool the server does not
 list, one hidden from apps, an ambiguous name and a name the CLI would rewrite are refused with no
 card (and a note in the widget's `refused` list). Allow runs `mcp_call` off the UI thread and
 answers the widget with the result, and a second Allow while that call runs does nothing; a Reject
-or any close denies it, and the call's late result is dropped. Every other end answers the widget
-`Denied` exactly once. A Reject (a click, or `reject_once` from the
-control verb) marks the card resolved; the other ends show it expired: Escape, a dismiss, the
-UI-side timer at `PERMISSION_TIMEOUT` (5 min), the widget being closed (the cap, a flood, three denials, its own close), the CLI going away (a
-transport error, a deadline, the event stream closing, even between turns), a restart, a new
-conversation or a history session replacing the transcript, and the chat being released. A model
-turn ending touches none of them. An Allow whose call is still running when the widget closes is
+or any close denies it, and the call's late result is dropped; the card keeps showing Allow then,
+since the call was sent and cannot be recalled. Every other end answers the widget `Denied`
+exactly once. A Reject (a click, or `reject_once` from the control verb) marks a card that is still
+unresolved as resolved; a card already resolved to Allow stays Allow when the widget closes, the CLI
+goes away or the session restarts, and only an unresolved card shows expired. The ways a card ends
+without an answer are Escape, a dismiss, the UI-side timer at `PERMISSION_TIMEOUT` (5 min), the
+widget being closed (the cap, a flood, a forged message, three denials, its own close), the CLI
+going away (a transport error, a deadline, a failed send, the event stream closing, even between
+turns), a restart, a new conversation or a history session replacing the transcript, and the chat
+being released. A model turn ending touches none of them. An Allow whose call is still running when the widget closes is
 answered `Denied` at the close, and the call's late result is dropped. After a denial the widget's
 calls are refused with no card for 10 s, and after three in a row the widget is closed; an Allow
 resets the count. Asks are never persisted.
+
+**What the webview does and does not do.** A click inside a widget gives its native child the
+keyboard, which GPUI's `Window::focus` does not take back. So a press anywhere else in the chat's
+window, hiding the widget and closing it all call `focus_parent()` on it (as `browser.rs` does for
+its own child), and keys meant for the composer never reach the view. The webview cancels every
+file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and has
+hyperlink auditing (`<a ping>`) and DNS prefetching turned off. A message the view posts straight
+to the IPC handler, outside its relay (no secret), closes the widget at the first one, with "the
+view posted outside its relay"; forged, oversized and over-cap messages still count toward the
+50-a-second limit. `surface.chat.read` reports each widget's `forged` count, which stays `"0"` for
+a legitimate view. Known gap: WebKitGTK still opens a TCP connection for `<link rel=preconnect>`
+whatever the CSP says, and the webkit2gtk bindings in use have no `LinkPreconnect` switch
+(`widget-isolation.sh` reports it as a KNOWN GAP). The widget's web process also runs without
+WebKitGTK's bubblewrap sandbox; both are follow-ups.
 
 **Placement.** A widget is mapped only when its slot was drawn this frame and lies wholly inside
 the list's viewport, no chat overlay is open (every `*_open` flag and `Popup` of `Chat`, the session

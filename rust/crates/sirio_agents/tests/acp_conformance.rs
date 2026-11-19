@@ -3406,7 +3406,8 @@ fn the_gateway_base_url_guard_checks_the_host() {
 /// the network. It uses no credential and no network beyond 127.0.0.1, but launches a real CLI,
 /// so it is `#[ignore]`d and stays off CI:
 ///
-///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance -- --ignored --exact claude_serves_mcp_apps_to_sirio --test-threads=1 --nocapture
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance \
+///         -- --ignored --exact claude_serves_mcp_apps_to_sirio --test-threads=1 --nocapture
 ///
 /// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
 /// `python3`. Its scratch directory is under the system temp dir, removed after a pass and kept
@@ -3501,7 +3502,9 @@ fn claude_serves_mcp_apps_to_sirio() {
     );
 
     let called = tool_updates.iter().find_map(|update| match &update.item {
-        McpToolItem::Called { name, input } => Some((update.id.clone(), name.clone(), input.clone())),
+        McpToolItem::Called { name, input } => {
+            Some((update.id.clone(), name.clone(), input.clone()))
+        }
         _ => None,
     });
     let (call_id, name, input) = called.expect("the chat got a Called notice");
