@@ -1,3 +1,7 @@
+  # Hand the X focus back to PointerRoot (the state before the step), then check nothing leaked to the
+  # composer either.
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool windowfocus --sync "$(DISPLAY="$DISPLAY_TARGET" xdotool getactivewindow 2>/dev/null || echo "$xid4")" >/dev/null 2>&1 || true
+  widget_wait "the composer holds no marker either" 5 '"keymark" not in c["composerText"]'
 #!/bin/bash
 set -euo pipefail
 
@@ -5831,6 +5835,24 @@ elif command == "dock-row":
         time.sleep(0.03)
     print("FAIL: no click-only card with a painted " + option + " row", file=sys.stderr)
     sys.exit(1)
+elif command == "x-focus":
+    # x-focus DISPLAY WINDOW_ID|pointer: XSetInputFocus on that window, or back to PointerRoot, the
+    # state a bare Xvfb starts in (xdotool cannot set it).
+    import ctypes
+    x11 = ctypes.CDLL("libX11.so.6")
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    display = x11.XOpenDisplay(sys.argv[2].encode())
+    if not display:
+        print("FAIL: cannot open the display", file=sys.stderr)
+        sys.exit(1)
+    target = 1 if sys.argv[3] == "pointer" else int(sys.argv[3], 0)
+    x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    x11.XSetInputFocus(display, target, 1, 0)
+    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    x11.XSync(display, 0)
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay(display)
 elif command == "invariant":
     # invariant SURFACE DISPLAY LABEL ARTIFACT COUNT: holds within 6 s of settling, or fails.
     surface, display, label, artifact, count = sys.argv[2:7]
@@ -6057,26 +6079,6 @@ print(int(b["x"] + b["w"] / 2), int(b["y"] - 60))')
     || fail "reject_once on card 3 failed"
   widget_wait "card 3 is closed" 15 'not d and not any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
   widget_invariant "4 card 3 rejected"
-  # 4b. the keyboard goes back to Sirio. A real click inside the first widget may give its native window the
-  # focus; a real click in the composer must take it back, so that real keys reach the composer. On this
-  # window-manager-less Xvfb the X input focus is PointerRoot (keys go to the window under the pointer), so
-  # the step passes without the fix too (checked with the hand-back disabled): it proves the composer takes
-  # keys after the clicks, and cannot prove the hand-back itself.
-  local xid geo wx wy ww wh cx cy
-  xid=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["xid"])')
-  [ -n "$xid" ] || fail "the first widget has no window to click in"
-  geo=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$xid" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} /Width:/ {w=$NF} /Height:/ {h=$NF} END {print x, y, w, h}')
-  read -r wx wy ww wh <<<"$geo"
-  echo "step: a real click inside widget 1 (window $xid at $wx,$wy ${ww}x${wh}), then one in the composer, then real keys"
-  click_at $(( wx + ww / 2 )) $(( wy + wh / 2 ))
-  origin=$(window_origin)
-  cy=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(int(float(json.load(sys.stdin)["mcpWidgets"][0]["viewportBottom"])) + 60)')
-  cx=$(( wx + ww / 2 ))
-  click_at "$cx" $(( cy + ${origin#* } ))
-  type_text focusmark
-  wait_panel "the composer holds what was typed after the click in the widget and the click in the composer" 'c["composerText"] == "focusmark"' 10
-  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool key --repeat 9 --delay 40 BackSpace || fail "xdotool could not clear the composer"
-  wait_panel "the composer is empty again" 'c["composerText"] == ""' 10
   # 5. scrolling the first widget half out, then back. The list follows the latest row, which leaves the
   # first widget partly above the viewport and its slot bounds stale (they are from the last sweep that
   # drew the slot), so the list goes to its top first, where the slot is drawn and its bounds are fresh.
@@ -6094,6 +6096,43 @@ print(float(r["slotTop"]) - (float(r["viewportTop"]) + 20))')
   widget_wait "the first widget lies whole in the viewport and is mapped" 15 \
     'w[0]["slotDrawn"] == "1" and w[0]["mapped"] == "1" and float(w[0]["slotTop"]) >= float(w[0]["viewportTop"]) and float(w[0]["slotBottom"]) <= float(w[0]["viewportBottom"])'
   widget_invariant "5 whole in view"
+  # 5a. A widget takes no keyboard input (after 5's scroll puts widget 1 whole in the viewport, so it is
+  # mapped). A real click inside the first widget gives its window GTK focus; then real keys are typed with
+  # the pointer resting there. The view counts `keydown` events in the capture phase and reports the count
+  # through its height (600 plus the count), so it must still read 600. With no window manager here nothing
+  # gives the widget the X input focus on a click (it stays PointerRoot, and WebKit sees an inactive window),
+  # so the step sets it as a window manager would (`MW x-focus`), and puts it back to PointerRoot after.
+  local xid4 geo4 wx4 wy4 ww4 wh4
+  xid4=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["xid"])')
+  [ -n "$xid4" ] || fail "the first widget has no window to click in"
+  geo4=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$xid4" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} /Width:/ {w=$NF} /Height:/ {h=$NF} END {print x, y, w, h}')
+  read -r wx4 wy4 ww4 wh4 <<<"$geo4"
+  echo "step: a real click inside widget 1, the X focus on its window, then real keys with the pointer over it"
+  click_at $(( wx4 + ww4 / 2 )) $(( wy4 + wh4 / 2 ))
+  MW x-focus "$DISPLAY_TARGET" "$xid4" || fail "could not set the X input focus to the widget's window"
+  type_text keymark
+  sleep 1
+  MW x-focus "$DISPLAY_TARGET" pointer || fail "could not give the X input focus back to the pointer"
+  widget_wait "no key reached widget 1: its keydown count, carried in its height, is 0" 10 'w[0]["height"] == "600"'
+  wait_panel "the composer holds no marker either" 'c["composerText"] == ""' 10
+  # 5b. the composer still gets keys after a click in a widget: a real click inside the first widget, then
+  # one in the composer, then real keys. (The widget gets none, see 5a; this proves the composer is not
+  # left without them.)
+  local xid geo wx wy ww wh cx cy
+  xid=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["xid"])')
+  [ -n "$xid" ] || fail "the first widget has no window to click in"
+  geo=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$xid" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} /Width:/ {w=$NF} /Height:/ {h=$NF} END {print x, y, w, h}')
+  read -r wx wy ww wh <<<"$geo"
+  echo "step: a real click inside widget 1 (window $xid at $wx,$wy ${ww}x${wh}), then one in the composer, then real keys"
+  click_at $(( wx + ww / 2 )) $(( wy + wh / 2 ))
+  origin=$(window_origin)
+  cy=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(int(float(json.load(sys.stdin)["mcpWidgets"][0]["viewportBottom"])) + 60)')
+  cx=$(( wx + ww / 2 ))
+  click_at "$cx" $(( cy + ${origin#* } ))
+  type_text focusmark
+  wait_panel "the composer holds what was typed after the click in the widget and the click in the composer" 'c["composerText"] == "focusmark"' 10
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool key --repeat 9 --delay 40 BackSpace || fail "xdotool could not clear the composer"
+  wait_panel "the composer is empty again" 'c["composerText"] == ""' 10
   shift=$(MW read "$SURFACE" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)["mcpWidgets"][0]

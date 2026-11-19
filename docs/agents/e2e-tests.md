@@ -542,9 +542,14 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     exactly when the slot is drawn wholly inside the list's viewport with no overlay,
 #                     dock question or hidden tab, and `xwininfo -id <xid>` says IsViewable exactly then
 #                     (no window counts as not viewable). The steps are the card open, a real click
-#                     inside widget 1 then one in the composer then real typing (the composer
-#                     takes the keys; on a window-manager-less Xvfb the X focus is PointerRoot, so this
-#                     step cannot prove the hand-back itself), a half scroll and back, a folded turn,
+#                     inside widget 1, the X focus set on its window (as a window manager would; a bare
+#                     Xvfb has none) and real typing (the view counts `keydown` events in the capture
+#                     phase and reports the count in its height, 600 plus the count: it must read 600,
+#                     and the composer must stay empty). Known limit: on a bare Xvfb the page gets no
+#                     input event at all, even with the handler disabled, so this step does not bite
+#                     there; it needs a window manager to,
+#                     a real click inside widget 1 then one in the composer then real typing (the
+#                     composer still takes the keys), a half scroll and back, a folded turn,
 #                     the effort list, a file tab over the chat, a terminal beside it, a call whose
 #                     `tool_use_result` is a string (the fixture's `mcp_denied` turn: its widget is
 #                     closed with "the call did not run" and never got input or result), a view that

@@ -113,15 +113,6 @@ impl McpWidget {
         self.apply(effects, cx);
     }
 
-    /// Hands the keyboard back to Sirio's window. A click inside the page gives its native
-    /// child the operating system's focus, which `Window::focus` does not take back, so keys
-    /// meant for the composer would go to the page (as `browser.rs` does for its own child).
-    pub fn focus_parent(&self) {
-        if let Some(webview) = &self.webview {
-            let _ = webview.focus_parent();
-        }
-    }
-
     pub fn tool_cancelled(&mut self, cx: &mut Context<Self>) {
         let effects = self.bridge.tool_cancelled("cancelled");
         self.apply(effects, cx);
@@ -153,8 +144,6 @@ impl McpWidget {
             }
             None => {
                 let _ = webview.set_visible(false);
-                // A hidden page keeps no claim on the keyboard.
-                let _ = webview.focus_parent();
                 flush_x();
             }
         }
@@ -230,7 +219,6 @@ impl McpWidget {
             return;
         }
         self.closing_since = Some(Instant::now());
-        self.focus_parent();
         if self.target.take().is_some() {
             if let Some(webview) = &self.webview {
                 let _ = webview.set_visible(false);

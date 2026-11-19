@@ -732,16 +732,6 @@ impl Chat {
 
     // --- Placement ---
 
-    /// A press landed on Sirio's own window, so not on a widget's native child (which gets its
-    /// own events): the keyboard goes back to Sirio, in case a widget kept it after a click.
-    pub(super) fn give_widgets_the_keyboard_back(&self, cx: &App) {
-        for slot in &self.widgets.slots {
-            if let Some(widget) = &slot.widget {
-                widget.read(cx).focus_parent();
-            }
-        }
-    }
-
     /// Hides every widget at once: the host took this chat off screen.
     pub fn unmap_widgets(&self, cx: &mut Context<Self>) {
         if self.widgets.slots.is_empty() {

@@ -8464,10 +8464,6 @@ impl Render for Chat {
             .on_action(cx.listener(Self::cancel_answer_action))
             .on_action(cx.listener(Self::leave_answer_action))
             .on_key_down(cx.listener(Self::on_composer_key))
-            // A press anywhere in the chat's own window hands the keyboard back from a widget.
-            .capture_any_mouse_down(cx.listener(|chat, _: &MouseDownEvent, _, cx| {
-                chat.give_widgets_the_keyboard_back(cx);
-            }))
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
             })

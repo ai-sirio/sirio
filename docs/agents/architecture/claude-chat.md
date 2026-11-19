@@ -916,10 +916,13 @@ answered `Denied` at the close, and the call's late result is dropped. After a d
 calls are refused with no card for 10 s, and after three in a row the widget is closed; an Allow
 resets the count. Asks are never persisted.
 
-**What the webview does and does not do.** A click inside a widget gives its native child the
-keyboard, which GPUI's `Window::focus` does not take back. So a press anywhere else in the chat's
-window, hiding the widget and closing it all call `focus_parent()` on it (as `browser.rs` does for
-its own child), and keys meant for the composer never reach the view. The webview cancels every
+**What the webview does and does not do.** A widget takes no keyboard input in this version. A
+click inside it gives its native window GTK focus, and under X11 a key typed with the pointer over
+that window goes to it, so handing focus back (wry's `focus_parent()` focuses the widget's own X
+child, not Sirio's top-level) cannot keep keys from the page. Instead `build_widget_child`
+connects `key-press-event` and `key-release-event` handlers that stop the event on the webview's
+top-level GtkWindow, which GTK runs before the WebView sees a key: keys typed with the pointer
+over a widget are dropped. (`browser.rs` still uses `focus_parent()` for its own child.) The webview cancels every
 file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and has
 hyperlink auditing (`<a ping>`) and DNS prefetching turned off. A message the view posts straight
 to the IPC handler, outside its relay (no secret), closes the widget at the first one, with "the

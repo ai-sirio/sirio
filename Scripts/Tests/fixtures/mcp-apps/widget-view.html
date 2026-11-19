@@ -32,6 +32,18 @@
   function codeOf(answer) { return answer.error ? answer.error.code : 0; }
   function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
 
+  // Sirio's webview passes the page no keyboard input. The view counts `keydown` events in the
+  // capture phase and reports the count through its height: the base height plus the count, so
+  // the harness reads 600 for the first widget when no key reached it.
+  var keys = 0;
+  var baseHeight = null;
+  function reportHeight() {
+    if (baseHeight !== null) {
+      notify("ui/notifications/size-changed", { height: baseHeight + keys });
+    }
+  }
+  window.addEventListener("keydown", function () { keys++; reportHeight(); }, true);
+
   window.addEventListener("message", function (event) {
     if (event.source !== window.parent) { return; }
     var m = event.data;
@@ -173,7 +185,8 @@
     notify("ui/notifications/initialized", {});
     await inputSeen;
     var text = input && input.text;
-    notify("ui/notifications/size-changed", { height: text === "hi" ? 600 : 120 });
+    baseHeight = text === "hi" ? 600 : 120;
+    reportHeight();
     if (text === "hi") { await hi(); }
     else if (text === "flood") { await flood(); }
     else if (text === "forge") { forge(); }
