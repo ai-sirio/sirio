@@ -204,23 +204,6 @@ lock and the `ci-linux.sh` stage that tests `vendor/gpui_linux` keep their shape
    are compared once the macOS sources are fetched (Task 5); any change joins the Mac hand
    check.
 
-### 5.5 Frame-rate limits
-
-gpui-pre 0.3.12's `WindowOptions::default()` sets `inactive_frame_interval` and
-`low_power_frame_interval` to 33,333 µs (30 fps) and `thermal_frame_interval` to 16,667 µs
-(60 fps) (`gpui-pre-0.3.12/src/platform.rs:2806-2808`, `src/window.rs:1953-1966`).
-
-What changes against bezel 0.3.8: 0.3.8 already had the inactive (30 fps) and thermal (60 fps)
-limits, but applied them only to forced frames and next-frame-callback frames. gpui-pre applies
-all three to every non-mandatory frame, including the ones a `notify` requests, for example
-terminal output arriving in an unfocused window. 0.3.8 had no low-power limit at all.
-
-Decision (2026-11-19): the app's main window and the `changes_preview` bin set
-`low_power_frame_interval: None`, so the focused window keeps its full frame rate under
-power-saving profiles, as on 0.3.8. The inactive and thermal limits now reaching `notify`
-frames is accepted as upstream behaviour and listed under Merge Danger in the PR. Examples and
-probes stay on the defaults.
-
 ### 5.4 The HTTP client gpui used to get for free
 
 Bezel's `gpui_platform::application()`/`headless()` install a reqwest `HttpClient`
@@ -243,6 +226,23 @@ remote-image case of the Markdown Preview is added to the verification (§6.4).
 `rust/vendor/README.md`, `docs/agents/architecture/crates.md` and
 `docs/agents/build-and-release.md` where they name `bezel-gpui`; a release-notes line is
 not needed (no visible change).
+
+### 5.6 Frame-rate limits
+
+gpui-pre 0.3.12's `WindowOptions::default()` sets `inactive_frame_interval` and
+`low_power_frame_interval` to 33,333 µs (30 fps) and `thermal_frame_interval` to 16,667 µs
+(60 fps) (`gpui-pre-0.3.12/src/platform.rs:2806-2808`, `src/window.rs:1953-1966`).
+
+What changes against bezel 0.3.8: 0.3.8 already had the inactive (30 fps) and thermal (60 fps)
+limits, but applied them only to forced frames and next-frame-callback frames. gpui-pre applies
+all three to every non-mandatory frame, including the ones a `notify` requests, for example
+terminal output arriving in an unfocused window. 0.3.8 had no low-power limit at all.
+
+Decision (2026-11-19): the app's main window and the `changes_preview` bin set
+`low_power_frame_interval: None`, so the focused window keeps its full frame rate under
+power-saving profiles, as on 0.3.8. The inactive and thermal limits now reaching `notify`
+frames is accepted as upstream behaviour and listed under Merge Danger in the PR. Examples and
+probes stay on the defaults.
 
 ## 6. Verification — "the app is identical"
 
@@ -292,7 +292,9 @@ settings as the run after the swap.
    recorded as pre-existing with its output and excluded from the gate; it is not fixed in
    this step.
 
-The artifact: the before/after sweep directories, the diff report, the E2E OK lines, under `artifacts/engine-swap/`, re-runnable from the commands above. There is no XDND transcript: the §6.4 waiver replaces it.
+The artifact: the before/after sweep directories, the diff report and the E2E OK lines, under
+`artifacts/engine-swap/`, re-runnable from the commands above. There is no XDND transcript: the
+§6.4 waiver replaces it.
 
 ## 7. Risks
 

@@ -31,8 +31,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # `sirio_env::command("xdg-open")`, sirio_ui/src/editor.rs:1288), so this one click covers every
 # link or file opener the app can start through the engine (the restart path spawns without the
 # child environment, outside the spec's §5.3.2). A re-applied set_child_environment that misses
-# the unreachable spawn point (`open_with_system`, and the reveal path of `run_open_commands`)
-# cannot be seen by any E2E.
+# `open_with_system` (a spawn point Sirio never reaches) or `run_open_commands` only through
+# `reveal_path_internal` (a caller Sirio never reaches) cannot be seen by any E2E.
 # With `set_child_environment` removed from main.rs the script must go red on a mount entry;
 # that mutation is made by hand (rebuild, run, restore), not by a flag.
 #
