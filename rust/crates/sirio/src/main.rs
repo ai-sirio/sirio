@@ -1408,6 +1408,11 @@ enum ControlAction {
         query: PaneQuery,
         reply: ControlReply,
     },
+    /// Publishes the app's own panes to the control registry now, rather than
+    /// at the workspace's next draw.
+    SyncPanes {
+        reply: ControlReply,
+    },
     PerfTerminalWrite {
         id: String,
         input: String,
@@ -2492,6 +2497,21 @@ impl AppControlHandler {
                     return self.app_pane(request, &id);
                 }
                 if self.host_terminal.client().is_none() {
+                    // The registry is published when the workspace draws, and a
+                    // window that draws nothing (hidden, occluded, headless)
+                    // would leave a tab opened since its last frame unknown. Its
+                    // panes are published here before the id is called missing,
+                    // for the calls an app pane answers.
+                    if matches!(method, "panel.read" | "panel.state" | "panel.scrollback") {
+                        let synced =
+                            self.queue_action(request, |reply| ControlAction::SyncPanes { reply });
+                        if !synced.ok {
+                            return synced;
+                        }
+                        if self.panes.is_app_pane(&id) {
+                            return self.app_pane(request, &id);
+                        }
+                    }
                     return Self::pane_error(request, self.panes.missing_pane_error(&id));
                 }
                 let response = self.host_request(request);
@@ -7280,6 +7300,10 @@ impl SirioWorkspace {
                                             .map_err(|error| error.to_string()),
                                     };
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::SyncPanes { reply } => {
+                                    workspace.sync_control_panes(cx);
+                                    let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::PerfTerminalWrite { id, input, reply } => {
                                     let result = workspace.perf_terminal_write(&id, input, cx);
@@ -50302,6 +50326,7 @@ done
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
+            | ControlAction::SyncPanes { reply }
             | ControlAction::ShowSession { reply, .. }
             | ControlAction::PerfTerminalWrite { reply, .. }
             | ControlAction::FocusPane { reply, .. }

@@ -244,6 +244,19 @@ power-saving profiles, as on 0.3.8. The inactive and thermal limits now reaching
 frames is accepted as upstream behaviour and listed under Merge Danger in the PR. Examples and
 probes stay on the defaults.
 
+A late first frame on macOS (2026-11-19) is a separate problem. On the `macos-15` runner, an
+unfocused window on gpui-pre drew a newly opened tab about 10 s late. As a result, host-sessions
+case 5 failed ("the cat terminal is unknown") and case 21 went from 7 s to 15 s.
+
+- **Not the inactive limit.** Setting `inactive_frame_interval: None` did not change it (run
+  44438260522). The suspect is the `CAMetalDisplayLink` that gpui-pre-macos pauses between frames
+  (#810).
+- **Fix for case 5.** With no host running, the control socket's registry of the app's own panes
+  was published only from render, so a tab opened since the last frame was unknown. Now
+  `panel.read`/`state`/`scrollback` for an unregistered id first publish the registry on the GPUI
+  thread (`ControlAction::SyncPanes`).
+- **Case 21.** It still waits on the frame; #810 tracks it.
+
 ## 6. Verification — "the app is identical"
 
 The baseline is captured from the last pre-swap commit with the same harness and display
