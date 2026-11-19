@@ -47,6 +47,7 @@ pub struct Dialog {
     scrim_closes: bool,
     fullscreen: bool,
     first: Option<FocusHandle>,
+    enter_field: Option<FocusHandle>,
     on_close: Run,
 }
 
@@ -67,6 +68,7 @@ impl Dialog {
             scrim_closes: true,
             fullscreen: false,
             first: None,
+            enter_field: None,
             on_close: Rc::new(on_close),
         }
     }
@@ -84,8 +86,9 @@ impl Dialog {
         self
     }
 
-    /// Runs on an unmodified Enter while the `focus_first` field holds focus; `build` gets the dialog's close. The field's key binding fires on key-down, so an Enter an IME takes never reaches it.
-    pub(crate) fn on_enter(mut self, build: impl FnOnce(Close) -> Run + 'static) -> Self {
+    /// Runs on an unmodified Enter while `field` holds focus; `build` gets the dialog's close. The field's key binding fires on key-down, so an Enter an IME takes never reaches it, and an Enter pressed before the dialog opened cannot confirm it.
+    pub fn on_enter(mut self, field: FocusHandle, build: impl FnOnce(Close) -> Run + 'static) -> Self {
+        self.enter_field = Some(field);
         self.enter = Some(Box::new(build));
         self
     }
@@ -182,13 +185,10 @@ impl RenderOnce for Dialog {
                 .gap_2()
                 .children(buttons)
         });
-        let enter = self.enter.map(|build| {
-            let field = self
-                .first
-                .clone()
-                .expect("a dialog that takes Enter names its field with focus_first");
-            (field, build(close.clone()))
-        });
+        let enter = self
+            .enter
+            .zip(self.enter_field)
+            .map(|(build, field)| (field, build(close.clone())));
         let (escape, dismiss, button) = (close.clone(), close.clone(), close);
         let fullscreen = self.fullscreen;
         let card = if fullscreen {
@@ -198,6 +198,8 @@ impl RenderOnce for Dialog {
                 .flex_col()
                 .size_full()
                 .bg(colors.bg)
+                // The card's own foreground, not whatever the owner rendered it under.
+                .text_color(colors.fg)
                 .child(
                     div()
                         .flex()
@@ -252,6 +254,8 @@ impl RenderOnce for Dialog {
                 .p_6()
                 .rounded(theme.radius(Radius::Xl))
                 .bg(colors.overlay)
+                // The card's own foreground, not whatever the owner rendered it under.
+                .text_color(colors.fg)
                 .border_1()
                 .border_color(colors.border)
                 .shadow(theme.elevation(Elevation::Modal))

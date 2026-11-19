@@ -40,6 +40,9 @@ smallvec = "1"
 unicode-segmentation = "1"
 web-time = "1.1"
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 jiff = { version = "0.2", features = ["js"] }
 

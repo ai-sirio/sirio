@@ -152,6 +152,7 @@ impl RenderOnce for Tabs {
         let shown = *strip_width.read(cx);
         let compact = axis == Axis::Horizontal
             && tabs.iter().all(|tab| tab.icon.is_some())
+            && tabs.iter().any(|tab| !tab.label.is_empty())
             && shown > Pixels::ZERO
             && shown < natural(&tabs, window, cx);
         let theme = cx.theme();

@@ -129,7 +129,8 @@ impl RenderOnce for Input {
                 if multi {
                     frame.items_start().py_1p5()
                 } else {
-                    frame.items_center().h(theme.control_height(self.size))
+                    // At least the control's height, and as tall as its line plus border beyond that: at a large interface size the line outgrows the fixed height.
+                    frame.items_center().min_h(theme.control_height(self.size))
                 }
             })
             .rounded(theme.radius(Radius::Md))

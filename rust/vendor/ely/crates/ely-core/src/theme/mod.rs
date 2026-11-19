@@ -8,7 +8,7 @@ mod tests;
 
 use std::time::Duration;
 
-use gpui::{App, Global, SharedString};
+use gpui::{App, Global, Pixels, SharedString};
 use web_time::Instant;
 
 use crate::motion;
@@ -27,6 +27,15 @@ pub use tokens::{
 
 const FRAME: Duration = Duration::from_millis(8);
 
+/// Host metric overrides, in logical pixels; converted to rems once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeMetrics {
+    /// The eight text sizes, `TextSize::Xs` to `TextSize::Display`.
+    pub text: [Pixels; 8],
+    /// The four radii, `Radius::Sm` to `Radius::Xl`.
+    pub radii: [Pixels; 4],
+}
+
 /// Design tokens. One global per app.
 pub struct Theme {
     mode: Mode,
@@ -42,6 +51,8 @@ pub struct Theme {
     pub radius_scale: f32,
     /// Scales every text and icon size.
     pub font_scale: f32,
+    /// The host's own text sizes and radii in pixels, which replace the scaled defaults.
+    pub metrics: Option<ThemeMetrics>,
     /// The face text sets in; Inter unless set.
     pub font_family: SharedString,
     /// The face code sets in; JetBrains Mono unless set.
@@ -83,6 +94,7 @@ impl Theme {
             font_scale: 1.0,
             font_family: "Inter".into(),
             mono_family: "JetBrains Mono".into(),
+            metrics: None,
             reduced_motion: false,
             scrollbars_shown: false,
             platform: Platform::current(),

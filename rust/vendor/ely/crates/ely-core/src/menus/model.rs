@@ -1,6 +1,6 @@
 use std::{ops::Range, rc::Rc};
 
-use gpui::{App, SharedString, Window};
+use gpui::{AnyElement, App, SharedString, Window};
 
 use crate::{forms::Run, navigation::fuzzy, primitives::IconName};
 
@@ -23,6 +23,12 @@ pub struct MenuItem {
     pub(super) disabled: bool,
     pub(super) on_click: Option<Run>,
     pub(super) hits: Vec<Range<usize>>,
+    pub(super) note: Option<SharedString>,
+    pub(super) note_selector: Option<SharedString>,
+    pub(super) selector: Option<SharedString>,
+    pub(super) tooltip: Option<SharedString>,
+    pub(super) trailing: Option<Rc<dyn Fn(&App) -> AnyElement>>,
+    pub(super) muted: bool,
 }
 
 impl MenuItem {
@@ -35,6 +41,12 @@ impl MenuItem {
             disabled: false,
             on_click: None,
             hits: Vec::new(),
+            note: None,
+            note_selector: None,
+            selector: None,
+            tooltip: None,
+            trailing: None,
+            muted: false,
         }
     }
 
@@ -80,6 +92,55 @@ impl MenuItem {
     pub fn on_click(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(handler));
         self
+    }
+
+    /// A quiet tag at the row's end, such as which choice is recommended.
+    pub fn note(mut self, note: impl Into<SharedString>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// An element the host draws at the row's end, after the note and before the keys, such as a
+    /// level indicator. It is built each time the row is drawn.
+    pub fn trailing(mut self, element: impl Fn(&App) -> AnyElement + 'static) -> Self {
+        self.trailing = Some(Rc::new(element));
+        self
+    }
+
+    /// The label in the muted tone, for a row that reads quieter than its neighbours. It stays
+    /// clickable, unlike a disabled one.
+    pub fn muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
+        self
+    }
+
+    /// The row's full label on hover, for one that was cut to fit.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    /// Debug selectors on the row and on its note, for hosts that measure them in tests.
+    /// GPUI's `debug_selector` is a no-op in release builds.
+    pub fn selectors(mut self, row: impl Into<SharedString>, note: Option<SharedString>) -> Self {
+        self.selector = Some(row.into());
+        self.note_selector = note;
+        self
+    }
+
+    /// The name `selectors` gave the row, kept in every build.
+    pub fn row_selector(&self) -> Option<&SharedString> {
+        self.selector.as_ref()
+    }
+
+    /// Whether the row is disabled: a press does nothing and the keys step over it.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    /// The tooltip `tooltip` gave the row.
+    pub fn tooltip_text(&self) -> Option<&SharedString> {
+        self.tooltip.as_ref()
     }
 }
 
@@ -145,6 +206,28 @@ impl Menu {
         self
     }
 
+    /// The rows, in order, headings, separators and button rows left out.
+    pub fn items(&self) -> impl Iterator<Item = &MenuItem> {
+        self.entries.iter().filter_map(|entry| match entry {
+            Entry::Item(item) => Some(item),
+            _ => None,
+        })
+    }
+
+    /// Runs row `at` as a press would, unless it is disabled or opens a submenu.
+    pub fn run(&self, at: usize, window: &mut Window, cx: &mut App) -> bool {
+        let Some(Entry::Item(item)) = self.entries.get(at) else {
+            return false;
+        };
+        if item.disabled || matches!(item.kind, Kind::Sub(_)) {
+            return false;
+        }
+        if let Some(on_click) = &item.on_click {
+            on_click(window, cx);
+        }
+        true
+    }
+
     /// Row `ix`, or button `column` of its button row.
     pub(super) fn item_at(&self, ix: usize, column: usize) -> Option<&MenuItem> {
         match self.entries.get(ix) {
@@ -168,7 +251,7 @@ impl Menu {
     }
 
     /// The next enabled row from `from`, stepping by `by` and wrapping.
-    pub(super) fn step(&self, from: Option<usize>, by: isize) -> Option<usize> {
+    pub fn step(&self, from: Option<usize>, by: isize) -> Option<usize> {
         let count = self.entries.len() as isize;
         let mut at = from.map_or(if by > 0 { -1 } else { count }, |at| at as isize);
         for _ in 0..count {

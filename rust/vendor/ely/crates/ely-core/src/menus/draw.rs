@@ -20,7 +20,36 @@ use crate::{
     typography::KbdCombo,
 };
 
-fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
+/// The frame of a menu row: its height, padding, gap and radius, its text colour (the disabled
+/// one when `disabled`), the hover wash when `current` and a pointer when it can be pressed.
+/// What a row holds is the caller's, so a host's own list can wear the same frame as Ely's menus.
+pub fn row_frame(
+    id: impl Into<ElementId>,
+    current: bool,
+    disabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let colors = &theme.colors;
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(theme.control_height(ControlSize::Md))
+        .px_2()
+        .rounded(theme.radius(Radius::Md))
+        .text_color(if disabled {
+            colors.fg_disabled
+        } else {
+            colors.fg
+        })
+        .when(current && !disabled, |row| row.bg(colors.hover))
+        .when(!disabled, |row| row.cursor_pointer())
+}
+
+pub(super) fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let colors = &theme.colors;
     let fg = if item.disabled {
@@ -33,8 +62,7 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
         Kind::Radio(true) => (Some(IconName::Dot), fg),
         _ => (item.icon, if item.disabled { fg } else { colors.fg_muted }),
     };
-    div()
-        .id(("row", ix))
+    row_frame(("row", ix), current, item.disabled, cx)
         .map(|row| match &item.kind {
             Kind::Check(on) => row.role(Role::MenuItemCheckBox).aria_toggled((*on).into()),
             Kind::Radio(on) => row.role(Role::MenuItemRadio).aria_toggled((*on).into()),
@@ -43,16 +71,6 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
         .aria_label(item.label.clone())
         .aria_selected(current)
         .when(item.disabled, |row| row.unavailable(cx))
-        .relative()
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(theme.control_height(ControlSize::Md))
-        .px_2()
-        .rounded(theme.radius(Radius::Md))
-        .text_color(fg)
-        .when(current && !item.disabled, |row| row.bg(colors.hover))
-        .when(!item.disabled, |row| row.cursor_pointer())
         .child(
             div()
                 .flex()
@@ -71,12 +89,33 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
+                .when(item.muted && !item.disabled, |label| {
+                    label.text_color(colors.fg_muted)
+                })
                 .child(if item.hits.is_empty() {
                     item.label.clone().into_any_element()
                 } else {
                     marked(item.label.clone(), item.hits.clone(), cx)
                 }),
         )
+        .when_some(item.note.clone(), |row, note| {
+            row.child(
+                div()
+                    .flex_none()
+                    .when_some(item.note_selector.clone(), |tag, selector| {
+                        tag.debug_selector(move || selector.to_string())
+                    })
+                    .px_1p5()
+                    .rounded(theme.radius(Radius::Sm))
+                    .bg(colors.hover)
+                    .text_size(theme.text_size(TextSize::Xs))
+                    .text_color(colors.fg_muted)
+                    .child(note),
+            )
+        })
+        .when_some(item.trailing.clone(), |row, trailing| {
+            row.child(div().flex_none().child(trailing(cx)))
+        })
         .when_some(item.keys.clone(), |row, keys| {
             row.child(
                 div()
@@ -92,6 +131,12 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
                     .size(IconSize::Xs)
                     .color(colors.fg_subtle),
             )
+        })
+        .when_some(item.selector.clone(), |row, selector| {
+            row.debug_selector(move || selector.to_string())
+        })
+        .when_some(item.tooltip.clone(), |row, text| {
+            row.tooltip(Tooltip::text(text))
         })
 }
 

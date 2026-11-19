@@ -91,3 +91,215 @@ enabled nowhere. Task 10's section 6.4 captures confirm it.
 - `crates/ely-core/src/theme/mod.rs`
 - `crates/ely-core/src/theme/palette.rs`
 - `crates/ely-core/src/theme/syntax.rs`
+
+## ely-core hooks (Task 3)
+
+Sirio's local changes to the old vendored crate, carried onto upstream's `ely-core`. Every row says
+re-applied, absorbed, dropped or re-decided, and its proof. A proof named "runs at Task 8" is a
+Sirio-side test or E2E: no Sirio crate uses these crates before Task 8, so it cannot run earlier.
+`ely-core` gains a `[dev-dependencies]` entry, `gpui` with its `test-support` feature, so the plain
+`#[cfg(test)]` modules below (which the repository's gate runs) build without ely-core's own
+`test-support` feature.
+
+- `crates/ely-core/Cargo.toml`: the `[dev-dependencies]` entry above.
+
+### Dialogs and popovers (rows 13 to 19, 87, 88)
+
+- `crates/ely-core/src/overlays/dialog.rs`: both cards (centred and fullscreen) set
+  `text_color(colors.fg)`, because a dialog is raised above its owner and otherwise inherited the
+  owner's text colour (gpui's default black in Sirio, unreadable on a dark card).
+  `Dialog::on_enter(field, build)` is `pub` and names its own field (upstream's is `pub(crate)` and
+  takes the `focus_first` field, panicking without one).
+- `crates/ely-core/src/overlays/dialogs.rs`: `PromptDialog` passes its field to `focus_first` and to
+  `on_enter`.
+- `crates/ely-core/src/overlays/popover.rs`: `Popover::on_close(handler)` runs each time the panel
+  closes, however it closed (trigger, Escape, a press outside, focus leaving), after focus is handed
+  back and only if it was open; the hook is stored in the popover's keyed state on every render.
+  `Popover::open(bool)` lets the owner hold the panel open or closed; it follows on the next draw and
+  every close, the owner's included, runs `on_close`.
+- `crates/ely-core/src/overlays/mod.rs`: declares the two test modules below.
+- `crates/ely-core/src/overlays/dialog_keys.rs` (new, plain `#[cfg(test)]`):
+  `a_dialog_takes_the_first_key_typed_right_after_it_opens`.
+- `crates/ely-core/src/overlays/popover_close.rs` (new, plain `#[cfg(test)]`): the two popover tests
+  moved from the old crate's `overlays/tests.rs`.
+
+Outcomes:
+
+- Row 13: re-applied. Proof: runs at Task 8 (the project-identity dialog, `test-project-identity-e2e.sh`).
+- Rows 14, 15: absorbed. `Dialog::held` and `Dialog::focus_first` are `pub` (`#[doc(hidden)]`) upstream;
+  grep proof (`overlays/dialog.rs`).
+- Row 16: re-applied (above). Proof: the closure build, and `project_identity_dialog.rs` calling
+  `on_enter(field, build)` at Task 8.
+- Row 17: absorbed by a different mechanism, and a feelable change. The old rule (a release of Enter
+  confirms only after a press the dialog saw) existed because the old crate confirmed on the *release*
+  of Enter. Upstream confirms on the key-down (its `capture_action(Enter)`), and has no key-up
+  handler, so the release of an Enter pressed before the dialog opened can never confirm it. The
+  consequence is that Enter now confirms on press, not on release. Nothing in Sirio depends on the
+  release: `test-project-identity-e2e.sh` scenario 4 (keydown opens, keyup leaves it open, a full
+  Return confirms) holds either way. Proof: `overlays::dialog_keys::a_dialog_takes_the_first_key_typed_right_after_it_opens`
+  (its Enter half has a positive control: an Enter that was pressed does confirm). It was written
+  first and was GREEN on the verbatim code, not red: upstream's key-down confirm already meets it.
+  For the section 6.4 list for Enzo.
+- Row 18: re-applied. Proof: as row 16.
+- Row 19: re-decided: upstream's `HoverListenerMode::InputModalityIndependent` on scroll, hover card
+  and tooltip is taken (`layout/scroll.rs`, `overlays/hover.rs`, `primitives/tooltip.rs` are verbatim).
+  The local "fork's `on_hover`" existed only because bezel-gpui lacked the mode. Reason: no documented
+  Sirio requirement beyond that. Proof: named hand check in Task 10's captures (hover cards, tooltips).
+- Rows 87, 88: re-applied. Proofs (ran): `overlays::popover_close::every_way_a_popover_closes_tells_its_owner_once`,
+  `overlays::popover_close::a_popover_follows_its_owner_open_and_closed`.
+
+### The text field (rows 62 to 82, 179 to 185, 196, 228)
+
+- `crates/ely-core/src/forms/text/mod.rs`:
+  - `TextInput::detached(cx)` is `new` without a `Window`; `new` is `detached` plus `attach`, the one
+    place the focus and blur subscriptions are made (it sets `attached`). A detached field attaches at
+    its first `render` (`first_frame`); if the handle is already focused by then and the window is
+    active, it takes the focused state (`gained_focus`, shared with the listener), emits one
+    `InputEvent::Focus` and starts its blink. In an inactive window the listener fires when the window
+    activates, so taking focus at the first frame too would report it twice.
+  - `TextInput::host_context(context)`: the root's key context is the one node `ElyInput <context>`
+    (`ElyInput ElyMultiLine <context>` with rows), built when `multi_line` or `host_context` is called
+    (`refresh_context`), not every frame. `context` is one identifier (`debug_assert!`): gpui's context
+    parser recurses forever on a `.` and reads `=` as key/value.
+  - `TextInput::reset_text(text, cx)` is `set_text` plus a fresh undo history.
+  - `TextInput::set_rows(min, max, cx)` replaces a multi-line field's rows, notifying only on change.
+  - `wheeled`: the caret's laid-out position when the wheel last scrolled; cleared by `replace`,
+    `restore`, `move_to`, `select_to` and `set_text`.
+  - `Newline`, `DeleteToLineStart`, `DeleteToLineEnd`, `DeleteWordRight` and `MULTI_LINE_CONTEXT` are
+    `pub use`d from `forms::text`.
+- `crates/ely-core/src/forms/text/actions.rs`:
+  - the three delete actions and their handlers (ported from bezel-ui 0.1.4; each is one undo step;
+    the line is the logical one between newlines), `MULTI_LINE_CONTEXT` (`ElyMultiLine`, `pub`);
+  - bindings: `word_key!("delete")` for `DeleteWordRight`; on macOS `cmd-backspace`
+    (`DeleteToLineStart`), `ctrl-k` (`DeleteToLineEnd`), the emacs set (`ctrl-a` Home, `ctrl-e` End,
+    `ctrl-b` Left, `ctrl-f` Right, `ctrl-h` Backspace, `ctrl-d` Delete) and `ctrl-n`/`ctrl-p` Down/Up in
+    `ElyMultiLine` alone;
+  - `scroll_wheel` (`ScrollEvent`, registered with `on_scroll` for fields with rows only): scrolls
+    within the laid-out overflow, records `wheeled`, and stops the event only when it scrolled, so at
+    the limits the wheel reaches a page behind the field;
+  - `render` calls `first_frame` and reads its key context from `self.context`.
+- `crates/ely-core/src/forms/text/element.rs`: `content_height`; `keep_in_view` clamps without
+  following the caret while `wheeled` still equals it; prepaint drops the hold when the caret's
+  laid-out position changed by another path.
+- `crates/ely-core/src/forms/text/edit.rs`: `is_word` (a segment counts only with a letter or digit in
+  it) in `words`, so word motion and deletion skip punctuation as bezel's field did; upstream's test
+  `words_skip_spaces_and_punctuation_stops` is rewritten (going back from `new` in
+  `hello  brave, new` lands on `brave`), and `a_word_is_a_run_with_a_letter_or_digit_in_it` is added
+  (moved from the old crate). Double-click selection (`word_at`) is untouched.
+- `crates/ely-core/src/forms/mod.rs`: `Copy`, `Cut`, `Paste`, `SelectAll` (public upstream already),
+  plus `Newline`, the three delete actions and `MULTI_LINE_CONTEXT`.
+- `crates/ely-core/src/forms/input.rs`: the one-line frame is `min_h(control height)` where upstream
+  has `h(..)`, so at an interface size over 14 the line, caret and selection do not cross the border.
+
+Outcomes:
+
+- Rows 62, 63, 64: re-applied. Proofs: runs at Task 8,
+  `a_detached_field_focused_before_its_first_frame_reports_focus_and_types`,
+  `a_detached_field_first_drawn_in_an_inactive_window_reports_focus_once_it_activates`.
+- Row 65: re-applied. Proof: runs at Task 8, `a_host_binding_registered_after_ely_wins_and_can_hand_the_key_on`.
+- Row 66: re-applied. Proof: runs at Task 8, `reset_text_starts_a_fresh_history`.
+- Row 67: re-applied (written directly with `ScrollEvent` and `on_scroll`; upstream has no scroll
+  handler on the field). Proofs: runs at Task 8, `a_long_multi_line_draft_scrolls_under_the_wheel`,
+  `a_wheel_scrolls_a_draft_alone_and_reaches_the_page_at_its_limit`.
+- Rows 68, 228: re-applied (the `wheeled` hold and the hand-resolved `filter` line in prepaint).
+  Proof: runs at Task 8, `a_wheeled_draft_follows_the_caret_again_on_the_next_edit`.
+- Row 69: partial upstream (`Copy`/`Cut`/`Paste`/`SelectAll` already `pub`), `Newline` re-applied as a
+  re-export of upstream's own field action (`ely_core::forms::Newline`, bound to `shift-enter`; not
+  `ely_editor::Newline`). Proof: runs at Task 8, `enter_sends_and_shift_return_inserts_a_newline`.
+- Row 70: re-applied. No test cited; exercised by the composer-resize path at Task 8 (composer band
+  E2E), otherwise a named hand check.
+- Rows 71, 72, 73: re-applied. Proofs: runs at Task 8,
+  `the_delete_to_line_and_word_actions_delete_what_bezels_did`, `a_delete_to_line_end_is_one_undo_step`.
+- Row 74: re-applied with upstream's `word_key!`. Proof: runs at Task 8,
+  `the_composer_answers_the_editing_chords_of_its_platform`.
+- Rows 75, 76, 77 (macOS chords): re-applied. Proofs: runs at Task 8 and, for the macOS chords,
+  only in the release gate (`the_composer_answers_the_editing_chords_of_its_platform`,
+  `ctrl_n_and_ctrl_p_do_not_move_a_single_line_field_the_way_down_and_up_do`,
+  `the_composer_moves_the_caret_a_row_with_its_platforms_keys`).
+- Row 78: re-applied. Proofs: runs at Task 8, `only_a_multi_line_field_names_the_multi_line_context`,
+  `a_host_binding_still_wins_in_a_multi_line_field`.
+- Rows 79, 80: re-applied. Proof (ran, in `ely-core`): `forms::text::edit::tests::a_word_is_a_run_with_a_letter_or_digit_in_it`.
+  Written before the port: RED on the verbatim unit (`the word before 12 in "Hello world."  left: 11
+  right: 6`), GREEN after `is_word`.
+- Row 81: a host rule (Sirio's readline fallback on macOS); nothing vendored.
+- Row 82: re-applied. Proof: runs at Task 8,
+  `settings::agents_page::tests::the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size`.
+- Rows 179 to 185: absorbed. Upstream binds with the compile-time `secondary!` and `word_key!`
+  (`typography/keys.rs`), its `keystroke()` uses `parse_with_os`, its selection code calls
+  `secondary(cx)`, and `compat::load_key` has no counterpart to carry. Row 185 (`on_scroll` instead of
+  `on_scroll_wheel`) is in the row 67 handler. Proof: the closure build.
+- Row 196: re-decided: upstream's `select` (a selection outside the text or inside a character is
+  logged and left) replaces the local `assert!`. Reason: nothing in Sirio relies on the panic, and the
+  field must not take the app down over a bad range.
+
+### Menus (rows 47 to 57, 172 to 175)
+
+- `crates/ely-core/src/menus/panel.rs` (new): `MenuPanel`, `layer`, `Hang` (`Above`, `AboveEnd`,
+  `At(point)`) and `panel_surface`, as in the old crate: a host that owns open state, anchor, keys and
+  closing draws a menu's rows and surface with Ely's own look; a press runs the row's `on_click` and
+  leaves the menu open. `layer` floats a panel over its parent's top edge or at a window point, kept in
+  the window, occluding, fading in. A button row (`Menu::buttons`, new upstream) draws with
+  `draw::button`, each button running its `on_click`.
+- `crates/ely-core/src/menus/model.rs`: `MenuItem::{note, tooltip, selectors, trailing, muted}` and
+  the readers `row_selector`, `is_disabled`, `tooltip_text`; `Menu::{step, run, items}` public
+  (`run` presses an item entry, not a button row; `items` walks item entries only).
+- `crates/ely-core/src/menus/draw.rs`: `row_frame(id, current, disabled, cx)` (public) is the frame of
+  `draw::row`, which builds on it; `row` is `pub(super)` for `MenuPanel`; it draws the note, then
+  `trailing` (in a `flex_none` wrapper) before the keys, a muted label in `fg_muted`, the debug
+  selectors and the tooltip.
+- `crates/ely-core/src/menus/mod.rs`: `mod panel`, `pub use draw::row_frame`,
+  `pub use panel::{Hang, MenuPanel, layer, panel_surface}`.
+
+Outcomes:
+
+- Rows 47, 48, 49: re-applied. Proof: runs at Task 8 (composer band E2E, `sirio_ui` menu callers).
+- Rows 50, 51, 52, 55, 56, 57: re-applied. Proof: runs at Task 8 (composer band E2E reads the rows back).
+- Row 53: re-applied. Proof: runs at Task 8.
+- Row 54: re-applied. Proof: runs at Task 8 (the model search and combobox wear `row_frame`).
+- Rows 172 to 175: re-applied (the four readers). Proof: runs at Task 8 (the composer band's
+  control-socket reading).
+- The old crate's `menus` code had `Menu::item_at(ix)`; upstream's now takes a column for button rows,
+  so `run` matches `Entry::Item` itself. No local API was renamed.
+
+### Tabs (row 84)
+
+- `crates/ely-core/src/navigation/tabs.rs`: `compact` also requires a tab with a non-empty label
+  (`tabs.iter().any(|tab| !tab.label.is_empty())`). Row 84 re-applied. Proof: runs at Task 8 (change
+  request tabs, `test-ely-forge-probe.sh`).
+
+### Typography and theme (rows 24, 168 to 170)
+
+- `crates/ely-core/src/typography/effects.rs`: `ShimmerText::phase(f32)` draws the band at the phase
+  given (0 to 1 across one sweep, wrapping) and animates nothing; the band's colouring is one private
+  function, `shimmered`, which both paths call. Rows 168, 169: re-applied. Proof: runs at Task 8 (the
+  Trace card's capped repaint loop).
+- `crates/ely-core/src/typography/fit.rs`: `cut_line`, behind `Ellipsis` and `MiddleEllipsis`, joins
+  its lines first (`one_line`). Row 170: re-applied. Proof (ran): `typography::fit::tests::a_cut_line_joins_the_lines_it_is_given`
+  (moved from the old crate). The selectable-text `end_overlay` path is upstream's and is not joined.
+- `crates/ely-core/src/theme/mod.rs`, `crates/ely-core/src/theme/tokens.rs`: `ThemeMetrics` (eight text
+  sizes and four radii in pixels), `Theme::metrics: Option<ThemeMetrics>` (`None` in `Theme::init`),
+  and `text_size`/`radius` return `px_to_rems(metrics..)` when it is set (one px-to-rem conversion, so
+  the font scale is not applied twice). Row 24: re-applied. Proof: runs at Task 8
+  (`sirio_ui/src/ely.rs` theme-sync tests).
+
+### Feedback (row 25)
+
+- `crates/ely-core/src/feedback/messages.rs`: `Alert::content(element)` takes a host-owned
+  (selectable) body; the title is drawn only when non-empty; `body`, actions and dismissal are as
+  before. Row 25: re-applied. Proof: runs at Task 8 (chat error alert).
+
+### Icons and assets (rows 6, 7, 8)
+
+- `crates/ely-core/src/primitives/icon/names.rs`, `crates/ely-core/icons/clipboard-list.svg`,
+  `crates/ely-core/icons/file-pen.svg`, `crates/ely-core/icons/shield-off.svg`: `IconName::ClipboardList`,
+  `FilePen` and `ShieldOff`, with their SVGs (lucide-static 1.48.0, byte-identical to the old crate's
+  and the same release as the rest of upstream's). Row 8: re-applied. Proof (ran): the closure's
+  `primitives::icon::tests::every_icon_carries_its_own_lucide_svg`, which checks each new file carries
+  its own `lucide-<name>` class; runs at Task 8 for the permission-mode icons (composer captures).
+- Row 6, re-decided: the `ely/` namespace is not needed in `ely-core`. Upstream embeds every icon's
+  bytes (`svg().data(name.svg())`), so drawing an Ely icon looks nothing up in an asset source, and
+  `assets.rs` stays verbatim. Where Sirio's code still needs a path (`IconName::path()`, the chat probe),
+  that is the facade's job at Task 8 (spec 5.4: the facade's `AssetSource` maps `ely/`).
+- Row 7, re-decided: Inter and JetBrains Mono are not bundled: `ely-core`'s `fonts` feature is off by
+  default here (see Manifests), and Sirio's facade does not call upstream's `init`. IBM Plex Sans (for
+  svg text) stays, as upstream always embeds it.

@@ -516,6 +516,9 @@ impl Theme {
 
     /// Text at `size`, scaled by `font_scale`.
     pub fn text_size(&self, size: TextSize) -> Rems {
+        if let Some(metrics) = self.metrics {
+            return px_to_rems(metrics.text[size as usize].into());
+        }
         let base = match size {
             TextSize::Xs => 11.0,
             TextSize::Sm => 12.0,
@@ -531,6 +534,9 @@ impl Theme {
 
     /// A corner's radius at `size`, scaled by `radius_scale`.
     pub fn radius(&self, size: Radius) -> Rems {
+        if let Some(metrics) = self.metrics {
+            return px_to_rems(metrics.radii[size as usize].into());
+        }
         let base = match size {
             Radius::Sm => 4.0,
             Radius::Md => 6.0,

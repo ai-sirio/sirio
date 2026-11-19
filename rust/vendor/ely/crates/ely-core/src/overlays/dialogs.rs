@@ -362,9 +362,12 @@ impl RenderOnce for PromptDialog {
         );
         let cancel = i18n::text(cx, "dialog.cancel", &[]);
         let on_close = self.on_close;
+        let focus = self.field.read(cx).focus().clone();
         Dialog::new(self.id, self.title, move |window, cx| on_close(window, cx))
-            .focus_first(self.field.read(cx).focus().clone())
-            .on_enter(move |close| Rc::new(move |window, cx| lifted(&close, window, cx)))
+            .focus_first(focus.clone())
+            .on_enter(focus, move |close| {
+                Rc::new(move |window, cx| lifted(&close, window, cx))
+            })
             .child(field)
             .action(move |close| {
                 Button::new(cancel_id, cancel)
