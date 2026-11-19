@@ -17,7 +17,7 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use std::{ffi::c_ulong, time::Instant};
+use std::time::Instant;
 
 use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use gpui::{
@@ -28,8 +28,6 @@ use gpui::{
 use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HandleError, RawWindowHandle, Win32WindowHandle, WindowHandle};
-#[cfg(target_os = "linux")]
-use raw_window_handle::{HandleError, RawWindowHandle, WindowHandle, XlibWindowHandle};
 use sirio_theme::Theme;
 #[cfg(target_os = "windows")]
 use std::num::NonZeroIsize;
@@ -40,42 +38,6 @@ use wry::{
     NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder,
     dpi::{LogicalPosition, LogicalSize},
 };
-
-/// GPUI's Linux backend exposes its X11 surface as XCB, while wry's
-/// WebKitGTK backend currently accepts only an Xlib window ID. The ID is
-/// shared by both X11 APIs, so this adapter tests that narrow seam without
-/// pretending the two handle types are interchangeable in general.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy)]
-struct XlibParent {
-    window: c_ulong,
-}
-
-#[cfg(target_os = "linux")]
-impl XlibParent {
-    fn from_gpui(window: &Window) -> Result<Self, String> {
-        let handle = HasWindowHandle::window_handle(window)
-            .map_err(|error| format!("GPUI window handle unavailable: {error}"))?;
-        match handle.as_raw() {
-            RawWindowHandle::Xcb(handle) => Ok(Self {
-                window: c_ulong::from(handle.window.get()),
-            }),
-            raw => Err(format!("GPUI returned unsupported handle: {raw:?}")),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl HasWindowHandle for XlibParent {
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        // The XID is copied from a live GPUI window and remains valid while
-        // the spike owns that window. XIDs are explicitly allowed to be
-        // borrowed as raw handles by raw-window-handle.
-        Ok(unsafe {
-            WindowHandle::borrow_raw(RawWindowHandle::Xlib(XlibWindowHandle::new(self.window)))
-        })
-    }
-}
 
 fn build_webview<W: HasWindowHandle>(parent: &W) -> Result<WebView, wry::Error> {
     WebViewBuilder::new()
@@ -90,31 +52,15 @@ fn build_webview<W: HasWindowHandle>(parent: &W) -> Result<WebView, wry::Error> 
 #[cfg(target_os = "linux")]
 fn build_spike_webview(window: &Window) -> (Option<WebView>, Option<String>) {
     match gtk::init() {
-        Ok(()) => match build_webview(window) {
-            Ok(webview) => (Some(webview), None),
-            Err(direct_error) => match XlibParent::from_gpui(window) {
-                Ok(parent) => match build_webview(&parent) {
-                    Ok(webview) => (
-                        Some(webview),
-                        Some(
-                            "WebKitGTK child · XCB→Xlib adapter · GTK loop pumped by GPUI"
-                                .to_owned(),
-                        ),
-                    ),
-                    Err(bridge_error) => (
-                        None,
-                        Some(format!(
-                            "Direct XCB build failed: {direct_error}; XCB→Xlib build failed: {bridge_error}"
-                        )),
-                    ),
-                },
-                Err(bridge_error) => (
-                    None,
-                    Some(format!(
-                        "Direct XCB build failed: {direct_error}; XCB→Xlib adapter failed: {bridge_error}"
-                    )),
-                ),
-            },
+        Ok(()) => match sirio_ui::native_child::build_in_window(window, |parent| {
+            build_webview(&parent)
+        }) {
+            Ok((webview, false)) => (Some(webview), None),
+            Ok((webview, true)) => (
+                Some(webview),
+                Some("WebKitGTK child · XCB→Xlib adapter · GTK loop pumped by GPUI".to_owned()),
+            ),
+            Err(message) => (None, Some(message)),
         },
         Err(error) => (None, Some(format!("GTK init failed: {error}"))),
     }
@@ -1039,24 +985,14 @@ fn build_production_webview_for_platform(
     events: &SharedWebEvents,
     context: &mut WebContext,
 ) -> Result<WebView, String> {
-    match gtk::init() {
-        Ok(()) => match build_production_webview(window, initial_url, events, context) {
-            Ok(webview) => Ok(webview),
-            Err(direct_error) => match XlibParent::from_gpui(window) {
-                Ok(parent) => build_production_webview(&parent, initial_url, events, context).map_err(
-                    |bridge_error| {
-                        format!(
-                            "Direct XCB build failed: {direct_error}; XCB→Xlib build failed: {bridge_error}"
-                        )
-                    },
-                ),
-                Err(bridge_error) => Err(format!(
-                    "Direct XCB build failed: {direct_error}; XCB→Xlib adapter failed: {bridge_error}"
-                )),
-            },
-        },
-        Err(error) => Err(format!("GTK init failed: {error}")),
-    }
+    gtk::init().map_err(|error| format!("GTK init failed: {error}"))?;
+    // `context` is borrowed mutably by one build at a time; `build` is `Fn`, so
+    // the cell hands it to whichever attempt is running.
+    let context = RefCell::new(context);
+    sirio_ui::native_child::build_in_window(window, |parent| {
+        build_production_webview(&parent, initial_url, events, &mut context.borrow_mut())
+    })
+    .map(|(webview, _)| webview)
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -103,6 +103,12 @@ webview2-com = "0.39"
 # development headers are an explicit Linux build prerequisite; no custom
 # PKG_CONFIG_PATH or repository-local sysroot is supported.
 gtk = "0.18.2"
+# The widget webview (mcp_widget) turns WebRTC and media streams off and
+# unsets the drop target on the WebKitWebView itself; wry's own copy of this
+# crate is the same =2.0.2 with v2_38 on, which those two setters need.
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+# A widget's per-webview relay secret. A version already in Cargo.lock.
+getrandom = "0.3"
 # wayland/x11 are Linux-only gpui/gpui_platform windowing backends; see the
 # long comment above the workspace-level `gpui` entry in the root Cargo.toml
 # for why this lives here per-crate rather than on the workspace dependency
