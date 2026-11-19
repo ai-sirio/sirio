@@ -665,6 +665,24 @@ mod tests {
         }
     }
 
+    // How the interrupted call can fail, written first: `tool-cancelled` is not sent to a view
+    // that never got an input; an input or a result is sent after the cancel; the view still
+    // gets either once the widget is closed.
+    #[test]
+    fn a_cancel_is_sent_with_no_input_and_nothing_follows_the_close() {
+        let t0 = Instant::now();
+        let mut bridge = ready_bridge(t0);
+        let sent_now = sent(&bridge.tool_cancelled("cancelled"));
+        assert_eq!(sent_now.len(), 1);
+        assert_eq!(sent_now[0]["method"], "ui/notifications/tool-cancelled");
+        assert!(!bridge.input_delivered(), "the cancel carried no input");
+        let teardown = bridge.teardown();
+        assert!(!teardown.is_empty());
+        assert!(bridge.tool_input(json!({"late": true})).is_empty());
+        assert!(bridge.tool_result(json!({"late": true})).is_empty());
+        assert!(!bridge.input_delivered() && !bridge.result_delivered());
+    }
+
     #[test]
     fn a_denial_cools_down_and_three_close_the_widget() {
         let t0 = Instant::now();

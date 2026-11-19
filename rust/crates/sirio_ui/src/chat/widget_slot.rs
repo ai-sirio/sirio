@@ -301,6 +301,16 @@ impl Widgets {
     }
 }
 
+/// Why a delivery closes its widget: a call that did not run, or was interrupted. A call that
+/// ran closes nothing.
+fn close_reason(delivery: &Delivery) -> Option<&'static str> {
+    match delivery {
+        Delivery::Ran { .. } => None,
+        Delivery::NotRun => Some(CALL_DID_NOT_RUN),
+        Delivery::Cancelled => Some(CALL_CANCELLED),
+    }
+}
+
 /// The accepted origins, each once, comma-separated.
 fn origins(csp: &UiCsp) -> String {
     let mut seen: Vec<&str> = Vec::new();
@@ -423,13 +433,12 @@ impl Chat {
                 });
                 self.refresh_snapshot(id, cx);
             }
-            Delivery::NotRun => {
-                self.close_slot(index, CALL_DID_NOT_RUN.to_owned(), cx);
-                self.slot_changed(id, cx);
-            }
-            Delivery::Cancelled => {
-                widget.update(cx, |widget, cx| widget.tool_cancelled(cx));
-                self.close_slot(index, CALL_CANCELLED.to_owned(), cx);
+            Delivery::NotRun | Delivery::Cancelled => {
+                if matches!(delivery, Delivery::Cancelled) {
+                    widget.update(cx, |widget, cx| widget.tool_cancelled(cx));
+                }
+                let why = close_reason(&delivery).unwrap_or_default();
+                self.close_slot(index, why.to_owned(), cx);
                 self.slot_changed(id, cx);
             }
         }
@@ -1109,6 +1118,19 @@ mod tests {
             tool: "show".into(),
             resource_uri: "ui://s/show".into(),
         }
+    }
+
+    // How it can fail, written first: a cancelled call leaves its widget live (no close
+    // reason); a call that did not run is closed with the cancelled text, or the other way
+    // round; a call that ran closes its widget.
+    #[test]
+    fn an_interrupted_call_closes_its_widget_and_a_call_that_ran_does_not() {
+        assert_eq!(close_reason(&Delivery::Cancelled), Some("the call was cancelled"));
+        assert_eq!(close_reason(&Delivery::NotRun), Some("the call did not run"));
+        assert_eq!(
+            close_reason(&Delivery::Ran { input: json!(1), result: json!(2) }),
+            None
+        );
     }
 
     /// How it can fail, written first: a chat that was never drawn has no window, so a page

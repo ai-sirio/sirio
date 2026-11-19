@@ -411,6 +411,25 @@ mod tests {
         assert!(!machine.holds("a"));
     }
 
+    // How the interrupted call can fail, written first: the input is sent on a cancel (a
+    // cancelled call's delivery must carry none); a result that arrives after a cancel is
+    // delivered; a cancel that arrives after a result replaces the result.
+    #[test]
+    fn an_interrupted_call_delivers_a_cancel_and_no_input() {
+        let mut held = Held::new(json!({ "secret": 1 }));
+        held.take(Update::Cancelled);
+        held.take(Update::Returned(json!({ "late": true })));
+        assert_eq!(held.clone().delivery(), Some(Delivery::Cancelled));
+        assert!(held.settled());
+
+        let mut ran = Held::new(json!(1));
+        ran.take(Update::Returned(json!(2)));
+        ran.take(Update::Cancelled);
+        assert_eq!(ran.delivery(), Some(Delivery::Ran { input: json!(1), result: json!(2) }));
+
+        assert_eq!(Held::new(json!(1)).delivery(), None, "an open call delivers nothing");
+    }
+
     #[test]
     fn a_miss_leaves_nothing_and_a_late_update_is_not_kept() {
         let mut machine = Machine::default();
