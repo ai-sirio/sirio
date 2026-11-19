@@ -103,6 +103,8 @@ webview2-com = "0.39"
 # development headers are an explicit Linux build prerequisite; no custom
 # PKG_CONFIG_PATH or repository-local sysroot is supported.
 gtk = "0.18.2"
+# The widget webview's X11 window id for the snapshot; already in Cargo.lock through wry.
+gdkx11 = "0.18"
 # The widget webview (mcp_widget) turns WebRTC and media streams off and
 # unsets the drop target on the WebKitWebView itself; wry's own copy of this
 # crate is the same =2.0.2 with v2_38 on, which those two setters need.

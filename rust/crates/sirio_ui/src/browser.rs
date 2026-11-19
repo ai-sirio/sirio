@@ -727,7 +727,9 @@ fn apply_native_visible(webview: &SharedWebView, flag: &SharedNativeVisibility, 
 #[cfg(target_os = "linux")]
 fn flush_native_window_ops() {
     for _ in 0..2 {
-        while gtk::events_pending() {
+        // Bounded, so a flooding widget cannot hold the GPUI thread here.
+        let deadline = Instant::now() + Duration::from_millis(4);
+        while gtk::events_pending() && Instant::now() < deadline {
             gtk::main_iteration_do(false);
         }
         if let Some(display) = gtk::gdk::Display::default() {
@@ -820,9 +822,8 @@ fn wait_for_script_result(
             // pump still drives `evaluate_script`'s callback home. Without one
             // there is no GTK loop to pump, and the caller falls through to
             // the same 20 ms `try_recv` cadence it would have used with GTK up.
-            while gtk::is_initialized_main_thread() && gtk::events_pending() {
-                gtk::main_iteration_do(false);
-            }
+            // `pump_gtk` keeps the same guard and bounds the loop at 4 ms.
+            crate::mcp_widget::pump_gtk(Duration::from_millis(4));
             match receiver.try_recv() {
                 Ok(value) => return Ok(value),
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -1662,9 +1663,7 @@ impl BrowserSurface {
                             // actually done something.
                             let drained = surface.pump_web_events(cx);
                             #[cfg(target_os = "linux")]
-                            while gtk::events_pending() {
-                                gtk::main_iteration_do(false);
-                            }
+                            crate::mcp_widget::pump_gtk(Duration::from_millis(4));
                             if drained {
                                 cx.notify();
                             }
