@@ -61,6 +61,9 @@ pub struct WidgetSnapshot {
     /// Whether the bridge has sent `tool-input` / `tool-result` to the view.
     pub input_delivered: bool,
     pub result_delivered: bool,
+    /// How many messages the view posted outside its relay (without the secret): any is one
+    /// too many, and the widget is closed at the first.
+    pub forged: u32,
 }
 
 static WIDGET_WEBVIEW_AVAILABLE: AtomicBool = AtomicBool::new(false);

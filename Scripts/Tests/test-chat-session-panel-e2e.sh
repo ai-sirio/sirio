@@ -5889,6 +5889,9 @@ elif command == "flood-end":
     if row["mapped"] != "0":
         print("FAIL: the closed widget is still mapped", file=sys.stderr)
         sys.exit(1)
+    if row["forged"] != "0":
+        print("FAIL: the flooding widget forged a message", file=sys.stderr)
+        sys.exit(1)
     problems, states = remembered_windows(display, 1)
     if problems or not states:
         print("FAIL: " + "; ".join(problems or ["no window was remembered"]), file=sys.stderr)
@@ -5985,7 +5988,7 @@ scenario_mcp_widget() {
   # the chat clamps it where it draws the box, so the box's own bounds (slotBottom - slotTop) are measured
   # against min(600, 0.8 x the viewport).
   widget_wait "two widgets are ready with input and result delivered, each in its own slot, with the server's CSP domains and the dropped one, the first as tall as min(600, 0.8 x the viewport)" 60 \
-    'len(w) == 2 and all(r["phase"] == "ready" and r["inputDelivered"] == "1" and r["resultDelivered"] == "1" and r["slotTop"] != "" and r["dockOpen"] == "0" for r in w) and {r["toolUseId"] for r in w} == {"toolu_show_1", "toolu_show_2"} and all(r["server"] == "apps" and r["tool"] == "show" and r["domains"] == "https://api.widget.test,https://cdn.widget.test" and r["dropped"] == "http://bad.widget.test" for r in w) and w[0]["xid"] != "" and w[1]["xid"] != "" and w[0]["xid"] != w[1]["xid"] and w[0]["toolUseId"] != w[1]["toolUseId"] and float(w[0]["slotBottom"]) <= float(w[1]["slotTop"]) and w[0]["height"] == "600" and abs((float(w[0]["slotBottom"]) - float(w[0]["slotTop"])) - min(600.0, 0.8 * (float(w[0]["viewportBottom"]) - float(w[0]["viewportTop"])))) <= 2.0'
+    'len(w) == 2 and all(r["phase"] == "ready" and r["inputDelivered"] == "1" and r["resultDelivered"] == "1" and r["forged"] == "0" and r["slotTop"] != "" and r["dockOpen"] == "0" for r in w) and {r["toolUseId"] for r in w} == {"toolu_show_1", "toolu_show_2"} and all(r["server"] == "apps" and r["tool"] == "show" and r["domains"] == "https://api.widget.test,https://cdn.widget.test" and r["dropped"] == "http://bad.widget.test" for r in w) and w[0]["xid"] != "" and w[1]["xid"] != "" and w[0]["xid"] != w[1]["xid"] and w[0]["toolUseId"] != w[1]["toolUseId"] and float(w[0]["slotBottom"]) <= float(w[1]["slotTop"]) and w[0]["height"] == "600" and abs((float(w[0]["slotBottom"]) - float(w[0]["slotTop"])) - min(600.0, 0.8 * (float(w[0]["viewportBottom"]) - float(w[0]["viewportTop"])))) <= 2.0'
   widget_invariant "1 two widgets"
   # 2. card 1: click-only, Reject selected; the probes; keys do nothing; Escape denies
   widget_wait "card 1 is pending, click-only, with Reject selected and the dock open" 60 \
@@ -6054,6 +6057,26 @@ print(int(b["x"] + b["w"] / 2), int(b["y"] - 60))')
     || fail "reject_once on card 3 failed"
   widget_wait "card 3 is closed" 15 'not d and not any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
   widget_invariant "4 card 3 rejected"
+  # 4b. the keyboard goes back to Sirio. A real click inside the first widget may give its native window the
+  # focus; a real click in the composer must take it back, so that real keys reach the composer. On this
+  # window-manager-less Xvfb the X input focus is PointerRoot (keys go to the window under the pointer), so
+  # the step passes without the fix too (checked with the hand-back disabled): it proves the composer takes
+  # keys after the clicks, and cannot prove the hand-back itself.
+  local xid geo wx wy ww wh cx cy
+  xid=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["xid"])')
+  [ -n "$xid" ] || fail "the first widget has no window to click in"
+  geo=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$xid" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} /Width:/ {w=$NF} /Height:/ {h=$NF} END {print x, y, w, h}')
+  read -r wx wy ww wh <<<"$geo"
+  echo "step: a real click inside widget 1 (window $xid at $wx,$wy ${ww}x${wh}), then one in the composer, then real keys"
+  click_at $(( wx + ww / 2 )) $(( wy + wh / 2 ))
+  origin=$(window_origin)
+  cy=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(int(float(json.load(sys.stdin)["mcpWidgets"][0]["viewportBottom"])) + 60)')
+  cx=$(( wx + ww / 2 ))
+  click_at "$cx" $(( cy + ${origin#* } ))
+  type_text focusmark
+  wait_panel "the composer holds what was typed after the click in the widget and the click in the composer" 'c["composerText"] == "focusmark"' 10
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool key --repeat 9 --delay 40 BackSpace || fail "xdotool could not clear the composer"
+  wait_panel "the composer is empty again" 'c["composerText"] == ""' 10
   # 5. scrolling the first widget half out, then back. The list follows the latest row, which leaves the
   # first widget partly above the viewport and its slot bounds stale (they are from the last sweep that
   # drew the slot), so the list goes to its top first, where the slot is drawn and its bounds are fresh.
@@ -6127,12 +6150,19 @@ print(top - (vtop - (bottom - top) / 2))')
   widget_wait "the denied call's widget is closed with 'the call did not run' and got neither input nor result" 60 \
     'len(w) == 3 and any(r["toolUseId"] == "toolu_denied_1" and r["phase"] == "closed" and r["error"] == "the call did not run" and r["inputDelivered"] == "0" and r["resultDelivered"] == "0" and r["mapped"] == "0" for r in w)'
   widget_invariant "9 a denied call's widget"
-  # 10. the CLI dies
+  # 10. a view that posts straight to the IPC handler, outside its relay, is closed at the first such
+  # message; the widgets that never did have a forged count of 0 throughout.
+  send_prompt mcp_forge
+  WIDGET_COUNT=4
+  widget_wait "the forging widget is closed with 'the view posted outside its relay', its forged count is 1 and every other widget's is 0" 60 \
+    'len(w) == 4 and any(r["toolUseId"] == "toolu_forge_1" and r["phase"] == "closed" and r["error"] == "the view posted outside its relay" and r["forged"] == "1" and r["mapped"] == "0" for r in w) and all(r["forged"] == "0" for r in w if r["toolUseId"] != "toolu_forge_1")'
+  widget_invariant "10 a forging widget closed"
+  # 11. the CLI dies
   send_prompt die
   widget_wait "every entry is closed and unmapped after the CLI died" 40 \
-    'len(w) == 3 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
-  widget_invariant "10 the CLI died"
-  MW remembered "$DISPLAY_TARGET" 3 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
+    'len(w) == 4 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
+  widget_invariant "11 the CLI died"
+  MW remembered "$DISPLAY_TARGET" 4 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
   # after the steps
   [ ! -s "$WIDGET_LOGGER_LOG" ] || fail "the request logger saw $(wc -l <"$WIDGET_LOGGER_LOG") requests from the widget"
   echo "OK: the request logger is empty"
@@ -6141,11 +6171,11 @@ import json, sys
 lines = [json.loads(line) for line in sys.stdin.read().splitlines()]
 reads = [l for l in lines if l.get("subtype") == "mcp_read_resource"]
 calls = [l for l in lines if l.get("subtype") == "mcp_call"]
-assert len(reads) == 3 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
+assert len(reads) == 4 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
 assert calls, "no mcp_call"
 assert all(l.get("tool") == "mcp__apps__act" and l.get("check_permissions") is True and l.get("result_not_for_model") is True for l in calls), "an mcp_call is not a gated act"
 assert not any("mcp_call_ask" in l for l in lines), "the fixture logged an mcp_call_ask"
-print(f"OK: the CLI heard 3 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
+print(f"OK: the CLI heard 4 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
     || fail "the control log is not what the widget run should leave"
   grep -qx 'mcp-apps-host 1' "$RUN_DIR/stub-calls.log" || fail "the CLI was not started with CLAUDE_CODE_MCP_APPS_HOST=1"
   echo "OK: the CLI was started with CLAUDE_CODE_MCP_APPS_HOST=1"

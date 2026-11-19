@@ -71,14 +71,10 @@
     r.frameElement = window.frameElement === null ? "null" : "present";
     try { void window.parent.ipc; r.parentIpc = "ok"; } catch (e) { r.parentIpc = "blocked"; }
     r.ownIpc = typeof window.ipc;
+    // Whether the IPC handler is reachable is recorded; it is posted to only in `forge()`,
+    // because Sirio closes a widget at its first message outside the relay.
     var wk = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc;
     r.webkitIpc = typeof wk === "undefined" ? "absent" : "present";
-    if (r.webkitIpc === "present") {
-      try {
-        wk.postMessage(JSON.stringify({ jsonrpc: "2.0", method: "forged" }));
-        r.forged = "sent";
-      } catch (e) { r.forged = "threw"; }
-    }
     r.rtc = typeof RTCPeerConnection === "undefined" ? "absent" : "present";
     try {
       r.open = window.open(LOGGER + "/open") === null ? "null" : "ok";
@@ -144,6 +140,12 @@
       name: "act", arguments: { step: 2, got: got, second: codeOf(second) } });
   }
 
+  // Posts straight to the IPC handler, outside the relay: Sirio closes the widget for it.
+  function forge() {
+    var wk = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc;
+    if (wk) { wk.postMessage(JSON.stringify({ jsonrpc: "2.0", method: "forged" })); }
+  }
+
   async function flood() {
     var answered = 0;
     var end = Date.now() + 3000;
@@ -174,6 +176,7 @@
     notify("ui/notifications/size-changed", { height: text === "hi" ? 600 : 120 });
     if (text === "hi") { await hi(); }
     else if (text === "flood") { await flood(); }
+    else if (text === "forge") { forge(); }
   });
 })();
 </script>

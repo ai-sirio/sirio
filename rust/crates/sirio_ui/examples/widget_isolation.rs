@@ -29,12 +29,13 @@ mod linux {
     };
     use gpui_platform::application;
     use serde_json::json;
+    use webkit2gtk::{SettingsExt, WebViewExt};
     use sirio_ui::mcp_widget::{
         Inbox, WidgetInbox, WidgetPage, accepts_drops, build_widget_child, flush_x, new_secret,
         pump_gtk,
     };
     use wry::{
-        Rect, WebView,
+        Rect, WebView, WebViewExtUnix,
         dpi::{LogicalPosition, LogicalSize},
     };
 
@@ -54,6 +55,12 @@ mod linux {
         out: String,
         csp: bool,
         incognito: bool,
+        /// The addresses of the hint probes (`preconnect`, `prefetch`, `ping`); each defaults to
+        /// `logger`.
+        hints: [String; 3],
+        /// `on` turns hyperlink auditing and DNS prefetching back on after the build, so the
+        /// control shows the probes can reach their loggers when production's settings are off.
+        auditing: bool,
     }
 
     fn parse_args() -> Args {
@@ -71,12 +78,16 @@ mod linux {
                 .unwrap_or_else(|| panic!("a required flag is missing"))
         };
         let on = |name: &str| get(name) == "on";
+        let logger = get("--logger");
+        let hint = |name: &str| values.get(name).cloned().unwrap_or_else(|| logger.clone());
         Args {
-            logger: get("--logger"),
+            hints: [hint("--logger-preconnect"), hint("--logger-prefetch"), hint("--logger-ping")],
             html: get("--html"),
             out: get("--out"),
             csp: on("--csp"),
             incognito: on("--incognito"),
+            auditing: values.get("--auditing").is_some_and(|value| value == "on"),
+            logger,
         }
     }
 
@@ -143,6 +154,9 @@ mod linux {
             let html = self
                 .template
                 .replace("{{LOGGER}}", &self.args.logger)
+                .replace("{{LOGGER_PRECONNECT}}", &self.args.hints[0])
+                .replace("{{LOGGER_PREFETCH}}", &self.args.hints[1])
+                .replace("{{LOGGER_PING}}", &self.args.hints[2])
                 .replace("{{ROLE}}", role);
             let page = Arc::new(WidgetPage {
                 key: self.key.clone(),
@@ -153,6 +167,12 @@ mod linux {
             let inbox: WidgetInbox = Rc::new(std::cell::RefCell::new(Inbox::default()));
             let webview =
                 build_widget_child(window, page, inbox.clone(), self.args.incognito).ok()?;
+            if self.args.auditing
+                && let Some(settings) = WebViewExt::settings(&webview.webview())
+            {
+                settings.set_enable_hyperlink_auditing(true);
+                settings.set_enable_dns_prefetching(true);
+            }
             // As production does at `place`.
             let _ = webview.set_bounds(Rect {
                 position: LogicalPosition::new(20_i32, 20_i32).into(),

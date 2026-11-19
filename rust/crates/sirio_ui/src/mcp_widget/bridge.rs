@@ -137,6 +137,11 @@ impl WidgetBridge {
 
     /// Counts one inbound message in its one-second window.
     fn admit(&mut self, now: Instant) -> Admit {
+        self.admit_many(now, 1)
+    }
+
+    /// Counts `count` inbound messages at once in the one-second window.
+    fn admit_many(&mut self, now: Instant, count: u32) -> Admit {
         let elapsed = self.window_start.map(|start| now.saturating_duration_since(start));
         if elapsed.is_none_or(|elapsed| elapsed >= WINDOW) {
             // A window that ended without a hit, or a gap of a whole window, breaks the run.
@@ -147,7 +152,7 @@ impl WidgetBridge {
             self.window_count = 0;
             self.window_hit = false;
         }
-        self.window_count = self.window_count.saturating_add(1);
+        self.window_count = self.window_count.saturating_add(count);
         if self.window_count <= RATE_LIMIT {
             return Admit::Pass;
         }
@@ -248,6 +253,27 @@ impl WidgetBridge {
             effects.push(BridgeEffect::Send(notify("ui/notifications/tool-cancelled", params)));
         }
         effects
+    }
+
+    /// The view posted straight to the IPC handler, outside its relay: nothing legitimate does,
+    /// so the widget is closed at the first such message.
+    pub(crate) fn forged(&mut self) -> Vec<BridgeEffect> {
+        if self.closed || self.close_sent {
+            return Vec::new();
+        }
+        self.close("the view posted outside its relay")
+    }
+
+    /// Messages that never reached `on_message` (forged, oversized, or over the inbox's cap)
+    /// still count toward the rate, so a flood of them cannot hide from the limit.
+    pub(crate) fn stray(&mut self, count: u32, now: Instant) -> Vec<BridgeEffect> {
+        if count == 0 || self.closed || self.close_sent {
+            return Vec::new();
+        }
+        match self.admit_many(now, count) {
+            Admit::Close => self.close("over the rate limit for 5 s"),
+            Admit::Pass | Admit::Drop => Vec::new(),
+        }
     }
 
     pub(crate) fn tool_input(&mut self, arguments: Value) -> Vec<BridgeEffect> {
@@ -606,6 +632,37 @@ mod tests {
         let quiet = bridge.on_message(&line(1, "ping", json!({})), secs(t0, 4.0));
         assert!(!quiet.iter().any(|e| matches!(e, BridgeEffect::Close(_))));
         assert!(flood(&mut bridge, secs(t0, 5.0)).is_empty());
+    }
+
+    // How it can fail, written first: a view that posts outside its relay is left open, or
+    // closed twice; traffic that never reaches `on_message` (forged, oversized, past the
+    // inbox's cap) is not counted, so five seconds of it never closes the widget; counting it
+    // closes a widget that stays under the limit; the close after a first forged message is
+    // repeated by the next window's count.
+    #[test]
+    fn a_forged_message_closes_the_widget_once_and_stray_traffic_counts_toward_the_rate() {
+        let t0 = Instant::now();
+        let mut bridge = WidgetBridge::new(ctx());
+        assert_eq!(
+            bridge.forged(),
+            vec![BridgeEffect::Close("the view posted outside its relay".to_owned())]
+        );
+        assert!(bridge.forged().is_empty(), "closed once");
+        assert!(bridge.stray(500, t0).is_empty(), "and then nothing more");
+
+        let mut bridge = WidgetBridge::new(ctx());
+        for second in 0..4 {
+            assert!(bridge.stray(200, secs(t0, f64::from(second))).is_empty());
+        }
+        assert_eq!(
+            bridge.stray(200, secs(t0, 4.0)),
+            vec![BridgeEffect::Close("over the rate limit for 5 s".to_owned())]
+        );
+
+        let mut bridge = WidgetBridge::new(ctx());
+        for second in 0..8 {
+            assert!(bridge.stray(50, secs(t0, f64::from(second))).is_empty());
+        }
     }
 
     #[test]

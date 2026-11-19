@@ -1062,6 +1062,18 @@ def script_mcp_flood():
     trace_result(0.05, started)
 
 
+def script_mcp_forge():
+    """A `show` call whose widget posts straight to the IPC handler, outside its relay."""
+    started = time.time()
+    message_start("msg_forge_1")
+    trace_assistant("msg_forge_1", tool_use(
+        "toolu_forge_1", "mcp__apps__show", {"text": "forge"}))
+    message_end("tool_use", 40)
+    pause()
+    mcp_widget_result("toolu_forge_1")
+    trace_result(0.05, started)
+
+
 def script_mcp_denied():
     """A `show` call that did not run: its `tool_use_result` is a string, as for a denial."""
     started = time.time()
@@ -1519,6 +1531,7 @@ TRACE_SCRIPTS = {
     "mcp_widget": script_mcp_widget,
     "mcp_flood": script_mcp_flood,
     "mcp_denied": script_mcp_denied,
+    "mcp_forge": script_mcp_forge,
     "mcp_subagent": script_mcp_subagent,
 }
 

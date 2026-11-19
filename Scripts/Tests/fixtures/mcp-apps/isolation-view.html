@@ -6,6 +6,12 @@
 (function () {
   "use strict";
   var LOGGER = "{{LOGGER}}";
+  // Three more addresses on 127.0.0.1, each with a port the view's CSP does not allow, for the
+  // hints a CSP does not cover: preconnect and DNS prefetch (a bare TCP connect), prefetch, and
+  // `<a ping>`. The proof counts raw TCP accepts on each, not only HTTP request lines.
+  var PRECONNECT = "{{LOGGER_PRECONNECT}}";
+  var PREFETCH = "{{LOGGER_PREFETCH}}";
+  var PING = "{{LOGGER_PING}}";
   var ROLE = "{{ROLE}}";
   function post(params) {
     window.parent.postMessage({ jsonrpc: "2.0", method: "probe", params: params }, "*");
@@ -59,6 +65,25 @@
     // A fact, not a verdict: whether the page can read back what it just wrote.
     r.storageSelfRead = localStorage.getItem("sirio-probe");
   } catch (e) { r.storageWrite = "unavailable"; }
+
+  try {
+    var hint = function (rel, href) {
+      var link = document.createElement("link");
+      link.rel = rel;
+      link.href = href;
+      document.head.appendChild(link);
+    };
+    hint("preconnect", PRECONNECT);
+    hint("dns-prefetch", PRECONNECT);
+    hint("prefetch", PREFETCH + "/prefetch");
+    var anchor = document.createElement("a");
+    anchor.href = "#pinged";
+    anchor.setAttribute("ping", PING + "/ping");
+    anchor.textContent = "ping";
+    document.body.appendChild(anchor);
+    anchor.click();
+    r.hints = "added";
+  } catch (e) { r.hints = "threw"; }
 
   var pending = [
     settle(function (done) {

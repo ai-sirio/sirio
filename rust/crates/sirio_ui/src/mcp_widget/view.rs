@@ -56,6 +56,8 @@ pub struct McpWidget {
     asks: u32,
     answered: u32,
     refused: Vec<String>,
+    /// Messages the view posted outside its relay, over the widget's life.
+    forged: u32,
     closing_since: Option<Instant>,
 }
 
@@ -96,6 +98,7 @@ impl McpWidget {
             asks: 0,
             answered: 0,
             refused: Vec::new(),
+            forged: 0,
             closing_since: None,
         }
     }
@@ -108,6 +111,15 @@ impl McpWidget {
     pub fn tool_result(&mut self, result: Value, cx: &mut Context<Self>) {
         let effects = self.bridge.tool_result(result);
         self.apply(effects, cx);
+    }
+
+    /// Hands the keyboard back to Sirio's window. A click inside the page gives its native
+    /// child the operating system's focus, which `Window::focus` does not take back, so keys
+    /// meant for the composer would go to the page (as `browser.rs` does for its own child).
+    pub fn focus_parent(&self) {
+        if let Some(webview) = &self.webview {
+            let _ = webview.focus_parent();
+        }
     }
 
     pub fn tool_cancelled(&mut self, cx: &mut Context<Self>) {
@@ -141,6 +153,8 @@ impl McpWidget {
             }
             None => {
                 let _ = webview.set_visible(false);
+                // A hidden page keeps no claim on the keyboard.
+                let _ = webview.focus_parent();
                 flush_x();
             }
         }
@@ -171,6 +185,7 @@ impl McpWidget {
             xid: self.webview.as_ref().and_then(x11_id),
             input_delivered: self.bridge.input_delivered(),
             result_delivered: self.bridge.result_delivered(),
+            forged: self.forged,
         }
     }
 
@@ -215,6 +230,7 @@ impl McpWidget {
             return;
         }
         self.closing_since = Some(Instant::now());
+        self.focus_parent();
         if self.target.take().is_some() {
             if let Some(webview) = &self.webview {
                 let _ = webview.set_visible(false);
@@ -295,8 +311,20 @@ impl McpWidget {
         }
         self.refresh_scale(cx);
         let now = Instant::now();
-        let messages: Vec<String> = self.inbox.borrow_mut().messages.drain(..).collect();
+        let (messages, forged, dropped): (Vec<String>, u32, u32) = {
+            let mut inbox = self.inbox.borrow_mut();
+            let messages = inbox.messages.drain(..).collect();
+            (messages, std::mem::take(&mut inbox.forged), std::mem::take(&mut inbox.dropped))
+        };
         let mut changed = false;
+        if forged > 0 {
+            self.forged = self.forged.saturating_add(forged);
+            let effects = self.bridge.forged();
+            self.apply(effects, cx);
+            changed = true;
+        }
+        let effects = self.bridge.stray(forged.saturating_add(dropped), now);
+        changed |= self.apply(effects, cx);
         for text in messages {
             let effects = self.bridge.on_message(&text, now);
             changed |= self.apply(effects, cx);

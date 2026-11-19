@@ -22547,10 +22547,10 @@ impl SirioWorkspace {
                     // docs/linux-rewrite/PORTABILITY.md's "Browser child
                     // attach" row -- so this loop just polls
                     // `surface.state()` on those platforms.
+                    // Bounded, as the widgets' pump is: a busy page must not hold the
+                    // UI thread here for as long as it keeps GTK busy.
                     #[cfg(target_os = "linux")]
-                    while gtk::events_pending() {
-                        gtk::main_iteration_do(false);
-                    }
+                    sirio_ui::mcp_widget::pump_gtk(Duration::from_millis(4));
                     if !surface.state().is_loading() || Instant::now() >= deadline {
                         break;
                     }

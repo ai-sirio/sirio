@@ -20,7 +20,7 @@ use std::{
 };
 
 use gtk::prelude::*;
-use webkit2gtk::{SettingsExt, WebViewExt};
+use webkit2gtk::{AuthenticationRequestExt, FileChooserRequestExt, SettingsExt, WebViewExt};
 use wry::{
     NewWindowResponse, PermissionResponse, Rect, WebView, WebViewBuilder, WebViewExtUnix,
     dpi::{LogicalPosition, LogicalSize},
@@ -56,6 +56,9 @@ pub fn new_secret() -> String {
 pub struct Inbox {
     pub messages: VecDeque<String>,
     pub forged: u32,
+    /// Messages dropped unread or over the cap: they never reach the bridge, but they were
+    /// posted, so they count toward its rate.
+    pub dropped: u32,
 }
 
 /// Messages the relay forwarded with the right secret (unwrapped `m`, as JSON text).
@@ -116,6 +119,8 @@ fn addresses(request: &Request<Vec<u8>>, key: &str) -> bool {
 /// the forged count, an oversized one or one over the inbox cap is dropped.
 fn accept_ipc(body: &str, secret: &str, inbox: &WidgetInbox) {
     if body.len() > MAX_IPC_BYTES {
+        let mut inbox = inbox.borrow_mut();
+        inbox.dropped = inbox.dropped.saturating_add(1);
         return;
     }
     let message = serde_json::from_str::<serde_json::Value>(body)
@@ -131,7 +136,9 @@ fn accept_ipc(body: &str, secret: &str, inbox: &WidgetInbox) {
     let mut inbox = inbox.borrow_mut();
     match message {
         None => inbox.forged = inbox.forged.saturating_add(1),
-        Some(_) if inbox.messages.len() >= INBOX_CAP => {}
+        Some(_) if inbox.messages.len() >= INBOX_CAP => {
+            inbox.dropped = inbox.dropped.saturating_add(1);
+        }
         Some(text) => inbox.messages.push_back(text),
     }
 }
@@ -200,9 +207,22 @@ pub fn build_widget_child(
     if let Some(settings) = WebViewExt::settings(&view) {
         settings.set_enable_webrtc(false);
         settings.set_enable_media_stream(false);
+        // `<a ping>` posts to a URL the page names, and DNS prefetching resolves names it picks.
+        settings.set_enable_hyperlink_auditing(false);
+        settings.set_enable_dns_prefetching(false);
     }
     view.drag_dest_unset();
     view.connect_context_menu(|_, _, _, _| true);
+    // No native file chooser from `<input type=file>`, and no HTTP authentication prompt that
+    // looks like Sirio's own: both requests are cancelled.
+    view.connect_run_file_chooser(|_, request| {
+        request.cancel();
+        true
+    });
+    view.connect_authenticate(|_, request| {
+        request.cancel();
+        true
+    });
     Ok(webview)
 }
 

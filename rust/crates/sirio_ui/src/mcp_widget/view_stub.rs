@@ -27,6 +27,8 @@ impl McpWidget {
 
     pub fn tool_cancelled(&mut self, _cx: &mut Context<Self>) {}
 
+    pub fn focus_parent(&self) {}
+
     pub fn answer_ask(&mut self, _ask: u64, _outcome: AskOutcome, _cx: &mut Context<Self>) {}
 
     pub fn place(&mut self, _at: Option<Bounds<Pixels>>, _cx: &mut Context<Self>) {}
@@ -46,6 +48,7 @@ impl McpWidget {
             xid: None,
             input_delivered: false,
             result_delivered: false,
+            forged: 0,
         }
     }
 }

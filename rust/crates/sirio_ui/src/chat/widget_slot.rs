@@ -105,6 +105,7 @@ pub(super) struct SlotView {
     pub(super) xid: Option<u64>,
     pub(super) input_delivered: bool,
     pub(super) result_delivered: bool,
+    pub(super) forged: u32,
 }
 
 pub(super) struct Slot {
@@ -168,6 +169,7 @@ impl Slot {
             xid: None,
             input_delivered: false,
             result_delivered: false,
+            forged: snapshot.as_ref().map_or(0, |snap| snap.forged),
         };
         let (Some(_), Some(snap)) = (&self.widget, snapshot.as_ref()) else {
             return own(self.phase);
@@ -192,6 +194,7 @@ impl Slot {
             xid: snap.xid,
             input_delivered: snap.input_delivered,
             result_delivered: snap.result_delivered,
+            forged: snap.forged,
         }
     }
 }
@@ -720,6 +723,16 @@ impl Chat {
 
     // --- Placement ---
 
+    /// A press landed on Sirio's own window, so not on a widget's native child (which gets its
+    /// own events): the keyboard goes back to Sirio, in case a widget kept it after a click.
+    pub(super) fn give_widgets_the_keyboard_back(&self, cx: &App) {
+        for slot in &self.widgets.slots {
+            if let Some(widget) = &slot.widget {
+                widget.read(cx).focus_parent();
+            }
+        }
+    }
+
     /// Hides every widget at once: the host took this chat off screen.
     pub fn unmap_widgets(&self, cx: &mut Context<Self>) {
         if self.widgets.slots.is_empty() {
@@ -1061,6 +1074,7 @@ impl Chat {
                     ("dropped".to_owned(), slot.dropped.clone()),
                     ("inputDelivered".to_owned(), flag(view.input_delivered)),
                     ("resultDelivered".to_owned(), flag(view.result_delivered)),
+                    ("forged".to_owned(), view.forged.to_string()),
                     ("asks".to_owned(), view.asks.to_string()),
                     ("answered".to_owned(), view.answered.to_string()),
                     ("refused".to_owned(), refused),

@@ -65,51 +65,92 @@ EXAMPLE="$TARGET_DIR/debug/examples/widget_isolation"
 
 # --- the request logger ------------------------------------------------------
 cat > "$TMP/logger.py" <<'PY'
-import http.server, sys
+import socket, sys, threading
 
-log_path, port_path = sys.argv[1], sys.argv[2]
+# Four listeners on 127.0.0.1 (main, preconnect, prefetch, ping), each on a port of its own.
+# Every raw TCP accept is counted in accepts_path, before any byte is read: a bare preconnect
+# sends no request line, so a logger that only logs HTTP requests would pass it vacuously.
+# A request line, when one comes, goes to log_path (the main port's as its bare path, the
+# others' as "<name>:<path>").
+log_path, accepts_path, port_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+NAMES = ("main", "preconnect", "prefetch", "ping")
+lock = threading.Lock()
 
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
     "890000000b49444154789c6360000200000500017a5eab3f0000000049454e44ae426082")
 
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        with open(log_path, "a") as log:
-            log.write(self.path + "\n")
-        # A valid 1x1 PNG for /img, so an `Image` that reaches us loads instead of erroring.
-        body = PNG if self.path == "/img" else b""
-        self.send_response(200)
-        self.send_header("Content-Type", "image/png" if body else "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    do_POST = do_GET
-    def log_message(self, *args):
-        pass
+def note(path, line):
+    with lock:
+        with open(path, "a") as log:
+            log.write(line + "\n")
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-with open(port_path, "w") as port:
-    port.write(str(server.server_address[1]))
-server.serve_forever()
+def handle(name, conn):
+    conn.settimeout(1.0)
+    data = b""
+    try:
+        while b"\r\n\r\n" not in data and len(data) < 65536:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        pass
+    parts = data.split(b"\r\n", 1)[0].decode("latin-1").split(" ")
+    if data and len(parts) >= 2:
+        path = parts[1]
+        note(log_path, path if name == "main" else name + ":" + path)
+        # A valid 1x1 PNG for /img, so an `Image` that reaches us loads instead of erroring.
+        body = PNG if path == "/img" else b""
+        head = ("HTTP/1.1 200 OK\r\nContent-Type: " + ("image/png" if body else "text/plain")
+                + "\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n")
+        try:
+            conn.sendall(head.encode("latin-1") + body)
+        except OSError:
+            pass
+    conn.close()
+
+def serve(name, listener):
+    while True:
+        conn, _ = listener.accept()
+        note(accepts_path, name)
+        threading.Thread(target=handle, args=(name, conn), daemon=True).start()
+
+listeners = []
+for name in NAMES:
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    listeners.append((name, listener))
+for name, listener in listeners:
+    with open(port_prefix + "." + name, "w") as port:
+        port.write(str(listener.getsockname()[1]))
+    if name != NAMES[-1]:
+        threading.Thread(target=serve, args=(name, listener), daemon=True).start()
+serve(*listeners[-1])
 PY
 
-run_once() { # name csp(on=restrictive, off=permissive) incognito
-    local name="$1" csp="$2" incognito="$3"
+run_once() { # name csp(on=restrictive, off=permissive) incognito auditing(off=production's settings)
+    local name="$1" csp="$2" incognito="$3" auditing="$4"
     local dir="$OUT_DIR/$name" home="$TMP/home-$name"
     mkdir -p "$dir" "$home/data" "$home/cache" "$home/config"
     : > "$dir/logger.log"
+    : > "$dir/accepts.log"
     : > "$dir/messages.jsonl"
-    rm -f "$TMP/port-$name"
-    python3 -I "$TMP/logger.py" "$dir/logger.log" "$TMP/port-$name" &
+    rm -f "$TMP/port-$name".*
+    python3 -I "$TMP/logger.py" "$dir/logger.log" "$dir/accepts.log" "$TMP/port-$name" &
     LOGGER_PID=$!
     for _ in $(seq 1 100); do
-        [[ -s "$TMP/port-$name" ]] && break
+        [[ -s "$TMP/port-$name.ping" ]] && break
         kill -0 "$LOGGER_PID" 2>/dev/null || { echo "FAIL: the logger died" >&2; exit 1; }
         sleep 0.1
     done
-    [[ -s "$TMP/port-$name" ]] || { echo "FAIL: the logger never announced a port" >&2; exit 1; }
-    local port; port="$(cat "$TMP/port-$name")"
+    [[ -s "$TMP/port-$name.ping" ]] || { echo "FAIL: the logger never announced its ports" >&2; exit 1; }
+    local port; port="$(cat "$TMP/port-$name.main")"
+    local pre; pre="$(cat "$TMP/port-$name.preconnect")"
+    local pref; pref="$(cat "$TMP/port-$name.prefetch")"
+    local ping; ping="$(cat "$TMP/port-$name.ping")"
     local status=0
     env -u WAYLAND_DISPLAY -u http_proxy -u https_proxy -u all_proxy \
         -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
@@ -117,7 +158,11 @@ run_once() { # name csp(on=restrictive, off=permissive) incognito
         HOME="$home" XDG_DATA_HOME="$home/data" XDG_CACHE_HOME="$home/cache" \
         XDG_CONFIG_HOME="$home/config" \
         timeout 60 "$EXAMPLE" --logger "http://127.0.0.1:$port" --html "$VIEW" \
+            --logger-preconnect "http://127.0.0.1:$pre" \
+            --logger-prefetch "http://127.0.0.1:$pref" \
+            --logger-ping "http://127.0.0.1:$ping" \
             --out "$dir/messages.jsonl" --csp "$csp" --incognito "$incognito" \
+            --auditing "$auditing" \
             >"$dir/example.stdout" 2>"$dir/example.stderr" || status=$?
     echo "$status" > "$dir/example.status"
     sleep 0.3
@@ -126,8 +171,8 @@ run_once() { # name csp(on=restrictive, off=permissive) incognito
     LOGGER_PID=""
 }
 
-run_once run on on
-run_once control off off
+run_once run on on off
+run_once control off off on
 
 # --- judge -------------------------------------------------------------------
 cat > "$TMP/judge.py" <<'PY'
@@ -135,6 +180,7 @@ import json, os, sys
 
 out_dir, tmp = sys.argv[1], sys.argv[2]
 failures = []
+known_gaps = []
 
 def ok(text):
     print("OK: " + text)
@@ -169,6 +215,10 @@ def load(name):
     end = [l["reason"] for l in lines if l.get("kind") == "end"]
     with open(os.path.join(d, "logger.log")) as f:
         paths = [p.strip() for p in f if p.strip()]
+    with open(os.path.join(d, "accepts.log")) as f:
+        accept_names = [p.strip() for p in f if p.strip()]
+    accepts = {name: accept_names.count(name)
+               for name in ("main", "preconnect", "prefetch", "ping")}
     with open(os.path.join(d, "example.status")) as f:
         status = int(f.read().strip())
     home = os.path.join(tmp, "home-" + name)
@@ -189,7 +239,8 @@ def load(name):
         "probeA": probes.get("A"), "probeB": probes.get("B"),
         "acceptsDrops": drops, "forgedCount": forged[0] if forged else None,
         "forgedMethodsAccepted": forged_methods, "end": end,
-        "loggerPaths": paths, "homeFilesWithProbe": hits, "exampleStatus": status,
+        "loggerPaths": paths, "tcpAccepts": accepts,
+        "homeFilesWithProbe": hits, "exampleStatus": status,
     }
 
 run, control = load("run"), load("control")
@@ -229,6 +280,26 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
     else:
         ok("run: the iframe cannot see webkit.messageHandlers.ipc")
     check(run["loggerPaths"] == [], "run: the logger saw no path", str(run["loggerPaths"]))
+    check(a.get("hints") == "added", "run: the preconnect, prefetch and ping probes were set up",
+          str(a.get("hints")))
+    # Raw TCP accepts, counted before any byte is read: a bare preconnect sends no request line.
+    for name, label in (("main", "any connection to the logger"),
+                        ("prefetch", "prefetch"), ("ping", "<a ping>")):
+        check(run["tcpAccepts"][name] == 0, "run: no TCP connect for " + label,
+              str(run["tcpAccepts"]))
+    # KNOWN GAP, not a pass: WebKitGTK connects for `<link rel=preconnect>` whatever the CSP says
+    # (observed 2026-11-19, 2.54.1). The setting that turns it off is the `LinkPreconnect` feature
+    # (`webkit_settings_set_feature_enabled`, 2.42+), which the webkit2gtk 2.0.2 and
+    # webkit2gtk-sys 2.0.2 bindings in use do not expose. The gap is reported, loudly, in the
+    # output and in widget-isolation.json; it fails the run the day the bindings let it be closed.
+    if run["tcpAccepts"]["preconnect"] == 0:
+        ok("run: no TCP connect for preconnect and dns-prefetch")
+    else:
+        known_gaps.append("preconnect: " + str(run["tcpAccepts"]["preconnect"])
+                          + " TCP connect(s) reached a port outside connect-src")
+        print("KNOWN GAP: run: preconnect made " + str(run["tcpAccepts"]["preconnect"])
+              + " TCP connect(s) to a port outside connect-src; the webkit2gtk bindings in use "
+              "have no LinkPreconnect feature switch")
     # --- the control ---------------------------------------------------------
     ca, cb = control["probeA"], control["probeB"]
     for path in ("/fetch", "/img"):
@@ -254,12 +325,17 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
         print("FACT: control: storage reached disk under HOME: "
               + str(len(control["homeFilesWithProbe"]) >= 1).lower())
 
+    # The control runs the same hints with hyperlink auditing and DNS prefetching turned back on
+    # and a permissive CSP: what reaches its loggers is what production's settings and CSP stop.
+    print("FACT: control: TCP accepts " + json.dumps(control["tcpAccepts"], sort_keys=True))
+    print("FACT: control: request paths " + json.dumps(control["loggerPaths"]))
     print("FACT: control: window.open returns " + repr(ca.get("open")))
     print("FACT: control: geolocation is " + repr(ca.get("geolocation"))
           + " (code " + repr(ca.get("geolocationCode")) + ")")
     print("FACT: control: notification is " + repr(ca.get("notification")))
 
 results["facts"] = {
+    "tcpAccepts": {"run": run["tcpAccepts"], "control": control["tcpAccepts"]},
     "ownIpc": (run["probeA"] or {}).get("ownIpc"),
     "webkitIpc": (run["probeA"] or {}).get("webkitIpc"),
     "forgedCount": run["forgedCount"],
@@ -271,6 +347,7 @@ results["facts"] = {
     "notification": (run["probeA"] or {}).get("notification"),
 }
 results["failures"] = failures
+results["knownGaps"] = known_gaps
 with open(os.path.join(out_dir, "widget-isolation.json"), "w") as f:
     json.dump(results, f, indent=2, sort_keys=True)
 sys.exit(1 if failures else 0)
