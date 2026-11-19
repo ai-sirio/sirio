@@ -225,8 +225,10 @@ pub fn accepts_drops(webview: &WebView) -> bool {
 /// Pushes pending X requests out, as `browser.rs` `flush_native_window_ops` does: an unmap or a
 /// destroy sits in Xlib's buffer until something flushes it, and the window stays painted.
 pub fn flush_x() {
+    // One 4 ms budget for both passes.
+    let deadline = Instant::now() + Duration::from_millis(4);
     for _ in 0..2 {
-        pump_gtk(Duration::from_millis(4));
+        pump_gtk(deadline.saturating_duration_since(Instant::now()));
         if let Some(display) = gtk::gdk::Display::default() {
             display.flush();
         }

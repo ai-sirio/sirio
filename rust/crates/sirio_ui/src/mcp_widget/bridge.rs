@@ -62,6 +62,8 @@ pub(crate) struct WidgetBridge {
     close_sent: bool,
     next_request: u64,
     teardown_id: Option<Value>,
+    /// Set by `teardown`, never cleared: a closed bridge answers nothing.
+    closed: bool,
 }
 
 impl WidgetBridge {
@@ -86,6 +88,7 @@ impl WidgetBridge {
             close_sent: false,
             next_request: 1,
             teardown_id: None,
+            closed: false,
         }
     }
 
@@ -95,6 +98,15 @@ impl WidgetBridge {
     }
 
     pub(crate) fn on_message(&mut self, text: &str, now: Instant) -> Vec<BridgeEffect> {
+        if self.closed {
+            return match parse_inbound(text) {
+                Inbound::Response { id } if self.teardown_id.as_ref() == Some(&id) => {
+                    self.teardown_id = None;
+                    vec![BridgeEffect::TornDown]
+                }
+                _ => Vec::new(),
+            };
+        }
         match self.admit(now) {
             Admit::Pass => {}
             Admit::Drop => return Vec::new(),
@@ -107,10 +119,6 @@ impl WidgetBridge {
                 NoteRoute::SizeChanged(height) => vec![BridgeEffect::Resize(height)],
                 NoteRoute::Drop => Vec::new(),
             },
-            Inbound::Response { id } if self.teardown_id.as_ref() == Some(&id) => {
-                self.teardown_id = None;
-                vec![BridgeEffect::TornDown]
-            }
             Inbound::Response { .. } | Inbound::Ignored => Vec::new(),
         }
     }
@@ -177,7 +185,7 @@ impl WidgetBridge {
         let ToolsCall { name, arguments } = call;
         let reason = if !self.initialized {
             Some("the view is not ready")
-        } else if self.close_sent || self.teardown_id.is_some() {
+        } else if self.close_sent {
             Some("the widget is closing")
         } else if self.cooldown_until.is_some_and(|until| now < until) {
             Some("cooling down after a denial")
@@ -209,7 +217,7 @@ impl WidgetBridge {
     /// Sends what is held, in protocol order: input, then result, then a cancellation.
     fn flush_pending(&mut self) -> Vec<BridgeEffect> {
         let mut effects = Vec::new();
-        if !self.initialized || self.close_sent || self.teardown_id.is_some() {
+        if !self.initialized || self.closed {
             return effects;
         }
         if let Some(arguments) = self.input.take() {
@@ -230,7 +238,7 @@ impl WidgetBridge {
     }
 
     pub(crate) fn tool_input(&mut self, arguments: Value) -> Vec<BridgeEffect> {
-        if std::mem::replace(&mut self.input_taken, true) {
+        if self.closed || std::mem::replace(&mut self.input_taken, true) {
             return Vec::new();
         }
         self.input = Some(arguments);
@@ -238,7 +246,7 @@ impl WidgetBridge {
     }
 
     pub(crate) fn tool_result(&mut self, result: Value) -> Vec<BridgeEffect> {
-        if std::mem::replace(&mut self.result_taken, true) {
+        if self.closed || std::mem::replace(&mut self.result_taken, true) {
             return Vec::new();
         }
         self.result = Some(result);
@@ -246,7 +254,7 @@ impl WidgetBridge {
     }
 
     pub(crate) fn tool_cancelled(&mut self, reason: &str) -> Vec<BridgeEffect> {
-        if self.cancelled.is_some() {
+        if self.closed || self.cancelled.is_some() {
             return Vec::new();
         }
         self.cancelled = Some(reason.to_owned());
@@ -259,6 +267,9 @@ impl WidgetBridge {
         outcome: AskOutcome,
         now: Instant,
     ) -> Vec<BridgeEffect> {
+        if self.closed {
+            return Vec::new();
+        }
         let id = match self.open_ask.take() {
             Some((open, id)) if open == ask => id,
             other => {
@@ -285,8 +296,14 @@ impl WidgetBridge {
     }
 
     pub(crate) fn teardown(&mut self) -> Vec<BridgeEffect> {
-        if self.teardown_id.is_some() {
+        if self.closed {
             return Vec::new();
+        }
+        self.closed = true;
+        self.open_ask = None;
+        if !self.initialized {
+            // The view never finished its handshake, so it has nothing to save.
+            return vec![BridgeEffect::TornDown];
         }
         let id = json!(self.next_request);
         self.next_request += 1;
@@ -307,7 +324,8 @@ mod tests {
     use super::*;
 
     // Failure list: the bridge may
-    // - send anything before `initialized` (other than the `ui/initialize` answer);
+    // - send anything host-initiated before `initialized` (answers to the view's own requests
+    //   are allowed);
     // - send tool-input twice;
     // - send tool-result before tool-input;
     // - answer `ui/initialize` with capabilities beyond `serverTools`;
@@ -321,7 +339,10 @@ mod tests {
     //   floods less;
     // - skip the cooldown after a denial, keep it too long, or count a refusal as a denial;
     // - close after fewer or more than three denials in a row;
-    // - miss the teardown answer, or take another response (or a request) for it.
+    // - miss the teardown answer, or take another response (or a request) for it;
+    // - after teardown: raise an Ask or answer a call that arrives in the same batch as the
+    //   teardown answer, answer an ask, deliver input or result, or emit a second Close;
+    // - send a teardown request before `initialized`, or answer a second teardown.
 
     fn ctx() -> HostContext {
         HostContext { dark: true, width: 640, max_height: 800, host_version: "1.2.3".to_owned() }
@@ -634,5 +655,50 @@ mod tests {
         assert!(!bridge.on_message(&imposter, t0).contains(&BridgeEffect::TornDown));
         let own = json!({"jsonrpc": "2.0", "id": id, "result": {}}).to_string();
         assert_eq!(bridge.on_message(&own, t0), vec![BridgeEffect::TornDown]);
+    }
+
+    #[test]
+    fn a_torn_down_widget_answers_nothing() {
+        let t0 = Instant::now();
+        let mut bridge = ready_bridge(t0);
+        let open = ask_id(&bridge.on_message(&call(5, "go"), t0)).unwrap();
+        let sent_teardown = bridge.teardown();
+        let id = sent(&sent_teardown)[0]["id"].clone();
+        assert!(bridge.teardown().is_empty());
+        // The call arrives before the teardown answer, in the same batch.
+        assert!(bridge.on_message(&call(6, "go"), t0).is_empty());
+        assert!(bridge.on_message(&line(7, "ping", json!({})), t0).is_empty());
+        let own = json!({"jsonrpc": "2.0", "id": id, "result": {}}).to_string();
+        assert_eq!(bridge.on_message(&own, t0), vec![BridgeEffect::TornDown]);
+        // And after the answer, still nothing.
+        assert!(bridge.on_message(&call(8, "go"), t0).is_empty());
+        assert!(bridge.answer_ask(open, AskOutcome::Result(json!({})), t0).is_empty());
+        assert!(bridge.tool_input(json!({"a": 1})).is_empty());
+        assert!(bridge.tool_result(json!({})).is_empty());
+        assert!(bridge.tool_cancelled("x").is_empty());
+    }
+
+    #[test]
+    fn a_denial_after_teardown_cannot_close_again() {
+        let t0 = Instant::now();
+        let mut bridge = ready_bridge(t0);
+        for i in 0..2_u32 {
+            let at = secs(t0, 10.0 * f64::from(i));
+            let ask = ask_id(&bridge.on_message(&call(10 + u64::from(i), "go"), at)).unwrap();
+            bridge.answer_ask(ask, AskOutcome::Denied, at);
+        }
+        let at = secs(t0, 20.0);
+        let ask = ask_id(&bridge.on_message(&call(30, "go"), at)).unwrap();
+        bridge.teardown();
+        assert!(bridge.answer_ask(ask, AskOutcome::Denied, at).is_empty());
+    }
+
+    #[test]
+    fn teardown_before_initialized_sends_nothing_and_is_done() {
+        let t0 = Instant::now();
+        let mut bridge = WidgetBridge::new(ctx());
+        assert_eq!(bridge.teardown(), vec![BridgeEffect::TornDown]);
+        assert!(bridge.teardown().is_empty());
+        assert!(bridge.on_message(&line(1, "ui/initialize", json!({})), t0).is_empty());
     }
 }

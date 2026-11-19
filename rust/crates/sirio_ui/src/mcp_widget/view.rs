@@ -10,7 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{App, Bounds, Context, EventEmitter, Pixels, WeakEntity, Window};
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, EventEmitter, Pixels, WeakEntity,
+    Window,
+};
 use gtk::prelude::*;
 use serde_json::Value;
 use sirio_chat::mcp_apps::{bridge::HostContext, csp::view_csp, document::WidgetDocument};
@@ -48,6 +51,7 @@ pub struct McpWidget {
     height: u32,
     /// Where the webview is shown, in layout pixels; `None`: hidden.
     target: Option<Bounds<Pixels>>,
+    window: AnyWindowHandle,
     scale: f64,
     asks: u32,
     answered: u32,
@@ -87,6 +91,7 @@ impl McpWidget {
             phase,
             height: LOADING_HEIGHT,
             target: None,
+            window: window.window_handle(),
             scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 },
             asks: 0,
             answered: 0,
@@ -185,6 +190,24 @@ impl McpWidget {
         }
     }
 
+    /// Re-reads the window's scale; a changed one re-places a shown webview, because the
+    /// logical bounds the chat holds did not change and `place` will not run again.
+    fn refresh_scale(&mut self, cx: &mut Context<Self>) {
+        let read = |_: gpui::AnyView, window: &mut Window, _: &mut App| {
+            f64::from(window.scale_factor())
+        };
+        let Ok(scale) = cx.update_window(self.window, read) else {
+            return;
+        };
+        if !scale.is_finite() || scale <= 0.0 || scale == self.scale {
+            return;
+        }
+        self.scale = scale;
+        if let (Some(webview), Some(target)) = (&self.webview, self.target) {
+            let _ = webview.set_bounds(self.rect(target));
+        }
+    }
+
     fn begin_close(&mut self) {
         if self.closing_since.is_some() || self.webview.is_none() {
             return;
@@ -199,10 +222,11 @@ impl McpWidget {
         if !matches!(self.phase, WidgetPhase::Failed(_)) {
             self.phase = WidgetPhase::Closed;
         }
-        let effects = self.bridge.teardown();
-        for effect in effects {
-            if let BridgeEffect::Send(text) = effect {
-                self.deliver(&text);
+        for effect in self.bridge.teardown() {
+            match effect {
+                BridgeEffect::Send(text) => self.deliver(&text),
+                BridgeEffect::TornDown => self.drop_webview(),
+                _ => {}
             }
         }
     }
@@ -267,6 +291,7 @@ impl McpWidget {
         if self.webview.is_none() {
             return;
         }
+        self.refresh_scale(cx);
         let now = Instant::now();
         let messages: Vec<String> = self.inbox.borrow_mut().messages.drain(..).collect();
         let mut changed = false;

@@ -726,9 +726,9 @@ fn apply_native_visible(webview: &SharedWebView, flag: &SharedNativeVisibility, 
 /// rather than papered over.
 #[cfg(target_os = "linux")]
 fn flush_native_window_ops() {
+    // One budget for both passes, so a flooding widget cannot hold the GPUI thread here.
+    let deadline = Instant::now() + Duration::from_millis(4);
     for _ in 0..2 {
-        // Bounded, so a flooding widget cannot hold the GPUI thread here.
-        let deadline = Instant::now() + Duration::from_millis(4);
         while gtk::events_pending() && Instant::now() < deadline {
             gtk::main_iteration_do(false);
         }
