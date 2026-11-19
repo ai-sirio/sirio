@@ -74,6 +74,20 @@ Outcomes:
 - Row 60: re-applied. Proof: `ely-core` calls `ely_palette::color_blind_chart` across the crate
   boundary; it does not compile with `pub(crate)`.
 
+Moved tests: the five upstream tests in `palette.rs` (`a_color_goes_by_its_name`,
+`mix_hits_both_ends_and_the_middle`, `a_name_no_color_has_fails`, `high_contrast_strengthens_borders`,
+`palette_mix_moves_every_field`) now live in `rust/vendor/ely-palette/src/palette.rs`, outside the
+eight-crate closure, which is why the closure count fell from 1427 to 1422. They are a plain
+`#[cfg(test)]` module, and `ely-palette` is a workspace member, so `Scripts/ci.sh`'s workspace
+nextest run covers them. Run by hand: `cd rust && cargo nextest run -p ely-palette` (5 run, 5 passed).
+
+Dark values: the dark palette (`bg` `#252525` instead of `#131110`, and the neighbouring greys) and
+the chart hues differ from the old extraction. No Sirio draw path reads them: Sirio's only
+`ely_palette` users are `sirio_theme/src/lib.rs` (a `Palette` field) and `presets.rs` (its own
+literals); the old `ely-gpui-component` calls `Palette::dark` only as `Theme::target()`'s fallback
+(`theme/mod.rs:196`), overridden by `sirio_ui/src/ely.rs:75` `set_palette`; colour-blind mode is
+enabled nowhere. Task 10's section 6.4 captures confirm it.
+
 - `crates/ely-core/src/theme/mod.rs`
 - `crates/ely-core/src/theme/palette.rs`
 - `crates/ely-core/src/theme/syntax.rs`
