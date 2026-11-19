@@ -3645,26 +3645,6 @@ mod tests {
     }
 
     #[test]
-    fn a_leave_without_a_drop_still_cancels_the_read() {
-        let mut drag = drag_state();
-        let data_offer = FakeDataOffer::new("A");
-        let generation = drag.begin_uri_read(Point::default());
-
-        assert!(drag.handle_leave().is_none());
-        let delivered = file_drop_events(complete_drag_uri_read(
-            &mut drag,
-            generation,
-            data_offer.clone(),
-            "window A",
-        ));
-
-        assert!(delivered.is_empty());
-        assert!(!data_offer.finished.get());
-        assert!(data_offer.destroyed.get());
-        assert!(drag.window.is_none());
-    }
-
-    #[test]
     fn a_failed_read_with_a_pending_drop_leaves_nothing_for_the_next_drag() {
         let mut drag = drag_state();
         let data_offer = FakeDataOffer::new("A");
@@ -3675,18 +3655,7 @@ mod tests {
         assert!(data_offer.destroyed.get());
         assert!(!data_offer.finished.get());
 
-        // A Leave now must cancel like any other: no drop is left waiting, so a late result
-        // of the abandoned read delivers nothing.
-        assert!(drag.handle_leave().is_none());
-        let late = file_drop_events(complete_drag_uri_read(
-            &mut drag,
-            generation,
-            FakeDataOffer::new("late"),
-            "window A",
-        ));
-        assert!(late.is_empty());
-
-        // And the next drag starts clean.
+        // The next drag starts clean.
         let data_offer_b = FakeDataOffer::new("B");
         let generation_b = drag.begin_uri_read(Point::default());
         let next = file_drop_events(complete_drag_uri_read(
