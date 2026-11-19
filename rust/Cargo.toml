@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-# vendor/gpui_linux, vendor/gpui_windows and vendor/bezel_theme are local `[patch.crates-io]`
+# vendor/gpui_linux, vendor/gpui_windows, vendor/gpui_macos and vendor/bezel_theme are local `[patch.crates-io]`
 # overrides (see ../vendor/README.md), not workspace members -- each carries its own `[workspace]`
 # table so `cargo test --manifest-path vendor/<crate>/Cargo.toml` can run its tests standalone;
 # excluded here so `cargo build/test --workspace` does not also try to treat them as members
 # (which conflicts with their own `[workspace]` tables).
-exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/bezel_theme"]
+exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/gpui_macos", "vendor/bezel_theme"]
 members = [
     "vendor/ely-palette",
     "vendor/ely-gpui-component",
@@ -149,6 +149,12 @@ gpui-pre-linux = { path = "vendor/gpui_linux" }
 # copy presents through a bitblt swap chain instead, and keeps additive alpha blending; see
 # rust/vendor/README.md.
 gpui-pre-windows = { path = "vendor/gpui_windows" }
+# Local override for #810: on macOS 14 and later upstream `gpui_macos` paces each window with a
+# CAMetalDisplayLink. A window in the background sometimes drew its next frame about 10 s late, and
+# a paused link is the suspected cause (unconfirmed on a Mac). The vendored copy, Ely's at
+# 0b983008, paces every window with CVDisplayLink, as gpui-pre 0.3.10 and bezel-gpui 0.3.8 did;
+# see rust/vendor/README.md.
+gpui-pre-macos = { path = "vendor/gpui_macos" }
 # `bezel-theme` 0.1.4 on gpui-pre: the published crate depends on `bezel-gpui`, the engine this
 # workspace used to build. The vendored copy changes only that dependency.
 bezel-theme = { path = "vendor/bezel_theme" }
