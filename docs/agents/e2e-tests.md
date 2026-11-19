@@ -545,7 +545,7 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #   mcp_widget_flood  a widget posting pings at about 125k a second for 3 s: surface.chat.read answers
 #                     within 1000 ms throughout; within 30 s the widget's row is closed with "over the
 #                     rate limit for 5 s" (the host's IPC backlog keeps it over 50 a second for 5 s of host
-#                     time), no card ever appeared, the CLI heard no mcp_call, and its window is not viewable;
+#                     time), no card ever appeared, the CLI heard no mcp_call, and the window it had is gone within 3 s;
 #                     mcp-widget-flood.json has the latencies and the final row. The per-second cut is
 #                     covered by the bridge test a_flood_is_cut_at_fifty_a_second.
 #   mcp_widget_gate   the CLI lists `_meta.ui` and serves the resource but reports no capability:

@@ -5699,24 +5699,32 @@ def remember(rows):
         json.dump(memory, f)
 
 
-def remembered_windows(display, count):
-    """(problems, states): every remembered window must now be gone or unmapped, and a widget that
-    reached ready must have had one."""
+def remembered_windows(display, count, seconds=3.0):
+    """(problems, states): every remembered window must be GONE (xwininfo says BadWindow or no such
+    window) within `seconds` of the call, which comes right after the close; IsUnMapped is not
+    enough, the webview is dropped after its 1 s teardown grace. A widget that reached ready must
+    have had a window. Each state carries the seconds the window took to go."""
     with open(os.environ["MW_XIDS"], encoding="utf-8") as f:
         memory = json.load(f)
     problems, states = [], []
     if len(memory) != count:
         problems.append(f"{len(memory)} widgets remembered, not {count}")
+    started = time.time()
     for key, entry in sorted(memory.items()):
         if entry["ready"] and not entry["xid"]:
             problems.append(f"{key} was ready and never showed an xid")
             continue
         if not entry["xid"]:
             continue
-        viewable, line = window_state(display, entry["xid"])
-        states.append({"toolUseId": key, "xid": entry["xid"], "mapState": line})
-        if viewable:
-            problems.append(f"{key}: window {entry['xid']} is still viewable after close")
+        while True:
+            viewable, line = window_state(display, entry["xid"])
+            took = round(time.time() - started, 2)
+            if line == "gone" or time.time() - started >= seconds:
+                break
+            time.sleep(0.1)
+        states.append({"toolUseId": key, "xid": entry["xid"], "mapState": line, "secondsToGo": took})
+        if line != "gone":
+            problems.append(f"{key}: window {entry['xid']} still exists {took} s after the close: {line}")
     return problems, states
 
 
@@ -5745,6 +5753,8 @@ def window_state(display, xid):
     done = subprocess.run(["xwininfo", "-display", display, "-id", xid],
                           capture_output=True, text=True, timeout=5)
     line = next((l.strip() for l in done.stdout.splitlines() if "Map State" in l), "no window")
+    if done.returncode != 0 and ("BadWindow" in done.stderr or "No such window" in done.stderr):
+        line = "gone"
     return done.returncode == 0 and "IsViewable" in line, line
 
 
@@ -5830,15 +5840,15 @@ elif command == "remembered":
     problems, states = remembered_windows(display, count)
     record(artifact, "remembered windows after close", [], None, states)
     for state in states:
-        print(f"  remembered window {state['xid']} of {state['toolUseId']}: {state['mapState']}")
+        print(f"  remembered window {state['xid']} of {state['toolUseId']}: {state['mapState']} after {state['secondsToGo']} s")
     if problems:
         for problem in problems:
             print("FAIL: " + problem, file=sys.stderr)
         sys.exit(1)
-    print(f"OK: the {len(states)} windows seen while the widgets lived are not viewable after close")
+    print(f"OK: the {len(states)} windows seen while the widgets lived are gone after close")
 elif command == "flood-end":
     # flood-end SURFACE SECONDS ARTIFACT DISPLAY: the flooded widget ends closed, for the rate limit,
-    # with no card ever raised and no viewable window; the final row joins the artifact.
+    # with no card ever raised and the window it had destroyed; the final row joins the artifact.
     surface, seconds, artifact, display = sys.argv[2], float(sys.argv[3]), sys.argv[4], sys.argv[5]
     deadline = time.time() + seconds
     while True:
@@ -5865,14 +5875,14 @@ elif command == "flood-end":
     if problems or not states:
         print("FAIL: " + "; ".join(problems or ["no window was remembered"]), file=sys.stderr)
         sys.exit(1)
-    line = states[0]["xid"] + " " + states[0]["mapState"]
+    line = f"{states[0]['xid']} {states[0]['mapState']} after {states[0]['secondsToGo']} s"
     with open(artifact, encoding="utf-8") as f:
         data = json.load(f)
     data["finalRow"] = row
     data["finalWindow"] = line
     with open(artifact, "w", encoding="utf-8") as f:
         json.dump(data, f)
-    print(f"OK: the widget closed with '{row['error']}', raised no card, and its remembered window {line} is not viewable")
+    print(f"OK: the widget closed with '{row['error']}', raised no card, and its remembered window {line}")
 elif command == "latency":
     # latency SURFACE SECONDS ARTIFACT: one surface.chat.read every 100 ms; each must answer in 1 s.
     surface, seconds, artifact = sys.argv[2], float(sys.argv[3]), sys.argv[4]
@@ -6064,7 +6074,7 @@ print(top - (vtop - (bottom - top) / 2))')
   widget_wait "every entry is closed and unmapped after the CLI died" 40 \
     'len(w) == 2 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
   widget_invariant "9 the CLI died"
-  MW remembered "$DISPLAY_TARGET" 2 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived is still viewable after the CLI died"
+  MW remembered "$DISPLAY_TARGET" 2 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
   # after the steps
   [ ! -s "$WIDGET_LOGGER_LOG" ] || fail "the request logger saw $(wc -l <"$WIDGET_LOGGER_LOG") requests from the widget"
   echo "OK: the request logger is empty"
