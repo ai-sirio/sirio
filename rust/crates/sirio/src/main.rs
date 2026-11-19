@@ -740,6 +740,13 @@ fn clamp_first_visible(
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Whether `id` names one of the app's tabs (`pane-<n>`); a control session's is
+/// `pane-c<hex>`.
+fn is_tab_pane_id(id: &str) -> bool {
+    id.strip_prefix("pane-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// How long typing must pause before the breadcrumb's symbols are asked for again.
 const SYMBOLS_DEBOUNCE: Duration = Duration::from_secs(1);
 /// How long a server that said it is still indexing is given before the one
@@ -2496,31 +2503,50 @@ impl AppControlHandler {
                 if self.panes.is_app_pane(&id) {
                     return self.app_pane(request, &id);
                 }
+                // The registry is published when the workspace draws, so a tab
+                // opened since a late frame (hidden, occluded, headless window)
+                // is not in it yet. When neither the registry nor the host
+                // answers ok for such an id, the registry is published now and
+                // the id answered from it, as it would be after the next frame.
+                let unpublished_tab =
+                    matches!(method, "panel.read" | "panel.state" | "panel.scrollback")
+                        && is_tab_pane_id(&id);
                 if self.host_terminal.client().is_none() {
-                    // The registry is published when the workspace draws, and a
-                    // window that draws nothing (hidden, occluded, headless)
-                    // would leave a tab opened since its last frame unknown. Its
-                    // panes are published here before the id is called missing,
-                    // for the calls an app pane answers.
-                    if matches!(method, "panel.read" | "panel.state" | "panel.scrollback") {
-                        let synced =
-                            self.queue_action(request, |reply| ControlAction::SyncPanes { reply });
-                        if !synced.ok {
-                            return synced;
-                        }
-                        if self.panes.is_app_pane(&id) {
-                            return self.app_pane(request, &id);
+                    if unpublished_tab {
+                        match self.answer_after_sync(request, &id) {
+                            Ok(Some(response)) | Err(response) => return response,
+                            Ok(None) => {}
                         }
                     }
                     return Self::pane_error(request, self.panes.missing_pane_error(&id));
                 }
                 let response = self.host_request(request);
+                if !response.ok
+                    && unpublished_tab
+                    && let Ok(Some(published)) = self.answer_after_sync(request, &id)
+                {
+                    return published;
+                }
                 if method == "panel.close" {
                     self.refresh_control();
                 }
                 response
             }
         }
+    }
+
+    /// Publishes the app's panes from the GPUI thread, then answers `id` as an
+    /// app pane if it is one now. `Err` is the dispatch that failed.
+    fn answer_after_sync(
+        &self,
+        request: &ControlRequest,
+        id: &str,
+    ) -> Result<Option<ControlResponse>, ControlResponse> {
+        let synced = self.queue_action(request, |reply| ControlAction::SyncPanes { reply });
+        if !synced.ok {
+            return Err(synced);
+        }
+        Ok(self.panes.is_app_pane(id).then(|| self.app_pane(request, id)))
     }
 
     /// A `panel.*` call on one of the app's own panes: read and state come

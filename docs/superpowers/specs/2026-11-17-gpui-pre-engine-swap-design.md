@@ -251,10 +251,13 @@ case 5 failed ("the cat terminal is unknown") and case 21 went from 7 s to 15 s.
 - **Not the inactive limit.** Setting `inactive_frame_interval: None` did not change it (run
   44438260522). The suspect is the `CAMetalDisplayLink` that gpui-pre-macos pauses between frames
   (#810).
-- **Fix for case 5.** With no host running, the control socket's registry of the app's own panes
-  was published only from render, so a tab opened since the last frame was unknown. Now
-  `panel.read`/`state`/`scrollback` for an unregistered id first publish the registry on the GPUI
-  thread (`ControlAction::SyncPanes`).
+- **Fix for cases 5 and 18.** The control socket's registry of the app's own panes was
+  published only from render, so a tab opened since the last frame was unknown with no host
+  (case 5), and after End All was sent to a host that had gone (case 18, "could not reach its
+  host"). Now a `panel.read`/`state`/`scrollback` for an unpublished tab id (`pane-<n>`) that
+  neither the registry nor the host can answer publishes the registry on the GPUI thread
+  (`ControlAction::SyncPanes`) and is answered from it, as it would be after the next frame. A
+  host answer that is ok is never replaced.
 - **Case 21.** It still waits on the frame; #810 tracks it.
 
 ## 6. Verification — "the app is identical"
