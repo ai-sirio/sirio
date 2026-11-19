@@ -50,8 +50,8 @@ impl CodeEditor {
     fn worst(&self, line: usize) -> Option<Severity> {
         let range = self.buffer.line_range(line);
         self.marks
-            .diagnostics
-            .iter()
+            .diagnostics_touching(range.start, range.end)
+            .into_iter()
             .filter(|diagnostic| {
                 diagnostic.range.start <= range.end && range.start <= diagnostic.range.end
             })
@@ -138,7 +138,7 @@ impl CodeEditor {
                 .into_any_element(),
             (false, None) => div().into_any_element(),
         };
-        let opens = self.frame.folds.iter().any(|(header, _)| *header == line);
+        let opens = super::syntax::opens(&self.buffer, line);
         let folded = self.folded.contains(&line);
         let chevron = opens.then(|| Disclosure::new(("fold", line), !folded).into_any_element());
         let entity = cx.entity();

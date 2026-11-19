@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fmt, ops::Range, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::BTreeSet, fmt, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
     App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, HighlightStyle, Pixels,
@@ -10,6 +10,7 @@ use super::{
     buffer::Buffer,
     cursor::{Selection, merged},
     decor::{CodeLens, Diagnostic, DiffHunk, GhostText, GitMark, InlayHint},
+    syntax,
     view::Frame,
 };
 use crate::{
@@ -152,6 +153,9 @@ pub(crate) struct Options {
 pub(crate) struct Marks {
     pub diagnostics: Vec<Diagnostic>,
     pub backgrounds: Vec<(Range<usize>, gpui::Hsla)>,
+    /// Where `diagnostics` and `backgrounds` lie, to find a line's by search; `reindex` brings them up to date after either list changes.
+    pub(crate) diagnostic_reach: super::anchors::Reach,
+    pub(crate) background_reach: super::anchors::Reach,
     pub hints: Vec<InlayHint>,
     pub lenses: Vec<CodeLens>,
     pub ghost: Option<GhostText>,
@@ -183,6 +187,12 @@ pub(crate) struct Snapshot {
 pub struct Metrics {
     /// The code's left edge.
     pub left: Pixels,
+    /// The window x where the code cell begins, the gutter's right edge.
+    pub code_left: Pixels,
+    /// The code cell's width.
+    pub code_width: Pixels,
+    /// The window x of the body's left edge.
+    pub body_left: Pixels,
     /// The top of the first row.
     pub top: Pixels,
     /// A character's width.
@@ -234,6 +244,16 @@ pub struct CodeEditor {
     pub(crate) centered: Option<(usize, Pixels, Pixels)>,
     /// Typewriter room rows at each end.
     pub(crate) pad: usize,
+    /// How far the code column is scrolled right, from zero.
+    pub(crate) scroll_x: Pixels,
+    /// The most `scroll_x` can be, from the widest line and the column's width.
+    pub(crate) scroll_x_max: Pixels,
+    /// The primary head the view last followed sideways.
+    pub(crate) followed: Option<usize>,
+    /// The widest line's unscrolled width, text start included, by the buffer stamp it was found in.
+    pub(crate) widest: Option<(u64, Pixels)>,
+    /// The last press on the horizontal bar: the pointer along it and the thumb's start then.
+    pub(crate) bar_press: Option<(Pixels, Pixels)>,
     pub(crate) dragging: bool,
     /// The left press in progress, for a platform click.
     pub(crate) pressed: Option<Press>,
@@ -242,6 +262,8 @@ pub struct CodeEditor {
     focused: bool,
     pub(crate) chat_field: gpui::Entity<TextInput>,
     pub(crate) frame: Frame,
+    /// Folds and brackets of the text as it stands, kept between frames.
+    structure: RefCell<syntax::Structure>,
     blink_epoch: u64,
     _blink: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -337,12 +359,18 @@ impl CodeEditor {
             metrics: Metrics::default(),
             centered: None,
             pad: 0,
+            scroll_x: Pixels::ZERO,
+            scroll_x_max: Pixels::ZERO,
+            followed: None,
+            widest: None,
+            bar_press: None,
             dragging: false,
             pressed: None,
             caret_on: true,
             focused: false,
             chat_field,
             frame: Frame::default(),
+            structure: RefCell::default(),
             blink_epoch: 0,
             _blink: None,
             _subscriptions: subscriptions,
@@ -605,6 +633,7 @@ impl CodeEditor {
             return;
         }
         self.marks.diagnostics = diagnostics;
+        self.marks.reindex();
         cx.notify();
     }
 
@@ -620,6 +649,7 @@ impl CodeEditor {
             return;
         }
         self.marks.backgrounds = ranges;
+        self.marks.reindex();
         cx.notify();
     }
 
@@ -787,6 +817,21 @@ impl CodeEditor {
             );
         }
         spans
+    }
+
+    /// The blocks the text opens, read once per revision of the text.
+    pub(crate) fn folds(&self) -> Rc<Vec<(usize, usize)>> {
+        self.structure.borrow_mut().folds(&self.buffer)
+    }
+
+    /// The brackets of the text, read once per revision of the text and, after an edit, only on the lines it touched.
+    pub(crate) fn brackets(&self) -> Rc<Vec<syntax::Bracket>> {
+        self.structure.borrow_mut().brackets(&self.buffer)
+    }
+
+    /// The headers of the blocks that hold `line`, outermost first, from an index built once per revision of the text.
+    pub(crate) fn enclosing(&self, line: usize) -> Vec<usize> {
+        self.structure.borrow_mut().enclosing(&self.buffer, line)
     }
 
     pub(crate) fn editable(&self) -> bool {

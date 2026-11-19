@@ -590,3 +590,89 @@ Outcomes:
   `tests::enter_presses_the_banner_button_inside_the_editor`, which ran.
 - Rows 140, 141: re-applied. Proof: runs at Task 8, E2E scenario `status_actions` (with tabs Tab inserts a
   tab and Shift-Tab takes it off; Enter after an opener and a block indent in Tabs mode).
+
+## ely-editor performance and sideways scroll (Task 6)
+
+Sirio's performance work and its sideways scroll (rows 142 to 167 of the checklist), carried from the old
+crate's `editor` onto upstream's `ely-editor`. Proofs named "runs at Task 8" are Sirio-side: no Sirio
+crate uses these crates before Task 8.
+
+- `crates/ely-editor/Cargo.toml`: depends on `sirio_perf` (path `../../../../crates/sirio_perf`, which has no
+  dependencies of its own, so no cycle).
+- `crates/ely-editor/src/buffer.rs`: the log of the last 32 edits and `Buffer::kept_since(stamp) -> Option<Kept>`; the two
+  edit-log tests moved with it.
+- `crates/ely-editor/src/syntax.rs`: `BracketIndex`, `Structure` (folds, brackets and the nesting index kept per text
+  revision), one-pass `folds`, `opens`, `Structure::enclosing`; `brackets` and the climbing `enclosing` are
+  test-only references. Upstream's `colors`, `colors_with`, `styles` and `occurrences` stay. The old inline
+  tests moved with it (the bracket index, the one-pass folds, the one-line answers, the nesting index).
+- `crates/ely-editor/src/layout.rs`: `rows_are_lines`, `Rows`, `MinimapPlan` and `minimap_plan`; the tests of the shortcut and
+  of the minimap sampling moved with them. `Rows::Lines` and `Rows::Listed` carry upstream's typewriter room
+  (`Row::Room`): `Lines { lines, pad }` holds `pad` room rows at each end as a count, `Listed` holds them in
+  its list, so `primary_row`, `row_of`, `line_from` and `get` give what upstream's `Vec<Row>` gave. `Rows::of`
+  takes the pad. `around` is gone (see row 152).
+- `crates/ely-editor/src/anchors.rs`: `Reach`, `Marks::{reindex, diagnostics_touching, backgrounds_touching}`; `shift` and
+  `clear` re-index; upstream's anchors stay. The two lookup tests moved with it.
+- `crates/ely-editor/src/state.rs`: `Marks` holds the two reaches; `set_diagnostics` and `set_backgrounds` re-index;
+  `CodeEditor::{folds, brackets, enclosing}` over a `RefCell<Structure>`; `scroll_x`, `scroll_x_max`,
+  `followed`, `widest`, `bar_press`; `Metrics` gains `code_left`, `code_width` and `body_left`.
+- `crates/ely-editor/src/view.rs`: the `sirio_perf` spans, labels copied from the old crate (`CodeEditor.render`,
+  `.active_block`, `.brackets`, `.rows`, `.sideways`, `.sticky`, `.minimap`, `.visible_rows`,
+  `.minimap_rows`, `.minimap_paint`); `Frame` holds `rows: Rows`, `brackets: Rc<..>`, `needle` and `active`
+  and drops `folds` and `occurrences`; the sticky header asks `enclosing` and shifts with the code;
+  `minimap_rows`, the minimap read in prepaint and painted in one `paint_layer`; `needle` skips a
+  multi-line selection; `scroll_sideways`, `horizontal_bar` (selector `code-editor-hbar`, thumb follows the
+  pointer from the press through `bar_press`), the list in `on_axis` and the body's horizontal wheel;
+  `offset_over_code` tests the gutter against `code_left` (this replaces Task 5's pre-#659
+  `metrics.left - metrics.advance`). Deviation from the old crate: when no line is wider than the column (`scroll_x_max` is zero) a horizontal
+  wheel (Shift and the wheel) scrolls the rows, by the wheel line the list uses (`metrics.wheel`), because
+  upstream's `ely-documents` test `document::tests::scroll::source_margins_scroll` requires it. `on_axis` is
+  `ely_core::layout::on_axis` (the editor's own `layout`
+  module hides the crate-level name).
+- `crates/ely-editor/src/line.rs`: brackets by search, the needle looked for on each drawn line, washes and diagnostics by
+  range, `x` and `grid` subtract `scroll_x`, the strong guide from `Frame.active`, the code canvas records
+  `code_left` and `code_width` and repaints when the width changes.
+- `crates/ely-editor/src/row.rs`: the removed-hunk and ghost rows clip and shift by `scroll_x`; the row reads
+  `Rows::get` (no index); lens and chat rows do not move.
+- `crates/ely-editor/src/gutter.rs`: the worst problem by range, the fold chevron by `syntax::opens`.
+- `crates/ely-editor/src/moves.rs`: motions skip the fold scan while nothing is folded; `folds()` from the structure;
+  `primary_row` answers the caret line directly while rows are lines (plus the typewriter pad).
+- `crates/ely-editor/src/ime.rs`: `measured` is `pub(super)`; the rows are asked by `Rows::row_of`.
+- `crates/ely-editor/src/sideways.rs` (new): `follow`.
+
+Outcomes:
+
+- Row 142: re-applied. Proof: the closure build (`cargo build -p ely-editor`; the dependency has no
+  dependencies, so no cycle).
+- Row 143: re-applied. Proof: unproven (spans change nothing a test reads); the labels were compared with
+  the old crate's by `diff` of their sorted list: identical.
+- Row 144: re-applied. Proofs (ran, each alone, 1 test): `buffer::tests::the_edits_after_a_stamp_leave_a_prefix_and_a_suffix`,
+  `buffer::tests::edits_older_than_the_log_are_not_remembered`.
+- Row 145: re-applied. Proofs: `syntax::tests::the_bracket_index_follows_every_kind_of_edit`,
+  `syntax::tests::a_one_character_edit_reads_only_its_own_line`.
+- Row 146: re-applied. Proof: `syntax::tests::one_pass_folds_match_the_pass_they_replace`.
+- Row 147: re-applied. Proof: `syntax::tests::one_line_answers_agree_with_the_folds_of_the_whole_text`.
+- Row 148: re-applied. Proof: `syntax::tests::an_edit_inside_a_line_does_not_read_the_file_again`.
+- Row 149: re-applied. Proof: unproven beyond the closure build; the old crate had no test of the needle on a
+  line, and the window tests that draw an editor pass with either form. No Sirio E2E asserts the wash
+  of the selected word's other appearances.
+- Row 150: re-applied. Proof: `layout::tests::rows_are_lines_only_when_nothing_adds_or_hides_a_row`
+  (the shortcut itself). The typewriter pad added to `Rows` is new and unproven: upstream has no typewriter
+  test, and none was written after the code.
+- Row 151: re-applied. Proof: unproven (no test reads `primary_row` or counts fold scans); the window tests
+  that move the caret (`tests::cursors_added_above_keep_climbing`) pass through it.
+- Row 152: re-applied as a removal, not dropped. Upstream calls `around` once, from `sticky`, and that
+  call is the one row 156 replaces with `enclosing`; with it gone `around` has no caller, as in the old
+  crate, so it and its one assertion in `layout::tests` are removed.
+- Row 153: re-applied. Proof: `layout::tests::the_minimap_samples_one_row_a_pixel_and_one_more_line_moves_no_sample_far`.
+- Row 154: re-applied. Proof: unproven (the picture is the same; the old crate's measurement is
+  `docs/perf/2026-10-ely-code-editor.md`).
+- Row 155: re-applied. Proofs: `anchors::tests::a_lookup_by_range_finds_what_a_scan_of_every_range_finds`,
+  `anchors::tests::marks_look_their_lists_up_in_the_owners_order_and_follow_edits`.
+- Row 156: re-applied. Proofs: `syntax::tests::the_nesting_index_agrees_with_climbing_on_every_line`,
+  `syntax::tests::the_nesting_index_follows_every_kind_of_edit`.
+- Rows 157, 158, 159, 160, 161, 162, 163, 164, 165, 166: re-applied. Proof (ran, for the wheel fallback of row 161): `ely-documents` `document::tests::scroll::source_margins_scroll`. Proof: runs at Task 8,
+  `Scripts/Tests/test-ely-editor-probe.sh` step 7 (the wheel right and Shift with the wheel move line 12
+  while the gutter and the rows stay, a drag of the bar's thumb moves it, End and Home follow the caret).
+  Unproven: the `code-editor-hbar` selector (no script reads it), the sticky header's shift and the
+  deleted-hunk and ghost rows' clip.
+- Row 167: re-applied (`measured` is `pub(super)`). Proof: the closure build (`view.rs` calls it).

@@ -12,6 +12,7 @@ use super::{
     layout::{Shown, stack},
     measure::Measured,
     state::{CodeEditor, CursorShape, EditorEvent, Press},
+    syntax,
 };
 use crate::{
     charts::tint,
@@ -36,12 +37,17 @@ impl CodeEditor {
         let mut spans = self.piece_colors(line, 0, self.row_text(line), cx);
         // Offsets found in an older text are left out.
         let fresh = self.frame.stamp == self.buffer.stamp();
-        let brackets = self
-            .frame
-            .brackets
-            .iter()
-            .filter(|bracket| fresh && range.contains(&bracket.offset));
-        for bracket in brackets {
+        // Brackets lie in the order of their offsets, so the line's are found by search.
+        let all = &self.frame.brackets;
+        let (first, last) = if fresh {
+            (
+                all.partition_point(|bracket| bracket.offset < range.start),
+                all.partition_point(|bracket| bracket.offset < range.end),
+            )
+        } else {
+            (0, 0)
+        };
+        for bracket in &all[first..last] {
             let at = bracket.offset - range.start;
             // With the owner's line highlighter its colors stand; only rainbow brackets recolour them.
             let color = if self.options.rainbow {
@@ -54,12 +60,15 @@ impl CodeEditor {
             spans.retain(|(span, _)| *span != (at..at + 1));
             spans.push((at..at + 1, color.into()));
         }
-        for span in self
+        // The washed text is looked for on this line alone: the frame holds the needle, not every place it appears.
+        let others = self
             .frame
-            .occurrences
-            .iter()
-            .filter(|span| fresh && touches(span))
-        {
+            .needle
+            .as_deref()
+            .filter(|_| fresh)
+            .map(|needle| syntax::occurrences(&self.buffer, needle, line..line + 1))
+            .unwrap_or_default();
+        for span in others.iter().filter(|span| touches(span)) {
             spans.push((
                 local(span),
                 HighlightStyle {
@@ -68,10 +77,12 @@ impl CodeEditor {
                 },
             ));
         }
+        // The washes and the problems of the line are found by range, in the order the owner gave them: a later one lies over an earlier.
+        let hi = range.end.max(range.start + 1);
         for (span, color) in self
             .marks
-            .backgrounds
-            .iter()
+            .backgrounds_touching(range.start, hi)
+            .into_iter()
             .filter(|(span, _)| touches(span))
         {
             spans.push((
@@ -84,8 +95,8 @@ impl CodeEditor {
         }
         for diagnostic in self
             .marks
-            .diagnostics
-            .iter()
+            .diagnostics_touching(range.start, hi)
+            .into_iter()
             .filter(|diagnostic| touches(&diagnostic.range))
         {
             spans.push((
@@ -176,8 +187,9 @@ impl CodeEditor {
             window,
         );
         // Text where laid out; rulers and guides on grid.
-        let x = |column: usize| advance + measured.x(column);
-        let grid = |column: usize| advance * (column + 1) as f32;
+        let scrolled = self.scroll_x;
+        let x = |column: usize| advance + measured.x(column) - scrolled;
+        let grid = |column: usize| advance * (column + 1) as f32 - scrolled;
         let focused = self.focus.is_focused(window);
         let primary = self.primary();
         let current = primary.is_empty() && self.buffer.line_of(primary.head) == line;
@@ -213,16 +225,7 @@ impl CodeEditor {
                     })
             })
         });
-        let active = self
-            .frame
-            .folds
-            .iter()
-            .filter(|(header, end)| {
-                let at = self.buffer.line_of(primary.head);
-                *header < at && at <= *end
-            })
-            .map(|(header, _)| self.buffer.indent(*header))
-            .next_back();
+        let active = self.frame.active;
         let guides = if self.options.guides {
             self.guides(line)
         } else {
@@ -350,9 +353,15 @@ impl CodeEditor {
                 canvas(
                     move |bounds, _, cx| {
                         let origin = bounds.origin.x + left;
-                        entity.update(cx, |editor, _| {
+                        entity.update(cx, |editor, cx| {
                             if editor.metrics.left != origin {
                                 editor.metrics.left = origin;
+                            }
+                            editor.metrics.code_left = bounds.origin.x;
+                            // The first frame that learns the width draws once more, with the scroll it allows.
+                            if editor.metrics.code_width != bounds.size.width {
+                                editor.metrics.code_width = bounds.size.width;
+                                cx.notify();
                             }
                         });
                     },

@@ -23,11 +23,16 @@ impl CodeEditor {
             .h(self.frame.line)
             .flex();
         let caret = self.buffer.line_of(self.primary().head);
-        let base = match self.frame.rows[ix] {
+        let row = self
+            .frame
+            .rows
+            .get(ix)
+            .expect("the list draws only rows that exist");
+        let base = match row {
             Row::Line(line) => base.debug_selector(move || format!("editor-line-{line}")),
             _ => base,
         };
-        match self.frame.rows[ix] {
+        match row {
             Row::Line(line) if self.options.focus_line && line != caret => {
                 self.line_row(base.opacity(FADED), ix, line, window, cx)
             }
@@ -103,12 +108,17 @@ impl CodeEditor {
                 div()
                     .flex_1()
                     .h_full()
-                    .pl(self.frame.advance)
+                    .overflow_hidden()
                     .bg(colors.danger.opacity(0.08))
                     .line_height(self.frame.line)
                     .whitespace_nowrap()
                     .text_color(colors.fg_muted)
-                    .child(text),
+                    .child(
+                        div()
+                            .relative()
+                            .left(self.frame.advance - self.scroll_x)
+                            .child(text),
+                    ),
             )
             .into_any_element()
     }
@@ -139,12 +149,17 @@ impl CodeEditor {
             .child(
                 div()
                     .flex_1()
-                    .flex()
-                    .pl(self.frame.advance)
+                    .overflow_hidden()
                     .line_height(self.frame.line)
                     .whitespace_nowrap()
-                    .child(div().italic().text_color(colors.fg_subtle).child(text))
-                    .children(rest),
+                    .child(
+                        div()
+                            .relative()
+                            .left(self.frame.advance - self.scroll_x)
+                            .flex()
+                            .child(div().italic().text_color(colors.fg_subtle).child(text))
+                            .children(rest),
+                    ),
             )
             .into_any_element()
     }

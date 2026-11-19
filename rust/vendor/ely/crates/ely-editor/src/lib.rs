@@ -35,6 +35,7 @@ mod prose;
 mod refactor;
 mod row;
 mod search;
+mod sideways;
 mod settings;
 mod state;
 mod status;

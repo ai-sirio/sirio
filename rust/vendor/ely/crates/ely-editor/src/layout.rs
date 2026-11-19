@@ -75,16 +75,130 @@ pub(crate) fn rows(buffer: &Buffer, hidden: &[bool], marks: &Marks) -> Vec<Row> 
     out
 }
 
-/// The headers of the blocks around `line`, outermost first, at most `limit` of them.
-pub(crate) fn around(folds: &[(usize, usize)], line: usize, limit: usize) -> Vec<usize> {
-    let mut headers: Vec<usize> = folds
-        .iter()
-        .filter(|(header, end)| *header < line && line <= *end)
-        .map(|(header, _)| *header)
-        .collect();
-    headers.sort_unstable();
-    headers.truncate(limit);
-    headers
+/// Whether every line has exactly one row and nothing else does, so row `n` is line `n`.
+pub(crate) fn rows_are_lines(marks: &Marks, folded: &BTreeSet<usize>) -> bool {
+    let ghost_lines = marks
+        .ghost
+        .as_ref()
+        .is_some_and(|ghost| ghost.text.contains('\n'));
+    folded.is_empty()
+        && marks.lenses.is_empty()
+        && marks.hunks.iter().all(|hunk| hunk.removed.is_empty())
+        && !ghost_lines
+        && marks.chat.is_none()
+}
+
+/// The rows the list draws: a count when row `n` is line `n`, so a file of any length costs nothing to hold, else each row listed.
+#[derive(Clone, Debug)]
+pub(crate) enum Rows {
+    /// `lines` rows, each a line, between `pad` typewriter room rows at either end.
+    Lines { lines: usize, pad: usize },
+    Listed(Vec<Row>),
+}
+
+impl Default for Rows {
+    fn default() -> Self {
+        Rows::Lines { lines: 0, pad: 0 }
+    }
+}
+
+impl Rows {
+    /// The rows of `buffer` with `hidden` folded away, and `pad` room rows at each end.
+    pub(crate) fn of(
+        buffer: &Buffer,
+        hidden: impl FnOnce() -> Vec<bool>,
+        marks: &Marks,
+        folded: &BTreeSet<usize>,
+        pad: usize,
+    ) -> Self {
+        if rows_are_lines(marks, folded) {
+            Rows::Lines {
+                lines: buffer.lines(),
+                pad,
+            }
+        } else {
+            let mut shown = vec![Row::Room; pad];
+            shown.extend(rows(buffer, &hidden(), marks));
+            shown.extend(std::iter::repeat_n(Row::Room, pad));
+            Rows::Listed(shown)
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Rows::Lines { lines, pad } => lines + 2 * pad,
+            Rows::Listed(rows) => rows.len(),
+        }
+    }
+
+    pub(crate) fn get(&self, ix: usize) -> Option<Row> {
+        match self {
+            Rows::Lines { lines, pad } => {
+                if ix >= lines + 2 * pad {
+                    None
+                } else if ix < *pad || ix >= pad + lines {
+                    Some(Row::Room)
+                } else {
+                    Some(Row::Line(ix - pad))
+                }
+            }
+            Rows::Listed(rows) => rows.get(ix).copied(),
+        }
+    }
+
+    /// The row that draws `line`.
+    pub(crate) fn row_of(&self, line: usize) -> Option<usize> {
+        match self {
+            Rows::Lines { lines, pad } => (line < *lines).then_some(line + pad),
+            Rows::Listed(rows) => rows.iter().position(|row| *row == Row::Line(line)),
+        }
+    }
+
+    /// The first line drawn at row `ix` or after it.
+    pub(crate) fn line_from(&self, ix: usize) -> Option<usize> {
+        match self {
+            Rows::Lines { lines, pad } => {
+                let line = ix.saturating_sub(*pad);
+                (ix < lines + pad && line < *lines).then_some(line)
+            }
+            Rows::Listed(rows) => rows.get(ix..)?.iter().find_map(|row| match row {
+                Row::Line(line) => Some(*line),
+                _ => None,
+            }),
+        }
+    }
+}
+
+/// How the minimap lays a file's rows out in its height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MinimapPlan {
+    /// Height one row takes, in pixels.
+    pub tall: f32,
+}
+
+impl MinimapPlan {
+    /// The rows the minimap draws among `rows`, each as its top in pixels and its row. While a row is a pixel tall or more every row is drawn, at `tall` times its number. Below that, one row a pixel: the pixel `y` shows the row at `floor(y / tall)`, so one more line in the file moves no pixel's row by more than one, where stepping through the rows a fixed stride apart took all new rows each time the stride changed.
+    pub(crate) fn samples(&self, rows: usize) -> Vec<(f32, usize)> {
+        if self.tall >= 1.0 {
+            return (0..rows)
+                .map(|row| (self.tall * row as f32, row))
+                .collect();
+        }
+        if self.tall <= 0.0 {
+            return Vec::new();
+        }
+        (0..)
+            .map(|pixel| (pixel as f32, (pixel as f32 / self.tall).floor() as usize))
+            .take_while(|(_, row)| *row < rows)
+            .collect()
+    }
+}
+
+pub(crate) fn minimap_plan(rows: usize, line: f32, height: f32) -> MinimapPlan {
+    let rows = rows.max(1);
+    MinimapPlan {
+        tall: (line * 0.15).min(height / rows as f32),
+    }
 }
 
 /// Styles laid over one another in order, later ones on top, as runs that do not overlap.
@@ -232,7 +346,6 @@ mod tests {
                 Row::Line(4)
             ]
         );
-        assert_eq!(around(&[(0, 4), (1, 2)], 2, 3), [0, 1]);
     }
 
     #[test]
@@ -270,5 +383,113 @@ mod tests {
             5,
             "inside the note falls back to it"
         );
+    }
+
+    // Task 12b fix 1: a shortcut that must not change what is drawn. The ways
+    // it can fail, written before the code:
+    //   1. `rows_are_lines` true while a lens, a removed line, a ghost line, the
+    //      chat or a fold adds or removes a row (the row numbers would drift);
+    //   2. `rows_are_lines` false for a plain buffer (the shortcut never runs).
+    // Its second shortcut, the minimap's cap on the rows it draws, is covered by
+    // fix 2's test below, which replaced the fix-1 test of the stride.
+
+    #[test]
+    fn rows_are_lines_only_when_nothing_adds_or_hides_a_row() {
+        let plain = Marks::default();
+        let none = BTreeSet::new();
+        assert!(rows_are_lines(&plain, &none), "a plain buffer");
+        let buffer = Buffer::new("a\nb\nc\nd");
+        let identity: Vec<Row> = (0..4).map(Row::Line).collect();
+        assert_eq!(rows(&buffer, &hidden(4, &[], &none), &plain), identity);
+
+        let lens = Marks {
+            lenses: vec![CodeLens { line: 1, items: vec!["Run".into()] }],
+            ..Marks::default()
+        };
+        let removed = Marks {
+            hunks: vec![DiffHunk { line: 2, added: 0, removed: vec!["old".into()] }],
+            ..Marks::default()
+        };
+        let ghost = Marks {
+            ghost: Some(GhostText { offset: 0, text: "x\ny".into() }),
+            ..Marks::default()
+        };
+        let chat = Marks { chat: Some(1), ..Marks::default() };
+        for (name, marks) in [("lens", lens), ("removed", removed), ("ghost", ghost), ("chat", chat)] {
+            assert!(!rows_are_lines(&marks, &none), "{name} adds a row");
+            assert_ne!(rows(&buffer, &hidden(4, &[], &none), &marks), identity, "{name}");
+        }
+        assert!(
+            !rows_are_lines(&plain, &BTreeSet::from([0])),
+            "a folded header may hide lines"
+        );
+        let added_only = Marks {
+            hunks: vec![DiffHunk { line: 1, added: 2, removed: Vec::new() }],
+            git: vec![(0, crate::decor::GitMark::Added)],
+            ..Marks::default()
+        };
+        assert!(rows_are_lines(&added_only, &none), "added lines and git marks add no row");
+        assert_eq!(rows(&buffer, &hidden(4, &[], &none), &added_only), identity);
+    }
+
+    // Task 12b fix 2: the minimap samples a long file by pixel row, so an edit
+    // that adds a line does not pick every sampled line again. Stepping through
+    // the rows `stride` apart picked rows 0, s, 2s, ..., and `stride` itself
+    // changes with the file's length. The ways it can fail, written before the
+    // code:
+    //   1. a row drawn per file line however long the file (cost follows pixels);
+    //   2. a short file's rows moved or resized (each row at `tall * row`);
+    //   3. a thin row's samples not one pixel apart, or the sample at pixel y not
+    //      the row at floor(y / tall);
+    //   4. one more row in the file moving any pixel's sampled row by more than
+    //      one (a change of stride moved all of them);
+    //   5. a minimap of no height, or a file of no rows, panicking or drawing;
+    //   6. a sample past the last row, the first not row 0, rows out of order.
+
+    #[test]
+    fn the_minimap_samples_one_row_a_pixel_and_one_more_line_moves_no_sample_far() {
+        let short = minimap_plan(100, 22.0, 800.0).samples(100);
+        assert_eq!(short.len(), 100, "a short file draws every row");
+        for (ix, (y, row)) in short.iter().enumerate() {
+            assert_eq!(*row, ix);
+            assert!((y - 3.3 * ix as f32).abs() < 1e-3, "row {ix} at a line's 15%: {y}");
+        }
+        let squeezed = minimap_plan(500, 22.0, 800.0).samples(500);
+        assert_eq!(squeezed.len(), 500, "rows a pixel tall or more are all drawn");
+
+        for rows in [2_000usize, 24_000, 39_247, 1_000_000] {
+            let plan = minimap_plan(rows, 22.0, 800.0);
+            let samples = plan.samples(rows);
+            assert!(samples.len() <= 801, "{rows} rows drew {}", samples.len());
+            assert_eq!(samples[0].1, 0);
+            for (pixel, (y, row)) in samples.iter().enumerate() {
+                assert!((y - pixel as f32).abs() < 1e-3, "{rows}: sample {pixel} at {y}");
+                assert_eq!(*row, ((pixel as f32 / plan.tall).floor() as usize).min(rows - 1));
+                assert!(*row < rows, "{rows}: row {row} is past the end");
+            }
+            assert!(
+                samples.windows(2).all(|pair| pair[0].1 < pair[1].1),
+                "{rows}: rows ascend"
+            );
+        }
+
+        for rows in 20_000..30_000usize {
+            let before = minimap_plan(rows, 22.0, 800.0).samples(rows);
+            let after = minimap_plan(rows + 1, 22.0, 800.0).samples(rows + 1);
+            assert!(before.len().abs_diff(after.len()) <= 1, "{rows}: sample counts");
+            for (pixel, (b, a)) in before.iter().zip(&after).enumerate() {
+                assert!(
+                    b.1.abs_diff(a.1) <= 1,
+                    "{rows} -> {}: pixel {pixel} moved from row {} to row {}",
+                    rows + 1,
+                    b.1,
+                    a.1
+                );
+            }
+        }
+
+        let blind = minimap_plan(39_247, 22.0, 0.0).samples(39_247);
+        assert!(blind.len() <= 1, "no height, nothing drawn: {}", blind.len());
+        assert!(minimap_plan(0, 22.0, 800.0).samples(0).is_empty(), "no rows, nothing drawn");
     }
 }

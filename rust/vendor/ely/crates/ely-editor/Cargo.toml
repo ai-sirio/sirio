@@ -22,6 +22,7 @@ gpui.workspace = true
 log = "0.4"
 regex = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
+sirio_perf = { path = "../../../../crates/sirio_perf" }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

@@ -87,7 +87,7 @@ impl CodeEditor {
         let scrolled = -self.scroll.0.borrow().base_handle.offset().y;
         let row = ((position.y - metrics.top + scrolled) / metrics.line).floor();
         let row = self.frame.rows.get(row.max(0.0) as usize)?;
-        let Row::Line(line) = *row else {
+        let Row::Line(line) = row else {
             return None;
         };
         self.offset_in(line, position.x, window, cx)
@@ -113,7 +113,7 @@ impl CodeEditor {
     }
 
     /// A line as drawn and laid out.
-    fn measured(&self, line: usize, window: &Window, cx: &Context<Self>) -> (Shown, Measured) {
+    pub(super) fn measured(&self, line: usize, window: &Window, cx: &Context<Self>) -> (Shown, Measured) {
         let text = self.row_text(line);
         let shown = Shown::new(text, self.notes(line, cx), self.styles(line, cx));
         let family = cx.theme().mono_family.clone();
@@ -242,11 +242,7 @@ impl EntityInputHandler for CodeEditor {
     ) -> Option<Bounds<Pixels>> {
         let range = self.byte_range(&range_utf16);
         let line = self.buffer.line_of(range.start);
-        let row = self
-            .frame
-            .rows
-            .iter()
-            .position(|row| *row == Row::Line(line))?;
+        let row = self.frame.rows.row_of(line)?;
         let text = self.row_text(line);
         let (shown, measured) = self.measured(line, window, cx);
         let column = shown.column(text, self.buffer.point(range.start).1.min(text.len()));
