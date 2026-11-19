@@ -24,7 +24,12 @@ concurrency:
 jobs:
   check:
     name: host (Windows)
-    runs-on: windows-latest
+    # Pinned, like build-release.yml's windows job (#804): windows-latest moved
+    # to windows-2025-vs2026, whose image 20261116 ships an MSVC STL that
+    # refuses any Clang below 22 (yvals_core.h STL1000), and sirio_term_session
+    # builds libghostty-vt with Zig 0.15.2's clang. Back to windows-latest once
+    # #805 has a real fix; until then the term E2E's case 12 skips there.
+    runs-on: windows-2022
     timeout-minutes: 45
     # The two scripts below are bash (Git for Windows' bash, which the runner
     # image ships), the same shell build-release.yml's windows job names

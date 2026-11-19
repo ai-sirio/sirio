@@ -833,6 +833,18 @@ case_resize_detached() {
 ATTACH_ID=""
 
 case_alt_screen() {
+  # ConPTY before Windows build 26100 (Server 2022 is 20348) repaints the
+  # alternate screen instead of passing ?1049h/l through, so the host never
+  # sees the switch it resyncs on. windows-check.yml runs on windows-2022
+  # until #805 is fixed.
+  if [ "$OS" = windows ]; then
+    local winbuild
+    winbuild="$(cmd.exe //c ver 2>/dev/null | sed -n 's/.*Version [0-9]*\.[0-9]*\.\([0-9]*\).*/\1/p')"
+    if [ -n "$winbuild" ] && [ "$winbuild" -lt 26100 ]; then
+      skip "ConPTY on Windows build $winbuild does not pass the alternate screen through"
+      return 0
+    fi
+  fi
   fresh_root
   start_held_host
   # The engine test's script (`alternate_screen_exit_resyncs_a_stream_that_attached_during_it`).
