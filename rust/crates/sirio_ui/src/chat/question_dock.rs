@@ -6,7 +6,9 @@
 
 use crate::text_selection::selectable_text;
 use ely_gpui_component::agent::{HumanInputRequest, PermissionPrompt};
-use gpui::{AnyElement, Context, Focusable, KeyDownEvent, Window, actions, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, Focusable, KeyDownEvent, Window, actions, canvas, div, prelude::*, px,
+};
 use serde_json::Value;
 use sirio_chat::{
     CloseReason, ElicitationAction, ElicitationField, ElicitationFieldKind, ElicitationPrompt,
@@ -32,7 +34,9 @@ pub enum ElicitationAct {
 }
 
 use super::visible_text::{is_hidden, strip_escape_sequences, visible_text};
-use super::{AnswerOption, AnswerTextInput, Chat, Entry, PlanApproval, TRANSCRIPT_WIDTH};
+use super::{
+    AnswerOption, AnswerTextInput, Chat, Entry, PlanApproval, TRANSCRIPT_WIDTH, WIDGET_ASK_BASE,
+};
 
 /// What the dock draws for the open question.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +55,9 @@ pub(super) struct QuestionView {
     /// Whether the digit keys and badges are on. Off for a card the CLI would
     /// rather have refused: a digit answers without looking.
     pub(super) digits: bool,
+    /// Only a pointer click answers: Enter, the arrows and the digits do nothing. The card of a
+    /// widget's ask, which no agent raised.
+    pub(super) click_only: bool,
     /// The answers, in the order they are numbered.
     pub(super) rows: Vec<DockRow>,
     /// The field of a form the dock is on; 0 for everything else. Part of
@@ -454,6 +461,8 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
                 // Pi's question repeats its header, so the prompt was
                 // blanked at parse time and the title is the question.
                 (true, true) => ("Question".to_string(), title.clone()),
+                // A widget's ask: the title says whose, the body is the arguments, whole.
+                (false, _) if *request_id >= WIDGET_ASK_BASE => (title.clone(), prompt.clone()),
                 (false, _) => (
                     "Permission requested".to_string(),
                     visible_text(title, true),
@@ -515,7 +524,8 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
                 caption,
                 body,
                 details,
-                digits,
+                digits: digits && *request_id < WIDGET_ASK_BASE,
+                click_only: *request_id >= WIDGET_ASK_BASE,
                 rows,
                 step: 0,
             })
@@ -529,6 +539,7 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
                 body: dock.body,
                 details: Vec::new(),
                 digits: true,
+                click_only: false,
                 rows: dock.rows,
                 step: *step,
             })
@@ -543,6 +554,7 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
             body: approval.title.clone(),
             details: Vec::new(),
             digits: true,
+            click_only: false,
             rows: approval.options.iter().cloned().map(DockRow::Option).collect(),
             step: 0,
         }),
@@ -621,6 +633,18 @@ impl Chat {
                 .collect::<Vec<_>>(),
             "selected": clamp_selection(selected, view.rows.len()),
             "digits": view.digits,
+            "clickOnly": view.click_only,
+            "rowBounds": (0..view.rows.len())
+                .map(|index| match self.question_dock.row_bounds.borrow().get(&index) {
+                    Some(bounds) => serde_json::json!({
+                        "x": f32::from(bounds.origin.x),
+                        "y": f32::from(bounds.origin.y),
+                        "w": f32::from(bounds.size.width),
+                        "h": f32::from(bounds.size.height),
+                    }),
+                    None => Value::Null,
+                })
+                .collect::<Vec<_>>(),
         })
         .to_string()
     }
@@ -741,7 +765,7 @@ impl Chat {
     }
 
     fn step_dock(&mut self, down: bool, cx: &mut Context<Self>) {
-        if let Some(view) = question_view(&self.entries) {
+        if let Some(view) = question_view(&self.entries).filter(|view| !view.click_only) {
             let next = step_selection(self.question_dock.selected, view.rows.len(), down);
             self.select_dock_row(next, cx);
         }
@@ -771,7 +795,7 @@ impl Chat {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = question_view(&self.entries) {
+        if let Some(view) = question_view(&self.entries).filter(|view| !view.click_only) {
             let index = clamp_selection(self.question_dock.selected, view.rows.len());
             self.activate_dock_row(index, window, cx);
         }
@@ -803,7 +827,7 @@ impl Chat {
         let Some(view) = question_view(&self.entries) else {
             return;
         };
-        if !view.digits {
+        if !view.digits || view.click_only {
             return;
         }
         if let Some(index) = row_for_digit(&event.keystroke.key, view.rows.len()) {
@@ -867,6 +891,9 @@ impl Chat {
             .iter()
             .any(|row| matches!(row, DockRow::Option(_)));
         let digits = view.digits;
+        let click_only = view.click_only;
+        let row_bounds = self.question_dock.row_bounds.clone();
+        row_bounds.borrow_mut().clear();
 
         let rows = view
             .rows
@@ -895,6 +922,20 @@ impl Chat {
                         .child(label)
                 });
                 let click_entity = entity.clone();
+                // Where this row is painted, for a test or the E2E to click on.
+                let probe = {
+                    let row_bounds = row_bounds.clone();
+                    canvas(
+                        move |bounds, _, _| {
+                            row_bounds.borrow_mut().insert(index, bounds);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                };
                 // Host-owned selection/focus; Ely supplies the request shell.
                 let frame = div()
                     .w_full()
@@ -912,6 +953,7 @@ impl Chat {
                     .hover(|row| row.bg(theme.ely.hover))
                     .when(!highlighted, |row| row.bg(gpui::transparent_black()))
                     .id(("question-dock-row", index))
+                    .relative()
                     .items_start()
                     .on_mouse_move({
                         let hover_entity = entity.clone();
@@ -928,6 +970,7 @@ impl Chat {
                             }
                         });
                     })
+                    .child(probe)
                     .children(badge);
                 match row {
                     DockRow::Option(option) => {
@@ -1053,7 +1096,11 @@ impl Chat {
                     .justify_end()
                     .text_size(typography.caption2)
                     .text_color(theme.ely.fg_subtle)
-                    .child("↑↓ select · ⏎ confirm · esc cancel"),
+                    .child(if click_only {
+                        "click to answer · esc reject"
+                    } else {
+                        "↑↓ select · ⏎ confirm · esc cancel"
+                    }),
             );
         let id: gpui::ElementId = (
             self.row_id(view.entry_index, cx),
@@ -2095,5 +2142,115 @@ mod tests {
         assert_eq!(row["url"], "https://User@Example.com/a");
         assert_eq!(row["openOffered"], "true");
         assert_eq!(row["rows"], "Open in browser|Decline");
+    }
+
+    // How it can fail, written first. The card of a widget's ask is the one card an agent
+    // did not raise and a stray key must not answer.
+    //
+    // 1. The arguments are missing from the body, so the user allows a call blind.
+    // 2. Allow is preselected, or the dock shows digits or no `clickOnly`, or no row bounds
+    //    for a test or an E2E to click on.
+    // 3. Enter, a digit or Down then Enter answers, with Allow highlighted or not.
+    // 4. A click before the dock is armed answers.
+    // 5. A click on Allow after it is armed answers nothing, or with a denial.
+    // 6. Escape answers with a result or leaves the ask open.
+    #[gpui::test]
+    async fn a_widget_card_shows_its_arguments_and_answers_only_to_a_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::chat::testing::{offline_chat, prepare};
+        use crate::chat::tests::refresh_frame;
+        use crate::chat::widget_lookup::Held;
+        use crate::chat::widget_slot::Slot;
+        use crate::mcp_widget::AskOutcome;
+        use gpui::{Keystroke, Modifiers};
+        use sirio_chat::{McpOrigin, McpServer, McpState, McpTool, UiToolRef};
+
+        prepare(cx);
+        let (chat, cx) = cx.add_window_view(|_, cx| offline_chat(cx));
+        let answers = chat.update(cx, |chat, cx| {
+            chat.widgets.seed_test_servers(vec![McpServer {
+                name: "s".into(),
+                status: McpState::Connected,
+                origin: McpOrigin::User,
+                tools: vec![McpTool { name: "do".into(), ui: None }],
+            }]);
+            let hit = UiToolRef {
+                server: "s".into(),
+                origin: McpOrigin::User,
+                tool: "show".into(),
+                resource_uri: "ui://s/show".into(),
+            };
+            chat.widgets
+                .insert_test_slot(Slot::resolving("a".into(), 1, &hit, Held::new(Value::Null)));
+            chat.widget_asked("a", 7, "do".into(), serde_json::json!({"needle": "haystack"}), cx);
+            chat.widgets.asks.answers.clone()
+        });
+        refresh_frame(cx);
+        let dock = |cx: &mut gpui::VisualTestContext| -> Value {
+            let text = chat.read_with(cx, |chat, _| chat.question_dock_json());
+            serde_json::from_str(&text).expect("the dock reads as JSON")
+        };
+        let said = || answers.borrow().len();
+
+        let first = dock(cx);
+        let body = first["body"].as_str().unwrap_or_default();
+        assert!(body.contains("needle") && body.contains("haystack"));
+        assert!(first["caption"].as_str().unwrap_or_default().starts_with("Widget"));
+        assert_eq!(first["selected"], 0);
+        assert_eq!(first["options"][0]["id"], "reject_once");
+        assert_eq!(first["options"][1]["id"], "allow_once");
+        assert_eq!(first["digits"], false);
+        assert_eq!(first["clickOnly"], true);
+        let bounds = first["rowBounds"].as_array().expect("row bounds are read");
+        assert_eq!(bounds.len(), 2);
+        assert!(bounds.iter().all(|row| row["w"].as_f64().unwrap_or(0.0) > 0.0));
+
+        // A click before the dock is armed does nothing.
+        let allow = cx.debug_bounds("permission-option-allow_once").expect("allow row");
+        cx.simulate_click(allow.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 0);
+
+        // Armed, with Allow under the pointer: no key answers.
+        cx.executor().advance_clock(DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        let digit = |key: &'static str| KeyDownEvent {
+            keystroke: Keystroke::parse(key).expect("a keystroke"),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| {
+                chat.dock_confirm(&DockConfirm, window, cx);
+                chat.dock_next(&DockNext, window, cx);
+                chat.dock_confirm(&DockConfirm, window, cx);
+                chat.dock_previous(&DockPrevious, window, cx);
+                chat.dock_confirm(&DockConfirm, window, cx);
+                chat.on_question_dock_key(&digit("1"), window, cx);
+                chat.on_question_dock_key(&digit("2"), window, cx);
+            });
+        });
+        assert_eq!(said(), 0);
+        assert!(chat.read_with(cx, |chat, _| question_view(&chat.entries).is_some()));
+
+        // A click on Allow answers with a result, once.
+        refresh_frame(cx);
+        let allow = cx.debug_bounds("permission-option-allow_once").expect("allow row");
+        cx.simulate_click(allow.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(said(), 1);
+        assert!(matches!(answers.borrow()[0].2, AskOutcome::Result(_)));
+
+        // Escape denies.
+        chat.update(cx, |chat, cx| {
+            chat.widget_asked("a", 8, "do".into(), serde_json::json!({}), cx);
+        });
+        refresh_frame(cx);
+        cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| chat.dock_cancel(&DockCancel, window, cx));
+        });
+        assert_eq!(said(), 2);
+        assert_eq!(answers.borrow()[1].2, AskOutcome::Denied);
     }
 }

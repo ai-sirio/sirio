@@ -22,7 +22,7 @@ use gpui::{
     Size, Subscription, Window, canvas, div, prelude::*, px,
 };
 use sirio_chat::{
-    McpServer, McpToolItem, McpToolUpdate, UiToolRef,
+    McpOrigin, McpServer, McpToolItem, McpToolUpdate, UiToolRef,
     mcp_apps::{bridge::HostContext, csp::UiCsp, document::widget_document},
     ui_tool_for,
 };
@@ -32,6 +32,7 @@ use super::{
     Chat, Entry, TRANSCRIPT_WIDTH, composer_row::TRANSCRIPT_PAD_X, question_dock::question_view,
     segment_turns, session_panel::Placement, tool_call_run_bounds_inclusive,
     visible_text::visible_text,
+    widget_asks::AskState,
     widget_lookup::{Delivery, Held, Lookups, Step, Update},
 };
 use crate::mcp_widget::{
@@ -45,6 +46,9 @@ const MIN_HEIGHT: u32 = 80;
 const MAX_HEIGHT: u32 = 800;
 
 const NO_SESSION: &str = "The widget could not be loaded: the session is gone";
+/// Why a slot closed when its CLI went away, and when it was replaced by a new process.
+pub(super) const SESSION_ENDED: &str = "the session ended";
+pub(super) const SESSION_RESTARTED: &str = "the session restarted";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SlotPhase {
@@ -103,6 +107,9 @@ pub(super) struct SlotView {
 pub(super) struct Slot {
     pub(super) id: String,
     pub(super) server: String,
+    /// The server's name as the CLI lists it, for the name a widget's call goes by.
+    pub(super) raw_server: String,
+    pub(super) origin: McpOrigin,
     pub(super) tool: String,
     /// The chat's turn key when the call was announced.
     pub(super) turn: u64,
@@ -128,6 +135,8 @@ impl Slot {
         Self {
             id,
             server: visible_text(&hit.server, false),
+            raw_server: hit.server.clone(),
+            origin: hit.origin.clone(),
             tool: visible_text(&hit.tool, false),
             turn,
             phase: SlotPhase::Resolving,
@@ -209,6 +218,8 @@ pub(super) struct Widgets {
     viewport: Cell<Bounds<Pixels>>,
     /// The window the chat was last drawn in, which a new webview needs.
     window: Option<AnyWindowHandle>,
+    /// The asks the widgets have open, and the card each one is shown in.
+    pub(super) asks: AskState,
 }
 
 impl Widgets {
@@ -223,6 +234,16 @@ impl Widgets {
     /// A new session: nothing of the old session's lookups stays.
     pub(super) fn reset_lookups(&mut self) {
         self.lookups.reset();
+    }
+
+    /// Every widget entity the slots hold.
+    pub(super) fn entities(&self) -> Vec<Entity<McpWidget>> {
+        self.slots.iter().filter_map(|slot| slot.widget.clone()).collect()
+    }
+
+    /// The servers the lookups last kept, for a widget's own calls.
+    pub(super) fn known_servers(&self) -> Option<Vec<McpServer>> {
+        self.lookups.list().cloned()
     }
 
     /// A reconnect, toggle or reload: the stored list is old, the next call asks again.
@@ -244,6 +265,20 @@ impl Widgets {
     #[allow(dead_code)]
     pub(super) fn insert_test_slot(&mut self, slot: Slot) {
         self.slots.push(slot);
+    }
+
+    /// A server list for a test, with no client to read it from.
+    #[cfg(test)]
+    pub(super) fn seed_test_servers(&mut self, servers: Vec<McpServer>) {
+        self.lookups.seed(servers);
+    }
+
+    /// A page read that waits for a window, for a test.
+    #[cfg(test)]
+    pub(super) fn hold_test_read(&mut self, id: &str) {
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == id) {
+            slot.waiting_read = Some((String::new(), Err(String::new())));
+        }
     }
 
     fn max_height(&self) -> u32 {
@@ -537,12 +572,11 @@ impl Chat {
         self.slot_changed(id, cx);
     }
 
-    fn widget_event(&mut self, id: &str, event: &WidgetEvent, cx: &mut Context<Self>) {
+    pub(super) fn widget_event(&mut self, id: &str, event: &WidgetEvent, cx: &mut Context<Self>) {
         match event {
-            // The ask is answered through the dock by the next task; until then it stays open,
-            // and is neither granted nor denied here, so the bridge's cooldown and its count of
-            // denials never move.
-            WidgetEvent::Ask { .. } => {}
+            WidgetEvent::Ask { ask, name, arguments } => {
+                self.widget_asked(id, *ask, name.clone(), arguments.clone(), cx);
+            }
             WidgetEvent::Resized(_) => {
                 self.refresh_snapshot(id, cx);
                 self.remeasure_row(id);
@@ -561,18 +595,21 @@ impl Chat {
     /// Closes the widget of the slot at `index` and marks the slot closed. The widget's own
     /// `close` emits nothing, so the phase is set here.
     fn close_slot(&mut self, index: usize, error: String, cx: &mut Context<Self>) {
+        // The ask is answered while the view may still be alive to get its denial, and no
+        // card is left that an Allow could run a call from.
+        let id = self.widgets.slots[index].id.clone();
+        self.deny_widget_asks_of(&id, cx);
         let slot = &mut self.widgets.slots[index];
         slot.phase = SlotPhase::Closed;
         slot.error = error;
         if let Some(widget) = slot.widget.clone() {
             widget.update(cx, |widget, cx| widget.close(cx));
         }
-        let id = self.widgets.slots[index].id.clone();
         self.refresh_snapshot(&id, cx);
     }
 
     /// At most `MAX_LIVE` widgets are live: past that, the oldest live one is closed.
-    fn cap_live_widgets(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cap_live_widgets(&mut self, cx: &mut Context<Self>) {
         loop {
             let mut live = self
                 .widgets
@@ -592,7 +629,7 @@ impl Chat {
     }
 
     /// Reads the widget's snapshot into the slot; true when the row's layout may have changed.
-    fn refresh_snapshot(&self, id: &str, cx: &App) -> bool {
+    pub(super) fn refresh_snapshot(&self, id: &str, cx: &App) -> bool {
         let Some(slot) = self.widgets.slot(id) else { return false };
         let Some(widget) = &slot.widget else { return false };
         let fresh = widget.read(cx).snapshot();
@@ -624,12 +661,34 @@ impl Chat {
 
     /// The transcript was replaced: the rows the slots belonged to are gone.
     pub(super) fn close_widgets(&mut self, cx: &mut Context<Self>) {
+        self.deny_all_widget_asks(cx);
+        for slot in &self.widgets.slots {
+            if let Some(widget) = slot.widget.clone() {
+                widget.update(cx, |widget, cx| widget.close(cx));
+            }
+        }
         self.widgets.slots.clear();
         // Calls still being looked up have no row either; their answers land on nothing.
         self.widgets.lookups.discard();
         self.widgets.records.borrow_mut().clear();
         self.widgets.disc.set(None);
         cx.notify();
+    }
+
+    /// The CLI went away or was replaced: every widget is closed, every open ask denied, and
+    /// the rows say why. A page read for the old session is dropped, so nothing is built from
+    /// it into the new one.
+    pub(super) fn close_session_widgets(&mut self, why: &str, cx: &mut Context<Self>) {
+        self.deny_all_widget_asks(cx);
+        for index in 0..self.widgets.slots.len() {
+            let slot = &mut self.widgets.slots[index];
+            slot.waiting_read = None;
+            if matches!(slot.phase, SlotPhase::Resolving | SlotPhase::Loading | SlotPhase::Ready) {
+                let id = slot.id.clone();
+                self.close_slot(index, why.to_owned(), cx);
+                self.slot_changed(&id, cx);
+            }
+        }
     }
 
     // --- Placement ---

@@ -67,6 +67,9 @@ mod question_dock;
 mod visible_text;
 mod session_panel;
 mod usage_card;
+mod widget_asks;
+pub(crate) use widget_asks::WIDGET_ASK_BASE;
+use widget_asks::WidgetAsks;
 mod widget_lookup;
 mod widget_slot;
 mod status_line;
@@ -1048,6 +1051,8 @@ struct QuestionDockState {
     for_request: Option<(u64, usize)>,
     /// When the current request first appeared in the dock.
     shown_at: Option<std::time::Instant>,
+    /// Where each row was last painted, in window pixels, by row index.
+    row_bounds: Rc<RefCell<BTreeMap<usize, Bounds<Pixels>>>>,
 }
 
 /// A tool call nested inside a subagent task card.
@@ -1561,6 +1566,8 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             locations: Vec::new(),
             duration_ms: if *by_parent { *duration_ms } else { None },
         }),
+        // A widget's ask is a live request of this session, never part of the conversation.
+        Entry::Permission { request_id, .. } if *request_id >= WIDGET_ASK_BASE => None,
         Entry::Permission {
             request_id,
             title,
@@ -3001,6 +3008,9 @@ impl Chat {
         .detach();
         cx.observe_global::<ComposerPrefs>(|chat: &mut Self, cx| chat.sync_composer_rows(cx))
             .detach();
+        // Every way of closing a chat comes to its release: no widget outlives it with an ask
+        // open.
+        cx.on_release(|chat: &mut Self, cx| chat.release_widgets(cx)).detach();
 
         // A restored native chat holds the session it resumes from the
         // start: the tab strip's save reads it, and a CLI that names its
@@ -3047,6 +3057,7 @@ impl Chat {
                 selected: 0,
                 for_request: None,
                 shown_at: None,
+                row_bounds: Rc::default(),
             },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
@@ -4440,7 +4451,7 @@ impl Chat {
                     "EndTurn" => time,
                     reason => format!("{time} · {}", turn_end_label(reason)),
                 };
-                self.expire_unanswered();
+                self.expire_unanswered(WidgetAsks::Keep, cx);
                 self.surface_mcp_warnings();
                 self.push_entry(Entry::TurnFooter(label));
                 self.streaming = false;
@@ -4473,7 +4484,8 @@ impl Chat {
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
                 self.reset_agent_title();
-                self.expire_unanswered();
+                self.expire_unanswered(WidgetAsks::Deny, cx);
+                self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
                 let (message, kind) = classify_connection_error(message);
                 self.fail_trace_turn(&message, cx);
                 self.push_entry(Entry::Error {
@@ -4496,7 +4508,8 @@ impl Chat {
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
                 self.reset_agent_title();
-                self.expire_unanswered();
+                self.expire_unanswered(WidgetAsks::Deny, cx);
+                self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
                 let message = format!(
                     "{operation:?} timed out after {:.1}s",
                     duration.as_secs_f32()
@@ -6570,6 +6583,10 @@ impl Chat {
         option: &AnswerOption,
         cx: &mut Context<Self>,
     ) {
+        if request_id >= WIDGET_ASK_BASE {
+            self.widget_card_chosen(request_id, option, cx);
+            return;
+        }
         if let Some(index) = self.dock_entry_index(request_id) {
             // From the dock: the entry the dock is on, never another one that
             // shares the id (ids restart after "Restart agent").
@@ -6670,6 +6687,10 @@ impl Chat {
     /// reads as no longer answerable; the agent is told the decision was
     /// cancelled.
     fn cancel_question(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        if request_id >= WIDGET_ASK_BASE {
+            self.deny_widget_ask(request_id, cx);
+            return;
+        }
         if self.open_elicitation_index(request_id).is_some() {
             self.respond_elicitation(request_id, sirio_chat::ElicitationAction::Cancel, cx);
             return;
@@ -6743,6 +6764,10 @@ impl Chat {
     /// no `dismissed` outcome, so the wire response is explicitly Cancelled;
     /// it is never mapped to a rejection option.
     fn dismiss_permission(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        if request_id >= WIDGET_ASK_BASE {
+            self.deny_widget_ask(request_id, cx);
+            return;
+        }
         let mut dismissed = false;
         if let Some((
             index,
@@ -6785,9 +6810,15 @@ impl Chat {
     /// F-CHAT-27: a finished turn (or a dead transport) leaves every
     /// unanswered question permanently unanswerable, so the surface never
     /// sits in a wait nothing can resolve.
-    fn expire_unanswered(&mut self) {
+    fn expire_unanswered(&mut self, widget_asks: WidgetAsks, cx: &mut Context<Self>) {
+        if widget_asks == WidgetAsks::Deny {
+            self.deny_all_widget_asks(cx);
+        }
         for entry in &mut self.entries {
             match entry {
+                // A model turn's end does not touch a widget's own ask.
+                Entry::Permission { request_id, .. }
+                    if *request_id >= WIDGET_ASK_BASE && widget_asks == WidgetAsks::Keep => {}
                 Entry::Permission {
                     resolved: None,
                     expired,
@@ -6966,6 +6997,8 @@ impl Chat {
         // still open here would never hear of its end.
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
+        // The widgets belong to the session that is replaced: none is built into the new one.
+        self.close_session_widgets(widget_slot::SESSION_RESTARTED, cx);
         // A new process has said nothing yet; retry, a new conversation,
         // launch and a failed launch all pass here.
         self.cli_state = None;
@@ -7087,8 +7120,11 @@ impl Chat {
         self.cli_unprompted = false;
         self.reset_background_tasks(cx);
         self.reset_agent_title();
+        // A CLI that dies between turns is when a widget's ask lives: not only inside the
+        // streaming branch.
+        self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
         if self.streaming {
-            self.expire_unanswered();
+            self.expire_unanswered(WidgetAsks::Deny, cx);
         }
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.push_entry(Entry::Error {
@@ -16871,7 +16907,7 @@ two"
                 },
                 cx,
             );
-            chat.expire_unanswered();
+            chat.expire_unanswered(WidgetAsks::Keep, cx);
         });
         chat.read_with(&cx.cx, |chat, _| {
             assert!(matches!(
@@ -18211,7 +18247,7 @@ two"
         assert!(dock_is_focused(&chat, cx));
 
         chat.update(cx, |chat, cx| {
-            chat.expire_unanswered();
+            chat.expire_unanswered(WidgetAsks::Keep, cx);
             cx.notify();
         });
         refresh_frame(cx);

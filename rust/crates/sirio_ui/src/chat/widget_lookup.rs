@@ -311,6 +311,20 @@ impl<L, R> Lookups<L, R> {
         self.pending.clear();
     }
 
+    /// The server list the lookups last kept, when there is a current one.
+    pub(super) fn list(&self) -> Option<&L> {
+        match &self.list {
+            List::Have(list) => Some(list),
+            _ => None,
+        }
+    }
+
+    /// A list for a test, with no client to read it from.
+    #[cfg(test)]
+    pub(super) fn seed(&mut self, list: L) {
+        self.list = List::Have(list);
+    }
+
     /// Whether the lookup still holds the call: it has no slot yet and may get one.
     pub(super) fn holds(&self, id: &str) -> bool {
         self.pending.iter().any(|pending| pending.id == id)

@@ -816,3 +816,101 @@ file link is taken in `MarkdownBody`'s capture phase before bezel's text can han
 so a change that touches either half (the link pass, or the capture handler) must keep the other's
 assumption: nothing but web URLs reaches `cx.open_url`.
 `Scripts/Tests/test-chat-session-panel-e2e.sh --only file_links` drives it with real clicks and drags.
+
+## MCP Apps widgets
+
+**What it is.** A tool that declares a UI (`_meta.ui.resourceUri`) gets its page drawn inline, under
+its tool row, in a WebKitGTK child window of the Sirio window (wry). It is Linux under X11 only:
+everything that touches wry or GTK is `#[cfg(target_os = "linux")]`, `widget_webview_available()`
+is false elsewhere, and there the launch sets no variable and the row stays the plain tool row.
+The code is `sirio_ui::mcp_widget` (the view, the bridge, the webview), `sirio_ui::chat::widget_slot`
+(the slots, the sweep, the read), `chat::widget_lookup` (which call gets a slot) and
+`chat::widget_asks` (the asks); the pure protocol half is the leaf crate `sirio_mcp_apps` (CSP,
+document, bridge parsing), with its tests on every OS.
+`docs/superpowers/specs/2026-11-15-claude-protocol-parity-design.md` (A11) has the design.
+
+**The gate.** A widget needs `mcp_tool_ui_meta_v1`, `mcp_read_resource_v1` and
+`mcp_call_result_not_for_model_v1` in `system/init.capabilities`, never in the `initialize` answer.
+A widget's call adds `check_permissions: true` only with `mcp_call_check_permissions_v1`. Without the
+three there is no notice, no request and no slot. A CLI that refuses one verb loses that feature and
+the chat never errors. The native launch sets `CLAUDE_CODE_MCP_APPS_HOST=1` when widgets are
+available and removes it from the child's environment otherwise, so an inherited value never passes
+through.
+
+**The wire.** The first `mcp__` call of a session asks `mcp_status` (and again only after a miss, a
+reconnect, a toggle or a reload; there is no polling, and lookups that arrive during a refresh wait
+for it). A call maps to a server and tool by rebuilding the CLI's name, `mcp__` plus the normalized
+server, `__`, the normalized tool, and the mapping is kept only when that name splits back into
+exactly that pair, no other server has the same normalized name, and the tool's name is its own
+normalized form (`ui_tool_for`, `app_call_name`). The page is read with `mcp_read_resource
+{serverName, uri}`; the MIME type must be `text/html;profile=mcp-app`, and a wrong type, a blob that
+is not UTF-8 or no item for the URI gives a one-line error on the row and no webview. A widget's
+own call is `mcp_call {tool, arguments, result_not_for_model: true}`.
+
+**Isolation.** The widget's HTML is never the top page. Each widget has its own webview with two
+custom schemes, `sirio-widget-relay://<key>/` and `sirio-widget-view://<key>/`: the relay page is
+served once (the one-shot state is in that handler's closure) and holds the view in an iframe
+sandboxed `allow-scripts allow-same-origin` on the second scheme, so the two never share an origin.
+The relay wraps each message the view posts as `{"s":SECRET,"m":<message>}` and sends it to Rust over
+IPC; `SECRET` is 32 lowercase hex characters from `getrandom`, per widget, and Rust drops and counts
+as forged every body whose `s` is not that secret. Rust to view goes through `postMessage` to the
+view's origin, never `"*"`. The webview is built hidden, unfocused, at 1x1, with autoplay off, no
+devtools and an incognito (ephemeral) context, so it shares no cookies or storage with Browser tabs.
+Its permission handler denies everything, its navigation handler allows exactly the two URLs above
+without query or fragment, new windows and downloads are denied, it is no drop target
+(`drag_dest_unset`) and shows no context menu, and it runs no initialization script. The view's CSP
+is a response header it cannot edit: `default-src 'none'`, `script-src` and `style-src` with `'self'
+'unsafe-inline'`, `img-src`, `font-src` and `media-src` limited to `'self'` (and `data:` for images
+and media), `connect-src` set to the accepted `connectDomains` or `'none'`, and `frame-src`,
+`object-src`, `base-uri` and `form-action` `'none'`; the resource's accepted `resourceDomains` are
+added to the script, style, image, font and media sources. After a webview is hidden or dropped,
+Sirio flushes the X connection (`flush_x`), or the window stays painted.
+
+**What the bridge allows.** Four requests are served: `ui/initialize`, `ping`,
+`ui/request-display-mode` (answered inline) and `tools/call`; every other method gets `-32601`. Of
+the notifications only `ui/notifications/initialized` and `ui/notifications/size-changed` act; the
+rest are dropped. An inbound message over 1 MiB is dropped, the inbox holds 64, and more than 50
+messages in one second drops the rest of that second; a widget over the limit for 5 s in a row is
+closed. A widget has at most one open ask, a call before `initialized` is refused, and a call may
+only name a tool of its own server that is visible to the app.
+
+**Asks.** A widget's `tools/call` is checked against the server list (`app_call_name`) and, if it
+can be shown, becomes a card in the question dock: id from `WIDGET_ASK_BASE` (`1 << 62`), title
+`Widget · <server> · <tool>`, the arguments pretty-printed and shown whole, and two rows, Reject
+(`reject_once`, preselected) and Allow (`allow_once`), never Always allow, in every permission mode,
+including bypass. It is click only: Enter, the arrows and the digits do nothing, a click answers
+once the dock is armed (500 ms), and Escape denies. `surface.chat.read` reports `clickOnly` and each
+row's `rowBounds` from the last paint. Arguments over 4000 characters, a tool the server does not
+list, one hidden from apps, an ambiguous name and a name the CLI would rewrite are refused with no
+card (and a note in the widget's `refused` list). Allow runs `mcp_call` off the UI thread and
+answers the widget with the result. Every other end answers the widget `Denied` exactly once and
+shows the card expired: Reject, Escape, a dismiss, the UI-side timer at `PERMISSION_TIMEOUT` (5 min),
+the widget being closed (the cap, a flood, three denials, its own close), the CLI going away (a
+transport error, a deadline, the event stream closing, even between turns), a restart, a new
+conversation or a history session replacing the transcript, and the chat being released. A model
+turn ending touches none of them. An Allow whose call is still running when the widget closes is
+answered `Denied` at the close, and the call's late result is dropped. After a denial the widget's
+calls are refused with no card for 10 s, and after three in a row the widget is closed; an Allow
+resets the count. Asks are never persisted.
+
+**Placement.** A widget is mapped only when its slot was drawn this frame and lies wholly inside
+the list's viewport, no chat overlay is open (every `*_open` flag and `Popup` of `Chat`, the session
+panel in its overlay placement, an external drag), the jump-to-latest disc does not intersect it,
+the dock shows no question, and its tab is on screen and not obscured by a host overlay. The
+slot's prepaint only records where it was drawn; one sweep, a canvas after the list, runs once the
+list has set its viewport and places every widget (`List::prepaint` holds the list state borrowed
+while its items prepaint, so nothing reads it there). Unmapping for an overlay, a tab switch or an
+obscuring host is immediate, and `place` with an unchanged target does nothing. A widget's `hidden`
+in the read also reflects the host's unmap until the next paint's sweep sets it again. At most 6
+widgets are live per chat (the oldest beyond that is closed), the height is clamped to
+`[80, min(800, 0.8 x viewport)]` px (160 while loading), and all widgets share one pump task that
+runs GTK at most 4 ms per 16 ms tick.
+
+**Degrading.** A widget that cannot load (the read fails, the page is wrong, the webview cannot be
+built) shows one line on its row and the turn goes on. A closed widget leaves its row with the
+reason. Without the gate, on another OS or under another display backend the chat draws the plain
+tool row, as before.
+
+**Known gap.** The domain check for `connectDomains` and `resourceDomains` has no public-suffix
+list: `https://*.co.uk` passes, because only the label count, the character set, the scheme, IP
+literals and local names are checked.
