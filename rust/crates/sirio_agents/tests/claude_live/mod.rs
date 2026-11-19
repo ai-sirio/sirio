@@ -338,6 +338,49 @@ fn assert_local_base_url(command: &Command) {
     );
 }
 
+/// Starts a fake model API script on a free 127.0.0.1 port, with `extra_arg` after the port, its
+/// output in `log`, and waits (10 s) until it accepts connections.
+fn spawn_fake_api(
+    python: &Path,
+    script: &str,
+    extra_arg: Option<&Path>,
+    log: &Path,
+) -> (u16, Reaper) {
+    let port = free_port();
+    let api_log = std::fs::File::create(log).unwrap();
+    let mut api_command = Command::new(python);
+    api_command
+        .args(["-I", script, &port.to_string()])
+        .args(extra_arg)
+        .env_clear()
+        .env("PATH", ISOLATED_PATH)
+        .stdin(Stdio::null())
+        .stdout(api_log.try_clone().unwrap())
+        .stderr(api_log);
+    let api = Reaper(api_command.spawn().expect("start the fake model API"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "the fake model API did not come up"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    (port, api)
+}
+
+/// The `.claude.json` of a private HOME and config dir: onboarding done, `key`'s tail approved,
+/// and `work` trusted.
+fn global_claude_json(key: &str, work: &Path) -> String {
+    // Claude remembers an approved key by its last 20 characters.
+    let key_tail = &key[key.len() - 20..];
+    let work_text = work.display().to_string();
+    format!(
+        r#"{{"hasCompletedOnboarding":true,"theme":"dark","hasSeenAutoDefaultNotice":true,"hasResetAutoModeOptInForDefaultOffer":true,"customApiKeyResponses":{{"approved":["{key_tail}"],"rejected":[]}},
+"projects":{{{work_text:?}:{{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}}}}"#
+    )
+}
+
 /// What a finished `Session::run_claude` printed.
 pub struct CommandOutput {
     pub success: bool,
@@ -511,36 +554,16 @@ impl Session {
             std::fs::create_dir_all(dir).unwrap();
         }
 
-        let port = free_port();
-        let api_log = std::fs::File::create(root.join(format!("api-{group}.log"))).unwrap();
-        let mut api_command = Command::new(python);
-        api_command
-            .args(["-I", api_script, &port.to_string()])
-            .args(limits.map(|(file, _)| file))
-            .env_clear()
-            .env("PATH", ISOLATED_PATH)
-            .stdin(Stdio::null())
-            .stdout(api_log.try_clone().unwrap())
-            .stderr(api_log);
-        let api = Reaper(api_command.spawn().expect("start the fake model API"));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(
-                Instant::now() < deadline,
-                "the fake model API did not come up"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let (port, api) = spawn_fake_api(
+            python,
+            api_script,
+            limits.map(|(file, _)| file),
+            &root.join(format!("api-{group}.log")),
+        );
 
         let mcp_log = root.join("mcp.log");
         if fresh {
-            // Claude remembers an approved key by its last 20 characters.
-            let key_tail = &FAKE_KEY[FAKE_KEY.len() - 20..];
-            let work_text = work.display().to_string();
-            let global = format!(
-                r#"{{"hasCompletedOnboarding":true,"theme":"dark","hasSeenAutoDefaultNotice":true,"hasResetAutoModeOptInForDefaultOffer":true,"customApiKeyResponses":{{"approved":["{key_tail}"],"rejected":[]}},
-"projects":{{{work_text:?}:{{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}}}}"#
-            );
+            let global = global_claude_json(FAKE_KEY, &work);
             std::fs::write(home.join(".claude.json"), &global).unwrap();
             let config_json = if user_mcp {
                 let mut config: Value = serde_json::from_str(&global).unwrap();
@@ -759,20 +782,25 @@ pub enum Polled {
 
 const APPS_API: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/fake_mcp_apps_api.py");
 const APPS_MCP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/mcp_apps.py");
+const STDOUT_RELAY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live/cli_stdout_relay.py");
 
 /// A fake model API, a fake MCP Apps server and a launcher script, for a test that starts the
 /// real CLI through the production client (`ClaudeClient::launch`) instead of speaking the
 /// protocol by hand. The launcher script is the fixture program: it clears the environment,
-/// sets the isolated one and `exec`s the CLI, passing on only the variables the production
-/// launch sets. Dropping the rig stops the API and sweeps what the CLI left under its HOME.
+/// sets the isolated one, passes on by name each variable the production launch sets
+/// (`LaunchLine::chat(..).env`) and `exec`s the CLI behind `cli_stdout_relay.py`, which logs
+/// the structure of what the CLI says. Dropping the rig stops the API and sweeps what the CLI
+/// left under its HOME.
 pub struct AppsRig {
     // Field order is drop order: the API, then whatever the CLI left behind.
     _api: Reaper,
     _sweep: HomeSweep,
     /// The script to run as the launch's program (`/bin/sh`'s first argument).
     pub launcher: PathBuf,
-    /// Where the MCP server logs the client's `initialize`, one JSON line each.
+    /// Where the MCP server logs the client's `initialize` and tool calls, one JSON line each.
     pub mcp_log: PathBuf,
+    /// Where the relay logs the CLI's `init` capabilities and `can_use_tool` asks.
+    pub relay_log: PathBuf,
     /// The CLI's working directory.
     pub work: PathBuf,
 }
@@ -788,43 +816,19 @@ impl AppsRig {
             std::fs::create_dir_all(dir).unwrap();
         }
 
-        let port = free_port();
+        let (port, api) = spawn_fake_api(python, APPS_API, None, &root.join("api.log"));
         let base_url = format!("http://127.0.0.1:{port}");
         assert!(
             is_local_base_url(&base_url),
             "the CLI's ANTHROPIC_BASE_URL is a 127.0.0.1 address: false"
         );
-        let api_log = std::fs::File::create(root.join("api.log")).unwrap();
-        let mut api_command = Command::new(python);
-        api_command
-            .args(["-I", APPS_API, &port.to_string()])
-            .env_clear()
-            .env("PATH", ISOLATED_PATH)
-            .stdin(Stdio::null())
-            .stdout(api_log.try_clone().unwrap())
-            .stderr(api_log);
-        let api = Reaper(api_command.spawn().expect("start the fake model API"));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(
-                Instant::now() < deadline,
-                "the fake model API did not come up"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
 
-        // The key is built here, so no token sits in the source. Claude remembers an approved
-        // key by its last 20 characters.
+        // The key is built here, so no token sits in the source.
         let key = format!("sk-ant-api03-{}-{}", "local-apps-test", "0".repeat(24));
-        let key_tail = &key[key.len() - 20..];
         // A bare API key reads as logged out to the chat (`tokenSource: none`, no account), so
         // the CLI also gets a gateway token, built the same way and good for the fake API only.
         let token = format!("gw-{}-{}", "local-apps-test", "1".repeat(24));
-        let work_text = work.display().to_string();
-        let global = format!(
-            r#"{{"hasCompletedOnboarding":true,"theme":"dark","hasSeenAutoDefaultNotice":true,"hasResetAutoModeOptInForDefaultOffer":true,"customApiKeyResponses":{{"approved":["{key_tail}"],"rejected":[]}},
-"projects":{{{work_text:?}:{{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}}}}"#
-        );
+        let global = global_claude_json(&key, &work);
         std::fs::write(home.join(".claude.json"), &global).unwrap();
         std::fs::write(config_dir.join(".claude.json"), &global).unwrap();
         // The model's `show` call is allowed here, so the only ask of the run is the one for
@@ -836,6 +840,7 @@ impl AppsRig {
         .unwrap();
 
         let mcp_log = root.join("mcp.log");
+        let relay_log = root.join("relay.log");
         let mcp_config = root.join("mcp.json");
         std::fs::write(
             &mcp_config,
@@ -846,6 +851,16 @@ impl AppsRig {
         )
         .unwrap();
 
+        // The production launch's own variables and the launch variable of MCP Apps, passed on
+        // by name when the client set them.
+        let line = sirio_claude::LaunchLine::chat(sirio_claude::ChatSession::New("rig"));
+        let passthrough: String = line
+            .env
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(["CLAUDE_CODE_MCP_APPS_HOST"])
+            .map(|name| format!("${{{name}+{name}=\"${name}\"}} "))
+            .collect();
         let launcher = root.join("launch-claude.sh");
         let script = format!(
             "#!/bin/sh\nexec /usr/bin/env -i \\\n\
@@ -854,13 +869,15 @@ impl AppsRig {
              NO_PROXY=127.0.0.1,localhost ANTHROPIC_API_KEY='{key}' ANTHROPIC_AUTH_TOKEN='{token}' ANTHROPIC_BASE_URL='{base_url}' \\\n\
              DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \\\n\
              CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 ENABLE_TOOL_SEARCH=false \\\n\
-             CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1 \\\n\
-             CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1 \\\n\
-             ${{CLAUDE_CODE_MCP_APPS_HOST:+CLAUDE_CODE_MCP_APPS_HOST=$CLAUDE_CODE_MCP_APPS_HOST}} \\\n\
+             {passthrough}\\\n\
+             '{python}' -I '{relay}' '{relay_log}' \\\n\
              '{claude}' --mcp-config '{mcp}' --strict-mcp-config \"$@\"\n",
             home = home.display(),
             config = config_dir.display(),
             tmp = tmp.display(),
+            python = python.display(),
+            relay = STDOUT_RELAY,
+            relay_log = relay_log.display(),
             claude = claude.display(),
             mcp = mcp_config.display(),
         );
@@ -871,6 +888,7 @@ impl AppsRig {
             _sweep: HomeSweep(home),
             launcher,
             mcp_log,
+            relay_log,
             work,
         }
     }
