@@ -32,7 +32,7 @@ mod linux {
     use webkit2gtk::{SettingsExt, WebViewExt};
     use sirio_ui::mcp_widget::{
         Inbox, WidgetInbox, WidgetPage, accepts_drops, build_widget_child, flush_x, new_secret,
-        pump_gtk,
+        pump_gtk, set_link_preconnect,
     };
     use wry::{
         Rect, WebView, WebViewExtUnix,
@@ -172,6 +172,7 @@ mod linux {
             {
                 settings.set_enable_hyperlink_auditing(true);
                 settings.set_enable_dns_prefetching(true);
+                set_link_preconnect(&settings, true);
             }
             // As production does at `place`.
             let _ = webview.set_bounds(Rect {

@@ -12,7 +12,7 @@ mod webview;
 #[cfg(target_os = "linux")]
 pub use webview::{
     Inbox, RELAY_SCHEME, VIEW_SCHEME, WidgetInbox, WidgetPage, accepts_drops, build_widget_child,
-    deliver_script, flush_x, new_secret, pump_gtk, relay_url, view_url,
+    deliver_script, flush_x, new_secret, pump_gtk, relay_url, set_link_preconnect, view_url,
 };
 
 #[cfg_attr(not(target_os = "linux"), path = "view_stub.rs")]

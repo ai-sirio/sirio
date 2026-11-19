@@ -568,9 +568,9 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 # and an `<a ping>` clicked by script (one port), each outside the view's connect-src. The run
 # (production's settings: hyperlink auditing and DNS prefetching off) must see no accept for
 # prefetch and ping; the control turns auditing back on and a permissive CSP, and its FACT lines show
-# which probes reach their logger (ping does). Preconnect connects in the run too: that is a KNOWN
-# GAP, printed as such and listed in widget-isolation.json under `knownGaps`, because the webkit2gtk
-# bindings in use expose no `LinkPreconnect` feature switch.
+# which probes reach their logger (preconnect and ping do), so a 0 in the run is the settings, not a
+# dead probe. The run's preconnect check fails on any accept: the `LinkPreconnect` feature is turned
+# off through `dlsym`-resolved WebKitGTK 2.42+ functions.
 # Unverified, for a later enablement: macOS WKWebView and Windows WebView2 (view CSP header
 # enforcement, the incognito store, IPC in subframes, WebRTC off, the permission handler, drops;
 # on Windows wry's navigation handler sees only the top frame).

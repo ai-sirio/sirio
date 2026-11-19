@@ -925,10 +925,12 @@ hyperlink auditing (`<a ping>`) and DNS prefetching turned off. A message the vi
 to the IPC handler, outside its relay (no secret), closes the widget at the first one, with "the
 view posted outside its relay"; forged, oversized and over-cap messages still count toward the
 50-a-second limit. `surface.chat.read` reports each widget's `forged` count, which stays `"0"` for
-a legitimate view. Known gap: WebKitGTK still opens a TCP connection for `<link rel=preconnect>`
-whatever the CSP says, and the webkit2gtk bindings in use have no `LinkPreconnect` switch
-(`widget-isolation.sh` reports it as a KNOWN GAP). The widget's web process also runs without
-WebKitGTK's bubblewrap sandbox; both are follow-ups.
+a legitimate view. WebKitGTK opens a TCP connection for `<link rel=preconnect>` whatever the CSP says, so the
+`LinkPreconnect` feature is turned off on the widget's settings (`set_link_preconnect` in
+`webview.rs`). The webkit2gtk bindings in use have no feature API, so `webkit_settings_get_all_features`
+and `webkit_settings_set_feature_enabled` are resolved at run time with `dlsym`; on a WebKitGTK older
+than 2.42 they are absent and the gap stays. The widget's web process also runs without WebKitGTK's
+bubblewrap sandbox (a follow-up).
 
 **Placement.** A widget is mapped only when its slot was drawn this frame and lies wholly inside
 the list's viewport, no chat overlay is open (every `*_open` flag and `Popup` of `Chat`, the session

@@ -189,7 +189,7 @@ import json, os, sys
 
 out_dir, tmp = sys.argv[1], sys.argv[2]
 failures = []
-known_gaps = []
+known_gaps = []  # kept in the JSON for a later engine; empty today
 
 def ok(text):
     print("OK: " + text)
@@ -293,23 +293,16 @@ if run["probeA"] and run["probeB"] and control["probeA"] and control["probeB"]:
           str(a.get("hints")))
     # Raw TCP accepts, counted before any byte is read: a bare preconnect sends no request line.
     for name, label in (("main", "any connection to the logger"),
+                        ("preconnect", "preconnect and dns-prefetch"),
                         ("prefetch", "prefetch"), ("ping", "<a ping>")):
         check(run["tcpAccepts"][name] == 0, "run: no TCP connect for " + label,
               str(run["tcpAccepts"]))
-    # KNOWN GAP, not a pass: WebKitGTK connects for `<link rel=preconnect>` whatever the CSP says
-    # (observed 2026-11-19, 2.54.1). The setting that turns it off is the `LinkPreconnect` feature
-    # (`webkit_settings_set_feature_enabled`, 2.42+), which the webkit2gtk 2.0.2 and
-    # webkit2gtk-sys 2.0.2 bindings in use do not expose. The gap is reported, loudly, in the
-    # output and in widget-isolation.json; it fails the run the day the bindings let it be closed.
-    if run["tcpAccepts"]["preconnect"] == 0:
-        ok("run: no TCP connect for preconnect and dns-prefetch")
-    else:
-        known_gaps.append("preconnect: " + str(run["tcpAccepts"]["preconnect"])
-                          + " TCP connect(s) reached a port outside connect-src")
-        print("KNOWN GAP: run: preconnect made " + str(run["tcpAccepts"]["preconnect"])
-              + " TCP connect(s) to a port outside connect-src; the webkit2gtk bindings in use "
-              "have no LinkPreconnect feature switch")
     # --- the control ---------------------------------------------------------
+    # The control has hyperlink auditing, DNS prefetching and the LinkPreconnect feature on, so
+    # these show the probes can see a connect: a run of 0 is then the settings, not a dead probe.
+    for name, label in (("preconnect", "preconnect"), ("ping", "<a ping>")):
+        check(control["tcpAccepts"][name] >= 1, "control: a TCP connect reached the " + label
+              + " logger", str(control["tcpAccepts"]))
     ca, cb = control["probeA"], control["probeB"]
     for path in ("/fetch", "/img"):
         check(path in control["loggerPaths"], "control: the logger saw " + path,

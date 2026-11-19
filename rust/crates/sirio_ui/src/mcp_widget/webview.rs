@@ -210,6 +210,7 @@ pub fn build_widget_child(
         // `<a ping>` posts to a URL the page names, and DNS prefetching resolves names it picks.
         settings.set_enable_hyperlink_auditing(false);
         settings.set_enable_dns_prefetching(false);
+        set_link_preconnect(&settings, false);
     }
     view.drag_dest_unset();
     view.connect_context_menu(|_, _, _, _| true);
@@ -224,6 +225,77 @@ pub fn build_widget_child(
         true
     });
     Ok(webview)
+}
+
+/// Sets the engine's `LinkPreconnect` feature on `settings`: off for a widget, so
+/// `<link rel=preconnect>` opens no TCP connection (a CSP does not cover it); the proof's
+/// control turns it back on. The feature switch exists from WebKitGTK
+/// 2.42 and the `webkit2gtk` bindings in use do not expose it, so both functions are looked up
+/// at run time with `dlsym`: on an older WebKitGTK they are absent and the call does nothing.
+/// Returns the identifier it set (WebKitGTK 2.54.1 names it `LinkPreconnect`), or `None`.
+pub fn set_link_preconnect(settings: &webkit2gtk::Settings, enabled: bool) -> Option<String> {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+
+    use webkit2gtk::glib::object::ObjectType;
+
+    unsafe extern "C" {
+        // Always present in libc/libdl, unlike the WebKitGTK symbols below.
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    // RTLD_DEFAULT is a null handle on Linux.
+    let find = |name: &CStr| unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+    let all_features = find(c"webkit_settings_get_all_features");
+    let set_enabled = find(c"webkit_settings_set_feature_enabled");
+    let list_length = find(c"webkit_feature_list_get_length");
+    let list_get = find(c"webkit_feature_list_get");
+    let list_unref = find(c"webkit_feature_list_unref");
+    let identifier_of = find(c"webkit_feature_get_identifier");
+    if [all_features, set_enabled, list_length, list_get, list_unref, identifier_of]
+        .iter()
+        .any(|symbol| symbol.is_null())
+    {
+        return None;
+    }
+    // SAFETY: each symbol is the WebKitGTK 2.42+ function of that name, with the C signature
+    // transmuted to here (webkit_settings_get_all_features, webkit_settings_set_feature_enabled,
+    // webkit_feature_list_{get_length,get,unref}, webkit_feature_get_identifier). The list is
+    // owned by us (transfer full) and unreferenced once; a feature taken from it is borrowed
+    // and used only before that; `settings` is a live WebKitSettings for the whole call.
+    unsafe {
+        let all_features: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(all_features);
+        let set_enabled: unsafe extern "C" fn(*mut c_void, *mut c_void, c_int) =
+            std::mem::transmute(set_enabled);
+        let list_length: unsafe extern "C" fn(*mut c_void) -> usize =
+            std::mem::transmute(list_length);
+        let list_get: unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void =
+            std::mem::transmute(list_get);
+        let list_unref: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(list_unref);
+        let identifier_of: unsafe extern "C" fn(*mut c_void) -> *const c_char =
+            std::mem::transmute(identifier_of);
+        let list = all_features();
+        if list.is_null() {
+            return None;
+        }
+        let mut set_to = None;
+        for index in 0..list_length(list) {
+            let feature = list_get(list, index);
+            if feature.is_null() {
+                continue;
+            }
+            let identifier = identifier_of(feature);
+            if identifier.is_null() {
+                continue;
+            }
+            let identifier = CStr::from_ptr(identifier).to_string_lossy().into_owned();
+            if identifier == "LinkPreconnect" {
+                set_enabled(settings.as_ptr().cast(), feature, c_int::from(enabled));
+                set_to = Some(identifier);
+                break;
+            }
+        }
+        list_unref(list);
+        set_to
+    }
 }
 
 /// Runs pending GTK events for at most `budget`.
