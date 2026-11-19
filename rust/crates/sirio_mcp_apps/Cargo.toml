@@ -1,0 +1,12 @@
+[package]
+name = "sirio_mcp_apps"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Leaf on purpose: the MCP Apps host rules (which origins a widget may reach, which resource
+# is a widget, which messages the bridge routes) are pure functions that the chat layer and
+# the UI layer both use, so neither depends on the other for them.
+[dependencies]
+base64 = "0.23.1"
+serde_json = { workspace = true }

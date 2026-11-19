@@ -46,6 +46,7 @@ members = [
     "crates/sirio_host_protocol",
     "crates/sirio_host",
     "crates/sirio_ide",
+    "crates/sirio_mcp_apps",
 ]
 
 [workspace.package]
