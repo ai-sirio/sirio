@@ -806,8 +806,9 @@ Each item is laid out the same way:
     `tool_use` carries only `tool_use_meta` (display names). Sirio asks `mcp_status` when the first
     `mcp__` call of a session arrives, and again only after a reconnect, a toggle, a reload or a
     miss. It never polls. It maps the call to a server and tool by rebuilding the CLI's name:
-    `mcp__`, then the server name with every character outside `[A-Za-z0-9_-]` replaced by `_`
-    (for a `claude.ai ` server the CLI also collapses runs of `_` and trims them at both ends),
+    `mcp__`, then the server name with every UTF-16 code unit outside `[A-Za-z0-9_-]` replaced
+    by `_` (the CLI's regex has no `u` flag, so a character outside the BMP gives two `_`; for a
+    `claude.ai ` server the CLI also collapses runs of `_` and trims them at both ends),
     then `__` and the tool, which the CLI normalizes the same way. `mcp_call` routes on the first
     `__` after `mcp__`, so Sirio keeps a mapping only when splitting the rebuilt name there gives
     back exactly that server part and that tool part, and when no other server in `mcp_status`,
