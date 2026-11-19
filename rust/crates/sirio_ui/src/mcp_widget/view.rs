@@ -139,8 +139,12 @@ impl McpWidget {
         self.target = at;
         match at {
             Some(bounds) => {
-                let _ = webview.set_bounds(self.rect(bounds));
+                // Shown before it is sized: on a hidden GtkWindow `set_bounds`' `size_allocate`
+                // is ignored and `show_all` then lays the webview out from its 1x1 build size,
+                // so the page would have no area. A widget already shown only moves or resizes,
+                // and `set_visible(true)` on it changes nothing.
                 let _ = webview.set_visible(true);
+                let _ = webview.set_bounds(self.rect(bounds));
             }
             None => {
                 let _ = webview.set_visible(false);

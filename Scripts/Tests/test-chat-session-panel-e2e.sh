@@ -5853,6 +5853,14 @@ elif command == "x-focus":
     x11.XSync(display, 0)
     x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
     x11.XCloseDisplay(display)
+elif command == "pixels":
+    # pixels IMAGE R G B TOL: the fraction of the image's pixels within TOL of the colour.
+    raw = subprocess.run(["convert", sys.argv[2], "-depth", "8", "rgb:-"], capture_output=True, check=True).stdout
+    want, tol = [int(v) for v in sys.argv[3:6]], int(sys.argv[6])
+    total = len(raw) // 3
+    near = sum(1 for i in range(0, total * 3, 3)
+               if all(abs(raw[i + k] - want[k]) <= tol for k in range(3)))
+    print(f"{near / total:.4f}" if total else "0")
 elif command == "invariant":
     # invariant SURFACE DISPLAY LABEL ARTIFACT COUNT: holds within 6 s of settling, or fails.
     surface, display, label, artifact, count = sys.argv[2:7]
@@ -6096,6 +6104,25 @@ print(float(r["slotTop"]) - (float(r["viewportTop"]) + 20))')
   widget_wait "the first widget lies whole in the viewport and is mapped" 15 \
     'w[0]["slotDrawn"] == "1" and w[0]["mapped"] == "1" and float(w[0]["slotTop"]) >= float(w[0]["viewportTop"]) and float(w[0]["slotBottom"]) <= float(w[0]["viewportBottom"])'
   widget_invariant "5 whole in view"
+  # 5p. the page fills the slot, on pixels (the X geometry check passed while the slot was black): widget
+  # 1's slot is cropped out of a screenshot of the display, at least 90% of it must be the view's own
+  # background colour (#12ab34, which the chat never uses), and the crop is kept as the artifact.
+  local px_origin px_x px_y px_w px_h px_frac
+  px_origin=$(window_origin)
+  read -r px_x px_y px_w px_h < <(MW read "$SURFACE" | python3 -c '
+import json, subprocess, sys
+r = json.load(sys.stdin)["mcpWidgets"][0]
+geo = subprocess.run(["xwininfo", "-display", sys.argv[1], "-id", r["xid"]], capture_output=True, text=True).stdout
+x = int([l for l in geo.splitlines() if "Absolute upper-left X" in l][0].split()[-1])
+w = int([l for l in geo.splitlines() if "Width:" in l][0].split()[-1])
+top, bottom = float(r["slotTop"]), float(r["slotBottom"])
+print(x, int(top) + int(sys.argv[3]), w, int(bottom - top))' "$DISPLAY_TARGET" "${px_origin% *}" "${px_origin#* }")
+  DISPLAY="$DISPLAY_TARGET" import -window root "$OUT_DIR/widget-slot-screen.png" || fail "could not take a screenshot of the display"
+  convert "$OUT_DIR/widget-slot-screen.png" -crop "${px_w}x${px_h}+${px_x}+${px_y}" +repage "$OUT_DIR/widget-slot-crop.png" || fail "could not crop the widget's slot"
+  px_frac=$(MW pixels "$OUT_DIR/widget-slot-crop.png" 18 171 52 12)
+  echo "  widget 1's slot ${px_w}x${px_h} at $px_x,$px_y: $px_frac of its pixels are the view's colour"
+  python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= 0.9 else 1)' "$px_frac" || fail "widget 1's page does not fill its slot: only $px_frac of its pixels are the view's colour"
+  echo "OK: widget 1's page fills its slot ($px_frac of the slot is the view's colour); crop: $OUT_DIR/widget-slot-crop.png"
   # 5a. A widget takes no keyboard input (after 5's scroll puts widget 1 whole in the viewport, so it is
   # mapped). A real click inside the first widget gives its window GTK focus; then real keys are typed with
   # the pointer resting there. The view counts `keydown` events in the capture phase and reports the count

@@ -541,7 +541,13 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     the Allow row then runs the call); and at every step the placement invariant: `mapped` is "1"
 #                     exactly when the slot is drawn wholly inside the list's viewport with no overlay,
 #                     dock question or hidden tab, and `xwininfo -id <xid>` says IsViewable exactly then
-#                     (no window counts as not viewable). The steps are the card open, a real click
+#                     (no window counts as not viewable). At the step that puts widget 1 whole in the
+#                     viewport it also checks pixels: the display is screenshotted (`import -window root`),
+#                     widget 1's slot is cropped out, at least 90% of the crop must be the view's own
+#                     background colour (#12ab34, which the chat never uses), and the crop is kept as
+#                     `widget-slot-crop.png` (the X geometry check passed while the slot was black: the
+#                     webview stayed 1x1 when `set_bounds` ran before `set_visible(true)`).
+#                     The steps are the card open, a real click
 #                     inside widget 1, the X focus set on its window (as a window manager would; a bare
 #                     Xvfb has none) and real typing (the view counts `keydown` events in the capture
 #                     phase and reports the count in its height, 600 plus the count: it must read 600,
