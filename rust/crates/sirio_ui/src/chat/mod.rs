@@ -730,14 +730,14 @@ fn parse_chat_markdown(source: &str) -> bezel_markdown::Doc {
     bezel_markdown::parse(source)
 }
 
-/// An assistant response's document with the files it names marked as links.
-/// The disk is asked here, while the document is built, and never while it
-/// paints; `memo` answers a candidate already seen in this response.
 /// Whether the card-body press record belongs to the body `key`.
 fn owns_press(press: &Option<(String, String)>, key: &str) -> bool {
     press.as_ref().is_some_and(|(owner, _)| owner == key)
 }
 
+/// An assistant response's document with the files it names marked as links.
+/// The disk is asked here, while the document is built, and never while it
+/// paints; `memo` answers a candidate already seen in this response.
 fn parse_linked_markdown(
     source: &str,
     cwd: &Path,
@@ -3397,7 +3397,7 @@ impl Chat {
             id: id.clone(),
             title: visible_text::visible_text(title, false),
             status: status.clone(),
-            parts: if prompt.is_empty() {
+            parts: if prompt.trim().is_empty() {
                 Vec::new()
             } else {
                 vec![SubagentPart::Prompt { text: prompt }]
@@ -3914,7 +3914,7 @@ impl Chat {
                     // prompt, which is the call's own text.
                     let mut parts = Vec::new();
                     let prompt = visible_text::visible_text(&content_text(&content), true);
-                    if !prompt.is_empty() {
+                    if !prompt.trim().is_empty() {
                         parts.push(SubagentPart::Prompt { text: prompt });
                     }
                     self.push_entry(Entry::SubagentTask {
@@ -4117,7 +4117,7 @@ impl Chat {
                     let needs_error = by_parent
                         && !held
                         && status.eq_ignore_ascii_case("failed")
-                        && !error.is_empty()
+                        && !error.trim().is_empty()
                         && !matches!(
                             self.entries.get(task_index),
                             Some(Entry::SubagentTask { parts, .. })
@@ -4695,11 +4695,23 @@ impl Chat {
     /// Converts rendered entries into the durable format, retaining only
     /// turns closed by a footer. A partially streamed tail is deliberately
     /// omitted so a relaunch never presents an unfinished answer as settled.
-    fn transcript_from_entries(tab_id: &str, entries: &[Entry]) -> ChatTranscript {
+    /// A card in `held` is one whose background task still runs: it is stored
+    /// as its launch left it, Completed, because nothing restored would ever
+    /// end it (the live card keeps its own status until the task ends).
+    fn transcript_from_entries(
+        tab_id: &str,
+        entries: &[Entry],
+        held: &[&str],
+    ) -> ChatTranscript {
         let mut turns = Vec::new();
         let mut current = Vec::new();
         for entry in entries {
-            if let Some(entry) = persisted_entry(entry) {
+            if let Some(mut entry) = persisted_entry(entry) {
+                if let ChatEntry::ToolCall { id, status, .. } = &mut entry {
+                    if held.contains(&id.as_str()) && !is_terminal_tool_status(status) {
+                        *status = "Completed".into();
+                    }
+                }
                 let is_footer = matches!(entry, ChatEntry::TurnFooter { .. });
                 current.push(entry);
                 if is_footer {
@@ -4714,11 +4726,17 @@ impl Chat {
         }
     }
 
+    /// The cards whose background task has not ended.
+    fn held_card_ids(&self) -> Vec<&str> {
+        self.background_cards.values().map(String::as_str).collect()
+    }
+
     /// Returns the settled transcript for callers that need to inspect the
     /// persistence seam without exposing the internal Entry model.
     pub fn persisted_transcript(&self) -> Option<ChatTranscript> {
         let persistence = self.persistence.as_ref()?;
-        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries);
+        let held = self.held_card_ids();
+        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries, &held);
         (!transcript.turns.is_empty()).then_some(transcript)
     }
 
@@ -5360,7 +5378,8 @@ impl Chat {
                 return;
             }
         };
-        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries);
+        let held = self.held_card_ids();
+        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries, &held);
         if let Err(error) = database.save_chat_transcript(&transcript) {
             eprintln!("[chat] failed to save transcript: {error}");
         }
@@ -10776,7 +10795,7 @@ two"
                 at: None,
             },
         ];
-        let transcript = Chat::transcript_from_entries("tab-chat", &entries);
+        let transcript = Chat::transcript_from_entries("tab-chat", &entries, &[]);
         assert_eq!(transcript.turns.len(), 1);
         assert_eq!(transcript.turns[0].entries.len(), 3);
     }
@@ -11755,45 +11774,64 @@ two"
             card_event(cx, on_link, true, MouseButton::Left);
             card_event(cx, on_link, false, MouseButton::Left);
             cx.run_until_parked();
-            assert_eq!(opened.borrow().last(), Some(&dir.0.join(name)), "part {part}");
+            let last_is_the_file = opened.borrow().last() == Some(&dir.0.join(name));
+            assert!(last_is_the_file, "part {part} opens its own file");
         }
         assert_eq!(opened.borrow().len(), 2, "one open per click");
-        assert_eq!(cx.cx.opened_url(), None, "the system opener is never handed a file");
+        let system_opener_used = cx.cx.opened_url().is_some();
+        assert!(!system_opener_used, "the system opener is never handed a file");
     }
 
+    // Ways a card's link could open without a click:
+    // - a press on plain text and a release over the link (a drag's end) opens it;
+    // - a release with no press at all (an OS drop's synthetic release) opens it.
+    // Removing the press-record match (`pressed == Some(url)`) makes both open.
     #[gpui::test]
-    async fn a_press_off_the_link_or_a_drop_on_it_opens_nothing(cx: &mut TestAppContext) {
+    async fn a_press_off_the_link_or_no_press_at_all_opens_nothing(cx: &mut TestAppContext) {
         let (_chat, cx, opened, _dir) = card_with_two_texts(cx);
         let on_link = text_part_point(cx, 2, 4.0);
         let on_plain = text_part_point(cx, 2, 200.0);
-        // Pressed on plain text, released over the link: a drag's end.
         card_event(cx, on_plain, true, MouseButton::Left);
         card_event(cx, on_link, false, MouseButton::Left);
-        // No press at all, as an OS file drop's synthetic release.
-        card_event(cx, on_link, false, MouseButton::Left);
-        // A right press does not arm a later left release either.
-        card_event(cx, on_link, true, MouseButton::Right);
         card_event(cx, on_link, false, MouseButton::Left);
         cx.run_until_parked();
-        assert!(opened.borrow().is_empty());
-        assert_eq!(cx.cx.opened_url(), None);
+        assert!(opened.borrow().is_empty(), "no click, no open");
+        let system_opener_used = cx.cx.opened_url().is_some();
+        assert!(!system_opener_used, "the system opener is never handed a file");
+    }
 
-        // A press on the link, then an OS file drop onto it: the drop's
-        // synthetic release is not a click, and neither is the bare drop.
-        for pressed in [true, false] {
-            if pressed {
-                card_event(cx, on_link, true, MouseButton::Left);
-            }
-            cx.simulate_event(gpui::FileDropEvent::Entered {
-                position: on_link,
-                paths: gpui::ExternalPaths(Default::default()),
-            });
-            cx.simulate_event(gpui::FileDropEvent::Submit { position: on_link });
-            cx.simulate_event(gpui::FileDropEvent::Exited);
-            cx.run_until_parked();
-            assert!(opened.borrow().is_empty(), "pressed first: {pressed}");
-        }
-        assert_eq!(cx.cx.opened_url(), None);
+    // Ways a right release could open a card's link: the release handler skips any
+    // button but the left one; without that, a left press on the link followed by a
+    // right release over it opens the file. (A right press would open the transcript
+    // menu, which swallows what follows, so the right button is the release here.)
+    #[gpui::test]
+    async fn a_right_release_on_a_pressed_link_opens_nothing(cx: &mut TestAppContext) {
+        let (_chat, cx, opened, _dir) = card_with_two_texts(cx);
+        let on_link = text_part_point(cx, 2, 4.0);
+        card_event(cx, on_link, true, MouseButton::Left);
+        card_event(cx, on_link, false, MouseButton::Right);
+        cx.run_until_parked();
+        assert!(opened.borrow().is_empty(), "a right release is not a click");
+    }
+
+    // Ways a drop could open a card's link: a left press on the link, then an OS
+    // file drop onto it, whose release is not a click. Removing the
+    // `has_active_drag` return makes the dropped release open the file.
+    #[gpui::test]
+    async fn a_file_drop_on_a_pressed_link_opens_nothing(cx: &mut TestAppContext) {
+        let (_chat, cx, opened, _dir) = card_with_two_texts(cx);
+        let on_link = text_part_point(cx, 2, 4.0);
+        card_event(cx, on_link, true, MouseButton::Left);
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position: on_link,
+            paths: gpui::ExternalPaths(Default::default()),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Submit { position: on_link });
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert!(opened.borrow().is_empty(), "a drop is not a click");
+        let system_opener_used = cx.cx.opened_url().is_some();
+        assert!(!system_opener_used, "the system opener is never handed a file");
     }
 
     #[gpui::test]
@@ -21770,6 +21808,61 @@ two"
             .load_chat_transcript("current-chat")
             .unwrap();
         assert!(stored == Some(sentinel), "the stored transcript was left as it was");
+    }
+
+    // Ways a held background card could fail a restored chat:
+    // - the transcript saved at the turn's end stores it InProgress, and the restored
+    //   row works forever (nothing restored ends its task);
+    // - the fix rewrites every card, so a card that is not held loses its own status;
+    // - the fix rewrites the live card too, so its task's end finds it already done.
+    #[gpui::test]
+    async fn a_held_background_card_is_stored_completed_and_stays_live(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let chat = chat_with_a_past_session(cx, &dir, &["an older question"]);
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("this session".into(), Vec::new(), Vec::new(), cx);
+            notice(chat, "a", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("a", "Explore", None), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::BackgroundTask(sirio_chat::BackgroundTaskEvent::Started {
+                    task_id: "t".into(),
+                    tool_use_id: Some("a".into()),
+                    task_type: None,
+                    description: "Explore".into(),
+                }),
+                cx,
+            );
+            chat.handle_event(completed("a", "Completed", None), cx);
+            // A card nothing holds, left running by its own launch.
+            notice(chat, "b", sirio_chat::SubagentItem::Opened, cx);
+            chat.handle_event(started("b", "Explore", None), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::TurnEnded {
+                    stop_reason: "EndTurn".into(),
+                },
+                cx,
+            );
+            assert_eq!(card_status(chat, 1), "InProgress", "the live card is still held");
+        });
+        let stored = AppDatabase::open(&dir.0.join("history.sqlite"))
+            .unwrap()
+            .load_chat_transcript("current-chat")
+            .unwrap()
+            .expect("the turn's end stored the transcript");
+        let status_of = |wanted: &str| {
+            stored
+                .turns
+                .iter()
+                .flat_map(|turn| turn.entries.iter())
+                .find_map(|entry| match entry {
+                    ChatEntry::ToolCall { id, status, .. } if id == wanted => Some(status.clone()),
+                    _ => None,
+                })
+        };
+        let held = status_of("a");
+        assert!(held.as_deref() == Some("Completed"), "the held card is stored Completed");
+        let loose = status_of("b");
+        assert!(loose.as_deref() == Some("InProgress"), "an unheld card is stored as it is");
     }
 
     #[gpui::test]
