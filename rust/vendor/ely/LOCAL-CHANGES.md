@@ -119,17 +119,17 @@ Sirio-side test or E2E: no Sirio crate uses these crates before Task 8, so it ca
   every close, the owner's included, runs `on_close`.
 - `crates/ely-core/src/overlays/mod.rs`: declares the two test modules below.
 - `crates/ely-core/src/overlays/dialog_keys.rs` (new, plain `#[cfg(test)]`):
-  `a_dialog_takes_the_first_key_typed_right_after_it_opens`.
+  `a_dialog_takes_the_first_key_typed_right_after_it_opens` and the three moved dialog tests.
 - `crates/ely-core/src/overlays/popover_close.rs` (new, plain `#[cfg(test)]`): the two popover tests
   moved from the old crate's `overlays/tests.rs`.
 
 Outcomes:
 
-- Row 13: re-applied. Proof: runs at Task 8 (the project-identity dialog, `test-project-identity-e2e.sh`).
+- Row 13: re-applied. Proof: unproven (no test or E2E step checks the card's text colour; `test-project-identity-e2e.sh` captures show it only by eye at Task 10).
 - Rows 14, 15: absorbed. `Dialog::held` and `Dialog::focus_first` are `pub` (`#[doc(hidden)]`) upstream;
   grep proof (`overlays/dialog.rs`).
-- Row 16: re-applied (above). Proof: the closure build, and `project_identity_dialog.rs` calling
-  `on_enter(field, build)` at Task 8.
+- Row 16: re-applied (above). Proof: `overlays::dialog_keys::a_dialog_takes_the_first_key_typed_right_after_it_opens`
+  (runs `on_enter(field, ..)` through `PromptDialog`); `project_identity_dialog.rs` calls it at Task 8.
 - Row 17: absorbed by a different mechanism, and a feelable change. The old rule (a release of Enter
   confirms only after a press the dialog saw) existed because the old crate confirmed on the *release*
   of Enter. Upstream confirms on the key-down (its `capture_action(Enter)`), and has no key-up
@@ -137,10 +137,14 @@ Outcomes:
   consequence is that Enter now confirms on press, not on release. Nothing in Sirio depends on the
   release: `test-project-identity-e2e.sh` scenario 4 (keydown opens, keyup leaves it open, a full
   Return confirms) holds either way. Proof: `overlays::dialog_keys::a_dialog_takes_the_first_key_typed_right_after_it_opens`
-  (its Enter half has a positive control: an Enter that was pressed does confirm). It was written
+  (its Enter half has a positive control: an Enter that was pressed does confirm), and the old crate's
+  three dialog tests, moved unchanged in intent into the same module and passing on upstream's code
+  (ran, each alone, 1 test): `overlays::dialog_keys::a_release_with_no_press_does_not_confirm`,
+  `overlays::dialog_keys::a_press_and_its_release_confirm_once`,
+  `overlays::dialog_keys::a_press_while_the_field_is_out_of_focus_arms_nothing`. The first was written
   first and was GREEN on the verbatim code, not red: upstream's key-down confirm already meets it.
   For the section 6.4 list for Enzo.
-- Row 18: re-applied. Proof: as row 16.
+- Row 18: re-applied. Proof: as row 16 (`a_dialog_takes_the_first_key_typed_right_after_it_opens` goes through `PromptDialog`).
 - Row 19: re-decided: upstream's `HoverListenerMode::InputModalityIndependent` on scroll, hover card
   and tooltip is taken (`layout/scroll.rs`, `overlays/hover.rs`, `primitives/tooltip.rs` are verbatim).
   The local "fork's `on_hover`" existed only because bezel-gpui lacked the mode. Reason: no documented
@@ -206,8 +210,8 @@ Outcomes:
 - Row 69: partial upstream (`Copy`/`Cut`/`Paste`/`SelectAll` already `pub`), `Newline` re-applied as a
   re-export of upstream's own field action (`ely_core::forms::Newline`, bound to `shift-enter`; not
   `ely_editor::Newline`). Proof: runs at Task 8, `enter_sends_and_shift_return_inserts_a_newline`.
-- Row 70: re-applied. No test cited; exercised by the composer-resize path at Task 8 (composer band
-  E2E), otherwise a named hand check.
+- Row 70: re-applied. Proof: runs at Task 8, `sirio_ui/src/chat/composer_height.rs`
+  `every_open_chat_takes_a_new_maximum`.
 - Rows 71, 72, 73: re-applied. Proofs: runs at Task 8,
   `the_delete_to_line_and_word_actions_delete_what_bezels_did`, `a_delete_to_line_end_is_one_undo_step`.
 - Row 74: re-applied with upstream's `word_key!`. Proof: runs at Task 8,
@@ -222,8 +226,10 @@ Outcomes:
   Written before the port: RED on the verbatim unit (`the word before 12 in "Hello world."  left: 11
   right: 6`), GREEN after `is_word`.
 - Row 81: a host rule (Sirio's readline fallback on macOS); nothing vendored.
-- Row 82: re-applied. Proof: runs at Task 8,
-  `settings::agents_page::tests::the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size`.
+- Row 82: re-applied. Proofs: runs at Task 8,
+  `settings::agents_page::tests::the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size`
+  and `the_project_name_field_tracks_font_preferences_and_keeps_native_editing`
+  (`sirio_ui/src/project_forms.rs`).
 - Rows 179 to 185: absorbed. Upstream binds with the compile-time `secondary!` and `word_key!`
   (`typography/keys.rs`), its `keystroke()` uses `parse_with_os`, its selection code calls
   `secondary(cx)`, and `compat::load_key` has no counterpart to carry. Row 185 (`on_scroll` instead of
@@ -252,41 +258,40 @@ Outcomes:
 
 Outcomes:
 
-- Rows 47, 48, 49: re-applied. Proof: runs at Task 8 (composer band E2E, `sirio_ui` menu callers).
-- Rows 50, 51, 52, 55, 56, 57: re-applied. Proof: runs at Task 8 (composer band E2E reads the rows back).
-- Row 53: re-applied. Proof: runs at Task 8.
-- Row 54: re-applied. Proof: runs at Task 8 (the model search and combobox wear `row_frame`).
-- Rows 172 to 175: re-applied (the four readers). Proof: runs at Task 8 (the composer band's
-  control-socket reading).
+- Rows 47, 48, 49: re-applied. Proof: runs at Task 8, the `sirio_ui/src/chat/band_tests.rs` menu tests (e.g. `a_blocked_fast_row_is_disabled`), which draw the composer menus through `MenuPanel`/`layer`.
+- Rows 50, 51, 52, 55, 56, 57: re-applied. Proof: runs at Task 8, `band_tests.rs` (`a_blocked_fast_row_is_disabled`, `the_background_tasks_row_is_informational`).
+- Row 53: re-applied. Proof: runs at Task 8, `band_tests.rs` `a_blocked_fast_row_is_disabled` (asserts `open.step(None, 1)`) and `the_background_tasks_row_is_informational`.
+- Row 54: re-applied. Proof: unproven (Sirio's own `controls.rs` has a separate `row_frame`; no Sirio test or E2E exercises Ely's `menus::row_frame`).
+- Rows 172 to 175: re-applied (the four readers). Proof: runs at Task 8, `band_tests.rs` (`a_blocked_fast_row_is_disabled`; `sirio_ui/src/chat/menus.rs` reads `Menu::items`).
 - The old crate's `menus` code had `Menu::item_at(ix)`; upstream's now takes a column for button rows,
   so `run` matches `Entry::Item` itself. No local API was renamed.
 
 ### Tabs (row 84)
 
 - `crates/ely-core/src/navigation/tabs.rs`: `compact` also requires a tab with a non-empty label
-  (`tabs.iter().any(|tab| !tab.label.is_empty())`). Row 84 re-applied. Proof: runs at Task 8 (change
-  request tabs, `test-ely-forge-probe.sh`).
+  (`tabs.iter().any(|tab| !tab.label.is_empty())`). Row 84 re-applied. Proof: unproven (no test covers
+  a strip of icon-only tabs; `test-ely-forge-probe.sh` is a visual check).
 
 ### Typography and theme (rows 24, 168 to 170)
 
 - `crates/ely-core/src/typography/effects.rs`: `ShimmerText::phase(f32)` draws the band at the phase
   given (0 to 1 across one sweep, wrapping) and animates nothing; the band's colouring is one private
-  function, `shimmered`, which both paths call. Rows 168, 169: re-applied. Proof: runs at Task 8 (the
-  Trace card's capped repaint loop).
+  function, `shimmered`, which both paths call. Rows 168, 169: re-applied. Proof: runs at Task 8,
+  `sirio_ui/src/chat/session_panel/trace.rs` `the_card_asks_for_no_frame_but_its_own`.
 - `crates/ely-core/src/typography/fit.rs`: `cut_line`, behind `Ellipsis` and `MiddleEllipsis`, joins
   its lines first (`one_line`). Row 170: re-applied. Proof (ran): `typography::fit::tests::a_cut_line_joins_the_lines_it_is_given`
   (moved from the old crate). The selectable-text `end_overlay` path is upstream's and is not joined.
 - `crates/ely-core/src/theme/mod.rs`, `crates/ely-core/src/theme/tokens.rs`: `ThemeMetrics` (eight text
   sizes and four radii in pixels), `Theme::metrics: Option<ThemeMetrics>` (`None` in `Theme::init`),
   and `text_size`/`radius` return `px_to_rems(metrics..)` when it is set (one px-to-rem conversion, so
-  the font scale is not applied twice). Row 24: re-applied. Proof: runs at Task 8
-  (`sirio_ui/src/ely.rs` theme-sync tests).
+  the font scale is not applied twice). Row 24: re-applied. Proof: runs at Task 8,
+  `sirio_ui/src/ely.rs` `a_theme_swapped_without_an_installer_reaches_both_consumers`.
 
 ### Feedback (row 25)
 
 - `crates/ely-core/src/feedback/messages.rs`: `Alert::content(element)` takes a host-owned
   (selectable) body; the title is drawn only when non-empty; `body`, actions and dismissal are as
-  before. Row 25: re-applied. Proof: runs at Task 8 (chat error alert).
+  before. Row 25: re-applied. Proof: unproven (`sirio_ui/src/chat/transcript.rs` draws chat errors through it, but no test asserts the alert).
 
 ### Icons and assets (rows 6, 7, 8)
 
