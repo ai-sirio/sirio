@@ -82,7 +82,7 @@ pub(super) struct Seen {
     pub(super) viewport: Bounds<Pixels>,
     pub(super) overlay_open: bool,
     pub(super) dock_open: bool,
-    /// The host had the chat off screen or covered.
+    /// The host had the chat off screen (`unmap_widgets`) or covered by an overlay.
     pub(super) hidden: bool,
 }
 
@@ -655,8 +655,13 @@ impl Chat {
         cx.notify();
     }
 
+    /// Hides every widget at once, and records that the host did: the read reports what the
+    /// host saw until the next paint's sweep sets it again from the host's overlays.
     fn hide_widgets(&self, cx: &mut Context<Self>) {
         for slot in &self.widgets.slots {
+            let mut seen = slot.seen.get();
+            seen.hidden = true;
+            slot.seen.set(seen);
             let Some(widget) = &slot.widget else { continue };
             widget.update(cx, |widget, cx| widget.place(None, cx));
             self.refresh_snapshot(&slot.id, cx);
@@ -1034,6 +1039,31 @@ mod tests {
             let slot = chat.widgets.slot("a").expect("the slot exists");
             assert_eq!(slot.phase, SlotPhase::Failed);
             assert!(slot.waiting_read.is_none());
+        });
+    }
+
+    /// How it can fail, written first: the host takes a chat off screen and `unmap_widgets`
+    /// hides the widgets, but the read, which reports what the last sweep and the host saw,
+    /// still says `hidden "0"` for a slot with no webview, or until the next paint.
+    #[gpui::test]
+    async fn a_chat_taken_off_screen_reports_its_widgets_hidden_until_painted_again(
+        cx: &mut TestAppContext,
+    ) {
+        prepare(cx);
+        let (chat, cx) = cx.add_window_view(|_, cx| offline_chat(cx));
+        let hidden = |chat: &Chat| {
+            let row = chat.widget_rows().remove(0);
+            (row["hidden"].clone(), row["mapped"].clone())
+        };
+        chat.update(cx, |chat, cx| {
+            let held = Held::new(json!({}));
+            chat.widgets.insert_test_slot(Slot::resolving("a".into(), 1, &tool(), held));
+            chat.plan_widgets(cx);
+            assert_eq!(hidden(chat), ("0".to_owned(), "0".to_owned()));
+            chat.unmap_widgets(cx);
+            assert_eq!(hidden(chat), ("1".to_owned(), "0".to_owned()));
+            chat.plan_widgets(cx);
+            assert_eq!(hidden(chat).0, "0");
         });
     }
 }
