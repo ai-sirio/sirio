@@ -206,7 +206,27 @@ rust/vendor/
   - no bundled fonts;
   - no `gpui_platform` dependency of its own.
 - **Lints.** Upstream's `[lints]` tables reference a workspace that does not exist here and are
-  dropped. Their warnings stay warnings.
+  dropped.
+  - The vendored Ely crates are not Sirio-owned code. `Scripts/ci-linux.sh`'s
+    "clippy (owned crates)" stage therefore excludes them by name, as it excludes `sirio` and
+    `sirio_ui`.
+  - Without that exclusion, the `Copy` that `ely-palette` adds would turn upstream's `.clone()`
+    calls into `clippy::clone_on_copy` errors under `-D warnings`.
+  - The old crate avoided this by rewriting its clones (checklist row 61); this step excludes the
+    crates instead, so upstream's code stays verbatim.
+- **Files taken from each crate.** `Cargo.toml`, `src/`, and `icons/`, `assets/` and `LICENSE`
+  where present. Upstream's `AGENTS.md` files (agent instructions for upstream's repository) and
+  `examples/` are not taken. The vendor check of §5.6 compares that same set.
+- **Tests.**
+  - `Scripts/ci.sh` runs `cargo nextest run --workspace` with no crate features. Upstream gates
+    most test modules on its crates' `test-support` feature, so CI does not run those tests, as
+    it does not run the old crate's feature-gated tests today.
+  - No Sirio manifest may enable an Ely crate's `test-support`. It turns on `gpui/leak-detection`,
+    which would panic every Sirio gpui test that leaks a handle.
+  - A Sirio-local test inside a vendored crate stays in a plain `#[cfg(test)]` module, as the
+    popover tests are today, so CI keeps running it.
+  - The upstream suites run per crate by hand: `--features test-support`, all eight crates in one
+    invocation.
 - **The facade** depends on the crates it re-exports and on nothing it does not re-export.
   - Its chapters map as upstream's root facade maps them: `forms`, `buttons`, `theme`, `menus`, …
     → `ely_core::<chapter>`; `chat` → `ely_chat`; `agent` → `ely_agent`; `editor` → `ely_editor`;
@@ -345,10 +365,11 @@ From the API map (in the same local plans directory): 108 of the 127 Ely symbols
 unchanged, and 16 are Sirio's own (they return with §5.4). Three moved:
 
 - `Assets` is served by the facade (§5.4).
-- `forms::Newline`: upstream's is an editor action (`ely_editor::Newline`). The composer's
-  `shift-return` binding (`sirio_ui/src/chat/mod.rs`) is re-pointed to whatever inserts a newline in
-  upstream's text field, or `Newline` stays as a recorded local action. The builder picks; the
-  composer's chord test decides.
+- `forms::Newline`: upstream's text field has its own `Newline` action
+  (`ely-core/src/forms/text/actions.rs`, bound to `shift-enter`) but does not re-export it. The
+  local change is that one re-export (checklist row 69).
+  - `ely_editor::Newline` is a different action.
+  - The proof is `enter_sends_and_shift_return_inserts_a_newline` (`sirio_ui/src/chat/mod.rs`).
 - `git::GitStatus` is `ely_core::lists::GitStatus`. The facade re-exports it at `git::GitStatus`,
   and the local copy goes.
 
@@ -370,19 +391,28 @@ unchanged, and 16 are Sirio's own (they return with §5.4). Three moved:
 
 ### 5.7 Order of work
 
-Each commit builds `cargo build -p sirio`, and the suites of the crates it touches pass.
+The old crate and the new crates register gpui actions under the same names (`ely_input::*`,
+`ely_editor::*`, `ely::FocusNext`). One binary that links both panics with "Action with name …
+already registered". A staged switch, chapter by chapter, is therefore impossible.
 
-1. **Vendor the closure verbatim and measure** (§5.3). The facade and Sirio stay on the old crate
-   until the switch.
-2. **Core switch.** `ely-palette` is re-extracted, the facade is rewritten over `ely-core`, and the
-   core local changes (text field, menus, dialog, popover, tabs, theme metrics, assets, init) are
-   re-applied. The old crate's core modules leave.
-3. **Chat and agent.** The composer, messages, status, permission and control local changes are
-   re-applied.
-4. **Git, then the editor.** The editor is last and largest: Task 1c through "Sideways scroll", plus
-   `sirio_perf`.
-5. **Exclusions** decided by §5.3, documentation, and the old crate removed.
-6. **Verification** (§6).
+Until the single switch, no Sirio crate depends on a new Ely crate, not even as a dev-dependency or
+from an example.
+
+1. **Vendor the closure verbatim and measure** (§5.3). Sirio stays on the old crate.
+2. **Re-apply the local changes crate by crate:** core, then chat and agent, then the editor
+   (largest, last), then git.
+   - After each one, the whole closure builds and the upstream suites of every crate that
+     depends on the changed one pass. A local change must not break an upstream caller inside the
+     closure.
+   - When a local signature conflicts with one an upstream crate calls, the local API takes a new
+     name and Sirio's call sites follow, recorded. One example is the editor's line-indexed
+     highlighter, since `ely-documents` calls upstream's `highlighter`.
+   - Sirio-side proofs cannot run until the switch.
+3. **The switch,** in one commit. The facade is rewritten, the old sources are deleted, Sirio's
+   moved symbols are re-pointed, and every Sirio-side proof runs. A failure is traced to its
+   checklist row through `LOCAL-CHANGES.md`.
+4. **Exclusions** decided by §5.3.
+5. **Verification** (§6). `LOCAL-CHANGES.md` is completed last, with proofs that actually ran.
 
 ## 6. Verification
 
@@ -432,9 +462,14 @@ scenario red before and after the 2026-11-17 sync.
    - **CI wall time** of the PR's runs against the baseline: `pr.yml` 30 min 10 s (run
      44466550074), `macos-check.yml` 23 min 51 s (44450730490), `windows-check.yml` 8 min 52 s
      (44450730389).
-   - **Test time.** The vendored crates' upstream tests are the only new tests in `Scripts/ci.sh`.
-     If `pr.yml` exceeds its bound (§1.2), they are the first thing reduced, for example to the
-     crates and files that carry local changes. Enzo gets the numbers before the PR.
+     - CI does not run the upstream suites (§5.1), so `pr.yml`'s growth is compile time.
+     - It is estimated before the PR: on this machine, time `cargo nextest run --workspace --no-run`
+       at the baseline and after the switch, and scale the delta by the baseline's ratio of CI time
+       to local time.
+     - The real figure comes from the PR's first run.
+   - **If the estimate exceeds the bound** (§1.2): CI runs no upstream suites, so the first lever
+     of §1.2 has nothing to cut. The levers are the cuts of §5.3. Enzo gets the numbers before the
+     PR.
    - **Frame cost.** The editor and chat frame probes that exist today, compared with the baseline.
 6. **Other platforms.**
    - `macos-check.yml` builds and links the app.
@@ -487,4 +522,8 @@ above.
   an E2E or a capture, or a named hand check (§5.4).
 - **All 24 former `not-ported` rows are verified by the builder.** Only those with a visible effect
   go to Enzo (§5.4).
+- **The vendored Ely crates are outside `ci-linux.sh`'s owned-crates clippy stage** (§5.1), so
+  upstream code stays verbatim.
+- **Only `Cargo.toml`, `src/`, `icons/`, `assets/` and `LICENSE` are taken from each crate,** not
+  upstream's `AGENTS.md` or `examples/` (§5.1).
 - **Commit type `refactor:`.** No version step; the PR merges after the 0.46.0 tag (Enzo's call, §1.2).
