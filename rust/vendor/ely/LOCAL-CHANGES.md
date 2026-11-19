@@ -44,3 +44,36 @@ gains `#[ignore = "needs upstream's patched pulldown-cmark; step 2"]` and nothin
 
 - `crates/ely-documents/src/markdown/tex/tests.rs`
 - `crates/ely-documents/src/tree/tests/inline.rs`
+
+### The palette split (`ely-palette`), rows 58 to 60
+
+`Palette`, `Syntax`, `SyntaxTheme`, `syntax_themes`, `Mix`, `HUE_NAMES`, `color_blind_chart` and
+`Mode` (with `From<WindowAppearance>`) now live in the sibling crate `rust/vendor/ely-palette`,
+re-extracted from this rev's `ely-core` theme files. `ely-core` depends on it and re-exports the
+types at the original `theme::` paths, so `ely_core::theme::{Palette, Syntax, Mode}` are the same
+types Sirio's theme crate holds.
+
+- `crates/ely-core/Cargo.toml`: gains `ely-palette.workspace = true`.
+- `crates/ely-core/src/theme/mod.rs`: `Mode` and its `From<WindowAppearance>` impl are removed; the
+  `palette` and `syntax` modules are gone; `pub use ely_palette::{HUE_NAMES, Mix, Mode, Palette,
+  Syntax, SyntaxTheme, syntax_themes}`; the `color_blind_chart` call reads `ely_palette::`.
+- `crates/ely-core/src/theme/palette.rs`, `crates/ely-core/src/theme/syntax.rs`: deleted; their
+  content moved into `ely-palette`.
+
+In `rust/vendor/ely-palette`: `Palette` and `Syntax` derive `Copy` (all fields are `Hsla`, so
+Sirio's `Theme` stays `Copy`), and `color_blind_chart` is `pub` instead of `pub(crate)`. The colour
+values are upstream's at this rev (the dark palette and the chart hues moved on since the old
+extraction); upstream's `.clone()` calls stay (row 61 is cosmetic and not carried here).
+
+Outcomes:
+
+- Row 58: re-applied (split re-made on this rev's files). Proof: the closure check and
+  `cargo nextest run -p sirio_theme`, which compile `Mode`/`Palette` as one type across both.
+- Row 59: re-applied. Proof: `sirio_theme`'s `ThemeColors` derives `Copy` over a `Palette` field,
+  so it fails to compile without it (`cargo nextest run -p sirio_theme`).
+- Row 60: re-applied. Proof: `ely-core` calls `ely_palette::color_blind_chart` across the crate
+  boundary; it does not compile with `pub(crate)`.
+
+- `crates/ely-core/src/theme/mod.rs`
+- `crates/ely-core/src/theme/palette.rs`
+- `crates/ely-core/src/theme/syntax.rs`

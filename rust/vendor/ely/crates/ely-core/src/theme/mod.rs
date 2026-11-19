@@ -1,8 +1,6 @@
 mod contrast;
 mod measures;
-mod palette;
 mod platform;
-mod syntax;
 mod tokens;
 
 #[cfg(all(test, feature = "test-support"))]
@@ -10,7 +8,7 @@ mod tests;
 
 use std::time::Duration;
 
-use gpui::{App, Global, SharedString, WindowAppearance};
+use gpui::{App, Global, SharedString};
 use web_time::Instant;
 
 use crate::motion;
@@ -20,33 +18,14 @@ pub use measures::{
     InteractionSizes, MapSizes, MediaSizes, MessagingSizes, MiscSizes, OnboardingSizes,
     ProjectSizes, ToolingSizes,
 };
-pub use palette::{HUE_NAMES, Mix, Palette, Syntax};
+pub use ely_palette::{HUE_NAMES, Mix, Mode, Palette, Syntax};
 pub use platform::Platform;
-pub use syntax::{SyntaxTheme, syntax_themes};
+pub use ely_palette::{SyntaxTheme, syntax_themes};
 pub use tokens::{
     AvatarSize, ContainerSize, ControlSize, Density, Elevation, IconSize, Radius, TextSize,
 };
 
 const FRAME: Duration = Duration::from_millis(8);
-
-/// Light or dark.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mode {
-    /// Dark text on light grounds.
-    #[default]
-    Light,
-    /// Light text on dark grounds.
-    Dark,
-}
-
-impl From<WindowAppearance> for Mode {
-    fn from(appearance: WindowAppearance) -> Self {
-        match appearance {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Mode::Dark,
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Mode::Light,
-        }
-    }
-}
 
 /// Design tokens. One global per app.
 pub struct Theme {
@@ -198,7 +177,7 @@ impl Theme {
             Mode::Dark => Palette::dark(self.high_contrast),
         };
         if self.color_blind_safe {
-            palette.chart = palette::color_blind_chart(self.mode);
+            palette.chart = ely_palette::color_blind_chart(self.mode);
         }
         palette
     }

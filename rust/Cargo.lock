@@ -2039,6 +2039,7 @@ dependencies = [
  "anyhow",
  "barcoders",
  "block2 0.6.2",
+ "ely-palette",
  "emojis",
  "futures",
  "gpui-pre",

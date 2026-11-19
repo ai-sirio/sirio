@@ -22,6 +22,7 @@ test-support = ["gpui/test-support", "gpui/leak-detection"]
 [dependencies]
 anyhow = "1"
 barcoders = { version = "2", default-features = false, features = ["std"] }
+ely-palette.workspace = true
 emojis = "0.9"
 futures = "0.3"
 gpui = { workspace = true, features = ["stacker"] }
