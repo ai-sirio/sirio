@@ -63,7 +63,8 @@ Existing methods only, newline JSON, every parameter a string:
 `surface.chat.open` (selects an already rendered chat — it does **not** create
 one; the seeded database does), `surface.chat.send` / `.compose`
 (`surfaceId`, `text`), `surface.chat.permission` (`surfaceId`, `requestId`,
-`optionId`), `surface.chat.stop` / `.read` (`surfaceId`), `system.quit`. The
+`optionId`; on an MCP Apps widget's card it may only reject: `reject_once`, any other option is
+refused), `surface.chat.stop` / `.read` (`surfaceId`), `system.quit`. The
 helper is `request(socket_path, method, params)`; a non-string parameter raises.
 Every request and reply goes to `responses.jsonl`.
 

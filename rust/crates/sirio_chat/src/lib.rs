@@ -19,7 +19,10 @@ pub use claude::{
     TaskControl, source_words,
 };
 pub use sirio_acp::AgentCommand;
+pub use sirio_chat_child::PERMISSION_TIMEOUT;
 pub use sirio_chat_vocab::*;
+/// The MCP Apps host rules, for `sirio_ui`, which reaches them only through here.
+pub use sirio_mcp_apps as mcp_apps;
 
 /// What a chat tab launches.
 ///
@@ -440,9 +443,10 @@ impl ChatClient {
 /// origin. Re-exported because `sirio_ui` reads them and does not depend on
 /// `sirio_claude`.
 pub use sirio_claude::{
-    CacheImpact, ContextBreakdown, ContextOrigins, ExtraUsage, FastMode, Hook, HookEvent,
-    HooksListing, HooksMode, HooksPolicy, LimitRow, McpAuthStart, McpOrigin, McpServer, McpState,
-    ModelTokens, OriginNode, PermissionRule, PermissionRules, PlanLimits, PluginsReloaded,
-    SessionTotals, SettingsError, Standing, THINKING_DISPLAYS, TaskOutput, UsageReport,
-    is_refusal, whole_percent,
+    AppCallRefusal, CacheImpact, ContextBreakdown, ContextOrigins, ExtraUsage, FastMode, Hook,
+    HookEvent, HooksListing, HooksMode, HooksPolicy, LimitRow, McpAuthStart, McpOrigin, McpServer,
+    McpState, McpTool, ModelTokens, OriginNode, PermissionRule, PermissionRules, PlanLimits,
+    PluginsReloaded, SessionTotals, SettingsError, Standing, THINKING_DISPLAYS, TaskOutput,
+    ToolUi, UiToolRef, UsageReport, app_call_name, call_tool_result, is_refusal, ui_tool_for,
+    whole_percent,
 };

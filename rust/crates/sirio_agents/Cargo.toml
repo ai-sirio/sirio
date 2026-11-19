@@ -23,3 +23,7 @@ serde_json = "1"
 # (`notify`) in the user's own `~/.codex/config.toml` and must leave every
 # other key and comment exactly as the user wrote it.
 toml_edit = "0.25"
+
+[dev-dependencies]
+# The live MCP Apps conformance test drives the production Claude client against the real CLI.
+sirio_chat = { path = "../sirio_chat" }

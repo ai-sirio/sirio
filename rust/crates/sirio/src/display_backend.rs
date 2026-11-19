@@ -78,20 +78,22 @@ pub(crate) fn choose(display: Option<&str>, force_flag: Option<&str>) -> Backend
     }
 }
 
-/// Applies the policy to this process's own environment.
+/// Applies the policy to this process's own environment, and says which one it applied: a
+/// widget's webview needs the X11 one.
 ///
 /// Must be called as the first thing `main` does. That is not style: in edition
 /// 2024 `set_var`/`remove_var` are `unsafe` because another thread reading the
 /// environment concurrently is a data race, and "no other thread exists yet" is
 /// what makes the call sound.
-pub(crate) fn prepare_environment() {
+pub(crate) fn prepare_environment() -> BackendChoice {
     let display = std::env::var("DISPLAY").ok();
     let force_flag = std::env::var(FORCE_FLAG).ok();
     let on_wayland = std::env::var_os("WAYLAND_DISPLAY")
         .as_deref()
         .is_some_and(|value| !value.is_empty());
 
-    match choose(display.as_deref(), force_flag.as_deref()) {
+    let choice = choose(display.as_deref(), force_flag.as_deref());
+    match choice {
         BackendChoice::ForceX11 => {
             // SAFETY: called as the first statement of `main`, before any
             // thread in this process exists, so nothing can be reading the
@@ -131,6 +133,7 @@ pub(crate) fn prepare_environment() {
             }
         }
     }
+    choice
 }
 
 /// Kept so a caller can name the variable without repeating the literal.

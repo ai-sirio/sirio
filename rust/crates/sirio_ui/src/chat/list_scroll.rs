@@ -55,6 +55,8 @@ impl Chat {
                 div()
                     .id("chat-jump-latest")
                     .debug_selector(|| "chat-jump-latest".into())
+                    // Where the disc is, for the widget sweep: a webview may not cover it.
+                    .child(self.disc_probe())
                     .child(ely_gpui_component::chat::ScrollToBottomButton::new(
                         "chat-latest-action",
                         0,

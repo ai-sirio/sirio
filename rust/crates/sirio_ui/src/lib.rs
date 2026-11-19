@@ -41,10 +41,16 @@ mod horizontal_scroll;
 // each having their own copy is the defect it exists to make impossible.
 pub mod git_status_style;
 pub mod loading;
+pub mod mcp_widget;
 pub mod markdown_preview;
 mod selectable_markdown;
 pub mod modal;
 pub mod motion;
+// The Linux XCB-to-Xlib parent fallback the browser and the widget webview share.
+// `pub` only because the `browser_*` examples compile `browser.rs` as their own crate.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod native_child;
 pub mod orbit;
 pub mod outline;
 pub mod pane_launcher;

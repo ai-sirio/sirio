@@ -1,0 +1,226 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>widget view</title>
+<style>html,body{margin:0;min-height:100vh;background:#12ab34}</style>
+<body>
+<script>
+// The scripted view of the mcp_widget* scenarios of test-chat-session-panel-e2e.sh. It speaks
+// JSON-RPC to window.parent and listens to nothing else. {{LOGGER}} is the scenario's own
+// 127.0.0.1 request logger, the only address the probes try to reach.
+(function () {
+  "use strict";
+  var LOGGER = "{{LOGGER}}";
+  var nextId = 1;
+  var pending = {};
+  var input = null;
+  var result = null;
+  var gotInput, gotResult;
+  var inputSeen = new Promise(function (resolve) { gotInput = resolve; });
+  var resultSeen = new Promise(function (resolve) { gotResult = resolve; });
+
+  function send(message) {
+    message.jsonrpc = "2.0";
+    window.parent.postMessage(message, "*");
+  }
+  function notify(method, params) { send({ method: method, params: params }); }
+  function call(method, params) {
+    return new Promise(function (resolve) {
+      var id = nextId++;
+      pending[id] = resolve;
+      send({ id: id, method: method, params: params });
+    });
+  }
+  function codeOf(answer) { return answer.error ? answer.error.code : 0; }
+  function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+  // Sirio's webview passes the page no keyboard input. The view counts `keydown` events in the
+  // capture phase and reports the count through its height: the base height plus the count, so
+  // the harness reads 600 for the first widget when no key reached it.
+  var keys = 0;
+  var baseHeight = null;
+  function reportHeight() {
+    if (baseHeight !== null) {
+      notify("ui/notifications/size-changed", { height: baseHeight + keys });
+    }
+  }
+  window.addEventListener("keydown", function () { keys++; reportHeight(); }, true);
+
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) { return; }
+    var m = event.data;
+    if (!m || typeof m !== "object") { return; }
+    if (m.method === "ui/notifications/tool-input") {
+      input = m.params && m.params.arguments;
+      gotInput();
+    } else if (m.method === "ui/notifications/tool-result") {
+      result = m.params;
+      gotResult();
+    } else if (m.id !== undefined && pending[m.id]) {
+      var resolve = pending[m.id];
+      delete pending[m.id];
+      resolve(m);
+    }
+  });
+
+  // After 3 s with no event a probe records "pending", never a guessed verdict.
+  function settle(executor) {
+    return new Promise(function (resolve) {
+      var done = false;
+      function finish(value) { if (!done) { done = true; resolve(value); } }
+      setTimeout(function () { finish("pending"); }, 3000);
+      try { executor(finish); } catch (e) { finish("threw"); }
+    });
+  }
+
+  // The isolation probes of isolation-view.html, role A, without its storage and navigation.
+  function probes() {
+    var r = {};
+    var violations = [];
+    document.addEventListener("securitypolicyviolation", function (e) {
+      violations.push(e.violatedDirective);
+    });
+    try { void window.parent.document; r.parentDocument = "ok"; }
+    catch (e) { r.parentDocument = "blocked"; }
+    r.frameElement = window.frameElement === null ? "null" : "present";
+    try { void window.parent.ipc; r.parentIpc = "ok"; } catch (e) { r.parentIpc = "blocked"; }
+    r.ownIpc = typeof window.ipc;
+    // Whether the IPC handler is reachable is recorded; it is posted to only in `forge()`,
+    // because Sirio closes a widget at its first message outside the relay.
+    var wk = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc;
+    r.webkitIpc = typeof wk === "undefined" ? "absent" : "present";
+    r.rtc = typeof RTCPeerConnection === "undefined" ? "absent" : "present";
+    try {
+      r.open = window.open(LOGGER + "/open") === null ? "null" : "ok";
+    } catch (e) { r.open = "null"; }
+    try {
+      var inner = document.createElement("iframe");
+      inner.src = LOGGER + "/frame";
+      document.body.appendChild(inner);
+      r.frame = "added";
+    } catch (e) { r.frame = "threw"; }
+    var checks = [
+      settle(function (done) {
+        fetch(LOGGER + "/fetch", { mode: "no-cors" }).then(
+          function () { done("ok"); }, function () { done("blocked"); });
+      }).then(function (v) { r.fetch = v; }),
+      settle(function (done) {
+        var img = new Image();
+        img.onload = function () { done("ok"); };
+        img.onerror = function () { done("blocked"); };
+        img.src = LOGGER + "/img";
+      }).then(function (v) { r.img = v; }),
+      settle(function (done) {
+        if (!navigator.geolocation) { done("absent"); return; }
+        navigator.geolocation.getCurrentPosition(
+          function () { done("granted"); },
+          function (e) { r.geolocationCode = e && e.code; done("denied"); });
+      }).then(function (v) { r.geolocation = v; }),
+      settle(function (done) {
+        if (typeof Notification === "undefined") { done("absent"); return; }
+        var p = Notification.requestPermission(done);
+        if (p && p.then) { p.then(done); }
+      }).then(function (v) { r.notification = v; })
+    ];
+    return Promise.all(checks).then(function () { return sleep(1000); }).then(function () {
+      r.violations = violations;
+      return r;
+    });
+  }
+
+  async function hi() {
+    var seen = await probes();
+    await Promise.all([inputSeen, resultSeen]);
+    var n = result && result.structuredContent && result.structuredContent.n;
+    var report = await call("tools/call", {
+      name: "report", arguments: { probes: seen, input: input, n: n } });
+    var escaped = codeOf(report);
+    var codes = [];
+    codes.push(codeOf(await call("resources/read", { uri: "ui://apps/show.html" })));
+    codes.push(codeOf(await call("ui/open-link", { url: LOGGER + "/link" })));
+    codes.push(codeOf(await call("ui/message", { role: "user", content: [] })));
+    // Past the 10 s cooldown the denial started. Sirio's own refusals are not denials.
+    await sleep(11000);
+    await call("tools/call", { name: "ping", arguments: {} });
+    await call("tools/call", { name: "model_only", arguments: {} });
+    var first = call("tools/call", {
+      name: "act", arguments: { step: 1, codes: codes, escaped: escaped } });
+    var second = await call("tools/call", {
+      name: "act", arguments: { step: 1, codes: codes, escaped: escaped } });
+    var answer = await first;
+    var got = answer.result && answer.result.structuredContent
+      && answer.result.structuredContent.n;
+    await call("tools/call", {
+      name: "act", arguments: { step: 2, got: got, second: codeOf(second) } });
+  }
+
+  // A real button at a known place (10,10 to 110,50 in the view): a click on it asks the host for
+  // the `report` tool, which raises a card.
+  function offerButton() {
+    var button = document.createElement("button");
+    button.id = "go";
+    button.textContent = "Go";
+    button.style.cssText = "position:absolute;left:10px;top:10px;width:100px;height:40px";
+    button.addEventListener("click", function () {
+      call("tools/call", { name: "report", arguments: { clicked: true } });
+    });
+    document.body.appendChild(button);
+  }
+
+  // A textarea at a known place (10,10 to 210,60 in the view). Its value length goes out through the
+  // height, on a base (2000) that the keydown count (120 plus the count) cannot reach: a middle click
+  // must not paste the PRIMARY selection into it.
+  function offerTextarea() {
+    var area = document.createElement("textarea");
+    area.id = "paste";
+    area.style.cssText = "position:absolute;left:10px;top:10px;width:200px;height:50px";
+    document.body.appendChild(area);
+    function report() {
+      notify("ui/notifications/size-changed", { height: 2000 + area.value.length });
+    }
+    area.addEventListener("input", report);
+    setInterval(report, 300);
+  }
+
+  // Posts straight to the IPC handler, outside the relay: Sirio closes the widget for it.
+  function forge() {
+    var wk = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc;
+    if (wk) { wk.postMessage(JSON.stringify({ jsonrpc: "2.0", method: "forged" })); }
+  }
+
+  async function flood() {
+    var answered = 0;
+    var end = Date.now() + 3000;
+    var posted = 0;
+    while (Date.now() < end) {
+      var id = nextId++;
+      pending[id] = function () { answered++; };
+      send({ id: id, method: "ping" });
+      posted++;
+      // Yielding every 500 posts (about 125k a second) is deliberately hostile: the host's IPC
+      // backlog keeps the widget over 50 a second for 5 s of host time, after the loop has ended,
+      // so Sirio closes it before the report below is ever sent.
+      if (posted % 500 === 0) { await sleep(0); }
+    }
+    await sleep(2000);
+    await call("tools/call", { name: "report", arguments: { answered: answered } });
+  }
+
+  call("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appInfo: { name: "scripted-view", version: "1" },
+    appCapabilities: {}
+  }).then(async function (answer) {
+    if (answer.error) { return; }
+    notify("ui/notifications/initialized", {});
+    await inputSeen;
+    var text = input && input.text;
+    baseHeight = text === "hi" ? 600 : 120;
+    reportHeight();
+    if (text === "hi") { await hi(); }
+    else if (text === "flood") { await flood(); }
+    else if (text === "forge") { forge(); }
+    else if (text === "idle") { offerButton(); }
+    else if (text === "paste") { offerTextarea(); }
+  });
+})();
+</script>

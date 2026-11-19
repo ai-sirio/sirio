@@ -14,8 +14,9 @@ use sirio_claude::message::{
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
 use sirio_chat_vocab::{
-    BackgroundTaskEvent, BackgroundTaskRow, ChatEvent, CliState, PlanEntryInfo, SessionNotice,
-    SubagentItem, SubagentUpdate, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
+    BackgroundTaskEvent, BackgroundTaskRow, ChatEvent, CliState, McpToolItem, McpToolUpdate,
+    PlanEntryInfo, SessionNotice, SubagentItem, SubagentUpdate, ToolCallContentInfo, ToolCallDiff,
+    ToolCallLocationInfo,
 };
 
 /// What a finished turn reported, kept for the caller that asks after the
@@ -106,6 +107,11 @@ pub(crate) struct Fold {
     /// ends. A command that fails repeats it as its `result`, and drawing
     /// that too would print the answer twice.
     local_command_text: Option<String>,
+    /// The CLI listed every capability a widget needs in its `system/init`, so main-thread
+    /// `mcp__` calls are announced as [`SessionNotice::McpTool`].
+    mcp_apps: bool,
+    /// Ids of the `mcp__` calls announced and not yet returned or cancelled, oldest first.
+    mcp_announced: Vec<String>,
 }
 
 /// What an `assistant` line's model says when the CLI wrote the line itself
@@ -115,6 +121,11 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 impl Fold {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Turns the MCP tool notices on or off. The worker sets it from `system/init`.
+    pub(crate) fn set_mcp_apps(&mut self, on: bool) {
+        self.mcp_apps = on;
     }
 
     /// Whether a subagent's line held this tool call.
@@ -332,6 +343,12 @@ impl Fold {
                             info,
                         },
                     );
+                    self.announce_mcp_call(
+                        &tool_use.id,
+                        &tool_use.name,
+                        &tool_use.input,
+                        &mut events,
+                    );
                 }
                 events
             }
@@ -344,7 +361,15 @@ impl Fold {
                     );
                 }
                 let mut events = Vec::new();
-                for result in user.tool_results() {
+                let results = user.tool_results();
+                // The line's structured result belongs to its one call; with several in the
+                // line it cannot be told whose it is.
+                let structured = (results.len() == 1)
+                    .then_some(user.tool_use_result.as_ref())
+                    .flatten()
+                    .filter(|value| !value.is_null());
+                let mut returned = false;
+                for result in results {
                     let Some(open) = self.open_calls.remove(&result.tool_use_id) else {
                         // A result for a call nobody opened: report the
                         // traffic rather than inventing a row for it.
@@ -354,6 +379,38 @@ impl Fold {
                         continue;
                     };
                     let content = completion_content(&open, &result, user.tool_use_result.as_ref());
+                    if let Some(at) = self
+                        .mcp_announced
+                        .iter()
+                        .position(|id| *id == result.tool_use_id)
+                    {
+                        self.mcp_announced.remove(at);
+                        // A call ran when its result block is not an error, whatever shape
+                        // its `tool_use_result` has: a denial and an error both carry
+                        // `is_error: true`. The result is rebuilt from the structured
+                        // `tool_use_result` when it is not a string, else from the text.
+                        let item = if result.is_error {
+                            McpToolItem::NotRun
+                        } else {
+                            // The CLI (2.1.328) sends a text-only success as the array of its
+                            // content blocks, and a structured one as an object.
+                            let value = match structured.filter(|value| !value.is_string()) {
+                                Some(blocks @ serde_json::Value::Array(_)) => {
+                                    serde_json::json!({ "content": blocks })
+                                }
+                                Some(object) => object.clone(),
+                                None => serde_json::Value::String(result.text.clone()),
+                            };
+                            McpToolItem::Returned {
+                                result: sirio_claude::call_tool_result(&value, false),
+                            }
+                        };
+                        self.notices.push(SessionNotice::McpTool(McpToolUpdate {
+                            id: result.tool_use_id.clone(),
+                            item,
+                        }));
+                        returned = true;
+                    }
                     events.push(ChatEvent::ToolCallCompleted {
                         id: result.tool_use_id,
                         status: if result.is_error {
@@ -370,6 +427,9 @@ impl Fold {
                             .as_ref()
                             .and_then(|value| serde_json::to_string_pretty(value).ok()),
                     });
+                }
+                if returned {
+                    events.push(session_notice_signal());
                 }
                 events
             }
@@ -485,7 +545,34 @@ impl Fold {
                 info,
             },
         );
+        self.announce_mcp_call(tool_use_id, tool_name, input, &mut events);
         events
+    }
+
+    /// Announces a main-thread `mcp__` call, once per id, when the notices are on. The signal
+    /// follows the call's own row event, so the row exists when the notice is read.
+    fn announce_mcp_call(
+        &mut self,
+        tool_use_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        events: &mut Vec<ChatEvent>,
+    ) {
+        if !self.mcp_apps
+            || !name.starts_with("mcp__")
+            || self.mcp_announced.iter().any(|id| id == tool_use_id)
+        {
+            return;
+        }
+        self.mcp_announced.push(tool_use_id.to_string());
+        self.notices.push(SessionNotice::McpTool(McpToolUpdate {
+            id: tool_use_id.to_string(),
+            item: McpToolItem::Called {
+                name: name.to_string(),
+                input: input.clone(),
+            },
+        }));
+        events.push(session_notice_signal());
     }
 
     /// A main-thread `Agent`/`Task` call opens the card its subagent's lines
@@ -861,6 +948,17 @@ impl Fold {
         // surface must not keep spinners running for work nobody will
         // report on.
         self.open_calls.clear();
+        let cancelled = std::mem::take(&mut self.mcp_announced);
+        if !cancelled.is_empty() {
+            self.notices
+                .extend(cancelled.into_iter().map(|id| {
+                    SessionNotice::McpTool(McpToolUpdate {
+                        id,
+                        item: McpToolItem::Cancelled,
+                    })
+                }));
+            events.push(session_notice_signal());
+        }
         self.streamed_ids.clear();
         self.open_message = None;
         self.last_row_was_chunk = false;
@@ -887,6 +985,13 @@ fn stop_reason_label(result: &ResultPayload) -> String {
         other => other,
     }
     .to_string()
+}
+
+/// The signal that tells a surface to drain the notice queue.
+fn session_notice_signal() -> ChatEvent {
+    ChatEvent::OtherSessionUpdate {
+        kind: "SessionNotice".into(),
+    }
 }
 
 /// Whether a tool call starts a subagent.
@@ -1892,5 +1997,137 @@ mod tests {
             "type": "result", "subtype": "success", "is_error": true, "result": "a real failure"
         })));
         assert!(events.contains(&ChatEvent::AgentMessageChunk("a real failure".into())));
+    }
+
+    // Failure list for the MCP tool notices:
+    // - a call announced twice, whether its permission or its `assistant` block came first;
+    // - a call announced with the gate shut, or a tool that is not an `mcp__` one;
+    // - a result announced for a call nobody announced;
+    // - an errored result that does not say so when the CLI gave no structured result;
+    // - a call still open at the turn's end that is not cancelled, or one that already returned
+    //   and is cancelled all the same, or cancelled again by the next turn.
+    fn mcp_updates(fold: &mut Fold) -> Vec<sirio_chat_vocab::McpToolUpdate> {
+        fold.take_notices()
+            .into_iter()
+            .filter_map(|notice| match notice {
+                SessionNotice::McpTool(update) => Some(update),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn mcp_call_line(id: &str, name: &str) -> CliMessage {
+        parse(json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": id, "name": name,
+                                     "input": {"text": "hi"}}]}
+        }))
+    }
+
+    fn mcp_result_line(id: &str, is_error: bool, text: &str) -> CliMessage {
+        parse(json!({
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": id,
+                                     "is_error": is_error, "content": text}]}
+        }))
+    }
+
+    #[test]
+    fn an_mcp_call_is_announced_once_whichever_line_comes_first() {
+        use sirio_chat_vocab::McpToolItem::Called;
+        let mut fold = Fold::new();
+        fold.set_mcp_apps(true);
+        fold.apply(mcp_call_line("toolu_a", "mcp__apps__show"));
+        fold.start_from_permission("mcp__apps__show", "toolu_a", &json!({"text": "hi"}));
+        fold.start_from_permission("mcp__apps__show", "toolu_b", &json!({"text": "hi"}));
+        fold.apply(mcp_call_line("toolu_b", "mcp__apps__show"));
+        fold.apply(mcp_call_line("toolu_c", "Bash"));
+        let ids: Vec<(String, bool)> = mcp_updates(&mut fold)
+            .into_iter()
+            .map(|update| (update.id, matches!(update.item, Called { .. })))
+            .collect();
+        assert_eq!(
+            ids,
+            [("toolu_a".to_string(), true), ("toolu_b".to_string(), true)]
+        );
+        let mut shut = Fold::new();
+        shut.apply(mcp_call_line("toolu_a", "mcp__apps__show"));
+        assert!(mcp_updates(&mut shut).is_empty(), "the gate is shut by default");
+    }
+
+    // How it can fail, written first: a text-only success (its `tool_use_result` is a string)
+    // is reported as not run, so its widget closes; a denial (a string, `is_error` true) is
+    // reported as having run, so the widget gets the call's input; a structured result with
+    // `is_error` true is reported as having run; a success reported as an error.
+    #[test]
+    fn an_mcp_call_ran_when_its_result_is_not_an_error() {
+        use sirio_chat_vocab::McpToolItem::{Called, NotRun, Returned};
+        let with_result = |id: &str, is_error: bool, structured: serde_json::Value| {
+            parse(json!({
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "tool_use_id": id,
+                                         "is_error": is_error, "content": "text"}]},
+                "tool_use_result": structured,
+            }))
+        };
+        let mut fold = Fold::new();
+        fold.set_mcp_apps(true);
+        for id in ["toolu_a", "toolu_b", "toolu_c", "toolu_d", "toolu_e", "toolu_f"] {
+            fold.apply(mcp_call_line(id, "mcp__apps__show"));
+        }
+        // A text-only success: the string is the text, and the call ran.
+        fold.apply(with_result("toolu_a", false, json!("plain text")));
+        // A denial: a string, `is_error` true.
+        fold.apply(with_result("toolu_b", true, json!("denied")));
+        // A structured result that is an error.
+        fold.apply(with_result("toolu_c", true, json!({"structuredContent": {"n": 1}})));
+        // A structured success.
+        fold.apply(with_result("toolu_d", false, json!({"structuredContent": {"n": 1}})));
+        // The real CLI's text-only success: the array of its content blocks.
+        fold.apply(with_result("toolu_f", false, json!([{"type": "text", "text": "noted"}])));
+        // No `tool_use_result` at all, success: ran, from the text.
+        fold.apply(mcp_result_line("toolu_e", false, "from text"));
+        // A result nobody announced is not announced.
+        fold.apply(mcp_result_line("toolu_unknown", false, "late"));
+        let updates = mcp_updates(&mut fold);
+        let of = |id: &str| {
+            updates
+                .iter()
+                .find(|update| update.id == id && !matches!(update.item, Called { .. }))
+                .map(|update| update.item.clone())
+        };
+        let Some(Returned { result }) = of("toolu_a") else { panic!("a text-only success ran") };
+        // Rebuilt from the result block's text, not from the string.
+        assert_eq!(result["content"][0]["text"], "text");
+        assert!(result.get("isError").is_none());
+        assert_eq!(of("toolu_b"), Some(NotRun));
+        assert_eq!(of("toolu_c"), Some(NotRun));
+        let Some(Returned { result }) = of("toolu_d") else { panic!("a structured success ran") };
+        assert_eq!(result["structuredContent"], json!({"n": 1}));
+        let Some(Returned { result }) = of("toolu_f") else { panic!("an array success ran") };
+        assert_eq!(result["content"][0]["text"], "noted");
+        let Some(Returned { result }) = of("toolu_e") else { panic!("a bare success ran") };
+        assert_eq!(result["content"][0]["text"], "from text");
+    }
+
+    #[test]
+    fn an_mcp_call_open_at_the_turns_end_is_cancelled_once() {
+        use sirio_chat_vocab::McpToolItem::Cancelled;
+        let mut fold = Fold::new();
+        fold.set_mcp_apps(true);
+        fold.apply(mcp_call_line("toolu_done", "mcp__apps__show"));
+        fold.apply(mcp_call_line("toolu_open", "mcp__apps__show"));
+        fold.apply(mcp_result_line("toolu_done", false, "ok"));
+        fold.take_notices();
+        let result = parse(json!({"type": "result", "subtype": "success", "is_error": false}));
+        fold.apply(result.clone());
+        let cancelled: Vec<String> = mcp_updates(&mut fold)
+            .into_iter()
+            .filter(|update| update.item == Cancelled)
+            .map(|update| update.id)
+            .collect();
+        assert_eq!(cancelled, ["toolu_open"]);
+        fold.apply(result);
+        assert!(mcp_updates(&mut fold).is_empty(), "a call is cancelled once");
     }
 }

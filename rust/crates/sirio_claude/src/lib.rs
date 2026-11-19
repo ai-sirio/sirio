@@ -37,7 +37,10 @@ pub use control::{
 };
 pub use hooks::{Hook, HookEvent, HooksListing, HooksMode, HooksPolicy, parse_hooks_listing};
 pub use launch::{ChatSession, LaunchLine};
-pub use mcp::{McpAuthStart, McpOrigin, McpServer, McpState, parse_mcp_status};
+pub use mcp::{
+    AppCallRefusal, McpAuthStart, McpOrigin, McpServer, McpState, McpTool, ToolUi, UiToolRef,
+    app_call_name, call_tool_result, claude_tool_name, parse_mcp_status, ui_tool_for,
+};
 pub use message::{
     AgentToolResult, AssistantMessage, AssistantPayload, BackgroundTask, CliMessage,
     CompactMetadata, ContentBlock, Delta, LocalCommandRun, McpServerStatus, MessageLifecycle, MessageUsage,

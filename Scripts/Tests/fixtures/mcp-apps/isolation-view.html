@@ -1,0 +1,124 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>isolation probe</title>
+<body>
+<script>
+(function () {
+  "use strict";
+  var LOGGER = "{{LOGGER}}";
+  // Three more addresses on 127.0.0.1, each with a port the view's CSP does not allow, for the
+  // hints a CSP does not cover: preconnect and DNS prefetch (a bare TCP connect), prefetch, and
+  // `<a ping>`. The proof counts raw TCP accepts on each, not only HTTP request lines.
+  var PRECONNECT = "{{LOGGER_PRECONNECT}}";
+  var PREFETCH = "{{LOGGER_PREFETCH}}";
+  var PING = "{{LOGGER_PING}}";
+  var ROLE = "{{ROLE}}";
+  function post(params) {
+    window.parent.postMessage({ jsonrpc: "2.0", method: "probe", params: params }, "*");
+  }
+  // After 3 s with no event a probe records "pending", never a guessed verdict.
+  function settle(executor) {
+    return new Promise(function (resolve) {
+      var done = false;
+      function finish(value) { if (!done) { done = true; resolve(value); } }
+      setTimeout(function () { finish("pending"); }, 3000);
+      try { executor(finish); } catch (e) { finish("threw"); }
+    });
+  }
+  if (ROLE === "B") {
+    var read;
+    try { read = localStorage.getItem("sirio-probe"); } catch (e) { read = "unavailable"; }
+    post({ role: "B", storageRead: read });
+    return;
+  }
+  var r = { role: "A" };
+  var violations = [];
+  document.addEventListener("securitypolicyviolation", function (e) {
+    violations.push(e.violatedDirective);
+  });
+  try { void window.parent.document; r.parentDocument = "ok"; }
+  catch (e) { r.parentDocument = "blocked"; }
+  r.frameElement = window.frameElement === null ? "null" : "present";
+  try { void window.parent.ipc; r.parentIpc = "ok"; } catch (e) { r.parentIpc = "blocked"; }
+  r.ownIpc = typeof window.ipc;
+  var wk = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc;
+  r.webkitIpc = typeof wk === "undefined" ? "absent" : "present";
+  if (r.webkitIpc === "present") {
+    try {
+      wk.postMessage(JSON.stringify({ jsonrpc: "2.0", method: "forged" }));
+      r.forged = "sent";
+    } catch (e) { r.forged = "threw"; }
+  }
+  r.rtc = typeof RTCPeerConnection === "undefined" ? "absent" : "present";
+  try {
+    r.open = window.open(LOGGER + "/open") === null ? "null" : "ok";
+  } catch (e) { r.open = "null"; }
+  try {
+    var inner = document.createElement("iframe");
+    inner.src = LOGGER + "/frame";
+    document.body.appendChild(inner);
+    r.frame = "added";
+  } catch (e) { r.frame = "threw"; }
+  try {
+    localStorage.setItem("sirio-probe", "A");
+    r.storageWrite = "ok";
+    // A fact, not a verdict: whether the page can read back what it just wrote.
+    r.storageSelfRead = localStorage.getItem("sirio-probe");
+  } catch (e) { r.storageWrite = "unavailable"; }
+
+  try {
+    var hint = function (rel, href) {
+      var link = document.createElement("link");
+      link.rel = rel;
+      link.href = href;
+      document.head.appendChild(link);
+    };
+    hint("preconnect", PRECONNECT);
+    hint("dns-prefetch", PRECONNECT);
+    hint("prefetch", PREFETCH + "/prefetch");
+    var rules = document.createElement("script");
+    rules.type = "speculationrules";
+    rules.textContent = JSON.stringify(
+      { prefetch: [{ source: "list", urls: [PREFETCH + "/spec"] }] });
+    document.head.appendChild(rules);
+    var anchor = document.createElement("a");
+    anchor.href = "#pinged";
+    anchor.setAttribute("ping", PING + "/ping");
+    anchor.textContent = "ping";
+    document.body.appendChild(anchor);
+    anchor.click();
+    r.hints = "added";
+  } catch (e) { r.hints = "threw"; }
+
+  var pending = [
+    settle(function (done) {
+      fetch(LOGGER + "/fetch", { mode: "no-cors" }).then(
+        function () { done("ok"); }, function () { done("blocked"); });
+    }).then(function (v) { r.fetch = v; }),
+    settle(function (done) {
+      var img = new Image();
+      img.onload = function () { done("ok"); };
+      img.onerror = function () { done("blocked"); };
+      img.src = LOGGER + "/img";
+    }).then(function (v) { r.img = v; }),
+    settle(function (done) {
+      if (!navigator.geolocation) { done("absent"); return; }
+      navigator.geolocation.getCurrentPosition(
+        function () { done("granted"); },
+        function (e) { r.geolocationCode = e && e.code; done("denied"); });
+    }).then(function (v) { r.geolocation = v; }),
+    settle(function (done) {
+      if (typeof Notification === "undefined") { done("absent"); return; }
+      var p = Notification.requestPermission(done);
+      if (p && p.then) { p.then(done); }
+    }).then(function (v) { r.notification = v; })
+  ];
+  Promise.all(pending).then(function () {
+    return new Promise(function (resolve) { setTimeout(resolve, 1000); });
+  }).then(function () {
+    r.violations = violations;
+    post(r);
+    location.href = LOGGER + "/nav";
+  });
+})();
+</script>

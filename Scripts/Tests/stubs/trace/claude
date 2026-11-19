@@ -4,9 +4,16 @@
 # native), and any other call is the stream-json fixture in its trace mode, whose
 # scripted turns the first word of a prompt picks and TRACE_STEP_MS paces (SIRIO_FIXTURE_FLOOR=1
 # makes it the 2.1.257 floor, which names no agent_id on a subagent's line or ask). Every
-# call is recorded in $SIRIO_STUB_LOG when the run names one.
+# call is recorded in $SIRIO_STUB_LOG when the run names one, with the launch variable
+# CLAUDE_CODE_MCP_APPS_HOST on a line of its own (`mcp-apps-host <value or ->`), which the
+# argv log cannot show. The MCP Apps knobs: SIRIO_FIXTURE_MCP_APPS=1,
+# SIRIO_FIXTURE_WIDGET_HTML=<path>, SIRIO_FIXTURE_STRAY_MCP_ASK=1, SIRIO_FIXTURE_START_BYPASS=1,
+# SIRIO_FIXTURE_EFFORT_LADDER=1 and SIRIO_FIXTURE_MCP_APPS_CAPS=<a,b> become the fixture's
+# `--fixture-*` arguments.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 [ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
+[ -z "${SIRIO_STUB_LOG:-}" ] ||
+  printf 'mcp-apps-host %s\n' "${CLAUDE_CODE_MCP_APPS_HOST:--}" >>"$SIRIO_STUB_LOG"
 case "$1" in
   --version|-V|version)
     echo "9.9.9 (Claude Code)"
@@ -14,4 +21,18 @@ case "$1" in
 esac
 floor=
 [ "${SIRIO_FIXTURE_FLOOR:-}" != 1 ] || floor=--fixture-floor
-exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" trace ${floor:+"$floor"} "$@"
+# Each knob is one argument or none, so an unset one adds nothing to the command line.
+mcp_apps=; [ "${SIRIO_FIXTURE_MCP_APPS:-}" != 1 ] || mcp_apps=--fixture-mcp-apps
+stray=; [ "${SIRIO_FIXTURE_STRAY_MCP_ASK:-}" != 1 ] || stray=--fixture-stray-mcp-ask
+bypass=; [ "${SIRIO_FIXTURE_START_BYPASS:-}" != 1 ] || bypass=--fixture-start-bypass
+ladder=; [ "${SIRIO_FIXTURE_EFFORT_LADDER:-}" != 1 ] || ladder=--fixture-effort-ladder
+widget=
+[ -z "${SIRIO_FIXTURE_WIDGET_HTML:-}" ] ||
+  widget=--fixture-widget-html=$SIRIO_FIXTURE_WIDGET_HTML
+# An empty list is an answer, so the variable's being set, not its value, decides.
+caps=
+[ -z "${SIRIO_FIXTURE_MCP_APPS_CAPS+x}" ] ||
+  caps=--fixture-mcp-apps-caps=$SIRIO_FIXTURE_MCP_APPS_CAPS
+exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" trace \
+  ${floor:+"$floor"} ${mcp_apps:+"$mcp_apps"} ${stray:+"$stray"} ${bypass:+"$bypass"} \
+  ${ladder:+"$ladder"} ${widget:+"$widget"} ${caps:+"$caps"} "$@"

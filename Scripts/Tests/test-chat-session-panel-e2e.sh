@@ -73,6 +73,15 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   rate_limit_shared  a forge host paused by the right panel's list is paused for the card
 #                      too: the row says so and the forge sees no read of it during the pause
 #   restore            the column is open, Sirio quits and starts again: it is still open
+#   mcp_widget         (A11, framed, 2200x1000, Linux/X11) two MCP Apps widgets (the trace stub, SIRIO_FIXTURE_MCP_APPS=1,
+#                      Scripts/Tests/fixtures/mcp-apps/widget-view.html) over their tool rows: the isolation probes, a
+#                      click-only card (keys do nothing, Escape denies, a real click allows), and at every step the
+#                      placement invariant on `mcpWidgets` (mapped exactly when the slot is wholly in the list's viewport
+#                      with no overlay, dock question or hidden tab; xwininfo says IsViewable exactly then) through
+#                      a half scroll, a folded turn, the effort list, a terminal tab and a dead CLI; the logger stays empty
+#   mcp_widget_flood   (framed) a widget posting pings at 125k a second for 3 s: surface.chat.read answers within 1 s
+#                      throughout, and the widget ends closed (over the rate limit for 5 s), with no card and no window
+#   mcp_widget_gate    (framed) the CLI lists _meta.ui but reports no capability: plain rows, no widget, no read, no call
 #
 # The notice_* scenarios (A7) use Scripts/Tests/stubs/notices/claude, the fixture in its cli_notices mode: the
 # prompt picks the turn (the stub's header, Scripts/Tests/stubs/notices/claude, lists them all).
@@ -414,7 +423,8 @@ ALL_SCENARIOS=(environment default_folds context connectors connector_switch con
   hooks_card hooks_policy hooks_refused hooks_closed_panel hooks_coalesced hooks_refresh hooks_unreadable
   notice_retry notice_retry_exhausted notice_notification notice_refusal notice_midstream limit_notice usage_text usage_floor usage_card
   usage_unavailable
-  startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result)
+  startup_config_invalid startup_opt_in startup_unknown_reason startup_no_result
+  mcp_widget mcp_widget_flood mcp_widget_gate)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -444,10 +454,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize background_tail_card background_tail_tab background_stop_click background_lane_stop connector_switch_click "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize background_tail_card background_tail_tab background_stop_click background_lane_stop connector_switch_click mcp_widget mcp_widget_flood mcp_widget_gate "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize background_stop_click connector_switch_click "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize background_stop_click connector_switch_click mcp_widget mcp_widget_flood mcp_widget_gate "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -1257,6 +1267,8 @@ capture() { # name
 #   SIRIO_FIXTURE_REPO  where the stub claude says the project memory lives
 #   SIRIO_STUB_LOG  the shim's call log; SIRIO_CSP_E2E_RUN marks this run's processes
 #   SIRIO_FIXTURE_DONE  the file the monitor script writes after its last turn (session_state_unprompted)
+#   SIRIO_FIXTURE_MCP_APPS, _WIDGET_HTML, _START_BYPASS, _STRAY_MCP_ASK, _EFFORT_LADDER, _MCP_APPS_CAPS  the
+#                      trace stub's MCP Apps knobs, passed only when a scenario sets them (the mcp_widget* scenarios)
 #   SIRIO_FIXTURE_GATE  the file session_state_background touches to release the fixture's held steps
 #   SIRIO_FIXTURE_STOP_DELAY  seconds the background-tasks stub waits before it answers a stop_task (default 1;
 #                        background_stop_click sets 5 so that a framed run's slow frames cannot skip `stopping`)
@@ -1330,6 +1342,14 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
   )
+  # The MCP Apps knobs reach the trace stub only when a scenario sets them. An empty capability list is
+  # an answer (no capabilities), so that one is passed whenever it is set, even to "".
+  local knob
+  for knob in SIRIO_FIXTURE_MCP_APPS SIRIO_FIXTURE_WIDGET_HTML SIRIO_FIXTURE_START_BYPASS \
+    SIRIO_FIXTURE_STRAY_MCP_ASK SIRIO_FIXTURE_EFFORT_LADDER; do
+    [ -z "${!knob:-}" ] || pairs+=("$knob=${!knob}")
+  done
+  [ -z "${SIRIO_FIXTURE_MCP_APPS_CAPS+x}" ] || pairs+=("SIRIO_FIXTURE_MCP_APPS_CAPS=$SIRIO_FIXTURE_MCP_APPS_CAPS")
   # A performance trace names a file that does not exist yet, one per launch.
   [ -z "${PERF_TRACE:-}" ] || pairs+=("SIRIO_PERF_TRACE=$PERF_TRACE")
   [ -z "${LC_ALL:-}" ] || pairs+=("LC_ALL=$LC_ALL")
@@ -5604,6 +5624,732 @@ scenario_startup_no_result() {
   stop_app
 }
 
+# ---- the mcp_widget* scenarios (A11, Linux/X11 only) ------------------------------------------------
+# A widget is a wry webview over the tool row, so the scenarios are framed (a private Xvfb, 2200x1000).
+# The view is Scripts/Tests/fixtures/mcp-apps/widget-view.html, scripted: its probes (the isolation
+# proof's, role A) try to reach a request logger on 127.0.0.1 that must stay empty. The trace stub
+# runs the fixture with SIRIO_FIXTURE_MCP_APPS=1 (the capabilities, `mcp_status`, `mcp_read_resource`,
+# `mcp_call`), SIRIO_FIXTURE_WIDGET_HTML (the view, with the logger's address), SIRIO_FIXTURE_START_BYPASS=1
+# (the CLI in bypassPermissions, which asks nothing for an `mcp_call`) and SIRIO_FIXTURE_EFFORT_LADDER=1
+# (the effort list the overlay step opens). The harness reads `mcpWidgets` of `surface.chat.read`, and each
+# widget's window with xwininfo.
+cat >"$RUN_DIR/widget-logger.py" <<'PY'
+import http.server, sys, threading
+
+port, path = int(sys.argv[1]), sys.argv[2]
+lock = threading.Lock()
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def handle_any(self):
+        with lock:
+            with open(path, "a", encoding="utf-8") as log:
+                log.write(f"{self.command} {self.path}\n")
+        self.send_response(204)
+        self.end_headers()
+
+    do_GET = do_POST = do_HEAD = do_PUT = do_OPTIONS = handle_any
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+cat >"$RUN_DIR/mcp_widgets.py" <<'PY'
+import json, os, re, socket, subprocess, sys, time
+
+
+def rpc(method, params):
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(30)
+    s.connect(os.environ["SIRIO_SOCKET"])
+    s.sendall((json.dumps({"id": "mw", "method": method, "params": params}) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(1 << 20)
+        if not chunk:
+            break
+        buf += chunk
+    s.close()
+    response = json.loads(buf)
+    if not response.get("ok"):
+        raise RuntimeError(response.get("error") or method)
+    return response.get("result") or {}
+
+
+def remember(rows):
+    """The last non-empty xid of each widget, and whether it reached ready, from every live read:
+    a closed row carries no xid, so the window to check afterwards is the one remembered here."""
+    path = os.environ.get("MW_XIDS")
+    if not path:
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            memory = json.load(f)
+    except (FileNotFoundError, ValueError):
+        memory = {}
+    for row in rows:
+        entry = memory.setdefault(row["toolUseId"], {"xid": "", "ready": False})
+        if row["xid"]:
+            entry["xid"] = row["xid"]
+        if row["phase"] == "ready":
+            entry["ready"] = True
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(memory, f)
+
+
+def remembered_windows(display, count, seconds=3.0):
+    """(problems, states): every remembered window must be GONE (xwininfo says BadWindow or no such
+    window) within `seconds` of the call, which comes right after the close; IsUnMapped is not
+    enough, the webview is dropped after its 1 s teardown grace. A widget that reached ready must
+    have had a window. Each state carries the seconds the window took to go."""
+    with open(os.environ["MW_XIDS"], encoding="utf-8") as f:
+        memory = json.load(f)
+    problems, states = [], []
+    if len(memory) != count:
+        problems.append(f"{len(memory)} widgets remembered, not {count}")
+    started = time.time()
+    for key, entry in sorted(memory.items()):
+        if entry["ready"] and not entry["xid"]:
+            problems.append(f"{key} was ready and never showed an xid")
+            continue
+        if not entry["xid"]:
+            continue
+        while True:
+            viewable, line = window_state(display, entry["xid"])
+            took = round(time.time() - started, 2)
+            if line == "gone" or time.time() - started >= seconds:
+                break
+            time.sleep(0.1)
+        states.append({"toolUseId": key, "xid": entry["xid"], "mapState": line, "secondsToGo": took})
+        if line != "gone":
+            problems.append(f"{key}: window {entry['xid']} still exists {took} s after the close: {line}")
+    return problems, states
+
+
+def read(surface):
+    result = rpc("surface.chat.read", {"surfaceId": surface})
+    rows = json.loads(result.get("mcpWidgets") or "[]")
+    remember(rows)
+    dock = json.loads(result["questionDock"]) if result.get("questionDock") else None
+    chat = {k: v for k, v in result.items() if k not in ("sessionPanel", "mcpWidgets")}
+    chat["transcript"] = json.loads(chat.get("transcript") or "[]")
+    return rows, dock, chat
+
+
+def norm(text):
+    return re.sub(r"\s+", "", text or "")
+
+
+def number(value):
+    return float(value) if value not in ("", None) else None
+
+
+def window_state(display, xid):
+    """(viewable, the Map State line): a missing window is not viewable."""
+    if not xid:
+        return False, "no xid"
+    done = subprocess.run(["xwininfo", "-display", display, "-id", xid],
+                          capture_output=True, text=True, timeout=5)
+    line = next((l.strip() for l in done.stdout.splitlines() if "Map State" in l), "no window")
+    if done.returncode != 0 and ("BadWindow" in done.stderr or "No such window" in done.stderr):
+        line = "gone"
+    return done.returncode == 0 and "IsViewable" in line, line
+
+
+def violations(rows, display):
+    """The placement invariant: mapped exactly when the slot is drawn wholly inside the viewport
+    with no overlay, no dock question and no hidden tab; the X window is viewable exactly when
+    mapped. Returns (problems, xwininfo lines)."""
+    problems, lines = [], []
+    for row in rows:
+        key = row["toolUseId"]
+        viewable, line = window_state(display, row["xid"])
+        lines.append({"toolUseId": key, "xid": row["xid"], "mapState": line})
+        mapped = row["mapped"] == "1"
+        if row["phase"] == "closed":
+            want = False
+        else:
+            top, bottom = number(row["slotTop"]), number(row["slotBottom"])
+            vtop, vbottom = number(row["viewportTop"]), number(row["viewportBottom"])
+            want = (row["slotDrawn"] == "1" and None not in (top, bottom, vtop, vbottom)
+                    and top >= vtop and bottom <= vbottom and row["overlayOpen"] == "0"
+                    and row["dockOpen"] == "0" and row["hidden"] == "0")
+        if mapped != want:
+            problems.append(f"{key}: mapped is {row['mapped']}, the placement says {int(want)}")
+        if viewable != mapped:
+            problems.append(f"{key}: the window is {line!r} while mapped is {row['mapped']}")
+    return problems, lines
+
+
+def record(artifact, label, rows, dock, windows):
+    with open(artifact, "a", encoding="utf-8") as out:
+        out.write(json.dumps({"step": label, "mcpWidgets": rows, "questionDock": dock,
+                              "xwininfo": windows}) + "\n")
+
+
+command = sys.argv[1]
+if command == "read":
+    rows, dock, chat = read(sys.argv[2])
+    print(json.dumps({"mcpWidgets": rows, "questionDock": dock}))
+elif command == "wait":
+    # wait SURFACE SECONDS DESC EXPR: `w` the widget rows, `d` the dock, `t` the transcript rows.
+    surface, seconds, desc, expr = sys.argv[2], float(sys.argv[3]), sys.argv[4], sys.argv[5]
+    deadline, last = time.time() + seconds, None
+    while True:
+        rows, dock, chat = read(surface)
+        last = {"mcpWidgets": rows, "questionDock": dock}
+        try:
+            if eval(expr, {"w": rows, "d": dock, "t": chat["transcript"], "c": chat,
+                           "re": re, "norm": norm, "json": json}):
+                print("  read: " + json.dumps(last))
+                print("OK: " + desc)
+                sys.exit(0)
+        except (KeyError, IndexError, TypeError):
+            pass
+        if time.time() > deadline:
+            print("  read: " + json.dumps(last), file=sys.stderr)
+            print("FAIL: " + desc, file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+elif command == "dock-row":
+    # dock-row SURFACE OPTION SECONDS: polls every 30 ms until the dock shows a click-only card with
+    # the option's row painted, then prints that row's centre in window pixels, as fast as it can:
+    # the caller presses on it before the card arms (500 ms after it appears).
+    surface, option, seconds = sys.argv[2], sys.argv[3], float(sys.argv[4])
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        result = rpc("surface.chat.read", {"surfaceId": surface})
+        dock = json.loads(result["questionDock"]) if result.get("questionDock") else None
+        if dock and dock.get("clickOnly") is True:
+            ids = [o["id"] for o in dock["options"]]
+            bounds = dock["rowBounds"][ids.index(option)] if option in ids else None
+            if bounds:
+                print(int(bounds["x"] + bounds["w"] / 2), int(bounds["y"] + bounds["h"] / 2))
+                sys.exit(0)
+        time.sleep(0.03)
+    print("FAIL: no click-only card with a painted " + option + " row", file=sys.stderr)
+    sys.exit(1)
+elif command == "pixels":
+    # pixels IMAGE R G B TOL: the fraction of the image's pixels within TOL of the colour.
+    raw = subprocess.run(["convert", sys.argv[2], "-depth", "8", "rgb:-"], capture_output=True, check=True).stdout
+    want, tol = [int(v) for v in sys.argv[3:6]], int(sys.argv[6])
+    total = len(raw) // 3
+    near = sum(1 for i in range(0, total * 3, 3)
+               if all(abs(raw[i + k] - want[k]) <= tol for k in range(3)))
+    print(f"{near / total:.4f}" if total else "0")
+elif command == "invariant":
+    # invariant SURFACE DISPLAY LABEL ARTIFACT COUNT: holds within 6 s of settling, or fails.
+    surface, display, label, artifact, count = sys.argv[2:7]
+    deadline = time.time() + 6
+    while True:
+        rows, dock, chat = read(surface)
+        problems, windows = violations(rows, display)
+        if len(rows) != int(count):
+            problems.append(f"{len(rows)} widgets, not {count}")
+        if not problems:
+            record(artifact, label, rows, dock, windows)
+            print(f"OK: the placement invariant holds at '{label}' for {len(rows)} widgets"
+                  f" ({', '.join(w['mapState'] for w in windows)})")
+            sys.exit(0)
+        if time.time() > deadline:
+            record(artifact, label + " (violated)", rows, dock, windows)
+            print("  read: " + json.dumps({"mcpWidgets": rows}), file=sys.stderr)
+            for problem in problems:
+                print("FAIL: " + problem, file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+elif command == "remembered":
+    # remembered DISPLAY COUNT ARTIFACT: after close, the windows seen live are gone or unmapped.
+    display, count, artifact = sys.argv[2], int(sys.argv[3]), sys.argv[4]
+    problems, states = remembered_windows(display, count)
+    record(artifact, "remembered windows after close", [], None, states)
+    for state in states:
+        print(f"  remembered window {state['xid']} of {state['toolUseId']}: {state['mapState']} after {state['secondsToGo']} s")
+    if problems:
+        for problem in problems:
+            print("FAIL: " + problem, file=sys.stderr)
+        sys.exit(1)
+    print(f"OK: the {len(states)} windows seen while the widgets lived are gone after close")
+elif command == "flood-end":
+    # flood-end SURFACE SECONDS ARTIFACT DISPLAY: the flooded widget ends closed, for the rate limit,
+    # with no card ever raised and the window it had destroyed; the final row joins the artifact.
+    surface, seconds, artifact, display = sys.argv[2], float(sys.argv[3]), sys.argv[4], sys.argv[5]
+    deadline = time.time() + seconds
+    while True:
+        rows, dock, chat = read(surface)
+        if dock is not None or any(r.get("kind") == "permission" for r in chat["transcript"]):
+            print("FAIL: a widget card appeared during the flood", file=sys.stderr)
+            sys.exit(1)
+        if rows and rows[0]["phase"] == "closed":
+            break
+        if time.time() > deadline:
+            print("  read: " + json.dumps(rows), file=sys.stderr)
+            print("FAIL: the flooding widget was not closed within 30 s", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+    row = rows[0]
+    print("  closed row: " + json.dumps(row))
+    if row["error"] != "over the rate limit for 5 s":
+        print("FAIL: the widget closed for another reason", file=sys.stderr)
+        sys.exit(1)
+    if row["mapped"] != "0":
+        print("FAIL: the closed widget is still mapped", file=sys.stderr)
+        sys.exit(1)
+    if row["forged"] != "0":
+        print("FAIL: the flooding widget forged a message", file=sys.stderr)
+        sys.exit(1)
+    problems, states = remembered_windows(display, 1)
+    if problems or not states:
+        print("FAIL: " + "; ".join(problems or ["no window was remembered"]), file=sys.stderr)
+        sys.exit(1)
+    line = f"{states[0]['xid']} {states[0]['mapState']} after {states[0]['secondsToGo']} s"
+    with open(artifact, encoding="utf-8") as f:
+        data = json.load(f)
+    data["finalRow"] = row
+    data["finalWindow"] = line
+    with open(artifact, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    print(f"OK: the widget closed with '{row['error']}', raised no card, and its remembered window {line}")
+elif command == "latency":
+    # latency SURFACE SECONDS ARTIFACT: one surface.chat.read every 100 ms; each must answer in 1 s.
+    surface, seconds, artifact = sys.argv[2], float(sys.argv[3]), sys.argv[4]
+    end, latencies = time.time() + seconds, []
+    while time.time() < end:
+        started = time.time()
+        rpc("surface.chat.read", {"surfaceId": surface})
+        latencies.append(round((time.time() - started) * 1000, 1))
+        time.sleep(max(0, 0.1 - (time.time() - started)))
+    with open(artifact, "w", encoding="utf-8") as out:
+        json.dump({"reads": len(latencies), "maxMs": max(latencies), "latenciesMs": latencies}, out)
+    print(f"  {len(latencies)} reads in {seconds:g} s, slowest {max(latencies)} ms")
+    if max(latencies) > 1000:
+        print("FAIL: a read took over 1000 ms during the flood", file=sys.stderr)
+        sys.exit(1)
+    print(f"OK: surface.chat.read answered within 1000 ms throughout the flood (max {max(latencies)} ms)")
+PY
+MW() { python3 "$RUN_DIR/mcp_widgets.py" "$@"; }
+WIDGET_LOGGER_PID=""
+# A fresh Sirio on the trace stub, its CLI MCP-Apps capable, the scripted view served with the logger's
+# address, and a Claude chat open. A second argument (mcp_widget_gate only) reports no capability at all.
+widget_chat() { # name [caps-given]
+  local name=$1 port
+  port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  WIDGET_LOGGER_LOG="$RUN_DIR/$name-logger.log"
+  : >"$WIDGET_LOGGER_LOG"
+  SIRIO_CSP_E2E_RUN="$RUN_DIR" python3 "$RUN_DIR/widget-logger.py" "$port" "$WIDGET_LOGGER_LOG" &
+  WIDGET_LOGGER_PID=$!
+  for _ in $(seq 1 50); do
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$port/ready" && break
+    sleep 0.2
+  done
+  : >"$WIDGET_LOGGER_LOG"
+  sed "s|{{LOGGER}}|http://127.0.0.1:$port|g" "$ROOT/Scripts/Tests/fixtures/mcp-apps/widget-view.html" >"$RUN_DIR/$name-view.html"
+  SIRIO_FIXTURE_MCP_APPS=1
+  SIRIO_FIXTURE_WIDGET_HTML="$RUN_DIR/$name-view.html"
+  SIRIO_FIXTURE_START_BYPASS=1
+  SIRIO_FIXTURE_EFFORT_LADDER=1
+  [ -z "${2:-}" ] || SIRIO_FIXTURE_MCP_APPS_CAPS=""
+  : >>"$RUN_DIR/fixture-control.log"
+  WIDGET_MARK=$(control_log_lines)
+  WIDGET_ARTIFACT="$RUN_DIR/$name-steps.jsonl"
+  export MW_XIDS="$RUN_DIR/$name-xids.json"
+  rm -f "$MW_XIDS"
+  trace_chat "$name" 150
+}
+stop_widget_logger() {
+  [ -z "$WIDGET_LOGGER_PID" ] || { kill "$WIDGET_LOGGER_PID" 2>/dev/null || true; wait "$WIDGET_LOGGER_PID" 2>/dev/null || true; }
+  WIDGET_LOGGER_PID=""
+}
+# The placement invariant at a step, for every widget.
+widget_invariant() { # label
+  MW invariant "$SURFACE" "$DISPLAY_TARGET" "$1" "$WIDGET_ARTIFACT" "${WIDGET_COUNT:-2}" || fail "the placement invariant failed at '$1'"
+}
+widget_wait() { # desc seconds expr
+  MW wait "$SURFACE" "$2" "$1" "$3" || fail "$1"
+}
+# The window pixel at the middle of the dock's row whose option id is $1.
+dock_row_xy() { # option-id
+  MW read "$SURFACE" | python3 -c '
+import json, sys
+dock = json.load(sys.stdin)["questionDock"]
+index = next(i for i, o in enumerate(dock["options"]) if o["id"] == sys.argv[1])
+b = dock["rowBounds"][index]
+print(int(b["x"] + b["w"] / 2), int(b["y"] + b["h"] / 2))' "$1"
+}
+# The pending permission card's request id.
+widget_card_id() {
+  find_panel "a permission card is pending" 'next((r["id"] for r in c["transcript"] if r.get("kind") == "permission" and r.get("status") == "pending"), "")' 30
+}
+# The scenarios' assertions on what the CLI heard and the logger saw.
+widget_control_lines() { # prints the control log lines after the mark
+  tail -n +"$((WIDGET_MARK + 1))" "$RUN_DIR/fixture-control.log" 2>/dev/null || true
+}
+
+scenario_mcp_widget() {
+  WIDGET_COUNT=2
+  widget_chat mcp_widget
+  send_prompt mcp_widget
+  # 1. two widgets, each with its own slot. One read judges them all, before card 1 (which the view
+  # raises about four seconds after it loads) shrinks the list. `height` is what the view asked for (600);
+  # the chat clamps it where it draws the box, so the box's own bounds (slotBottom - slotTop) are measured
+  # against min(600, 0.8 x the viewport).
+  widget_wait "two widgets are ready with input and result delivered, each in its own slot, with the server's CSP domains and the dropped one, the first as tall as min(600, 0.8 x the viewport)" 60 \
+    'len(w) == 2 and all(r["phase"] == "ready" and r["inputDelivered"] == "1" and r["resultDelivered"] == "1" and r["forged"] == "0" and r["slotTop"] != "" and r["dockOpen"] == "0" for r in w) and {r["toolUseId"] for r in w} == {"toolu_show_1", "toolu_show_2"} and all(r["server"] == "apps" and r["tool"] == "show" and r["domains"] == "https://api.widget.test,https://cdn.widget.test" and r["dropped"] == "http://bad.widget.test" for r in w) and w[0]["xid"] != "" and w[1]["xid"] != "" and w[0]["xid"] != w[1]["xid"] and w[0]["toolUseId"] != w[1]["toolUseId"] and float(w[0]["slotBottom"]) <= float(w[1]["slotTop"]) and w[0]["height"] == "600" and abs((float(w[0]["slotBottom"]) - float(w[0]["slotTop"])) - min(600.0, 0.8 * (float(w[0]["viewportBottom"]) - float(w[0]["viewportTop"])))) <= 2.0'
+  widget_invariant "1 two widgets"
+  # 2. card 1: click-only, Reject selected; the probes; keys do nothing; Escape denies
+  widget_wait "card 1 is pending, click-only, with Reject selected and the dock open" 60 \
+    'd and d["clickOnly"] is True and d["options"][d["selected"]]["id"] == "reject_once" and any(r["dockOpen"] == "1" for r in w)'
+  widget_wait "the dock body names the input, n and the isolation probes" 10 \
+    'all(s in norm(d["body"]) for s in ["\"text\":\"hi\"", "\"n\":42", "\"parentDocument\":\"blocked\"", "\"frameElement\":\"null\"", "\"parentIpc\":\"blocked\"", "\"rtc\":\"absent\"", "\"fetch\":\"blocked\"", "\"img\":\"blocked\"", "\"open\":\"null\""])'
+  widget_invariant "2 card 1 open"
+  sleep 0.6
+  # These keys reach the dock: the same press_key path's real Escape below closes this card.
+  press_key Return
+  press_key 1
+  press_key Down
+  press_key Return
+  sleep 1
+  widget_wait "card 1 is still pending after Return, 1, Down and Return" 5 \
+    'd and any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  echo "step: a real Escape denies card 1"
+  press_key Escape
+  widget_wait "Escape closed card 1" 15 'not d and not any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  widget_invariant "2 card 1 denied"
+  # 3. card 2 after the cooldown
+  # 3a. a press that begins before card 2 arms does not count when it is released after it (500 ms): the
+  # press goes down on the Allow row as soon as the row is painted, and the release comes 0.7 s later.
+  # The card must still be pending. (A real press moves Sirio's keyboard focus to the composer on this
+  # window-manager-less display, so it comes at the step that needs no key afterwards.)
+  local early origin ex ey
+  origin=$(window_origin)
+  early=$(MW dock-row "$SURFACE" allow_once 60) || fail "card 2 did not show a painted Allow row"
+  ex=$(( ${early% *} + ${origin% *} ))
+  ey=$(( ${early#* } + ${origin#* } ))
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$ex" "$ey" mousedown 1 sleep 0.7 mouseup 1 \
+    || fail "xdotool could not press on the Allow row"
+  echo "step: a real press on the Allow row before card 2 armed, released 0.7 s later"
+  widget_wait "card 2 is still pending after a press that began before it armed" 5 \
+    'd and d["clickOnly"] is True and any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  widget_wait "card 2 arrives with the unsupported codes, the escape and one ask at a time" 60 \
+    'd and all(s in norm(d["body"]) for s in ["\"step\":1", "\"codes\":[-32601,-32601,-32601]", "\"escaped\":-32000"]) and set(w[0]["refused"].split("|")) >= {"tools/call:ping:not a tool of this server", "tools/call:model_only:not callable from a widget", "tools/call:act:one ask at a time"}'
+  widget_invariant "3 card 2 open"
+  # Card 2's body (ten lines) is cut by the dock's box, so Allow is not armed: a real click on it, long
+  # after the card armed, does nothing. A real wheel over the body scrolls it to its end, which arms Allow.
+  widget_wait "card 2's body is cut by its box, so Allow is not armed" 10 'd and d["allowArmed"] == "0"'
+  sleep 0.6
+  echo "step: a real click on the Allow row, before the body was scrolled to its end"
+  click_at_window "$(dock_row_xy allow_once)"
+  widget_wait "card 2 is still pending after a click on its unarmed Allow" 5 \
+    'd and d["allowArmed"] == "0" and any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  local wheel
+  wheel=$(MW read "$SURFACE" | python3 -c '
+import json, sys
+b = json.load(sys.stdin)["questionDock"]["rowBounds"][0]
+print(int(b["x"] + b["w"] / 2), int(b["y"] - 60))')
+  origin=$(window_origin)
+  echo "step: a real wheel over the card's body ($wheel)"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove $(( ${wheel% *} + ${origin% *} )) $(( ${wheel#* } + ${origin#* } )) \
+    click --repeat 8 --delay 100 5 || fail "xdotool could not scroll the card's body"
+  widget_wait "scrolled to its end, card 2's Allow is armed" 10 'd and d["allowArmed"] == "1"'
+  sleep 0.6
+  echo "step: a real click on the Allow row"
+  click_at_window "$(dock_row_xy allow_once)"
+  # 4. card 3: the result of the call that card 2 allowed came back through bypass
+  widget_wait "card 3 carries the allowed call's n, and its Allow is not armed until its body is scrolled" 40 \
+    'd and d["allowArmed"] == "0" and "\"got\":42" in norm(d["body"])'
+  widget_invariant "4 card 3 open"
+  sleep 0.6
+  E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="$(widget_card_id)" optionId=reject_once >/dev/null \
+    || fail "reject_once on card 3 failed"
+  widget_wait "card 3 is closed" 15 'not d and not any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  widget_invariant "4 card 3 rejected"
+  # 5. scrolling the first widget half out, then back. The list follows the latest row, which leaves the
+  # first widget partly above the viewport and its slot bounds stale (they are from the last sweep that
+  # drew the slot), so the list goes to its top first, where the slot is drawn and its bounds are fresh.
+  # There the box still ends below the viewport's bottom (the user row and the header come first), so
+  # it is scrolled until it lies whole in the viewport: every pixel count below is computed from a read.
+  local shift
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels=-100000 >/dev/null || fail "scrollBy to the top failed"
+  widget_wait "at the top of the list the first widget is drawn" 15 'w[0]["slotDrawn"] == "1"'
+  shift=$(MW read "$SURFACE" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["mcpWidgets"][0]
+print(float(r["slotTop"]) - (float(r["viewportTop"]) + 20))')
+  echo "step: scrolling the first widget whole into the viewport ($shift px)"
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels="$shift" >/dev/null || fail "scrollBy failed"
+  widget_wait "the first widget lies whole in the viewport and is mapped" 15 \
+    'w[0]["slotDrawn"] == "1" and w[0]["mapped"] == "1" and float(w[0]["slotTop"]) >= float(w[0]["viewportTop"]) and float(w[0]["slotBottom"]) <= float(w[0]["viewportBottom"])'
+  widget_invariant "5 whole in view"
+  # 5p. the page fills the slot, on pixels (the X geometry check passed while the slot was black): widget
+  # 1's slot is cropped out of a screenshot of the display, at least 90% of it must be the view's own
+  # background colour (#12ab34, which the chat never uses), and the crop is kept as the artifact.
+  local px_origin px_x px_y px_w px_h px_frac
+  px_origin=$(window_origin)
+  read -r px_x px_y px_w px_h < <(MW read "$SURFACE" | python3 -c '
+import json, subprocess, sys
+r = json.load(sys.stdin)["mcpWidgets"][0]
+geo = subprocess.run(["xwininfo", "-display", sys.argv[1], "-id", r["xid"]], capture_output=True, text=True).stdout
+x = int([l for l in geo.splitlines() if "Absolute upper-left X" in l][0].split()[-1])
+w = int([l for l in geo.splitlines() if "Width:" in l][0].split()[-1])
+top, bottom = float(r["slotTop"]), float(r["slotBottom"])
+print(x, int(top) + int(sys.argv[3]), w, int(bottom - top))' "$DISPLAY_TARGET" "${px_origin% *}" "${px_origin#* }")
+  DISPLAY="$DISPLAY_TARGET" import -window root "$OUT_DIR/widget-slot-screen.png" || fail "could not take a screenshot of the display"
+  convert "$OUT_DIR/widget-slot-screen.png" -crop "${px_w}x${px_h}+${px_x}+${px_y}" +repage "$OUT_DIR/widget-slot-crop.png" || fail "could not crop the widget's slot"
+  px_frac=$(MW pixels "$OUT_DIR/widget-slot-crop.png" 18 171 52 12)
+  echo "  widget 1's slot ${px_w}x${px_h} at $px_x,$px_y: $px_frac of its pixels are the view's colour"
+  python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= 0.9 else 1)' "$px_frac" || fail "widget 1's page does not fill its slot: only $px_frac of its pixels are the view's colour"
+  echo "OK: widget 1's page fills its slot ($px_frac of the slot is the view's colour); crop: $OUT_DIR/widget-slot-crop.png"
+  # 5b. the composer still gets keys after a click in a widget: a real click inside the first widget, then
+  # one in the composer, then real keys.
+  local xid geo wx wy ww wh cx cy
+  xid=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["xid"])')
+  [ -n "$xid" ] || fail "the first widget has no window to click in"
+  geo=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$xid" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} /Width:/ {w=$NF} /Height:/ {h=$NF} END {print x, y, w, h}')
+  read -r wx wy ww wh <<<"$geo"
+  echo "step: a real click inside widget 1 (window $xid at $wx,$wy ${ww}x${wh}), then one in the composer, then real keys"
+  click_at $(( wx + ww / 2 )) $(( wy + wh / 2 ))
+  origin=$(window_origin)
+  cy=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(int(float(json.load(sys.stdin)["mcpWidgets"][0]["viewportBottom"])) + 60)')
+  cx=$(( wx + ww / 2 ))
+  click_at "$cx" $(( cy + ${origin#* } ))
+  type_text focusmark
+  wait_panel "the composer holds what was typed after the click in the widget and the click in the composer" 'c["composerText"] == "focusmark"' 10
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool key --repeat 9 --delay 40 BackSpace || fail "xdotool could not clear the composer"
+  wait_panel "the composer is empty again" 'c["composerText"] == ""' 10
+  shift=$(MW read "$SURFACE" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["mcpWidgets"][0]
+top, bottom, vtop = float(r["slotTop"]), float(r["slotBottom"]), float(r["viewportTop"])
+print(top - (vtop - (bottom - top) / 2))')
+  echo "step: scrolling the first widget to half out of the top ($shift px)"
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels="$shift" >/dev/null || fail "scrollBy failed"
+  widget_wait "half of the first widget is above the viewport, and it is unmapped" 15 'w[0]["mapped"] == "0"'
+  widget_invariant "5 scrolled half out"
+  echo "step: scrolling back by the same pixels"
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels="-$shift" >/dev/null || fail "scrollBy back failed"
+  widget_wait "the first widget is whole in view again and mapped" 15 'w[0]["slotDrawn"] == "1" and w[0]["mapped"] == "1"'
+  widget_invariant "5 scrolled back"
+  # 6. folding its turn
+  local footer
+  footer=$(MW read "$SURFACE" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mcpWidgets"][0]["turnFooter"])')
+  [ -n "$footer" ] || fail "the first widget's turn has no footer to fold"
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=toggleTurn turn="$footer" >/dev/null || fail "toggleTurn failed"
+  widget_wait "the folded turn draws no slot, and nothing is mapped" 15 'w[0]["slotDrawn"] == "0" and w[0]["mapped"] == "0"'
+  widget_invariant "6 turn folded"
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=toggleTurn turn="$footer" >/dev/null || fail "toggleTurn back failed"
+  widget_wait "the unfolded turn draws its slot again" 15 'w[0]["slotDrawn"] == "1"'
+  widget_invariant "6 turn unfolded"
+  # 7. the effort list is an overlay
+  E2E rpc surface.chat.effort surfaceId="$SURFACE" action=open >/dev/null || fail "effort open failed"
+  widget_wait "the effort list is open and every widget is unmapped" 15 \
+    'len(w) == 2 and all(r["overlayOpen"] == "1" and r["mapped"] == "0" for r in w)'
+  widget_invariant "7 effort list open"
+  E2E rpc surface.chat.effort surfaceId="$SURFACE" action=close >/dev/null || fail "effort close failed"
+  widget_wait "the effort list is closed" 15 'len(w) == 2 and all(r["overlayOpen"] == "0" for r in w)'
+  widget_invariant "7 effort list closed"
+  # 8. a file tab in the chat's pane takes the chat off screen. A terminal tab does not: it opens in the
+  # other pane of the split, so the chat stays on screen beside it (checked next, as a layout change).
+  E2E rpc surface.editor.open path="$LINKED/CLAUDE.md" >/dev/null || fail "surface.editor.open failed"
+  widget_wait "the chat's tab is off screen and every widget is unmapped" 15 \
+    'len(w) == 2 and all(r["hidden"] == "1" and r["mapped"] == "0" for r in w)'
+  widget_invariant "8 a file tab selected"
+  show_chat
+  widget_wait "the chat is back and shows its widgets" 15 'len(w) == 2 and all(r["hidden"] == "0" for r in w)'
+  widget_invariant "8 chat selected"
+  E2E rpc surface.terminal.open >/dev/null || fail "surface.terminal.open failed"
+  local terminal
+  terminal=$(tab_positions terminal | awk '{print $1}')
+  [ -n "$terminal" ] || fail "no terminal tab opened"
+  sleep 2
+  capture mcp-widget-terminal
+  widget_wait "beside a terminal the chat is on screen and its widgets are still ready" 15 \
+    'len(w) == 2 and all(r["hidden"] == "0" and r["phase"] == "ready" for r in w)'
+  widget_invariant "8 terminal beside the chat"
+  # 8b. a widget takes a click. A third widget's view has a real button (10,10 to 110,50 in the view); a real
+  # click on it, at screen coordinates from the widget's X window, makes the view ask for the `report` tool,
+  # and the card for that call appears (rejected over the verb, so nothing runs). Then, with the pointer
+  # still over the widget, a marker is typed: the page's keydown count (carried in its height, 120 plus the
+  # count) stays 0. The count stayed 0 with the key handler disabled too (no run has seen a key reach the
+  # page, handler on or off), so this step cannot tell the handler's work from its absence.
+  send_prompt mcp_idle
+  WIDGET_COUNT=3
+  widget_wait "the third widget is ready" 60 'len(w) == 3 and any(r["toolUseId"] == "toolu_idle_1" and r["phase"] == "ready" for r in w)'
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels=100000 >/dev/null || fail "scrollBy to the bottom failed"
+  widget_wait "the third widget is drawn and mapped at the end of the list" 30 \
+    'len(w) == 3 and any(r["toolUseId"] == "toolu_idle_1" and r["phase"] == "ready" and r["mapped"] == "1" for r in w)'
+  sleep 1
+  local idle_geo ix iy
+  idle_geo=$(MW read "$SURFACE" | python3 -c '
+import json, subprocess, sys
+r = next(r for r in json.load(sys.stdin)["mcpWidgets"] if r["toolUseId"] == "toolu_idle_1")
+geo = subprocess.run(["xwininfo", "-display", sys.argv[1], "-id", r["xid"]], capture_output=True, text=True).stdout
+x = int([l for l in geo.splitlines() if "Absolute upper-left X" in l][0].split()[-1])
+y = int([l for l in geo.splitlines() if "Absolute upper-left Y" in l][0].split()[-1])
+print(x, y)' "$DISPLAY_TARGET")
+  read -r ix iy <<<"$idle_geo"
+  echo "step: a real click on the button of the third widget (window at $ix,$iy)"
+  click_at $(( ix + 60 )) $(( iy + 30 ))
+  widget_wait "the click on the widget's button raised a card for its call" 20 \
+    'd and d["clickOnly"] is True and any(r.get("kind") == "permission" and r.get("status") == "pending" for r in t)'
+  E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="$(widget_card_id)" optionId=reject_once >/dev/null \
+    || fail "reject_once on the button's card failed"
+  widget_wait "the button's card is closed and the third widget is mapped again" 15 \
+    'not d and any(r["toolUseId"] == "toolu_idle_1" and r["mapped"] == "1" for r in w)'
+  sleep 1
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove $(( ix + 60 )) $(( iy + 30 )) || fail "xdotool could not move over the widget"
+  type_text keymark
+  sleep 1
+  widget_wait "no key reached the third widget: its keydown count, carried in its height, is 0" 10 \
+    'any(r["toolUseId"] == "toolu_idle_1" and r["height"] == "120" for r in w)'
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool key --repeat 14 --delay 40 BackSpace || fail "xdotool could not clear the composer"
+  # 8c. no middle-click paste. A fourth widget's view is a textarea (10,10 to 210,60 in the view) that reports
+  # its value length through its height (2000 plus the length). The X PRIMARY selection is set on this display
+  # from outside the app, by a helper process that owns it until it is killed by its exact PID, to a known
+  # marker; a real middle click on the textarea would paste it. Sirio stops button 2 on the webview, so the
+  # length stays 0.
+  send_prompt mcp_paste
+  WIDGET_COUNT=4
+  widget_wait "the fourth widget is ready" 60 'len(w) == 4 and any(r["toolUseId"] == "toolu_paste_1" and r["phase"] == "ready" for r in w)'
+  E2E rpc surface.chat.transcript surfaceId="$SURFACE" action=scrollBy pixels=100000 >/dev/null || fail "scrollBy to the bottom failed"
+  widget_wait "the fourth widget is drawn and mapped, its textarea reporting a length of 0" 30 \
+    'any(r["toolUseId"] == "toolu_paste_1" and r["mapped"] == "1" and r["height"] == "2000" for r in w)'
+  sleep 1
+  cat >"$RUN_DIR/primary-owner.py" <<'PY'
+import gi, sys
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gtk
+Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY).set_text("PRIMARYMARK", -1)
+open(sys.argv[1], "w").write("ready")
+Gtk.main()
+PY
+  rm -f "$RUN_DIR/primary-ready"
+  DISPLAY="$DISPLAY_TARGET" python3 "$RUN_DIR/primary-owner.py" "$RUN_DIR/primary-ready" &
+  PRIMARY_PID=$!
+  for _ in $(seq 1 50); do [ -f "$RUN_DIR/primary-ready" ] && break; sleep 0.2; done
+  [ -f "$RUN_DIR/primary-ready" ] || { kill "$PRIMARY_PID" 2>/dev/null || true; fail "the PRIMARY owner never started"; }
+  local paste_geo px py
+  paste_geo=$(MW read "$SURFACE" | python3 -c '
+import json, subprocess, sys
+r = next(r for r in json.load(sys.stdin)["mcpWidgets"] if r["toolUseId"] == "toolu_paste_1")
+geo = subprocess.run(["xwininfo", "-display", sys.argv[1], "-id", r["xid"]], capture_output=True, text=True).stdout
+x = int([l for l in geo.splitlines() if "Absolute upper-left X" in l][0].split()[-1])
+y = int([l for l in geo.splitlines() if "Absolute upper-left Y" in l][0].split()[-1])
+print(x, y)' "$DISPLAY_TARGET")
+  read -r px py <<<"$paste_geo"
+  echo "step: a real middle click on the textarea of the fourth widget (window at $px,$py), PRIMARY owned by pid $PRIMARY_PID"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove $(( px + 60 )) $(( py + 30 )) click 2 || { kill "$PRIMARY_PID" 2>/dev/null || true; fail "xdotool could not middle-click"; }
+  # Read while the helper still owns the selection, then kill it by its exact PID. The length must stay 0
+  # on every read for 5 s, since it already read 0 before the click; a read that does not answer means
+  # Sirio hung on the paste (as it did with the stop disabled).
+  local paste_reads=0 paste_verdict=""
+  while [ "$paste_reads" -lt 5 ]; do
+    sleep 1
+    paste_verdict=$(MW read "$SURFACE" 2>/dev/null | python3 -c '
+import json, sys
+w = json.load(sys.stdin)["mcpWidgets"]
+print("zero" if any(r["toolUseId"] == "toolu_paste_1" and r["height"] == "2000" for r in w) else "pasted")' 2>/dev/null) || paste_verdict=""
+    [ "$paste_verdict" = "zero" ] || break
+    paste_reads=$(( paste_reads + 1 ))
+  done
+  kill "$PRIMARY_PID" 2>/dev/null || true
+  wait "$PRIMARY_PID" 2>/dev/null || true
+  case "$paste_verdict" in
+    zero) echo "OK: the middle click pasted nothing: the textarea's length read 0 on 5 reads over 5 s" ;;
+    pasted) fail "the middle click pasted the PRIMARY selection into the widget's textarea" ;;
+    *) fail "Sirio stopped answering surface.chat.read after a middle click in a widget" ;;
+  esac
+  # 9. a call that did not run: its tool_use_result is a string, as for a denial. The widget is closed
+  # with "the call did not run" and never gets the call's input (or a result), and the logger stays empty.
+  send_prompt mcp_denied
+  WIDGET_COUNT=5
+  widget_wait "the denied call's widget is closed with 'the call did not run' and got neither input nor result" 60 \
+    'len(w) == 5 and any(r["toolUseId"] == "toolu_denied_1" and r["phase"] == "closed" and r["error"] == "the call did not run" and r["inputDelivered"] == "0" and r["resultDelivered"] == "0" and r["mapped"] == "0" for r in w)'
+  widget_invariant "9 a denied call's widget"
+  # 10. a view that posts straight to the IPC handler, outside its relay, is closed at the first such
+  # message; the widgets that never did have a forged count of 0 throughout.
+  send_prompt mcp_forge
+  WIDGET_COUNT=6
+  widget_wait "the forging widget is closed with 'the view posted outside its relay', its forged count is 1 and every other widget's is 0" 60 \
+    'len(w) == 6 and any(r["toolUseId"] == "toolu_forge_1" and r["phase"] == "closed" and r["error"] == "the view posted outside its relay" and r["forged"] == "1" and r["mapped"] == "0" for r in w) and all(r["forged"] == "0" for r in w if r["toolUseId"] != "toolu_forge_1")'
+  widget_invariant "10 a forging widget closed"
+  # 11. the CLI dies
+  send_prompt die
+  widget_wait "every entry is closed and unmapped after the CLI died" 40 \
+    'len(w) == 6 and all(r["phase"] == "closed" and r["mapped"] == "0" for r in w)'
+  widget_invariant "11 the CLI died"
+  MW remembered "$DISPLAY_TARGET" 6 "$WIDGET_ARTIFACT" || fail "a window seen while a widget lived still exists 3 s after the CLI died"
+  # after the steps
+  [ ! -s "$WIDGET_LOGGER_LOG" ] || fail "the request logger saw $(wc -l <"$WIDGET_LOGGER_LOG") requests from the widget"
+  echo "OK: the request logger is empty"
+  widget_control_lines | python3 -c '
+import json, sys
+lines = [json.loads(line) for line in sys.stdin.read().splitlines()]
+reads = [l for l in lines if l.get("subtype") == "mcp_read_resource"]
+calls = [l for l in lines if l.get("subtype") == "mcp_call"]
+assert len(reads) == 6 and all(l.get("serverName") == "apps" for l in reads), "mcp_read_resource count or server"
+assert calls, "no mcp_call"
+assert all(l.get("tool") == "mcp__apps__act" and l.get("check_permissions") is True and l.get("result_not_for_model") is True for l in calls), "an mcp_call is not a gated act"
+assert not any("mcp_call_ask" in l for l in lines), "the fixture logged an mcp_call_ask"
+print(f"OK: the CLI heard 6 mcp_read_resource for apps and {len(calls)} gated mcp_call for act, and asked nothing")' \
+    || fail "the control log is not what the widget run should leave"
+  grep -qx 'mcp-apps-host 1' "$RUN_DIR/stub-calls.log" || fail "the CLI was not started with CLAUDE_CODE_MCP_APPS_HOST=1"
+  echo "OK: the CLI was started with CLAUDE_CODE_MCP_APPS_HOST=1"
+  python3 - "$OUT_DIR/mcp-widget.json" "$WIDGET_ARTIFACT" "$WIDGET_LOGGER_LOG" <(widget_control_lines) <<'PY'
+import json, sys
+out, steps, logger, control = sys.argv[1:5]
+with open(out, "w", encoding="utf-8") as f:
+    json.dump({"steps": [json.loads(l) for l in open(steps, encoding="utf-8")],
+               "controlLog": [json.loads(l) for l in open(control, encoding="utf-8")],
+               "loggerLog": open(logger, encoding="utf-8").read()}, f, indent=1)
+PY
+  echo "artifact: $OUT_DIR/mcp-widget.json"
+  echo "OK: mcp_widget: two widgets ran isolated and stayed in place through every step"
+  stop_widget_logger
+  stop_app
+}
+
+scenario_mcp_widget_flood() {
+  WIDGET_COUNT=1
+  widget_chat mcp_widget_flood
+  send_prompt mcp_flood
+  widget_wait "the flooding widget is ready" 60 'len(w) == 1 and w[0]["phase"] == "ready"'
+  MW latency "$SURFACE" 3 "$OUT_DIR/mcp-widget-flood.json" || fail "the UI did not keep answering during the flood"
+  # The brief's hostile pacing (a post loop of about 125k a second) leaves an IPC backlog that keeps the
+  # widget over 50 a second for 5 s of host time, so Sirio closes it and no card ever comes. The cut
+  # per second itself is covered by the bridge test a_flood_is_cut_at_fifty_a_second.
+  MW flood-end "$SURFACE" 30 "$OUT_DIR/mcp-widget-flood.json" "$DISPLAY_TARGET" || fail "the flooded widget did not end closed for the rate limit"
+  [ "$(widget_control_lines | grep -c '"subtype":"mcp_call"' || true)" = 0 ] || fail "the CLI heard an mcp_call during the flood"
+  echo "OK: the CLI heard no mcp_call"
+  echo "artifact: $OUT_DIR/mcp-widget-flood.json"
+  echo "OK: mcp_widget_flood: the UI answered throughout the flood and Sirio closed the widget"
+  stop_widget_logger
+  stop_app
+}
+
+scenario_mcp_widget_gate() {
+  widget_chat mcp_widget_gate caps-empty
+  send_prompt mcp_widget
+  wait_panel "the turn is over" 'c["status"] in ("idle", "completed") and sum(1 for r in c["transcript"] if r.get("kind") == "tool" and r.get("text") == "apps: show") == 2' 60
+  check_panel "both apps: show rows are Completed" \
+    '[r.get("status") for r in c["transcript"] if r.get("kind") == "tool" and r.get("text") == "apps: show"] == ["Completed", "Completed"]'
+  sleep 2
+  MW wait "$SURFACE" 5 "no widget exists although the tools carry _meta.ui" 'w == []' || fail "a widget exists with no capabilities"
+  grep -qx 'mcp-apps-host 1' "$RUN_DIR/stub-calls.log" || fail "the CLI was not started with CLAUDE_CODE_MCP_APPS_HOST=1"
+  echo "OK: the CLI was started with CLAUDE_CODE_MCP_APPS_HOST=1, so only the gate refused"
+  widget_control_lines | python3 -c '
+import json, sys
+lines = [json.loads(line) for line in sys.stdin.read().splitlines()]
+bad = [l.get("subtype") for l in lines if l.get("subtype") in ("mcp_read_resource", "mcp_call")]
+assert not bad, "the CLI heard a resource read or a call"
+print("OK: the CLI heard no mcp_read_resource and no mcp_call")' || fail "the gate did not stop the widget's requests"
+  echo "OK: mcp_widget_gate: without the capabilities the rows are plain and nothing is read or called"
+  stop_widget_logger
+  stop_app
+}
+
 ran=0
 for name in "${SCENARIOS[@]}"; do
   echo "== scenario $name"
@@ -5636,6 +6382,12 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_E2E_TZ=""
   SIRIO_FIXTURE_HOOKS=""
   SIRIO_FIXTURE_HOOKS_GATE=""
+  SIRIO_FIXTURE_MCP_APPS=""
+  SIRIO_FIXTURE_WIDGET_HTML=""
+  SIRIO_FIXTURE_START_BYPASS=""
+  SIRIO_FIXTURE_STRAY_MCP_ASK=""
+  SIRIO_FIXTURE_EFFORT_LADDER=""
+  unset SIRIO_FIXTURE_MCP_APPS_CAPS
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))

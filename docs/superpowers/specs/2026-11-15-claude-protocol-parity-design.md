@@ -782,6 +782,211 @@ Each item is laid out the same way:
 - **Before the PR.** A probe of the MCP Apps protocol (SEP-1865) and a dedicated security review
   (the critic, focused on the isolation and the bridge), with every finding fixed or dismissed
   with a reason.
+- **Deviations**, from the live probe (`.superpowers/probe-a11/FINDINGS.md`: 2.1.327 over stdio
+  with a local fake API and a local fake MCP server, plus 2.1.326, 2.1.325, 2.1.301 to 2.1.322 and
+  the 2.1.257 floor; no account, no network), the protocol research
+  (`.superpowers/a11/sep-1865-research.md`: MCP Apps spec 2026-01-26 "Stable", cited `S<line>`,
+  and ext-apps 2.1.0), a read-only search of the 2.1.327 binary and the code map
+  (`.superpowers/a11/codemap.md`):
+  - **The gate is `system/init.capabilities`.** `mcp_tool_ui_meta_v1` and `mcp_read_resource_v1`
+    arrive only there, at the first model turn, never in the `initialize` answer. A6 read
+    capabilities from `initialize` only, so the catalog gains this second source. A widget needs
+    both, and its tool calls need `mcp_call_result_not_for_model_v1`. Every CLI from 2.1.301 to
+    2.1.327 has all three. The floor has none (no `_meta` in `mcp_status`, and
+    `mcp_read_resource` is an unsupported subtype), so it draws the plain tool row. Each one's
+    first version lies between 2.1.257 and 2.1.301.
+  - **Sirio declares itself an MCP Apps host.** The CLI sends
+    `extensions["io.modelcontextprotocol/ui"] = {mimeTypes: ["text/html;profile=mcp-app"]}` in its
+    own MCP `initialize` only when `CLAUDE_CODE_MCP_APPS_HOST=1` is in its environment. That is the
+    variable's only effect in the 2.1.327 binary, besides a cache key that includes it. Servers
+    should check that capability before declaring a widget (S1531). Sirio sets it in the native
+    launch environment wherever it can draw a widget, and nowhere else. Side effect, for the PR's
+    Merge Danger: such a server may give the model thinner text and leave the data to the widget.
+  - **Which call gets a widget.** Nothing in a model turn names the UI: no UI line, and the
+    `tool_use` carries only `tool_use_meta` (display names). Sirio asks `mcp_status` when the first
+    `mcp__` call of a session arrives, and again only after a reconnect, a toggle, a reload or a
+    miss. It never polls. It maps the call to a server and tool by rebuilding the CLI's name:
+    `mcp__`, then the server name with every UTF-16 code unit outside `[A-Za-z0-9_-]` replaced
+    by `_` (the CLI's regex has no `u` flag, so a character outside the BMP gives two `_`; for a
+    `claude.ai ` server the CLI also collapses runs of `_` and trims them at both ends),
+    then `__` and the tool, which the CLI normalizes the same way. `mcp_call` routes on the first
+    `__` after `mcp__`, so Sirio keeps a mapping only when splitting the rebuilt name there gives
+    back exactly that server part and that tool part, and when no other server in `mcp_status`,
+    whatever its state, has the same normalized name: the CLI runs the call on the first
+    connected server whose normalized name matches. A widget may call only a tool whose name is
+    already its own normalized form, because for a tool hidden from the model the CLI may send
+    the server the normalized name. Otherwise there is no widget, or the call is refused. The
+    URI is
+    `_meta.ui.resourceUri`, else the deprecated flat `ui/resourceUri`; the CLI already drops
+    non-`ui://` and oversized values. A server is its `name` with its `source`.
+  - **What the widget receives.** `tool-input` is the `tool_use` input, whole: Sirio sends no
+    partial input. `tool-result` is rebuilt from the user line's `tool_use_result` as
+    `{content: [{type: "text", text}], structuredContent, _meta}`, without `com.anthropic/*` keys;
+    a text-only result, which 2.1.328 gives as a list of content blocks, becomes
+    `{content: <that list>}`.
+    Sirio sends `tool-input` only once the call is known to have run: the input and the result go
+    to the view together, when the call's `tool_result` block is not an error. An error or a
+    denial (`is_error: true`, which 2.1.328 pairs with a string `tool_use_result`; Sirio cannot
+    tell the two apart without reading CLI text) closes the widget with "the call did not run",
+    and the view never gets the input. The live test checks both shapes on the wire. An
+    interrupted call sends `tool-cancelled`, with no input, and closes the widget. The webview
+    may load and the resource may be read before then; neither carries the call's arguments,
+    and neither does
+    `ui/initialize`. (Deviation, 2026-11-19, from the security review: a user who denies the
+    model's call, or a deny rule, must keep its arguments from the server's declared domains.)
+    When the server returns `structuredContent`, the
+    CLI puts its JSON in place of the server's content blocks, so the widget never sees those
+    blocks. The `_meta` is otherwise passed whole: it is the widget's own server's output.
+  - **Reading the resource.** `mcp_read_resource {serverName, uri}` is not bound to the tool that
+    declared the URI: the same URI read through another server returns that server's answer. So
+    Sirio always passes the declaring server. It takes only a content item whose `uri` is the one
+    asked for and whose `mimeType` is `text/html;profile=mcp-app`, from `text` or from a base64
+    `blob` decoded as UTF-8. The CLI caps a read at 10,485,760 characters and never caches, so each
+    widget costs one read. `_meta.ui` comes from that content item only.
+  - **Isolation: a sandboxed iframe inside each widget's webview.** The spec says "All View
+    content MUST be rendered in sandboxed iframes" (S1698). Views built on ext-apps also post to
+    `window.parent` and accept only messages whose source is `window.parent`
+    (`PostMessageTransport`). In a top-level window the parent is the window itself, so the
+    handshake would echo back into the view. So each widget still gets its own fresh incognito
+    webview, sharing no cookies or storage with Browser tabs or other widgets, with no devtools.
+    Its top frame is a small relay page that Sirio serves, and the `ui://` document runs in an
+    iframe with `sandbox="allow-scripts allow-same-origin"` (S475), served from a second
+    Sirio-owned scheme so the two origins differ on every engine (S474). The relay is not a trust
+    boundary: on Windows wry injects `window.ipc` into subframes too. Rust treats every IPC message
+    as hostile, and on Windows it also drops any whose source URL is not the relay's. The relay
+    never hands IPC to the iframe: it relays only `postMessage` traffic whose source is that
+    iframe, which Rust then validates. On WebKitGTK the IPC handler may be reachable from a
+    subframe, so the relay wraps each message with a per-widget secret that Sirio writes into the
+    relay page, and Rust drops every message without it. The relay page is served once; a second
+    request for it gets nothing. A test proves that the iframe can reach neither
+    `parent.document` nor its own `<iframe>` element, so it cannot lift its sandbox, and that a
+    message the iframe posts straight to the IPC handler is dropped (coordinator's condition,
+    2026-11-19).
+    - Each webview is built hidden, unfocused, with autoplay off, at 1×1, and is shown only when
+      placed. Its permission handler denies every request. It accepts no dropped files, so a
+      file dragged toward the composer never reaches the view, and it shows no context menu.
+      It opens no file chooser and no HTTP authentication prompt: both requests are cancelled.
+      LinkPreconnect, link prefetch and speculation-rules prefetch are turned off through
+      WebKitGTK's feature switches (2.42 and later; on 2.38-2.41 they stay on, a disclosed gap).
+      An `<a ping>` is blocked by the CSP. DNS prefetching has no working switch on
+      WebKitGTK 2.54 (the setting is a no-op), so a `<link rel=dns-prefetch>` may still resolve
+      a name outside the declared domains; this is a disclosed gap with a follow-up for a
+      DNS-level probe. A widget receives no keyboard input in this version: its webview's
+      top-level window stops every key event that reaches it before the page sees it. Measured
+      on a bare X server and under a window manager, the page counted no key typed over it, even
+      after a click in it and with the stop disabled; what keeps keys out is not identified, so
+      the stop is the designed guard, and no test shows it stopping a key (deviation,
+      2026-11-19, security re-review).
+  - **The CSP, and the rest of "no network".** Sirio's protocol handler sends the CSP as a
+    response header, never a meta tag, built from the spec's restrictive default (S275-S284) plus
+    the declared domains, where `R` is `resourceDomains` and `C` is `connectDomains`:
+    `default-src 'none'; script-src 'self' 'unsafe-inline' R; style-src 'self' 'unsafe-inline' R;
+    img-src 'self' data: R; font-src 'self' R; media-src 'self' data: R; connect-src C (or 'none');
+    frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`.
+    - Where the spec's own example uses `connect-src 'self'` (S1737), Sirio takes the stricter
+      `'none'` of S283.
+    - `frameDomains` and `baseUriDomains` are ignored in this version: no nested frames, because
+      on Linux the IPC handler cannot tell frames apart.
+    - A declared entry must be `https://host[:port]` or `https://*.host`, with `wss://` also
+      allowed for connect. Every other form is dropped: bare hosts, `*`, `http:`, IP literals,
+      `localhost` and private names, and anything with a quote, a `;` or whitespace. Claude's own
+      rules for embedded sites are the reference.
+    - A CSP does not stop every request. So the webview also denies every navigation except the
+      relay page and the widget's document, every new window, every download and every permission
+      request
+      (`_meta.ui.permissions` is not honoured). It turns WebRTC off where the engine allows it:
+      `connect-src` does not cover `RTCPeerConnection`, and WebView2 enables WebRTC by default.
+    - The handler serves the two documents and nothing else.
+    - The widget's frame names the domains it may reach (S1757).
+  - **A widget's tool call.** Sirio answers a view's `tools/call` only when all of these hold:
+    - the bare name is listed under the declaring server (same `name` and `source`) in
+      `mcp_status`;
+    - its visibility includes `"app"` (an absent visibility means both; S401 is a MUST);
+    - the full name resolves as above.
+
+    Sirio then raises its own card in the transcript, showing the server, the tool and the
+    arguments, with Allow and Reject and no "Always allow". It does so in every permission mode,
+    bypass included. A widget has at most one open card; a further call meanwhile is refused at
+    once. Arguments whose JSON exceeds 4,000 characters are refused with no card, so the card
+    always shows the whole call. On this card Reject is preselected and only a click approves it:
+    Enter, the arrows and the digit keys do nothing, so a keystroke meant for the composer cannot
+    approve a call. Escape rejects it. The control verb `surface.chat.permission` may reject it
+    and is refused any other option, since a denial grants nothing (deviation, 2026-11-19: the
+    E2E closes cards through that verb). A second Allow while the call runs does nothing; a
+    Reject or any close in that time denies it, and the call's late answer is dropped. The card
+    keeps showing Allow then, since the call was sent and cannot be recalled.
+
+    Two rules keep a widget from steering a click onto Allow (deviation, 2026-11-19, from the
+    security review). A click counts only when its press began on that row after the card
+    armed; a press that began earlier, or on another row, does nothing. And Allow arms only
+    once the arguments have been scrolled to their end, or when they fit without scrolling, so
+    "the card always shows the whole call" holds for what the user has actually seen.
+
+    On Allow, Sirio sends `mcp_call {tool, arguments, result_not_for_model: true}`. Where
+    `mcp_call_check_permissions_v1` is advertised (2.1.319 and later), it adds
+    `check_permissions: true`, so managed settings, deny rules and hooks still apply. Sirio answers
+    the resulting `can_use_tool` (`toolu_mcp_call_…`) itself, with allow and without a second card,
+    only when it matches the one call the user just approved (same tool, same input), and only
+    once. The approval lapses when that `mcp_call` answers, or after 10 seconds, whichever comes
+    first. Sirio denies any other `toolu_mcp_call_…` ask. Tests prove the denial for a different
+    input, a second use and a lapsed approval (coordinator's condition, 2026-11-19).
+
+    On 2.1.301 to 2.1.318, Sirio's card is the only gate, and the PR's Merge Danger says so.
+    `mcp_call` is bound to no server and checks no tool name, so all of these checks are Sirio's.
+    The view gets the `mcp_call` answer rebuilt the same way as a model turn's `tool-result`
+    (`com.anthropic/*` dropped), and an error answer becomes `{content: [text], isError: true}`.
+  - **"Ignored" means no effect, with an error answer.** JSON-RPC requires an answer to every
+    request, and a dropped request leaves the view waiting forever.
+    - Sirio answers `ui/initialize` with `protocolVersion` `2026-01-26`, `hostInfo`, and
+      `hostCapabilities` naming only `serverTools`. Its `hostContext` carries the theme,
+      `displayMode` `"inline"`, `availableDisplayModes` `["inline"]`, platform `desktop` and the
+      container size.
+    - It answers `ping`, `tools/call` (above), and `ui/request-display-mode` with
+      `{mode: "inline"}`, the result the spec asks for.
+    - It reads `ui/notifications/initialized` and `ui/notifications/size-changed`.
+    - Every other request gets `-32601` and does nothing: `resources/read`, `ui/open-link`,
+      `ui/message`, `ui/update-model-context` and the draft-only methods. Every other notification
+      is dropped, `notifications/message` included.
+    - Nothing reaches the view before `initialized` (S485).
+    - `ui/resource-teardown` precedes every teardown.
+  - **Where it shows.** wry cannot clip a native child, and the list prepaints rows outside its
+    viewport. So a widget is mapped only while its whole frame lies inside the transcript viewport
+    (measured against the viewport, not from prepaint) and no Sirio overlay covers it, the chat's
+    own overlays included. Otherwise a placeholder of the same size stands in for it. Its height
+    follows `size-changed`, capped below the viewport's height so that the rule can be met. A folded
+    turn, a hidden tab or a closed chat unmaps it.
+    - While the question dock shows any question, every widget of that chat is unmapped. So no
+      widget sits beside a card it could imitate, or under the pointer when the card arrives. The
+      dock's rows already ignore input for half a second after a question appears.
+    - A widget's ask goes through the same dock as any other permission. It is not persisted, and
+      it lapses into Reject at the permission timeout, timed by Sirio itself. Every way a card can
+      close without Allow (Escape, dismiss, the timeout, the session ending, the chat closing)
+      answers the view with a denial, so the view never waits forever. The end of a model turn
+      does not close it: a widget mostly acts after the turn.
+    - An open card keeps the composer off, so a widget must not be able to ask without end.
+      After a denial, that widget's calls are refused with no card for 10 seconds; after three
+      denials in a row the widget is closed. A widget whose messages hit the rate limit for 5
+      seconds in a row is closed too.
+  - **Not persisted.** As in A10, a restored chat shows the plain tool row.
+  - **No webview, no widget.** Where Sirio has no webview, it sets no variable and draws the plain
+    row. That covers a Wayland session that stays native (`SIRIO_FORCE_X11` set off, or no usable
+    `DISPLAY`) and Windows without the WebView2 runtime.
+  - **Linux on X11 only, in this version.** The isolation rests on engine behaviour that only a
+    test on that engine can prove, and the tests here run on Linux. So widgets are drawn only on
+    Linux under X11. On macOS and Windows Sirio sets no variable and draws the plain row until
+    each engine has passed the same isolation test. The PR's Merge Danger says so.
+  - **Tests that open a webview.** The probe never opened the HTML a server served. The E2E
+    scenarios and the isolation check render only HTML that Sirio's own tests write, on a private
+    Xvfb, and the only address they let it reach is a request logger on 127.0.0.1.
+    - The research could read three engine facts only in wry's source: a header CSP enforced on a
+      custom protocol, an incognito webview that keeps no store, and no `window.ipc` in the
+      iframe on WebKitGTK.
+    - The plan's first task proves all three, plus the denied permission requests and the
+      dropped message without the secret. If the header is not enforced, the design changes
+      before any other task.
+    - That proof runs on Linux only. On macOS (WKWebView) and Windows (WebView2) the same facts,
+      and WebRTC off, stay unverified until someone checks them on those systems, which is why
+      widgets stay off there. The PR lists them as such.
 
 ## Delivery
 

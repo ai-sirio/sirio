@@ -816,3 +816,154 @@ file link is taken in `MarkdownBody`'s capture phase before bezel's text can han
 so a change that touches either half (the link pass, or the capture handler) must keep the other's
 assumption: nothing but web URLs reaches `cx.open_url`.
 `Scripts/Tests/test-chat-session-panel-e2e.sh --only file_links` drives it with real clicks and drags.
+
+## MCP Apps widgets
+
+**What it is.** A tool that declares a UI (`_meta.ui.resourceUri`) gets its page drawn inline, under
+its tool row, in a WebKitGTK child window of the Sirio window (wry). It is Linux under X11 only:
+everything that touches wry or GTK is `#[cfg(target_os = "linux")]`, `widget_webview_available()`
+is false elsewhere, and there the launch sets no variable and the row stays the plain tool row.
+The code is `sirio_ui::mcp_widget` (the view, the bridge, the webview), `sirio_ui::chat::widget_slot`
+(the slots, the sweep, the read), `chat::widget_lookup` (which call gets a slot) and
+`chat::widget_asks` (the asks); the pure protocol half is the leaf crate `sirio_mcp_apps` (CSP,
+document, bridge parsing), with its tests on every OS.
+`docs/superpowers/specs/2026-11-15-claude-protocol-parity-design.md` (A11) has the design.
+
+**The gate.** A widget needs `mcp_tool_ui_meta_v1`, `mcp_read_resource_v1` and
+`mcp_call_result_not_for_model_v1` in `system/init.capabilities`, never in the `initialize` answer.
+A widget's call adds `check_permissions: true` only with `mcp_call_check_permissions_v1`. Without the
+three there is no notice, no request and no slot. A CLI that refuses one verb loses that feature and
+the chat never errors. The native launch sets `CLAUDE_CODE_MCP_APPS_HOST=1` when widgets are
+available and removes it from the child's environment otherwise, so an inherited value never passes
+through.
+
+**The wire.** The first `mcp__` call of a session asks `mcp_status` (and again only after a miss, a
+reconnect, a toggle or a reload; there is no polling, and lookups that arrive during a refresh wait
+for it). A call maps to a server and tool by rebuilding the CLI's name, `mcp__` plus the normalized
+server, `__`, the normalized tool, and the mapping is kept only when that name splits back into
+exactly that pair, no other server has the same normalized name, and the tool's name is its own
+normalized form (`ui_tool_for`, `app_call_name`). The page is read with `mcp_read_resource
+{serverName, uri}`; the MIME type must be `text/html;profile=mcp-app`, and a wrong type, a blob that
+is not UTF-8 or no item for the URI gives a one-line error on the row and no webview. A widget's
+own call is `mcp_call {tool, arguments, result_not_for_model: true}`.
+
+**What the widget receives.** The webview is built and the page read when the call is announced,
+but neither carries the call's arguments, and `ui/initialize`'s `hostContext` carries none. The
+view gets `tool-input` only once the call is known to have run: the slot keeps the input, and the
+input and the result go to the view together when the call's result block arrives with `is_error`
+false, whatever shape the line's `tool_use_result` has (the fold reports `McpToolItem::Returned`).
+The result is rebuilt from the `tool_use_result` when it is an object (a structured result) or an
+array (the CLI 2.1.328 sends a text-only success as its content blocks), and from the block's text
+otherwise. A result block with `is_error` true is an error or a denial (the CLI sends a string
+`tool_use_result` with it): the fold reports `McpToolItem::NotRun`, the widget is closed with
+"the call did not run", and the view never gets the input. An interrupted call sends
+`tool-cancelled` with no input and closes the widget. This keeps the
+arguments of a call the user denied (or a deny rule blocked) from the widget's declared domains.
+
+**Isolation.** The widget's HTML is never the top page. Each widget has its own webview with two
+custom schemes, `sirio-widget-relay://<key>/` and `sirio-widget-view://<key>/`: the relay page is
+served once (the one-shot state is in that handler's closure) and holds the view in an iframe
+sandboxed `allow-scripts allow-same-origin` on the second scheme, so the two never share an origin.
+The relay wraps each message the view posts as `{"s":SECRET,"m":<message>}` and sends it to Rust over
+IPC; `SECRET` is 32 lowercase hex characters from `getrandom`, per widget, and Rust drops and counts
+as forged every body whose `s` is not that secret. Rust to view goes through `postMessage` to the
+view's origin, never `"*"`. The webview is built hidden, unfocused, at 1x1, with autoplay off, no
+devtools and an incognito (ephemeral) context, so it shares no cookies or storage with Browser tabs.
+Its permission handler denies everything, its navigation handler allows exactly the two URLs above
+without query or fragment, new windows and downloads are denied, it is no drop target
+(`drag_dest_unset`) and shows no context menu, and it runs no initialization script. The view's CSP
+is a response header it cannot edit: `default-src 'none'`, `script-src` and `style-src` with `'self'
+'unsafe-inline'`, `img-src`, `font-src` and `media-src` limited to `'self'` (and `data:` for images
+and media), `connect-src` set to the accepted `connectDomains` or `'none'`, and `frame-src`,
+`object-src`, `base-uri` and `form-action` `'none'`; the resource's accepted `resourceDomains` are
+added to the script, style, image, font and media sources. After a webview is hidden or dropped,
+Sirio flushes the X connection (`flush_x`), or the window stays painted.
+
+**What the bridge allows.** Four requests are served: `ui/initialize`, `ping`,
+`ui/request-display-mode` (answered inline) and `tools/call`; every other method gets `-32601`. Of
+the notifications only `ui/notifications/initialized` and `ui/notifications/size-changed` act; the
+rest are dropped. An inbound message over 1 MiB is dropped, the inbox holds 64, and more than 50
+messages in one second drops the rest of that second; a widget over the limit for 5 s in a row is
+closed. A widget has at most one open ask, a call before `initialized` is refused, and a call may
+only name a tool of its own server that is visible to the app.
+
+**Asks.** A widget's `tools/call` is checked against the server list (`app_call_name`) and, if it
+can be shown, becomes a card in the question dock: id from `WIDGET_ASK_BASE` (`1 << 62`), title
+`Widget · <server> · <tool>`, the arguments pretty-printed and shown whole, and two rows, Reject
+(`reject_once`, preselected) and Allow (`allow_once`), never Always allow, in every permission mode,
+including bypass. Only a click approves: Enter, the arrows and the digits do nothing, a click answers
+once the dock is armed (500 ms) and only when its press began on that row after the card armed (a
+press that began earlier, or on another row, does nothing), and Escape denies. Allow is inert, drawn
+dimmed with the hint "Scroll to the end to allow", until the body (the arguments and the card's
+details) has been scrolled to its end or fits its box; Reject is never inert. The control verb
+`surface.chat.permission` can only reject a widget's card (`reject_once`); any other option is
+refused with an error, and `surface.chat.elicitation` `Row(n)` is refused on it. `surface.chat.read`
+reports `clickOnly`, `allowArmed` (`"1"`/`"0"`) and each row's `rowBounds` from the last paint. Arguments over 4000 characters, a tool the server does not
+list, one hidden from apps, an ambiguous name and a name the CLI would rewrite are refused with no
+card (and a note in the widget's `refused` list). Allow runs `mcp_call` off the UI thread and
+answers the widget with the result, and a second Allow while that call runs does nothing; a Reject
+or any close denies it, and the call's late result is dropped; the card keeps showing Allow then,
+since the call was sent and cannot be recalled. Every other end answers the widget `Denied`
+exactly once. A Reject (a click, or `reject_once` from the control verb) marks a card that is still
+unresolved as resolved; a card already resolved to Allow stays Allow when the widget closes, the CLI
+goes away or the session restarts, and only an unresolved card shows expired. The ways a card ends
+without an answer are Escape, a dismiss, the UI-side timer at `PERMISSION_TIMEOUT` (5 min), the
+widget being closed (the cap, a flood, a forged message, three denials, its own close), the CLI
+going away (a transport error, a deadline, a failed send, the event stream closing, even between
+turns), a restart, a new conversation or a history session replacing the transcript, and the chat
+being released. A model turn ending touches none of them. An Allow whose call is still running when the widget closes is
+answered `Denied` at the close, and the call's late result is dropped. After a denial the widget's
+calls are refused with no card for 10 s, and after three in a row the widget is closed; an Allow
+resets the count. Asks are never persisted.
+
+**What the webview does and does not do.** A widget takes no keyboard input in this version.
+Measured on a bare X server and under a window manager, the page counted no key typed over it,
+even after a click in it and with the guard below disabled; what keeps keys out is not
+identified (Sirio's browser, embedded the same way, does take keys). `build_widget_child` connects `key-press-event` and `key-release-event` handlers that
+stop the event on the webview's top-level GtkWindow, which GTK runs before the WebView sees a key:
+a guard for any path that would hand GTK a key; no test shows it stopping one. Nothing calls wry's
+`focus_parent()` for a widget: it focuses the widget's own X child, not Sirio's top-level
+(`browser.rs` still uses it for its own child). A widget is shown before it is sized: on a hidden
+GtkWindow `set_bounds` is ignored and the page would keep its 1x1 build size, so its slot would
+stay blank and take no click. There is no middle-click paste: the
+webview stops button 2 (press and release), because WebKitGTK would paste the user's X PRIMARY
+selection into an editable element of the page, which could then send it to its declared domains.
+It also opens no option menu (`show-option-menu`), colour chooser (`run-color-chooser`) or print
+dialog (`print`); those three have no E2E, only the code. The webview cancels every
+file chooser (`run-file-chooser`) and every HTTP authentication prompt (`authenticate`), and the
+hyperlink auditing and DNS prefetching settings are off (documented no-ops on 2.54.1, kept for older
+engines: an `<a ping>` is stopped by the CSP, and DNS prefetching has no working switch there, a
+disclosed gap). A message the view posts straight
+to the IPC handler, outside its relay (no secret), closes the widget at the first one, with "the
+view posted outside its relay"; forged, oversized, over-cap and non-object messages (a message with the right secret whose payload is not a plain object is dropped, not forged) still count toward the
+50-a-second limit. `surface.chat.read` reports each widget's `forged` count, which stays `"0"` for
+a legitimate view. WebKitGTK opens a TCP connection for `<link rel=preconnect>` whatever the CSP says, so the
+`LinkPreconnect`, `LinkPrefetch` and `SpeculationRulesPrefetch` features are turned off on the
+widget's settings (`set_link_features` in `webview.rs`; `SpeculationRulesPrefetchEnabled` is a
+preference key, not a feature identifier). When the API is missing or an identifier is not listed,
+one constant line per missing switch is logged. The webkit2gtk bindings in use have no feature API, so `webkit_settings_get_all_features`
+and `webkit_settings_set_feature_enabled` are resolved at run time with `dlsym`; on a WebKitGTK older
+than 2.42 they are absent and those hints stay on. The widget's web process also runs without WebKitGTK's
+bubblewrap sandbox (a follow-up).
+
+**Placement.** A widget is mapped only when its slot was drawn this frame and lies wholly inside
+the list's viewport, no chat overlay is open (every `*_open` flag and `Popup` of `Chat`, the session
+panel in its overlay placement, an external drag), the jump-to-latest disc does not intersect it,
+the dock shows no question, and its tab is on screen and not obscured by a host overlay. The
+slot's prepaint only records where it was drawn; one sweep, a canvas after the list, runs once the
+list has set its viewport and places every widget (`List::prepaint` holds the list state borrowed
+while its items prepaint, so nothing reads it there). Unmapping for an overlay, a tab switch or an
+obscuring host is immediate, and `place` with an unchanged target does nothing. A widget's `hidden`
+in the read also reflects the host's unmap until the next paint's sweep sets it again. At most 6
+widgets are live per chat (the oldest beyond that is closed), the height is clamped to
+`[80, min(800, 0.8 x viewport)]` px (160 while loading), and all widgets share one pump task that
+runs GTK at most 4 ms per 16 ms tick.
+
+**Degrading.** A widget that cannot load (the read fails, the page is wrong, the webview cannot be
+built) shows one line on its row and the turn goes on. A closed widget leaves its row with the
+reason. Without the gate, on another OS or under another display backend the chat draws the plain
+tool row, as before.
+
+**Known gap.** The domain check for `connectDomains` and `resourceDomains` has no public-suffix
+list: `https://*.co.uk` passes, because only the label count, the character set, the scheme, IP
+literals and local names are checked.

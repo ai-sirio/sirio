@@ -1212,6 +1212,28 @@ pub mod request {
         )
     }
 
+    /// Debug-only `surface.chat.transcript {surfaceId, action, pixels?, turn?}`: scrolls a
+    /// chat's transcript (`scrollBy`, by `pixels`) or folds or unfolds a closed turn
+    /// (`toggleTurn`, by the turn's footer index `turn`), as the wheel and the turn's row do.
+    pub fn chat_transcript(
+        surface_id: &str,
+        action: &str,
+        pixels: Option<&str>,
+        turn: Option<&str>,
+    ) -> ControlRequest {
+        let mut params = BTreeMap::from([
+            ("surfaceId".to_string(), surface_id.to_string()),
+            ("action".to_string(), action.to_string()),
+        ]);
+        if let Some(pixels) = pixels {
+            params.insert("pixels".to_string(), pixels.to_string());
+        }
+        if let Some(turn) = turn {
+            params.insert("turn".to_string(), turn.to_string());
+        }
+        request("surface.chat.transcript", params)
+    }
+
     /// Debug-only `surface.project_add {kind, value, submit?, answer?}`: starts
     /// an add without the folder chooser. `kind` is `path` (the Open folder
     /// flow on the folder `value`), `clone` or `create` (the form, its field

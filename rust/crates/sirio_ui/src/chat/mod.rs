@@ -67,6 +67,11 @@ mod question_dock;
 mod visible_text;
 mod session_panel;
 mod usage_card;
+mod widget_asks;
+pub(crate) use widget_asks::WIDGET_ASK_BASE;
+use widget_asks::WidgetAsks;
+mod widget_lookup;
+mod widget_slot;
 mod status_line;
 mod thought;
 mod tool_calls;
@@ -1046,6 +1051,13 @@ struct QuestionDockState {
     for_request: Option<(u64, usize)>,
     /// When the current request first appeared in the dock.
     shown_at: Option<std::time::Instant>,
+    /// Where each row was last painted, in window pixels, by row index.
+    row_bounds: Rc<RefCell<BTreeMap<usize, Bounds<Pixels>>>>,
+    /// The scroll of the question's body, to know whether its end has been seen.
+    body_scroll: ScrollHandle,
+    /// The last mouse press on a row of the dock: request, step, row and when it began. A
+    /// widget's card counts a click only if its press began after the dock armed.
+    press: Option<(u64, usize, usize, std::time::Instant)>,
 }
 
 /// A tool call nested inside a subagent task card.
@@ -1313,6 +1325,18 @@ pub struct ChatControlSnapshot {
     /// `{source, text, tone, held}` of a retry or `{source, key, text, priority, tone, held}`
     /// of a notification.
     pub status_line: String,
+    /// The widgets of MCP Apps calls, in call order, one row of string values each: see
+    /// `widget_slot::Chat::widget_rows`.
+    pub mcp_widgets: Vec<BTreeMap<String, String>>,
+}
+
+/// What the debug control verb does to the transcript.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TranscriptAction {
+    /// Scrolls the list by this many pixels (`ListState::scroll_by`).
+    ScrollBy(f32),
+    /// Folds or unfolds the closed turn whose footer is at this entry index.
+    ToggleTurn(usize),
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -1547,6 +1571,8 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             locations: Vec::new(),
             duration_ms: if *by_parent { *duration_ms } else { None },
         }),
+        // A widget's ask is a live request of this session, never part of the conversation.
+        Entry::Permission { request_id, .. } if *request_id >= WIDGET_ASK_BASE => None,
         Entry::Permission {
             request_id,
             title,
@@ -2475,6 +2501,8 @@ pub struct Chat {
     /// A preview the reader has not confirmed yet. One slot: confirming
     /// always answers the latest preview.
     pending_rewind: Option<PendingRewind>,
+    /// MCP Apps widgets: the lookup, the slots, and where the sweep places them.
+    widgets: widget_slot::Widgets,
     /// The draft, in Ely's field: IME, selection, undo, wrapping and scroll
     /// are its job. `Chat` observes it and reads `text()`/`cursor()` into
     /// `draft`/`draft_caret` on every change — the popups and Send read the
@@ -2985,6 +3013,9 @@ impl Chat {
         .detach();
         cx.observe_global::<ComposerPrefs>(|chat: &mut Self, cx| chat.sync_composer_rows(cx))
             .detach();
+        // Every way of closing a chat comes to its release: no widget outlives it with an ask
+        // open.
+        cx.on_release(|chat: &mut Self, cx| chat.release_widgets(cx)).detach();
 
         // A restored native chat holds the session it resumes from the
         // start: the tab strip's save reads it, and a CLI that names its
@@ -3003,6 +3034,7 @@ impl Chat {
             agent_name: None,
             agent_cwd: cwd,
             session_panel: session_panel::SessionPanel::new(),
+            widgets: widget_slot::Widgets::default(),
             composer_row,
             composer_drag: None,
             entries: Vec::new(),
@@ -3030,6 +3062,9 @@ impl Chat {
                 selected: 0,
                 for_request: None,
                 shown_at: None,
+                row_bounds: Rc::default(),
+                body_scroll: ScrollHandle::new(),
+                press: None,
             },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
@@ -3331,6 +3366,12 @@ impl Chat {
             SessionNotice::Subagent(update) => {
                 self.apply_subagent_notice(update);
                 cx.notify();
+                return;
+            }
+            // A widget's call: the tool row it belongs to is already in the transcript, and
+            // gets a slot under it when the call's tool names a UI.
+            SessionNotice::McpTool(update) => {
+                self.apply_mcp_tool(update, cx);
                 return;
             }
         };
@@ -4417,7 +4458,7 @@ impl Chat {
                     "EndTurn" => time,
                     reason => format!("{time} · {}", turn_end_label(reason)),
                 };
-                self.expire_unanswered();
+                self.expire_unanswered(WidgetAsks::Keep, cx);
                 self.surface_mcp_warnings();
                 self.push_entry(Entry::TurnFooter(label));
                 self.streaming = false;
@@ -4444,13 +4485,12 @@ impl Chat {
                 cx.emit(ChatEvent::TurnEnded);
             }
             sirio_chat::ChatEvent::TransportError(message) => {
-                self.client.take();
+                self.lose_client(cx);
                 // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
                 self.reset_agent_title();
-                self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
                 self.fail_trace_turn(&message, cx);
                 self.push_entry(Entry::Error {
@@ -4467,13 +4507,12 @@ impl Chat {
                 // A deadline expiring is the agent failing to answer, so it
                 // belongs in the transcript like any other error rather than
                 // leaving the composer stuck in its streaming state.
-                self.client.take();
+                self.lose_client(cx);
                 // The CLI that said it was running is gone.
                 self.cli_state = None;
                 self.cli_unprompted = false;
                 self.reset_background_tasks(cx);
                 self.reset_agent_title();
-                self.expire_unanswered();
                 let message = format!(
                     "{operation:?} timed out after {:.1}s",
                     duration.as_secs_f32()
@@ -4932,6 +4971,10 @@ impl Chat {
         let Some(option) = option else {
             return Err(format!("unknown chat permission option: {option_id}"));
         };
+        // Only a click approves a widget's call; the control surface can only reject it.
+        if request_id >= WIDGET_ASK_BASE && !option.is_rejection {
+            return Err("a widget's card is approved only by a click".to_owned());
+        }
         self.respond_permission(request_id, &option, cx);
         Ok(())
     }
@@ -5124,6 +5167,7 @@ impl Chat {
             agent_title: self.agent_title_json(),
             question_dock: self.question_dock_json(),
             status_line: self.status_line.snapshot(),
+            mcp_widgets: self.widget_rows(),
         }
     }
 
@@ -5160,6 +5204,37 @@ impl Chat {
                     return Err(format!("the session does not offer effort {value}"));
                 }
                 self.choose_picker_row(controls::PickerRow::Effort(value), window, cx);
+            }
+        }
+        Ok(())
+    }
+
+    /// What the debug control verb does to the transcript: what the wheel and a turn's fold row
+    /// do, without needing a pointer. A turn that is not closed, or has nothing to fold, is
+    /// refused.
+    pub fn transcript_act(
+        &mut self,
+        action: TranscriptAction,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        match action {
+            TranscriptAction::ScrollBy(pixels) => {
+                if !pixels.is_finite() {
+                    return Err("pixels is not a number".to_string());
+                }
+                self.list_state.scroll_by(px(pixels));
+                cx.notify();
+            }
+            TranscriptAction::ToggleTurn(turn) => {
+                let turns = segment_turns(&self.entries);
+                let foldable = turns
+                    .iter()
+                    .position(|segment| segment.footer == Some(turn))
+                    .is_some_and(|position| turn_is_foldable(&turns, position));
+                if !foldable {
+                    return Err("no closed turn has that footer".to_string());
+                }
+                self.toggle_turn_folded(turn, cx);
             }
         }
         Ok(())
@@ -5302,6 +5377,8 @@ impl Chat {
         persistence.tab_id = tab_id;
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         let old_count = self.entries.len();
+        // The widgets go, and their asks are denied, before the cards are cleared with the rest.
+        self.close_widgets(cx);
         self.entries.clear();
         self.turn_message_ids.clear();
         // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
@@ -6239,6 +6316,7 @@ impl Chat {
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let old_count = self.entries.len();
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
+        self.close_widgets(cx);
         self.entries.clear();
         self.turn_message_ids.clear();
         self.pending_rewind = None;
@@ -6406,7 +6484,7 @@ impl Chat {
             && let Err(error) =
                 client.prompt_content(text, mention_paths, images, self.agent_cwd.clone())
         {
-            self.client.take();
+            self.lose_client(cx);
             // The CLI that said it was running is gone.
             self.cli_state = None;
             self.cli_unprompted = false;
@@ -6513,6 +6591,10 @@ impl Chat {
         option: &AnswerOption,
         cx: &mut Context<Self>,
     ) {
+        if request_id >= WIDGET_ASK_BASE {
+            self.widget_card_chosen(request_id, option, cx);
+            return;
+        }
         if let Some(index) = self.dock_entry_index(request_id) {
             // From the dock: the entry the dock is on, never another one that
             // shares the id (ids restart after "Restart agent").
@@ -6574,6 +6656,10 @@ impl Chat {
     /// rides the selected-option channel; the transcript records it as the
     /// answer, and the pending state ends.
     fn answer_question_text(&mut self, request_id: u64, text: &str, cx: &mut Context<Self>) {
+        // A widget's card has no text row, and its answers never go to the CLI as a permission.
+        if request_id >= WIDGET_ASK_BASE {
+            return;
+        }
         if self.open_elicitation_index(request_id).is_some() {
             self.answer_elicitation_text(request_id, text, cx);
             return;
@@ -6613,6 +6699,10 @@ impl Chat {
     /// reads as no longer answerable; the agent is told the decision was
     /// cancelled.
     fn cancel_question(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        if request_id >= WIDGET_ASK_BASE {
+            self.deny_widget_ask(request_id, cx);
+            return;
+        }
         if self.open_elicitation_index(request_id).is_some() {
             self.respond_elicitation(request_id, sirio_chat::ElicitationAction::Cancel, cx);
             return;
@@ -6686,6 +6776,10 @@ impl Chat {
     /// no `dismissed` outcome, so the wire response is explicitly Cancelled;
     /// it is never mapped to a rejection option.
     fn dismiss_permission(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        if request_id >= WIDGET_ASK_BASE {
+            self.deny_widget_ask(request_id, cx);
+            return;
+        }
         let mut dismissed = false;
         if let Some((
             index,
@@ -6728,9 +6822,15 @@ impl Chat {
     /// F-CHAT-27: a finished turn (or a dead transport) leaves every
     /// unanswered question permanently unanswerable, so the surface never
     /// sits in a wait nothing can resolve.
-    fn expire_unanswered(&mut self) {
+    fn expire_unanswered(&mut self, widget_asks: WidgetAsks, cx: &mut Context<Self>) {
+        if widget_asks == WidgetAsks::Deny {
+            self.deny_all_widget_asks(cx);
+        }
         for entry in &mut self.entries {
             match entry {
+                // A model turn's end does not touch a widget's own ask.
+                Entry::Permission { request_id, .. }
+                    if *request_id >= WIDGET_ASK_BASE && widget_asks == WidgetAsks::Keep => {}
                 Entry::Permission {
                     resolved: None,
                     expired,
@@ -6909,6 +7009,8 @@ impl Chat {
         // still open here would never hear of its end.
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
+        // The widgets belong to the session that is replaced: none is built into the new one.
+        self.close_session_widgets(widget_slot::SESSION_RESTARTED, cx);
         // A new process has said nothing yet; retry, a new conversation,
         // launch and a failed launch all pass here.
         self.cli_state = None;
@@ -6925,6 +7027,8 @@ impl Chat {
         self.effort_auto_attempt = None;
         self.effort_auto_budget = EFFORT_AUTO_REQUESTS;
         self.session_panel.clear_session();
+        // A new process is a new session: the old one's tool list answers nothing.
+        self.widgets.reset_lookups();
         self.connecting = true;
         let cwd = self.agent_cwd.clone();
         self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -7014,10 +7118,23 @@ impl Chat {
         }));
     }
 
+    /// The CLI went away under a live chat: a transport error, a deadline, or a prompt that
+    /// failed to send. With no CLI behind them, widget asks are denied, their cards expire and
+    /// the widgets close. A closed event stream (`event_source_closed`) and a new connection
+    /// (`start_connection`) drop the client on their own paths and close the widgets there.
+    fn lose_client(&mut self, cx: &mut Context<Self>) {
+        self.client.take();
+        self.expire_unanswered(WidgetAsks::Deny, cx);
+        self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
+    }
+
     /// The event source closed with no terminal event: see the call site in
     /// `start_connection`. `client` still being `Some` is what tells this
     /// from an already-handled `TransportError`/`Timeout`.
     fn event_source_closed(&mut self, cx: &mut Context<Self>) {
+        // A send that failed already dropped the client, and its widgets were closed then; the
+        // teardown here is for whatever opened since, and costs nothing when there is none.
+        self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
         if self.client.is_none() {
             return;
         }
@@ -7029,7 +7146,7 @@ impl Chat {
         self.reset_background_tasks(cx);
         self.reset_agent_title();
         if self.streaming {
-            self.expire_unanswered();
+            self.expire_unanswered(WidgetAsks::Deny, cx);
         }
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.push_entry(Entry::Error {
@@ -8246,6 +8363,15 @@ impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
+        self.widgets.note_window(window.window_handle());
+        if self.widgets.has_waiting_read() {
+            // A page was read before this chat had a window. `McpWidget::new` needs `&mut
+            // Window` and this render holds the chat, so the build runs after it.
+            let chat = cx.entity();
+            window.defer(cx, move |window, cx| {
+                chat.update(cx, |chat, cx| chat.build_waiting_widgets(window, cx));
+            });
+        }
         self.settle_background_popover(window, cx);
         // Read before any loader renews this view's lease.
         if sirio_perf::enabled() && crate::motion::Painter::of(cx).woken(cx) {
@@ -8504,11 +8630,15 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         &row_bezel_theme,
                                         entity.clone(),
                                     );
+                                    // A slot's prepaint reports its place inside this item, and
+                                    // this probe is where the item begins.
+                                    let probe = this.widget_item_probe(start, end);
                                     return div()
                                         .id(this.row_id(entry_index, cx))
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
+                                        .children(probe)
                                         .child(run)
                                         .into_any_element();
                                 }
@@ -8558,7 +8688,10 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                         .with_sizing_behavior(ListSizingBehavior::Auto)
                         .flex_grow_1(),
                     )
-                    .child(self.render_jump_to_latest(&bezel_theme, cx)),
+                    .child(self.render_jump_to_latest(&bezel_theme, cx))
+                    // After the list and its disc, so both have prepainted: places the
+                    // widgets, which are separate X windows over the rows.
+                    .child(self.widget_sweep(cx)),
             )
             // #239: the generating spinner, transient by construction. It is a
             // sibling of the transcript rather than an entry in it: the list is
@@ -16796,7 +16929,7 @@ two"
                 },
                 cx,
             );
-            chat.expire_unanswered();
+            chat.expire_unanswered(WidgetAsks::Keep, cx);
         });
         chat.read_with(&cx.cx, |chat, _| {
             assert!(matches!(
@@ -18136,7 +18269,7 @@ two"
         assert!(dock_is_focused(&chat, cx));
 
         chat.update(cx, |chat, cx| {
-            chat.expire_unanswered();
+            chat.expire_unanswered(WidgetAsks::Keep, cx);
             cx.notify();
         });
         refresh_frame(cx);

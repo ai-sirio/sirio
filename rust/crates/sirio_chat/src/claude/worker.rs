@@ -32,6 +32,7 @@ use super::{ClaudeLaunch, ReloadError};
 use super::events::{Fold, ResultSummary};
 use super::permission;
 use super::trace::TraceFold;
+use super::widget_approvals::WidgetApprovals;
 use sirio_chat_vocab::{
     AgentMode, ChatError, ChatEvent, CloseReason, ContextCost, ContextUsage, EffortChoice,
     EffortOption, ElicitationAction, ElicitationPrompt, ModeCatalog, ModelCatalog, ModelOption,
@@ -95,6 +96,19 @@ pub(super) enum Command {
     McpStatus {
         reply: mpsc::SyncSender<Result<Vec<McpServer>, String>>,
     },
+    /// Read an MCP resource for a widget. The reply is the `contents` array.
+    McpReadResource {
+        server: String,
+        uri: String,
+        reply: mpsc::SyncSender<Result<serde_json::Value, String>>,
+    },
+    /// Call an MCP tool for a widget the user allowed. The reply is the CLI's whole answer;
+    /// the CLI's own ask for the call is pre-approved for exactly this tool and input.
+    McpCall {
+        tool: String,
+        arguments: serde_json::Value,
+        reply: mpsc::SyncSender<Result<serde_json::Value, String>>,
+    },
     /// Ask the CLI for its live permission rules. The reply carries the CLI's
     /// own refusal text when it refuses.
     PermissionRules {
@@ -132,6 +146,81 @@ pub(super) enum Command {
     ReloadSkills {
         reply: mpsc::SyncSender<Result<(), ReloadError>>,
     },
+}
+
+/// The variable that tells the CLI its host draws MCP Apps widgets.
+const MCP_APPS_HOST_VAR: &str = "CLAUDE_CODE_MCP_APPS_HOST";
+
+/// The three capabilities of `system/init` a widget needs, all of them.
+const MCP_APPS_GATE: [&str; 3] = [
+    "mcp_tool_ui_meta_v1",
+    "mcp_read_resource_v1",
+    "mcp_call_result_not_for_model_v1",
+];
+
+/// The capability that lets a widget's call ask the CLI to check permissions.
+const CHECK_PERMISSIONS_CAPABILITY: &str = "mcp_call_check_permissions_v1";
+
+/// The prefix of the tool-use id the CLI gives its own ask for an `mcp_call`.
+const MCP_CALL_ASK_PREFIX: &str = "toolu_mcp_call_";
+
+/// What Sirio says to an ask for an `mcp_call` it did not make for a widget.
+const MCP_CALL_NOT_APPROVED: &str = "Sirio did not approve this call";
+
+/// Sets the launch variable, or removes it: the child's environment is the user's, which may
+/// hold a value of its own, and it must not reach a CLI that was not told to expect widgets.
+fn set_mcp_apps_host_env(command: &mut std::process::Command, on: bool) {
+    if on {
+        command.env(MCP_APPS_HOST_VAR, "1");
+    } else {
+        command.env_remove(MCP_APPS_HOST_VAR);
+    }
+}
+
+/// What the CLI's own ask for a widget's `mcp_call` comes to.
+enum McpCallAsk {
+    /// Not one of these asks: the ordinary paths read it.
+    Other,
+    /// One of them, with no request id to answer under.
+    Unanswerable,
+    /// One of them, and this is the line that answers it.
+    Answer(serde_json::Value),
+}
+
+/// Reads a raw control request as the ask of an `mcp_call`, by the `can_use_tool` subtype and the
+/// `toolu_mcp_call_` prefix on its tool-use id, and answers it: allowed when a grant covers
+/// exactly its tool and input, denied otherwise, including when it is too malformed to parse.
+/// Nothing but a grant allows it.
+fn mcp_call_ask(
+    value: &serde_json::Value,
+    approvals: &mut WidgetApprovals,
+    now: std::time::Instant,
+) -> McpCallAsk {
+    let is_mcp_call = value.pointer("/request/subtype").and_then(serde_json::Value::as_str)
+        == Some("can_use_tool")
+        && value
+            .pointer("/request/tool_use_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id.starts_with(MCP_CALL_ASK_PREFIX));
+    if !is_mcp_call {
+        return McpCallAsk::Other;
+    }
+    let Some(request_id) = value.get("request_id").and_then(serde_json::Value::as_str) else {
+        return McpCallAsk::Unanswerable;
+    };
+    let granted = sirio_claude::CanUseTool::parse(value)
+        .filter(|request| approvals.take(&request.tool_name, &request.input, now));
+    let result = match granted {
+        Some(request) => sirio_claude::PermissionResult::allow(request.input),
+        None => sirio_claude::PermissionResult::deny(MCP_CALL_NOT_APPROVED),
+    };
+    McpCallAsk::Answer(result.into_response(request_id))
+}
+
+/// Whether `system/init` listed `name`. Never the `initialize` answer: the names a widget
+/// depends on are in `system/init` only.
+fn init_has(capabilities: &[String], name: &str) -> bool {
+    capabilities.iter().any(|capability| capability == name)
 }
 
 /// How long a finished turn waits for the meter's answer before the result's
@@ -403,6 +492,7 @@ pub(super) fn run(config: Config) {
                 program: launch.program.clone(),
                 resume: resume.clone(),
                 prefix_args: launch.prefix_args.clone(),
+                mcp_apps_host: launch.mcp_apps_host,
             },
             cwd: cwd.clone(),
             command_rx: command_rx.clone(),
@@ -500,6 +590,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
     for (key, value) in &line.env {
         std_command.env(key, value);
     }
+    set_mcp_apps_host_env(&mut std_command, launch.mcp_apps_host);
     #[cfg(unix)]
     {
         // Make the child a process-group leader so terminating it takes
@@ -760,6 +851,18 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut pending_context_refresh: Option<String> = None;
     let mut pending_mcp_status: HashMap<String, mpsc::SyncSender<Result<Vec<McpServer>, String>>> =
         HashMap::new();
+    let mut pending_mcp_reads: HashMap<
+        String,
+        mpsc::SyncSender<Result<serde_json::Value, String>>,
+    > = HashMap::new();
+    let mut pending_mcp_calls: HashMap<
+        String,
+        mpsc::SyncSender<Result<serde_json::Value, String>>,
+    > = HashMap::new();
+    // What the user allowed on a widget card, for the CLI's own ask about the call.
+    let mut widget_approvals = WidgetApprovals::default();
+    // The capabilities the latest `system/init` listed: the only source of the widget gate.
+    let mut init_capabilities: Vec<String> = Vec::new();
     let mut pending_permission_rules: HashMap<
         String,
         mpsc::SyncSender<Result<PermissionRules, String>>,
@@ -834,6 +937,11 @@ async fn session(context: SessionContext) -> SessionOutcome {
             continue;
         }
         // Anything else before the handshake answer is ordinary traffic.
+        if let CliMessage::System(system) = &message
+            && system.subtype == "init"
+        {
+            init_capabilities.clone_from(&system.capabilities);
+        }
         send_trace(&event_tx, trace.line(&message, at)).await;
         let events = fold.apply(message);
         // An `init` printed before the answer names the session here, so it
@@ -845,6 +953,10 @@ async fn session(context: SessionContext) -> SessionOutcome {
             let _ = event_tx.send(event).await;
         }
     };
+
+    // An `init` printed before the answer named the capabilities, too.
+    catalog.add_capabilities(&init_capabilities);
+    fold.set_mcp_apps(MCP_APPS_GATE.iter().all(|name| init_has(&init_capabilities, name)));
 
     if catalog.is_logged_out() {
         // The same error the ACP path raises, so the surface's existing
@@ -1123,6 +1235,33 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 }
                                 let _ = reply.send(answer);
                             }
+                            if let Some(reply) = pending_mcp_reads.remove(&envelope.request_id) {
+                                let _ = reply.send(match (&envelope.payload, &envelope.error) {
+                                    (Some(payload), _) => payload
+                                        .get("contents")
+                                        .filter(|contents| contents.is_array())
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                            "the resource could not be read".to_string()
+                                        }),
+                                    (None, Some(error)) => Err(error.clone()),
+                                    (None, None) => {
+                                        Err("the agent refused the resource read".to_string())
+                                    }
+                                });
+                            }
+                            if let Some(reply) = pending_mcp_calls.remove(&envelope.request_id) {
+                                // The answer, success or error, ends what the call was
+                                // allowed to ask.
+                                widget_approvals.revoke(&envelope.request_id);
+                                let _ = reply.send(match (&envelope.payload, &envelope.error) {
+                                    (Some(payload), _) => Ok(payload.clone()),
+                                    (None, Some(error)) => Err(error.clone()),
+                                    (None, None) => {
+                                        Err("the agent refused the tool call".to_string())
+                                    }
+                                });
+                            }
                             if let Some(reply) =
                                 pending_permission_rules.remove(&envelope.request_id)
                             {
@@ -1328,6 +1467,30 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             }
                             continue;
                         }
+                        // The CLI's own ask for a widget's `mcp_call`. Answered here, before
+                        // any trace, row or card: the user already decided on the widget's
+                        // card, and an ask that decision does not cover is none of the user's
+                        // to answer.
+                        if let CliMessage::ControlRequest(value) = &message {
+                            match mcp_call_ask(
+                                value,
+                                &mut widget_approvals,
+                                std::time::Instant::now(),
+                            ) {
+                                McpCallAsk::Other => {}
+                                McpCallAsk::Unanswerable => continue,
+                                McpCallAsk::Answer(line) => {
+                                    if write_line(&mut stdin, &line).await.is_err() {
+                                        end_held_turn(&event_tx, &mut pending_context_usage)
+                                            .await;
+                                        return SessionOutcome::Died(
+                                            ": could not answer a tool call's ask".into(),
+                                        );
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         if let CliMessage::ControlRequest(value) = &message
                             && let Some(request) = sirio_claude::CanUseTool::parse(value)
                         {
@@ -1419,6 +1582,15 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             && let Some(mode) = system.permission_mode.clone()
                         {
                             apply_current_mode(&shared, &mode);
+                        }
+                        if let CliMessage::System(system) = &message
+                            && system.subtype == "init"
+                        {
+                            init_capabilities.clone_from(&system.capabilities);
+                            catalog.add_capabilities(&init_capabilities);
+                            fold.set_mcp_apps(
+                                MCP_APPS_GATE.iter().all(|name| init_has(&init_capabilities, name)),
+                            );
                         }
                         // A plugin or skill loaded mid-session. The list is
                         // republished even when it came back empty: this is
@@ -1800,6 +1972,54 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the connector status request".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::McpReadResource { server, uri, reply }) => {
+                        let id = next_request_id();
+                        pending_mcp_reads.insert(id.clone(), reply);
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::mcp_read_resource(&id, &server, &uri),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the resource read".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::McpCall {
+                        tool,
+                        arguments,
+                        reply,
+                    }) => {
+                        let id = next_request_id();
+                        // Only a CLI that checks permissions asks about the call, so only then
+                        // is there an ask to approve; the grant is for this call's id and
+                        // ends with its answer.
+                        let check = init_has(&init_capabilities, CHECK_PERMISSIONS_CAPABILITY);
+                        if check {
+                            widget_approvals.grant(
+                                &id,
+                                &tool,
+                                &arguments,
+                                std::time::Instant::now(),
+                            );
+                        }
+                        pending_mcp_calls.insert(id.clone(), reply);
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::mcp_call(&id, &tool, &arguments, check),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the tool call".into(),
                             );
                         }
                     }
@@ -2376,5 +2596,80 @@ mod tests {
         let mut summary = summary();
         summary.context_window = None;
         assert_eq!(context_usage_event(None, &summary), None);
+    }
+
+    // Failure list for the launch variable: a user's own value passing through when the switch
+    // is off, the variable missing when it is on, the switch being on without saying "1".
+    #[test]
+    fn an_inherited_launch_variable_is_removed() {
+        let envs_of = |on: bool| {
+            let mut command = std::process::Command::new("claude");
+            command.env(MCP_APPS_HOST_VAR, "from the user");
+            set_mcp_apps_host_env(&mut command, on);
+            command
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new(MCP_APPS_HOST_VAR))
+                .map(|(_, value)| value.map(std::ffi::OsStr::to_owned))
+        };
+        assert_eq!(envs_of(false), Some(None), "a removal, not a value");
+        assert_eq!(envs_of(true), Some(Some("1".into())));
+    }
+
+    // Failure list for the ask of an `mcp_call`: an ask with a `toolu_mcp_call_` id but no
+    // `tool_name` left unanswered or sent on to the card path; one answered with the wrong
+    // request id; an ask that was not granted being allowed; a granted one allowed twice; an
+    // ordinary ask taken for one of these; a control request of another subtype that carries
+    // such an id taken for one, and answered with a permission verdict.
+    #[test]
+    fn every_mcp_call_ask_is_answered_and_only_a_granted_one_is_allowed() {
+        let now = std::time::Instant::now();
+        let input = serde_json::json!({"step": 1});
+        let ask = |request: serde_json::Value| {
+            serde_json::json!({"type": "control_request", "request_id": "r1", "request": request})
+        };
+        let whole = ask(serde_json::json!({
+            "subtype": "can_use_tool", "tool_name": "mcp__apps__act", "input": input,
+            "tool_use_id": "toolu_mcp_call_01234567"
+        }));
+        let behavior = |answer: McpCallAsk| match answer {
+            McpCallAsk::Answer(line) => {
+                assert_eq!(line["response"]["request_id"], "r1");
+                line["response"]["response"]["behavior"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        };
+        let mut approvals = WidgetApprovals::default();
+        approvals.grant("c1", "mcp__apps__act", &input, now);
+        assert_eq!(behavior(mcp_call_ask(&whole, &mut approvals, now)).as_deref(), Some("allow"));
+        assert_eq!(behavior(mcp_call_ask(&whole, &mut approvals, now)).as_deref(), Some("deny"));
+
+        // No tool name: the ask does not parse, and is still denied under its own id.
+        let nameless = ask(serde_json::json!({
+            "subtype": "can_use_tool", "tool_use_id": "toolu_mcp_call_01234567", "input": {}
+        }));
+        assert_eq!(
+            behavior(mcp_call_ask(&nameless, &mut approvals, now)).as_deref(),
+            Some("deny")
+        );
+        // No request id either: nothing can be answered, and nothing goes on to a card.
+        let mut anonymous = nameless.clone();
+        anonymous.as_object_mut().expect("an object").remove("request_id");
+        assert!(matches!(
+            mcp_call_ask(&anonymous, &mut approvals, now),
+            McpCallAsk::Unanswerable
+        ));
+        // An ordinary ask is not one of these, whatever it lacks.
+        let ordinary =
+            ask(serde_json::json!({"subtype": "can_use_tool", "tool_use_id": "toolu_1"}));
+        assert!(matches!(mcp_call_ask(&ordinary, &mut approvals, now), McpCallAsk::Other));
+        // Nor is a request of another subtype, whatever id it carries.
+        let other_subtype = ask(serde_json::json!({
+            "subtype": "hook_callback", "tool_name": "mcp__apps__act", "input": input,
+            "tool_use_id": "toolu_mcp_call_01234567"
+        }));
+        assert!(matches!(
+            mcp_call_ask(&other_subtype, &mut approvals, now),
+            McpCallAsk::Other
+        ));
     }
 }

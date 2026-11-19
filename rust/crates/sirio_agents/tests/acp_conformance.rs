@@ -3373,3 +3373,365 @@ fn the_gateway_base_url_guard_checks_the_host() {
         assert!(claude_live::is_local_base_url(url), "a local API URL is accepted");
     }
 }
+
+// Failure list for `claude_serves_mcp_apps_to_sirio`, written before the test. It fails when:
+// - the CLI's own MCP `initialize` does not declare `io.modelcontextprotocol/ui` with the
+//   `text/html;profile=mcp-app` MIME type under `CLAUDE_CODE_MCP_APPS_HOST=1` (the launch
+//   variable is not honoured, or Sirio does not set it);
+// - `system/init` lacks any of the four capabilities a widget needs, as the relay in front of
+//   the CLI logged them (`mcp_tool_ui_meta_v1`, `mcp_read_resource_v1`,
+//   `mcp_call_result_not_for_model_v1`, `mcp_call_check_permissions_v1`);
+// - the model's `mcp__apps__show` call does not reach the chat as `Called` and `Returned`, or
+//   the result lost its `structuredContent`;
+// - `mcp_status` does not carry `show`'s `resourceUri` and `app` visibility, or shows `act` to
+//   the model (the `_meta.ui` of a tool is not forwarded);
+// - `ui_tool_for` does not find `show`, or `mcp_read_resource` does not return a document
+//   whose csp is the one the server declared;
+// - the widget's `act` call fails, or the relay does not log exactly one `can_use_tool` ask
+//   with a `toolu_mcp_call_` id for `mcp__apps__act` with `{"step":1}`, or the server did not
+//   run `act` with `{"step":1}` (the ask is the one Sirio grants, and Sirio denies any ask it
+//   did not grant);
+// - any permission card reaches the chat, during the turn or in the 2 s after the widget's
+//   call (the model's `show` is allowed by the user settings and the widget's call is
+//   answered by Sirio alone);
+// - the turn does not end within 60 s.
+
+/// Proves the real `claude` and Sirio's MCP Apps plumbing agree on the wire: the host
+/// capability reaches the server, a model call to a widget tool reaches the chat with its
+/// structured result, `mcp_status` carries the tool's UI, and `mcp_read_resource` and
+/// `mcp_call` (with the CLI's own permission ask, in the default permission mode) work through
+/// the production client.
+///
+/// A fake model API (`fake_mcp_apps_api.py`) and a fake MCP server (`mcp_apps.py`) stand in for
+/// the network. It uses no credential and no network beyond 127.0.0.1, but launches a real CLI,
+/// so it is `#[ignore]`d and stays off CI:
+///
+///     TMPDIR=/var/tmp/sirio-live cargo test -p sirio_agents --test acp_conformance \
+///         -- --ignored --exact claude_serves_mcp_apps_to_sirio --test-threads=1 --nocapture
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
+/// `python3`. Its scratch directory is under the system temp dir, removed after a pass and kept
+/// after a failure.
+#[test]
+#[ignore = "launches the real claude"]
+fn claude_serves_mcp_apps_to_sirio() {
+    use sirio_chat::{ChatEvent, ClaudeClient, ClaudeLaunch, McpToolItem, SessionNotice};
+
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("mcp-apps", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    eprintln!("claude reports {version_text}");
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude is below the claimed floor");
+        return;
+    }
+
+    let rig = claude_live::AppsRig::start(&claude, &python, &scratch.root.join("apps"));
+    let launch = ClaudeLaunch::fixture(
+        std::path::PathBuf::from("/bin/sh"),
+        vec![rig.launcher.display().to_string()],
+    )
+    .mcp_apps_host(true);
+    let Ok((mut client, events)) = ClaudeClient::launch(launch, &rig.work) else {
+        panic!("the CLI did not complete its handshake");
+    };
+    if client.prompt("run apps").is_err() {
+        panic!("the prompt was not sent");
+    }
+
+    // The turn: the model calls `show`; the chat gets its `Called` and `Returned` notices.
+    let mut tool_updates = Vec::new();
+    let mut permission_cards = 0;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut ended = false;
+    while Instant::now() < deadline && !ended {
+        match events.try_recv() {
+            Ok(ChatEvent::TurnEnded { .. }) => ended = true,
+            Ok(ChatEvent::PermissionRequest { request_id, .. }) => {
+                permission_cards += 1;
+                let _ = client.cancel_permission(request_id);
+            }
+            Ok(ChatEvent::OtherSessionUpdate { .. }) => {
+                for notice in client.take_notices() {
+                    if let SessionNotice::McpTool(update) = notice {
+                        tool_updates.push(update);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    assert!(ended, "the turn ended within 60 s");
+    for notice in client.take_notices() {
+        if let SessionNotice::McpTool(update) = notice {
+            tool_updates.push(update);
+        }
+    }
+
+    // The server saw the host's MCP Apps capability in the CLI's own `initialize`.
+    let log = std::fs::read_to_string(&rig.mcp_log).unwrap_or_default();
+    let initializes: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|entry| entry.get("initialize").cloned())
+        .collect();
+    assert!(!initializes.is_empty(), "the server saw an initialize");
+    assert!(
+        initializes.iter().any(|params| {
+            params["capabilities"]["extensions"]["io.modelcontextprotocol/ui"]["mimeTypes"]
+                == serde_json::json!(["text/html;profile=mcp-app"])
+        }),
+        "the server saw no MCP Apps capability"
+    );
+
+    let called = tool_updates.iter().find_map(|update| match &update.item {
+        McpToolItem::Called { name, input } => {
+            Some((update.id.clone(), name.clone(), input.clone()))
+        }
+        _ => None,
+    });
+    let (call_id, name, input) = called.expect("the chat got a Called notice");
+    assert!(name == "mcp__apps__show", "the call names the show tool");
+    assert!(
+        input == serde_json::json!({"text": "hi"}),
+        "the call carries the model's input"
+    );
+    let returned = tool_updates.iter().find_map(|update| match &update.item {
+        McpToolItem::Returned { result } if update.id == call_id => Some(result.clone()),
+        _ => None,
+    });
+    let returned = returned.expect("the chat got a Returned notice for the call");
+    assert!(
+        returned.get("structuredContent").is_some(),
+        "the result carries structuredContent"
+    );
+
+    // `mcp_status` carries each tool's UI.
+    let control = client.mcp_control();
+    let Ok(servers) = control.refresh_status() else {
+        panic!("mcp_status did not answer");
+    };
+    let apps = servers
+        .iter()
+        .find(|server| server.name == "apps")
+        .expect("the apps server is listed");
+    let ui_of = |tool: &str| {
+        apps.tools
+            .iter()
+            .find(|candidate| candidate.name == tool)
+            .and_then(|candidate| candidate.ui.clone())
+    };
+    let show = ui_of("show").expect("show carries a ui");
+    assert!(
+        show.resource_uri.as_deref() == Some("ui://apps/show.html"),
+        "show names the widget resource"
+    );
+    assert!(show.for_app, "show is visible to the app");
+    let act = ui_of("act").expect("act carries a ui");
+    assert!(act.for_app && !act.for_model, "act is app only");
+    assert!(
+        sirio_claude::mcp::ui_tool_for(&servers, "mcp__apps__show").is_some(),
+        "ui_tool_for finds show"
+    );
+
+    // The widget's resource, through the CLI, is a document with the declared csp.
+    let Ok(contents) = control.read_resource("apps", "ui://apps/show.html") else {
+        panic!("mcp_read_resource did not answer");
+    };
+    let Ok(document) =
+        sirio_chat::mcp_apps::document::widget_document(&contents, "ui://apps/show.html")
+    else {
+        panic!("the resource is not a widget document");
+    };
+    assert!(
+        document.csp.connect == ["https://api.widget.test"],
+        "the document carries the declared connect domains"
+    );
+
+    // The widget's call: the CLI asks in the default mode, and Sirio answers its own grant.
+    let Ok(acted) =
+        control.call_tool_after_user_allowed("mcp__apps__act", serde_json::json!({"step": 1}))
+    else {
+        panic!("the widget's call was not allowed and answered");
+    };
+    assert!(
+        acted.get("content").is_some_and(serde_json::Value::is_array),
+        "the call's content is a block array"
+    );
+
+    // The widget's call raised no card: the events after the turn are drained for 2 s.
+    let drain_until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < drain_until {
+        match events.try_recv() {
+            Ok(ChatEvent::PermissionRequest { .. }) => permission_cards += 1,
+            Ok(_) => {}
+            Err(_) if events.is_closed() => break,
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    assert!(permission_cards == 0, "no permission card reached the chat for the widget's call");
+
+    // The wire, as the relay in front of the CLI saw it.
+    let relay = jsonl_of(&rig.relay_log);
+    let capabilities: Vec<&str> = relay
+        .iter()
+        .filter_map(|entry| entry.get("init_capabilities")?.as_array())
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    for gate in [
+        "mcp_tool_ui_meta_v1",
+        "mcp_read_resource_v1",
+        "mcp_call_result_not_for_model_v1",
+        "mcp_call_check_permissions_v1",
+    ] {
+        assert!(
+            capabilities.contains(&gate),
+            "system/init lists every capability a widget needs"
+        );
+    }
+    let mcp_call_asks: Vec<&serde_json::Value> = relay
+        .iter()
+        .filter_map(|entry| entry.get("ask"))
+        .filter(|ask| ask["id_prefix"] == "toolu_mcp_call_")
+        .collect();
+    assert!(
+        mcp_call_asks.len() == 1,
+        "the CLI sent exactly one mcp_call ask"
+    );
+    assert!(
+        mcp_call_asks[0]["tool_name"] == "mcp__apps__act",
+        "the ask names the tool Sirio sent"
+    );
+    assert!(
+        mcp_call_asks[0]["input"] == serde_json::json!({"step": 1}),
+        "the ask carries the widget's input"
+    );
+    assert!(
+        jsonl_of(&rig.mcp_log).iter().any(|call| {
+            call["call"] == "act" && call["arguments"] == serde_json::json!({"step": 1})
+        }),
+        "the server ran act with the widget's input"
+    );
+
+    // A second prompt: the model calls `note` (allowed, text only), then `ask_me` (not allowed:
+    // the CLI asks and the test rejects), then answers. A call ran when its result is not an
+    // error, whatever shape its `tool_use_result` has.
+    if client.prompt("run notes").is_err() {
+        panic!("the second prompt was not sent");
+    }
+    let mut second_updates = Vec::new();
+    let mut second_asks = 0;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut ended = false;
+    while Instant::now() < deadline && !ended {
+        match events.try_recv() {
+            Ok(ChatEvent::TurnEnded { .. }) => ended = true,
+            Ok(ChatEvent::PermissionRequest { request_id, options, .. }) => {
+                second_asks += 1;
+                let reject = options.iter().find(|option| option.id == "reject_once");
+                let Some(reject) = reject else {
+                    panic!("the ask offered no reject option");
+                };
+                if client.respond_permission(request_id, reject.id.clone()).is_err() {
+                    panic!("the rejection was not sent");
+                }
+            }
+            Ok(ChatEvent::OtherSessionUpdate { .. }) => {
+                for notice in client.take_notices() {
+                    if let SessionNotice::McpTool(update) = notice {
+                        second_updates.push(update);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    assert!(ended, "the second turn ended within 60 s");
+    for notice in client.take_notices() {
+        if let SessionNotice::McpTool(update) = notice {
+            second_updates.push(update);
+        }
+    }
+    assert!(second_asks == 1, "exactly one ask reached the chat in the second prompt");
+    let outcome_of = |tool: &str| {
+        let id = second_updates.iter().find_map(|update| match &update.item {
+            McpToolItem::Called { name, .. } if name == tool => Some(update.id.clone()),
+            _ => None,
+        })?;
+        second_updates
+            .iter()
+            .find(|update| update.id == id && !matches!(update.item, McpToolItem::Called { .. }))
+            .map(|update| update.item.clone())
+    };
+    match outcome_of("mcp__apps__note") {
+        Some(McpToolItem::Returned { result }) => assert!(
+            result["content"][0]["text"] == "noted",
+            "the text-only call returned its text"
+        ),
+        _ => panic!("the text-only call did not produce a Returned notice"),
+    }
+    assert!(
+        matches!(outcome_of("mcp__apps__ask_me"), Some(McpToolItem::NotRun)),
+        "the rejected call produced a NotRun notice"
+    );
+
+    // The wire, for the record: the structure of each result and the one ask that is not a
+    // widget's.
+    let relay = jsonl_of(&rig.relay_log);
+    let result_of = |id: &str| {
+        relay
+            .iter()
+            .filter_map(|entry| entry.get("result"))
+            .find(|result| result["tool_use_id"] == id)
+            .cloned()
+    };
+    let note = result_of("toolu_n1").expect("the relay saw the text-only result");
+    // A success carries no `is_error` field at all (null here), so "not true" is the test.
+    assert!(note["is_error"] != true, "the text-only result is not an error");
+    let denied = result_of("toolu_n2").expect("the relay saw the rejected call's result");
+    assert!(denied["is_error"] == true, "the rejected call's result is an error");
+    eprintln!(
+        "wire: note result {{is_error: {}, tool_use_result: {}}}; ask_me result {{is_error: {}, \
+         tool_use_result: {}}}",
+        note["is_error"], note["tool_use_result_type"], denied["is_error"],
+        denied["tool_use_result_type"]
+    );
+    let other_asks = relay
+        .iter()
+        .filter_map(|entry| entry.get("ask"))
+        .filter(|ask| ask["id_prefix"] == "other")
+        .count();
+    assert!(other_asks == 1, "the CLI sent exactly one ask that is not a widget's");
+
+    if client.shutdown().is_err() {
+        panic!("the client did not shut down");
+    }
+}
+
+/// Every JSON line of a test log.
+fn jsonl_of(path: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}

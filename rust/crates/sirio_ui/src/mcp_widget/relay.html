@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;height:100%;overflow:hidden}
+iframe{border:0;display:block;width:100%;height:100%}
+</style>
+<body>
+<script>
+(function () {
+  "use strict";
+  const SECRET = "{{SECRET}}";
+  const VIEW_URL = "{{VIEW_URL}}";
+  const VIEW_ORIGIN = "{{VIEW_ORIGIN}}";
+  const ipc = window.ipc;
+  const frame = document.createElement("iframe");
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+  frame.src = VIEW_URL;
+  document.body.appendChild(frame);
+  window.addEventListener("message", function (e) {
+    if (e.source !== frame.contentWindow) return;
+    // Only a plain object goes on: no null, array, string, class instance or other value.
+    const d = e.data;
+    if (d === null || typeof d !== "object" || Array.isArray(d)) return;
+    const proto = Object.getPrototypeOf(d);
+    if (proto !== Object.prototype && proto !== null) return;
+    ipc.postMessage(JSON.stringify({ s: SECRET, m: d }));
+  });
+  window.__sirioDeliver = function (t) {
+    frame.contentWindow.postMessage(JSON.parse(t), VIEW_ORIGIN);
+  };
+})();
+</script>

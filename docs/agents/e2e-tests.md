@@ -520,6 +520,81 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 
+# MCP Apps widgets (A11): a tool with a UI shows its widget inline in the native Claude chat, in a
+# wry webview over the tool row. Widgets exist on Linux under X11 only, so these three scenarios
+# need a framed run on a private Xvfb of your own (never $DISPLAY or :0), at --window-size
+# 2200x1000, with Mesa's lavapipe:
+#   Xvfb :97 -screen 0 2400x1200x24 &      # keep its exact PID; kill that PID when done
+#   Scripts/Tests/test-chat-session-panel-e2e.sh --display :97 --window-size 2200x1000 \
+#     --out-dir DIR --only mcp_widget      # then mcp_widget_flood, then mcp_widget_gate
+# They run the trace stub with the fixture's MCP Apps knobs (SIRIO_FIXTURE_MCP_APPS=1, _WIDGET_HTML,
+# _START_BYPASS, _EFFORT_LADDER, _MCP_APPS_CAPS, _STRAY_MCP_ASK) and serve the hand-written view
+# Scripts/Tests/fixtures/mcp-apps/widget-view.html, which talks JSON-RPC to its parent and probes
+# for escapes against a request logger on 127.0.0.1 that must stay empty. The widgets are read
+# from the `mcpWidgets` key of `surface.chat.read`, the dock's `clickOnly`, `selected` and
+# `rowBounds` give the card, and the debug-only `surface.chat.transcript` scrolls the list or folds a turn.
+#   mcp_widget        two widgets, each with its own slot; a card that only a real click allows (Return,
+#                     1, Down and Return do nothing, Escape denies; a real press on the Allow row
+#                     that begins before card 2 armed and is released 0.7 s later leaves it pending; a
+#                     real click on its Allow before the body is scrolled to its end does nothing
+#                     (`allowArmed` "0"); a real wheel over the body arms it, and a real X click on
+#                     the Allow row then runs the call); and at every step the placement invariant: `mapped` is "1"
+#                     exactly when the slot is drawn wholly inside the list's viewport with no overlay,
+#                     dock question or hidden tab, and `xwininfo -id <xid>` says IsViewable exactly then
+#                     (no window counts as not viewable). At the step that puts widget 1 whole in the
+#                     viewport it also checks pixels: the display is screenshotted (`import -window root`),
+#                     widget 1's slot is cropped out, at least 90% of the crop must be the view's own
+#                     background colour (#12ab34, which the chat never uses), and the crop is kept as
+#                     `widget-slot-crop.png` (the X geometry check passed while the slot was black: the
+#                     webview stayed 1x1 when `set_bounds` ran before `set_visible(true)`).
+#                     The steps are the card open, a real click
+#                     inside widget 1 (the page fills its slot, checked on pixels above), a third
+#                     widget whose view has a real button (a real click on it raises the card for its
+#                     `report` call, rejected over the verb) and real typing with the pointer over it
+#                     (the view counts `keydown` events in the capture phase and reports the count in
+#                     its height, 120 plus the count: it must read 120). Known limit: the count stays 0
+#                     with the key handler disabled too (no run has seen a key reach the
+#                     page, handler on or off), so that part cannot tell the handler's work
+#                     from its absence.
+#                     A fourth widget is a textarea whose value length goes out through its height (2000
+#                     plus the length): the X PRIMARY selection is set from a python3-gi helper process
+#                     (killed by its exact PID), a real `click 2` lands on the textarea, and the length
+#                     must stay 0 (with the button-2 handler disabled the app stops answering reads: the
+#                     paste engaged). `show-option-menu`, `run-color-chooser` and `print` have no E2E.
+#                     Also a real click inside widget 1 then one in the composer then real typing (the
+#                     composer still takes the keys), a half scroll and back, a folded turn,
+#                     the effort list, a file tab over the chat, a terminal beside it, a call whose
+#                     `tool_use_result` is a string (the fixture's `mcp_denied` turn: its widget is
+#                     closed with "the call did not run" and never got input or result), a view that
+#                     posts straight to the IPC handler (`mcp_forge`: closed with "the view posted
+#                     outside its relay", `forged` "1" while every other widget's is "0"), and a dead
+#                     CLI. It also checks the CLI heard six mcp_read_resource and only gated
+#                     mcp_calls for `act`, and writes mcp-widget.json to the out dir.
+#   mcp_widget_flood  a widget posting pings at about 125k a second for 3 s: surface.chat.read answers
+#                     within 1000 ms throughout; within 30 s the widget's row is closed with "over the
+#                     rate limit for 5 s" (the host's IPC backlog keeps it over 50 a second for 5 s of host
+#                     time), no card ever appeared, its `forged` count is "0", the CLI heard no mcp_call, and the window it had is gone within 3 s;
+#                     mcp-widget-flood.json has the latencies and the final row. The per-second cut is
+#                     covered by the bridge test a_flood_is_cut_at_fifty_a_second.
+#   mcp_widget_gate   the CLI lists `_meta.ui` and serves the resource but reports no capability:
+#                     the rows are plain, no widget exists, and the CLI hears no read or call.
+# Scripts/Tests/widget-isolation.sh --display :97 --out-dir DIR is the webview's own isolation
+# proof (parent, IPC, network, devices, storage and navigation), run on the same kind of Xvfb.
+# Its logger listens on four 127.0.0.1 ports and counts raw TCP accepts (accepts.log) before it
+# reads a byte, so a bare preconnect, which sends no request line, cannot pass vacuously. The probe
+# view adds `<link rel=preconnect>` and `dns-prefetch` (one port), `<link rel=prefetch>` and a
+# speculation-rules prefetch (one port) and an `<a ping>` clicked by script (one port), each outside
+# the view's connect-src. The run must see no accept on any of them; the control opens the CSP and
+# turns the link features back on, and its checks and FACT lines show which probes reach their
+# logger, so a 0 in the run is the CSP or the switches, not a dead probe. `<a ping>` is stopped by
+# the CSP (the hyperlink auditing and DNS prefetching settings are documented no-ops on 2.54.1). The
+# raw TCP logger cannot see a DNS lookup, so the dns-prefetch probe proves only that no TCP connect
+# follows. `LinkPreconnect`, `LinkPrefetch` and `SpeculationRulesPrefetch` are turned off through
+# `dlsym`-resolved WebKitGTK 2.42+ functions.
+# Unverified, for a later enablement: macOS WKWebView and Windows WebView2 (view CSP header
+# enforcement, the incognito store, IPC in subframes, WebRTC off, the permission handler, drops;
+# on Windows wry's navigation handler sees only the top frame).
+
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
 # control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and
 # light) prove a chat asks its agent for High at start and again after a relaunch, and that the
