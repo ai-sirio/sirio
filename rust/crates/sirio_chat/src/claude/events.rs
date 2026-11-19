@@ -2051,7 +2051,7 @@ mod tests {
         fold.apply(mcp_result_line("toolu_unknown", false, "late"));
         let updates = mcp_updates(&mut fold);
         let [_, last] = updates.as_slice() else {
-            panic!("one call and one result, got {updates:?}");
+            panic!("expected one call and one result, got {} updates", updates.len());
         };
         let Returned { result } = &last.item else {
             panic!("the result follows the call");

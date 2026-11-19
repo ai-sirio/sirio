@@ -177,6 +177,43 @@ fn set_mcp_apps_host_env(command: &mut std::process::Command, on: bool) {
     }
 }
 
+/// What the CLI's own ask for a widget's `mcp_call` comes to.
+enum McpCallAsk {
+    /// Not one of these asks: the ordinary paths read it.
+    Other,
+    /// One of them, with no request id to answer under.
+    Unanswerable,
+    /// One of them, and this is the line that answers it.
+    Answer(serde_json::Value),
+}
+
+/// Reads a raw control request as the ask of an `mcp_call`, by the `toolu_mcp_call_` prefix on
+/// its tool-use id, and answers it: allowed when a grant covers exactly its tool and input,
+/// denied otherwise, including when it is too malformed to parse. Nothing but a grant allows it.
+fn mcp_call_ask(
+    value: &serde_json::Value,
+    approvals: &mut WidgetApprovals,
+    now: std::time::Instant,
+) -> McpCallAsk {
+    let is_mcp_call = value
+        .pointer("/request/tool_use_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| id.starts_with(MCP_CALL_ASK_PREFIX));
+    if !is_mcp_call {
+        return McpCallAsk::Other;
+    }
+    let Some(request_id) = value.get("request_id").and_then(serde_json::Value::as_str) else {
+        return McpCallAsk::Unanswerable;
+    };
+    let granted = sirio_claude::CanUseTool::parse(value)
+        .filter(|request| approvals.take(&request.tool_name, &request.input, now));
+    let result = match granted {
+        Some(request) => sirio_claude::PermissionResult::allow(request.input),
+        None => sirio_claude::PermissionResult::deny(MCP_CALL_NOT_APPROVED),
+    };
+    McpCallAsk::Answer(result.into_response(request_id))
+}
+
 /// Whether `system/init` listed `name`. Never the `initialize` answer: the names a widget
 /// depends on are in `system/init` only.
 fn init_has(capabilities: &[String], name: &str) -> bool {
@@ -1431,30 +1468,25 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         // any trace, row or card: the user already decided on the widget's
                         // card, and an ask that decision does not cover is none of the user's
                         // to answer.
-                        if let CliMessage::ControlRequest(value) = &message
-                            && let Some(request) = sirio_claude::CanUseTool::parse(value)
-                            && request
-                                .tool_use_id
-                                .as_deref()
-                                .is_some_and(|id| id.starts_with(MCP_CALL_ASK_PREFIX))
-                        {
-                            let result = if widget_approvals.take(
-                                &request.tool_name,
-                                &request.input,
+                        if let CliMessage::ControlRequest(value) = &message {
+                            match mcp_call_ask(
+                                value,
+                                &mut widget_approvals,
                                 std::time::Instant::now(),
                             ) {
-                                sirio_claude::PermissionResult::allow(request.input.clone())
-                            } else {
-                                sirio_claude::PermissionResult::deny(MCP_CALL_NOT_APPROVED)
-                            };
-                            let line = result.into_response(&request.request_id);
-                            if write_line(&mut stdin, &line).await.is_err() {
-                                end_held_turn(&event_tx, &mut pending_context_usage).await;
-                                return SessionOutcome::Died(
-                                    ": could not answer a tool call's ask".into(),
-                                );
+                                McpCallAsk::Other => {}
+                                McpCallAsk::Unanswerable => continue,
+                                McpCallAsk::Answer(line) => {
+                                    if write_line(&mut stdin, &line).await.is_err() {
+                                        end_held_turn(&event_tx, &mut pending_context_usage)
+                                            .await;
+                                        return SessionOutcome::Died(
+                                            ": could not answer a tool call's ask".into(),
+                                        );
+                                    }
+                                    continue;
+                                }
                             }
-                            continue;
                         }
                         if let CliMessage::ControlRequest(value) = &message
                             && let Some(request) = sirio_claude::CanUseTool::parse(value)
@@ -2578,5 +2610,53 @@ mod tests {
         };
         assert_eq!(envs_of(false), Some(None), "a removal, not a value");
         assert_eq!(envs_of(true), Some(Some("1".into())));
+    }
+
+    // Failure list for the ask of an `mcp_call`: an ask with a `toolu_mcp_call_` id but no
+    // `tool_name` left unanswered or sent on to the card path; one answered with the wrong
+    // request id; an ask that was not granted being allowed; a granted one allowed twice; an
+    // ordinary ask taken for one of these.
+    #[test]
+    fn every_mcp_call_ask_is_answered_and_only_a_granted_one_is_allowed() {
+        let now = std::time::Instant::now();
+        let input = serde_json::json!({"step": 1});
+        let ask = |request: serde_json::Value| {
+            serde_json::json!({"type": "control_request", "request_id": "r1", "request": request})
+        };
+        let whole = ask(serde_json::json!({
+            "subtype": "can_use_tool", "tool_name": "mcp__apps__act", "input": input,
+            "tool_use_id": "toolu_mcp_call_01234567"
+        }));
+        let behavior = |answer: McpCallAsk| match answer {
+            McpCallAsk::Answer(line) => {
+                assert_eq!(line["response"]["request_id"], "r1");
+                line["response"]["response"]["behavior"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        };
+        let mut approvals = WidgetApprovals::default();
+        approvals.grant("c1", "mcp__apps__act", &input, now);
+        assert_eq!(behavior(mcp_call_ask(&whole, &mut approvals, now)).as_deref(), Some("allow"));
+        assert_eq!(behavior(mcp_call_ask(&whole, &mut approvals, now)).as_deref(), Some("deny"));
+
+        // No tool name: the ask does not parse, and is still denied under its own id.
+        let nameless = ask(serde_json::json!({
+            "subtype": "can_use_tool", "tool_use_id": "toolu_mcp_call_01234567", "input": {}
+        }));
+        assert_eq!(
+            behavior(mcp_call_ask(&nameless, &mut approvals, now)).as_deref(),
+            Some("deny")
+        );
+        // No request id either: nothing can be answered, and nothing goes on to a card.
+        let mut anonymous = nameless.clone();
+        anonymous.as_object_mut().expect("an object").remove("request_id");
+        assert!(matches!(
+            mcp_call_ask(&anonymous, &mut approvals, now),
+            McpCallAsk::Unanswerable
+        ));
+        // An ordinary ask is not one of these, whatever it lacks.
+        let ordinary =
+            ask(serde_json::json!({"subtype": "can_use_tool", "tool_use_id": "toolu_1"}));
+        assert!(matches!(mcp_call_ask(&ordinary, &mut approvals, now), McpCallAsk::Other));
     }
 }
