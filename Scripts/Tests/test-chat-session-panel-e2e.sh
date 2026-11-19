@@ -1269,6 +1269,7 @@ capture() { # name
 #   SIRIO_FIXTURE_DONE  the file the monitor script writes after its last turn (session_state_unprompted)
 #   SIRIO_FIXTURE_MCP_APPS, _WIDGET_HTML, _START_BYPASS, _STRAY_MCP_ASK, _EFFORT_LADDER, _MCP_APPS_CAPS  the
 #                      trace stub's MCP Apps knobs, passed only when a scenario sets them (the mcp_widget* scenarios)
+#   SIRIO_FIXTURE_ASK_GATE  the file unread_question touches to release the trace stub's `subperm` question
 #   SIRIO_FIXTURE_GATE  the file session_state_background touches to release the fixture's held steps
 #   SIRIO_FIXTURE_STOP_DELAY  seconds the background-tasks stub waits before it answers a stop_task (default 1;
 #                        background_stop_click sets 5 so that a framed run's slow frames cannot skip `stopping`)
@@ -1342,11 +1343,11 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
     "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
   )
-  # The MCP Apps knobs reach the trace stub only when a scenario sets them. An empty capability list is
+  # The MCP Apps knobs and the ask gate reach the trace stub only when a scenario sets them. An empty capability list is
   # an answer (no capabilities), so that one is passed whenever it is set, even to "".
   local knob
   for knob in SIRIO_FIXTURE_MCP_APPS SIRIO_FIXTURE_WIDGET_HTML SIRIO_FIXTURE_START_BYPASS \
-    SIRIO_FIXTURE_STRAY_MCP_ASK SIRIO_FIXTURE_EFFORT_LADDER; do
+    SIRIO_FIXTURE_STRAY_MCP_ASK SIRIO_FIXTURE_EFFORT_LADDER SIRIO_FIXTURE_ASK_GATE; do
     [ -z "${!knob:-}" ] || pairs+=("$knob=${!knob}")
   done
   [ -z "${SIRIO_FIXTURE_MCP_APPS_CAPS+x}" ] || pairs+=("SIRIO_FIXTURE_MCP_APPS_CAPS=$SIRIO_FIXTURE_MCP_APPS_CAPS")
@@ -3873,7 +3874,10 @@ scenario_unread_parked_chat() {
 }
 
 scenario_unread_question() {
-  # The question comes about three seconds after the prompt, with the worktree already left.
+  # The fixture holds the question until the gate exists, so it comes with the worktree already
+  # left however long the select and the reads take.
+  SIRIO_FIXTURE_ASK_GATE="$RUN_DIR/unread-question.gate"
+  rm -f "$SIRIO_FIXTURE_ASK_GATE"
   unread_chat unread_question 1000
   wait_panel "the chat is ready for a prompt" 'c["status"] in ("idle", "completed")' 30
   capture unread_question-before
@@ -3882,6 +3886,7 @@ scenario_unread_question() {
   # The turn runs and has not asked yet: the question below comes with the worktree left.
   [ "$(attention_chat status)" = running ] || fail "the chat does not read running right after the select (status '$(attention_chat status)'), so the question would not come off screen"
   [ "$(attention_chat onScreen)" = false ] || fail "the chat reads onScreen after the select"
+  touch "$SIRIO_FIXTURE_ASK_GATE"
   echo "step: the worktree was left; the turn asks a permission and nobody answers"
   wait_attention "the parked chat waits for the user" status needs-input 30
   wait_attention "the question marked the parked chat" unread true 5
@@ -6387,6 +6392,7 @@ for name in "${SCENARIOS[@]}"; do
   SIRIO_FIXTURE_START_BYPASS=""
   SIRIO_FIXTURE_STRAY_MCP_ASK=""
   SIRIO_FIXTURE_EFFORT_LADDER=""
+  SIRIO_FIXTURE_ASK_GATE=""
   unset SIRIO_FIXTURE_MCP_APPS_CAPS
   "scenario_$name"
   check_mise "after scenario $name"

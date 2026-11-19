@@ -9,7 +9,8 @@
 # argv log cannot show. The MCP Apps knobs: SIRIO_FIXTURE_MCP_APPS=1,
 # SIRIO_FIXTURE_WIDGET_HTML=<path>, SIRIO_FIXTURE_STRAY_MCP_ASK=1, SIRIO_FIXTURE_START_BYPASS=1,
 # SIRIO_FIXTURE_EFFORT_LADDER=1 and SIRIO_FIXTURE_MCP_APPS_CAPS=<a,b> become the fixture's
-# `--fixture-*` arguments.
+# `--fixture-*` arguments. SIRIO_FIXTURE_ASK_GATE=<path> holds `subperm`'s permission request
+# until the file exists.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 [ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
 [ -z "${SIRIO_STUB_LOG:-}" ] ||
@@ -33,6 +34,8 @@ widget=
 caps=
 [ -z "${SIRIO_FIXTURE_MCP_APPS_CAPS+x}" ] ||
   caps=--fixture-mcp-apps-caps=$SIRIO_FIXTURE_MCP_APPS_CAPS
+ask_gate=
+[ -z "${SIRIO_FIXTURE_ASK_GATE:-}" ] || ask_gate=--fixture-ask-gate=$SIRIO_FIXTURE_ASK_GATE
 exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" trace \
   ${floor:+"$floor"} ${mcp_apps:+"$mcp_apps"} ${stray:+"$stray"} ${bypass:+"$bypass"} \
-  ${ladder:+"$ladder"} ${widget:+"$widget"} ${caps:+"$caps"} "$@"
+  ${ladder:+"$ladder"} ${widget:+"$widget"} ${caps:+"$caps"} ${ask_gate:+"$ask_gate"} "$@"
