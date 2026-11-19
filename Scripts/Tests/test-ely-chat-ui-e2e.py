@@ -705,9 +705,15 @@ def restore(run: Run) -> None:
     chat.until("the turn completes", lambda s: s["status"] == "completed" and "reply" in "".join(texts(s, "assistant")))
     chat.frame("before-restart")
     scenario.relaunch()
-    state = chat.until("the transcript is restored", lambda s: "remember me" in texts(s, "user"))
+    chat.until("the transcript is restored", lambda s: "remember me" in texts(s, "user"))
+    # The transcript is back before the agent is: the chat reads `connecting` while its agent
+    # relaunches. A launch that fails also ends `connecting`, with an error row under a
+    # transcript that still reads completed, so the check wants both.
+    state = chat.until("the restored chat has finished connecting", lambda s: s["status"] != "connecting")
     if state["status"] != "completed":
         raise Failure(f"restore: a restored chat reads {state['status']!r}, not completed")
+    if rows(state, "error"):
+        raise Failure("restore: the restored chat shows an error row: its agent did not relaunch")
     chat.frame("restored")
     scenario.finish()
 

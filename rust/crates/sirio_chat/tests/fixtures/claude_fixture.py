@@ -722,6 +722,8 @@ def result_when_gated():
 
 TRACE_MODEL = "claude-haiku-5-5"
 TRACE_STEP = float(os.environ.get("TRACE_STEP_MS", "400")) / 1000.0
+# `--fixture-ask-gate=<path>` holds `subperm`'s permission request until the file exists.
+ASK_GATE_PATH = flag_value("fixture-ask-gate")
 TRACE_COST = {"total": 0.0}
 TRACE_COUNTER = {"n": 0}
 TRACE_INTERRUPT = threading.Event()
@@ -1304,6 +1306,10 @@ def script_subagent_permission(early):
         trace_assistant("msg_sub_" + task, tool_use(tool, "Bash", tool_input),
                         parent=agent, agent_id=task)
         pause()
+        # A closed stdin ends the wait, as it ends `wait_answer`'s, and so does an interrupt.
+        while (ASK_GATE_PATH and not os.path.exists(ASK_GATE_PATH)
+               and not TRACE_EOF.is_set() and not TRACE_INTERRUPT.is_set()):
+            time.sleep(0.02)
         trace_ask("cli-sub-" + task, "Bash", tool, tool_input, agent_id=task)
     allowed = wait_answer("cli-sub-" + task) == "allow"
     trace_result_line(tool, "ran" if allowed else "denied", is_error=not allowed, parent=agent)
