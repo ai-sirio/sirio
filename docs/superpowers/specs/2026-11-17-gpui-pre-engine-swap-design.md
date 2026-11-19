@@ -204,6 +204,17 @@ lock and the `ci-linux.sh` stage that tests `vendor/gpui_linux` keep their shape
    are compared once the macOS sources are fetched (Task 5); any change joins the Mac hand
    check.
 
+### 5.3.6 Frame-rate limits
+
+gpui-pre 0.3.12's `WindowOptions::default()` sets `inactive_frame_interval` and
+`low_power_frame_interval` to 33,333 µs (30 fps) and `thermal_frame_interval` to 16,667 µs
+(60 fps), applied to every non-mandatory frame (`gpui-pre-0.3.12/src/platform.rs:2806-2808`,
+`src/window.rs:1953-1966`). bezel 0.3.8 had no low-power limit. Decision (2026-11-19): the
+app's main window and the `changes_preview` bin set `low_power_frame_interval: None`, so the
+focused window keeps its full frame rate under power-saving profiles, as on 0.3.8. The
+inactive (30 fps) and thermal (60 fps) limits are accepted as upstream behaviour and listed
+under Merge Danger in the PR. Examples and probes stay on the defaults.
+
 ### 5.4 The HTTP client gpui used to get for free
 
 Bezel's `gpui_platform::application()`/`headless()` install a reqwest `HttpClient`
@@ -247,7 +258,11 @@ settings as the run after the swap.
    printing its own OK line; the Ely chat UI E2E (`Scripts/Tests/test-ely-chat-ui-e2e.py`)
    included.
 4. **Engine patches and the HTTP client.** XDND: `Scripts/wayland-drive.sh xdnd …
-   --delay-ms 400` against a Terminal pane — the drop lands. Child environment: no repeatable
+   --delay-ms 400` against a Terminal pane — the drop lands.
+   *Waived for this step (2026-11-19):* it was not run (no sway on this machine, at baseline or
+   after). It is replaced by a hand check owed by Enzo on his Hyprland session with the branch
+   build (drag a file onto a terminal pane with a slow drop), listed in the PR; the PendingDrop
+   logic is covered by the gpui_linux unit tests. Child environment: no repeatable
    check exists today, so one is added and proven on the baseline first: the app is started
    through a fake AppRun mount (the one `Scripts/Tests/test-sirioctl-e2e.sh` builds), a link
    is opened by a real click, and an `xdg-open` stub on the user's login PATH writes its own
@@ -279,7 +294,8 @@ XDND transcript, under `artifacts/engine-swap/`, re-runnable from the commands a
 - Rendering differences between zed `82aeef` and the gpui-pre snapshot (68 files differ,
   including text layout and the scene) — caught by §6.2; mitigation is to find the cause, not
   to accept a drift.
-- The XDND redesign changes gpui-pre's tested behaviour — needs the live Wayland check.
+- The XDND redesign changes gpui-pre's tested behaviour — needs the live Wayland check. Waived for this
+  step (2026-11-19), see §6.4: a hand check owed by Enzo on Hyprland.
 - ~1,190 `#[gpui::test]` uses run on a new test scheduler — failures there are engine
   behaviour differences and are triaged one by one, never skipped.
 - Build load on a shared machine — builds wait for a slot from t2s.
