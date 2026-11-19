@@ -146,13 +146,19 @@ fn parse_tools(entry: &Value) -> Vec<McpTool> {
         .collect()
 }
 
-/// The CLI's name rule: every char outside `[A-Za-z0-9_-]` becomes `_`; a name that starts
-/// with `claude.ai ` also has its runs of `_` collapsed and both ends trimmed of `_`.
+/// The CLI's name rule (claude 2.1.327 `Dn`): `name.replace(/[^a-zA-Z0-9_-]/g, "_")`, with no
+/// `u` flag, so it works per UTF-16 code unit: a character outside the BMP is two units and
+/// gives two `_`. A name that starts with `claude.ai ` then also gets
+/// `.replace(/_+/g, "_").replace(/^_|_$/g, "")`.
 fn normalize(name: &str) -> String {
-    let mapped: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-        .collect();
+    let mut mapped = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            mapped.push(c);
+        } else {
+            mapped.extend(std::iter::repeat('_').take(c.len_utf16()));
+        }
+    }
     if !name.starts_with("claude.ai ") {
         return mapped;
     }
@@ -286,7 +292,9 @@ pub fn app_call_name(
 
 /// A result as an MCP CallToolResult. `value` is a `tool_use_result` or an `mcp_call` answer
 /// (object or string); `is_error` comes from the `tool_result` block or the error envelope.
-/// Drops `com.anthropic/*` meta keys; turns string content into one text block.
+/// Drops `com.anthropic/*` meta keys; turns string content into one text block. `isError: true`
+/// appears when `is_error` is true or the object's own `isError` is `true`; `isError: false` is
+/// never emitted, and a non-boolean own `isError` is removed.
 #[must_use]
 pub fn call_tool_result(value: &Value, is_error: bool) -> Value {
     let text_block = |text: &str| serde_json::json!([{"type": "text", "text": text}]);
@@ -313,9 +321,9 @@ pub fn call_tool_result(value: &Value, is_error: bool) -> Value {
             result.remove("_meta");
         }
     }
-    if is_error {
+    if is_error || result.get("isError") == Some(&Value::Bool(true)) {
         result.insert("isError".to_owned(), Value::Bool(true));
-    } else if result.get("isError") == Some(&Value::Bool(false)) {
+    } else {
         result.remove("isError");
     }
     Value::Object(result)
@@ -491,6 +499,8 @@ mod tests {
         );
         let files = connected("files.", vec![tool("t", ui)]);
         assert_eq!(found(&[files], "mcp__files___t"), None);
+        // The CLI's regex has no `u` flag: a character outside the BMP is two units, two `_`.
+        assert_eq!(claude_tool_name("a😀b", "show"), "mcp__a__b__show");
         let clash = connected("s", vec![tool("a.b", ui), tool("a_b", ui)]);
         assert_eq!(found(&[clash], "mcp__s__a_b"), None);
         let dotted_tool = connected("s", vec![tool("do.thing", ui)]);
@@ -524,6 +534,7 @@ mod tests {
                 app_tool("app", false, true),
                 app_tool("model", true, false),
                 tool("plain", None),
+                tool("novis", Some("ui://x")),
             ],
         )];
         let call = |name: &str, origin: &McpOrigin| {
@@ -532,6 +543,8 @@ mod tests {
         let user = McpOrigin::User;
         assert_eq!(call("both", &user), Ok("mcp__my_server__both".into()));
         assert_eq!(call("app", &user), Ok("mcp__my_server__app".into()));
+        assert_eq!(call("plain", &user), Ok("mcp__my_server__plain".into()));
+        assert_eq!(call("novis", &user), Ok("mcp__my_server__novis".into()));
         assert_eq!(call("model", &user), Err(AppCallRefusal::NotForApp));
         assert_eq!(call("missing", &user), Err(AppCallRefusal::NotListed));
         assert_eq!(call("both", &McpOrigin::Plugin), Err(AppCallRefusal::ServerGone));
@@ -630,6 +643,18 @@ mod tests {
         assert_eq!(
             call_tool_result(&json!("boom"), true),
             json!({"content": [{"type": "text", "text": "boom"}], "isError": true})
+        );
+        assert_eq!(
+            call_tool_result(&json!({"content": "x", "isError": true}), false)["isError"],
+            json!(true)
+        );
+        assert_eq!(
+            call_tool_result(&json!({"content": "x", "isError": "yes"}), false),
+            json!({"content": [{"type": "text", "text": "x"}]})
+        );
+        assert_eq!(
+            call_tool_result(&json!({"content": "x", "isError": false}), false),
+            json!({"content": [{"type": "text", "text": "x"}]})
         );
         assert_eq!(
             call_tool_result(&json!("fine"), false),
