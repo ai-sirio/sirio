@@ -87,7 +87,8 @@ struct Agent {
     tool_in_message: bool,
     /// The id of the latest message that opened a call. The two flags above
     /// describe it until the agent's next tool result clears them; the id
-    /// stays, so a late line of that message does not reopen its call.
+    /// stays, so a late line of that message still sets them (a line of an
+    /// older message is dropped: its id is already seen).
     latest_call: Option<String>,
 }
 
@@ -2351,9 +2352,8 @@ mod tests {
     // Ways it could fail: a message of one-line-per-block is cut at its
     // first line (the call ends before the tool_use line); the call starts
     // at a later line instead of the agent's edge; the call ends twice, or
-    // at the tool_result instead of its message's last line; the call
-    // ends before the tool_use line, so the thinking and text lines before
-    // it are lost; the usage is lost or emitted early.
+    // at the tool_result instead of its message's last line; the usage is
+    // lost or emitted early.
     #[test]
     fn a_subagents_call_ends_at_its_messages_last_line() {
         let clock = Clock::new();

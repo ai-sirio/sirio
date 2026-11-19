@@ -259,8 +259,8 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # hand-back frame anywhere; a background card that fills after the result and after a second turn
 # began, and is Completed once its task ends; the end notice as before. subagent_text_floor does
 # the same under SIRIO_FIXTURE_FLOOR=1 (the 2.1.257 floor: no line or ask names its agent). They
-# write subagent-text.json and subagent-text-floor.json (the cards' final items, the first
-# turn's lanes, a `mode` field of "forward" or "floor").
+# write subagent-text.json and subagent-text-floor.json (the cards' final items, the lanes as
+# read at the ask and at the first turn's end, a `mode` field of "forward" or "floor").
 # The live check is `claude_forwards_a_subagents_text_under_sirios_initialize` (#[ignore],
 # acp_conformance): the real CLI against tests/live/fake_subagent_api.py (127.0.0.1) forwards the
 # subagent's text on stdout under Sirio's own `initialize`, for a foreground `Agent` call and one

@@ -2437,7 +2437,7 @@ subagent_text_run() { # name mode (forward|floor)
       "lanes_at_ask": json.loads(r"""'"$lanes_ask"'"""),
       "lanes_first_turn": json.loads(r"""'"$lanes"'""")}, indent=2)' 10 >"$artifact"
   [ -s "$artifact" ] || fail "no $artifact was written"
-  echo "OK: $artifact holds the final items of both cards and the first turn's lanes"
+  echo "OK: $artifact holds both cards' final items and the lanes at the ask and after turn one"
   stop_app
 }
 
