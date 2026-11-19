@@ -482,9 +482,11 @@ The line-indexed highlighter keeps upstream's `highlighter` untouched, because `
 (`document/mod.rs:173`, `modes.rs:142`). Sirio's is `CodeEditor::line_highlighter(..)` and
 `set_line_highlighter(..)`, `Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)>`, held in its
 own option (`IndexedHighlighter`); it wins when both are set. Without it `piece_colors` falls back to
-upstream's `line_colors`, so upstream's behaviour is unchanged. Renamed API: Sirio's
-`file_view/code_surface.rs` and `sirio_ui/examples/ely_editor_probe.rs` call `.highlighter(..)` with the
-indexed signature; Task 8 re-points them to `line_highlighter`.
+upstream's `line_colors`, so upstream's behaviour is unchanged. Renamed API: Task 8 re-points
+every Sirio caller of the indexed signature to `line_highlighter`/`set_line_highlighter`:
+`sirio_ui/src/file_view/code_surface.rs` (the builder call and `set_highlighter` at line 432),
+`sirio_ui/src/proposal_tab.rs:569` (`.highlighter(standalone_highlighter(language))`) and
+`sirio_ui/examples/ely_editor_probe.rs`.
 
 The row selector stays upstream's `editor-line-{n}` (row 127): `ely-documents`' own tests look it up
 (`document::tests::secondary::a_right_press_in_source_keeps_the_selection`). Sirio's tests that look up
@@ -496,11 +498,13 @@ Outcomes:
 - Row 89: absorbed. Upstream carries the three panels and their inline tests, ahead of the old copy.
   Proofs (ran, each alone, 1 test): `problems::tests::files_with_worse_problems_lead_and_filters_hide`,
   `filters::tests::globs_take_includes_then_drop_excludes`.
-- Rows 90, 91, 92: re-applied. Proofs (ran): `find_all` and `passes` now run through `Finder` and
-  `GlobFilter`, so `find::tests::finds_by_case_word_and_pattern`, `filters::tests::globs_take_includes_then_drop_excludes`
-  and `tests::stale::a_glob_too_big_for_a_regex_matches_nothing` go red if either breaks; the public
-  `Finder::new` and `GlobFilter::new` call paths run at Task 8 (`drawer/search_engine.rs`, E2E
-  `test-editor-e2e.sh` scenarios `search_options` and `search_scope`).
+- Rows 90, 91, 92: re-applied. Behaviour (ran): `find_all` and `passes` now run through `Finder` and
+  `GlobFilter`, and `find::tests::finds_by_case_word_and_pattern`,
+  `filters::tests::globs_take_includes_then_drop_excludes` and
+  `tests::stale::a_glob_too_big_for_a_regex_matches_nothing` show that behaviour is unchanged; they would
+  also pass with the old bodies back, so they do not prove the types are present. Presence: runs at Task 8,
+  the compile of `sirio_ui/src/drawer/search_engine.rs:15` (it imports `Finder` and `GlobFilter`), plus the
+  E2E scenarios `search_options` and `search_scope`.
 - Rows 93, 94, 95, 96: re-applied. Proof: unproven. The E2E scenarios `search_dirty`, `search_open`,
   `search_cap` and `search_scope` assert Sirio's own state (`search_unsaved`, `search_selected`, the
   summary line), which stays true if Ely's panel drew none of the label, the wash, the `3 of 412` badge
@@ -511,7 +515,7 @@ Outcomes:
 - Row 98: re-applied. Proof: unproven. `problems_volume` asserts the store's counts, not the toggles'
   labels. Named hand check at Task 10: its capture `problems-volume` shows 1250, 2500 and 1250 on the
   toggles, not the 1 500 drawn.
-- Rows 99, 100, 103: re-decided. Upstream's wider module set, its newer base files and its test module
+- Rows 99, 100, 103: absorbed. Upstream's wider module set, its newer base files and its test module
   are taken whole; the old crate's ports from upstream `main` are in them. All 15 old window tests of
   `tests/mod.rs` have a same-named counterpart upstream, which ran green here; the old inline tests with
   no counterpart (the lookup by range, the edit log, the bracket index, the one-pass folds, the nesting
@@ -524,8 +528,8 @@ Outcomes:
   `set_chat` (grep of `rust/crates`), so nothing on screen changes.
 - Row 105: absorbed (`ely_charts::tint`, through `use ely_charts as charts`).
 - Row 106: dropped; upstream's `pub use layout::stack` and `code_colors` stay.
-- Row 107: re-decided: `init_editor` is the facade's at Task 8 (spec section 5.4); `ely-editor` keeps
-  upstream's `bind_keys`.
+- Row 107: re-applied at Task 8, in the facade (spec section 5.4), not in `ely-editor`, which keeps
+  upstream's `bind_keys`. Proof: runs at Task 8.
 - Row 108: re-applied. Proof: runs at Task 8, `file_view.rs`
   `escape_closes_find_then_a_hunk_and_leaves_the_cursors_until_none_is_open` (it `capture_action`s
   `SingleCursor`, so it does not compile without the export).
@@ -545,8 +549,8 @@ Outcomes:
 - Row 117: re-applied. Proof: runs at Task 8, the probe's step 4 (no toggle from a click in the slot) and its
   step 8 (the `breakpoints-on` control run toggles).
 - Row 118: absorbed. Upstream's `prose.rs` `reset` has the same body (new buffer, caret 0, history, folds,
-  marked and composing, marks cleared, `Changed`, blink). Proof: unproven (no test; the probe does not
-  cover `reset`).
+  marked and composing, marks cleared, `Changed`, blink). Proof: a grep shows the same definition (old `state.rs:451-462`, upstream
+  `prose.rs:38-47`: identical statements in the same order).
 - Rows 119, 120, 121: re-applied. Proof: runs at Task 8, the probe's steps 2 (Pointer offset inside line 3),
   3 (the git bar is not the code) and 5 (`SecondaryClick` from a right click); for 119 also
   `file_view.rs` `the_pointer_sliding_from_the_code_onto_the_find_bar_drops_the_card` (a pointer resting on
@@ -559,7 +563,7 @@ Outcomes:
 - Row 125: re-applied. Proof: runs at Task 8, the probe's step 3 (`GitMarkPressed` from a real click on line
   5's git bar) and E2E scenario `git_marks` (a mark opens its hunk).
 - Row 126: re-applied. Proof: the closure build (`Point<Pixels>` is not `Eq`, so the derive cannot stay).
-- Row 127: re-decided (above). Proof (ran): `ely-documents` `document::tests::secondary::a_right_press_in_source_keeps_the_selection`
+- Row 127: dropped with a reason: Sirio follows upstream's selector, and its callers follow at Task 8 (above). Proof (ran): `ely-documents` `document::tests::secondary::a_right_press_in_source_keeps_the_selection`
   finds `editor-line-0`, so renaming the selector would break it.
 - Row 128: re-applied. Proof: unproven. `file_view.rs` `revealing_a_line_scrolls_it_into_view` moves
   the caret, so `select` scrolls on its own and the test passes with `reveal_primary` a no-op; no test
