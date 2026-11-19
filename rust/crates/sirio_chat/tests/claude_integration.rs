@@ -1394,6 +1394,7 @@ fn init_names_the_servers_until_a_status_answers() {
             name: "codegraph".into(),
             status: McpState::Pending,
             origin: McpOrigin::Other(String::new()),
+            tools: Vec::new(),
         }])
     );
 

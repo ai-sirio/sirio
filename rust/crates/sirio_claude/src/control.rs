@@ -181,6 +181,39 @@ impl ControlRequest {
         )
     }
 
+    /// Reads one resource (an MCP Apps widget's document) from a connected server. The field is
+    /// `serverName`; the CLI refuses `server_name`.
+    #[must_use]
+    pub fn mcp_read_resource(request_id: &str, server_name: &str, uri: &str) -> Value {
+        Self::envelope(
+            request_id,
+            json!({"subtype": "mcp_read_resource", "serverName": server_name, "uri": uri}),
+        )
+    }
+
+    /// Calls an MCP tool by its full `mcp__...` name for a widget, keeping the result from the
+    /// model. `check_permissions` is sent only when asked for, never as `false`.
+    #[must_use]
+    pub fn mcp_call(
+        request_id: &str,
+        tool: &str,
+        arguments: &Value,
+        check_permissions: bool,
+    ) -> Value {
+        let mut request = json!({
+            "subtype": "mcp_call",
+            "tool": tool,
+            "arguments": arguments,
+            "result_not_for_model": true
+        });
+        if let Some(fields) = request.as_object_mut() {
+            if check_permissions {
+                fields.insert("check_permissions".to_string(), json!(true));
+            }
+        }
+        Self::envelope(request_id, request)
+    }
+
     /// Reloads plugins. `hold` asks the CLI to leave the session alone when
     /// the reload would change its tool list and say so instead;
     /// `refuse_if_busy` asks it to refuse while a turn runs. A flag that is
@@ -584,6 +617,27 @@ mod tests {
     const CAN_USE_TOOL: &str = include_str!("../tests/fixtures/can_use_tool.json");
     const CAN_USE_TOOL_SUBAGENT: &str =
         include_str!("../tests/fixtures/trace_can_use_tool_subagent.json");
+
+    #[test]
+    fn the_mcp_apps_requests_use_the_probed_field_names() {
+        // Probed against the CLI: `server_name` is refused with "serverName must be a string".
+        assert_eq!(
+            ControlRequest::mcp_read_resource("r1", "probe", "ui://probe/show.html")["request"],
+            serde_json::json!({"subtype": "mcp_read_resource", "serverName": "probe",
+                "uri": "ui://probe/show.html"})
+        );
+        let args = serde_json::json!({"a": 1});
+        assert_eq!(
+            ControlRequest::mcp_call("r2", "mcp__probe__show", &args, false)["request"],
+            serde_json::json!({"subtype": "mcp_call", "tool": "mcp__probe__show",
+                "arguments": {"a": 1}, "result_not_for_model": true})
+        );
+        assert_eq!(
+            ControlRequest::mcp_call("r3", "mcp__probe__show", &args, true)["request"]
+                ["check_permissions"],
+            serde_json::json!(true)
+        );
+    }
 
     #[test]
     fn ultracode_is_a_boolean_beside_the_level_not_a_level() {

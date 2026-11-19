@@ -255,11 +255,20 @@ impl Catalog {
         }
     }
 
-    /// Whether the `initialize` answer listed `name` among its capabilities.
-    /// A CLI that lists none (the floor) has none.
+    /// Whether the `initialize` answer or `system/init` listed `name` among its
+    /// capabilities. A CLI that lists none (the floor) has none.
     #[must_use]
     pub fn has_capability(&self, name: &str) -> bool {
         self.capabilities.iter().any(|capability| capability == name)
+    }
+
+    /// Merges names from `system/init`; `has_capability` then sees both sources.
+    pub fn add_capabilities(&mut self, names: &[String]) {
+        for name in names {
+            if !self.capabilities.contains(name) {
+                self.capabilities.push(name.clone());
+            }
+        }
     }
 
     /// Replaces the command list from a `commands_changed` line.
@@ -461,6 +470,25 @@ mod tests {
             serde_json::from_str(INITIALIZE_RESPONSE).expect("fixture is valid JSON");
         let payload = line["response"]["response"].clone();
         Catalog::from_initialize(&payload)
+    }
+
+    #[test]
+    fn system_init_capabilities_reach_the_catalog() {
+        let line =
+            r#"{"type":"system","subtype":"init","capabilities":["mcp_tool_ui_meta_v1", 7]}"#;
+        let Some(crate::message::CliMessage::System(init)) =
+            crate::message::CliMessage::parse(line)
+        else {
+            panic!("the init line parses as a system line");
+        };
+        assert_eq!(init.capabilities, vec!["mcp_tool_ui_meta_v1".to_string()]);
+        let mut catalog = Catalog::from_initialize(
+            &serde_json::json!({"capabilities": ["reload_plugins_refuse_if_busy_v1"]}),
+        );
+        assert!(!catalog.has_capability("mcp_tool_ui_meta_v1"));
+        catalog.add_capabilities(&init.capabilities);
+        assert!(catalog.has_capability("mcp_tool_ui_meta_v1"));
+        assert!(catalog.has_capability("reload_plugins_refuse_if_busy_v1"));
     }
 
     #[test]

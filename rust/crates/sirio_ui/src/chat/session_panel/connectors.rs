@@ -1051,6 +1051,7 @@ mod tests {
             name: "gh".to_string(),
             status,
             origin: McpOrigin::User,
+            tools: Vec::new(),
         };
         let rows = |connectors: &Connectors| {
             section(connectors, true, &HashSet::new())

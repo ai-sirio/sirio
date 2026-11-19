@@ -118,6 +118,9 @@ pub struct SystemPayload {
     #[serde(rename = "apiKeySource")]
     pub api_key_source: Option<String>,
     pub tools: Vec<String>,
+    /// Present on `init`: what the CLI can do. Lenient: keeps the strings, drops the rest.
+    #[serde(deserialize_with = "lenient_strings")]
+    pub capabilities: Vec<String>,
     pub mcp_servers: Vec<McpServerStatus>,
     pub slash_commands: Vec<String>,
     /// Commands whose UX is bound to a terminal; a desktop chat hides them.
@@ -267,6 +270,18 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).ok())
+}
+
+/// A list of names, keeping the strings and dropping anything else; a non-list is empty.
+fn lenient_strings<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_array()
+        .map(|names| names.iter().filter_map(|n| n.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default())
 }
 
 /// A token count, read as zero when the CLI sent something else.
