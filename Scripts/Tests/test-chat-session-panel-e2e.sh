@@ -6241,16 +6241,26 @@ print(x, y)' "$DISPLAY_TARGET")
   read -r px py <<<"$paste_geo"
   echo "step: a real middle click on the textarea of the fourth widget (window at $px,$py), PRIMARY owned by pid $PRIMARY_PID"
   DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove $(( px + 60 )) $(( py + 30 )) click 2 || { kill "$PRIMARY_PID" 2>/dev/null || true; fail "xdotool could not middle-click"; }
-  sleep 1
-  # Read while the helper still owns the selection, then kill it by its exact PID.
-  if ! MW wait "$SURFACE" 10 "the middle click pasted nothing: the textarea's value length is 0" \
-    'any(r["toolUseId"] == "toolu_paste_1" and r["height"] == "2000" for r in w)'; then
-    kill "$PRIMARY_PID" 2>/dev/null || true
-    wait "$PRIMARY_PID" 2>/dev/null || true
-    fail "the middle click pasted nothing: the textarea's value length is 0"
-  fi
+  # Read while the helper still owns the selection, then kill it by its exact PID. The length must stay 0
+  # on every read for 5 s, since it already read 0 before the click; a read that does not answer means
+  # Sirio hung on the paste (as it did with the stop disabled).
+  local paste_reads=0 paste_verdict=""
+  while [ "$paste_reads" -lt 5 ]; do
+    sleep 1
+    paste_verdict=$(MW read "$SURFACE" 2>/dev/null | python3 -c '
+import json, sys
+w = json.load(sys.stdin)["mcpWidgets"]
+print("zero" if any(r["toolUseId"] == "toolu_paste_1" and r["height"] == "2000" for r in w) else "pasted")' 2>/dev/null) || paste_verdict=""
+    [ "$paste_verdict" = "zero" ] || break
+    paste_reads=$(( paste_reads + 1 ))
+  done
   kill "$PRIMARY_PID" 2>/dev/null || true
   wait "$PRIMARY_PID" 2>/dev/null || true
+  case "$paste_verdict" in
+    zero) echo "OK: the middle click pasted nothing: the textarea's length read 0 on 5 reads over 5 s" ;;
+    pasted) fail "the middle click pasted the PRIMARY selection into the widget's textarea" ;;
+    *) fail "Sirio stopped answering surface.chat.read after a middle click in a widget" ;;
+  esac
   # 9. a call that did not run: its tool_use_result is a string, as for a denial. The widget is closed
   # with "the call did not run" and never gets the call's input (or a result), and the logger stays empty.
   send_prompt mcp_denied

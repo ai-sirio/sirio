@@ -568,7 +568,7 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 #                     closed with "the call did not run" and never got input or result), a view that
 #                     posts straight to the IPC handler (`mcp_forge`: closed with "the view posted
 #                     outside its relay", `forged` "1" while every other widget's is "0"), and a dead
-#                     CLI. It also checks the CLI heard five mcp_read_resource and only gated
+#                     CLI. It also checks the CLI heard six mcp_read_resource and only gated
 #                     mcp_calls for `act`, and writes mcp-widget.json to the out dir.
 #   mcp_widget_flood  a widget posting pings at about 125k a second for 3 s: surface.chat.read answers
 #                     within 1000 ms throughout; within 30 s the widget's row is closed with "over the
