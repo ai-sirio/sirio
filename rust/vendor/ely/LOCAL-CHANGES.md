@@ -433,3 +433,156 @@ No proof needed (nothing changed).
 
 No local API was renamed: no closure crate calls any of the changed signatures (`ely-chat` has
 `src/tests/compose.rs` calling `PromptInput::new`, which keeps its signature).
+
+## ely-editor hosting hooks (Task 5)
+
+Sirio's local changes to the old crate's `editor` (rows 89 to 141), carried onto upstream's `ely-editor`.
+Proofs named "runs at Task 8" are Sirio-side tests or E2E: no Sirio crate uses these crates before
+Task 8. The old crate's performance and sideways-scroll changes (rows 142 to 167) are Task 6's and are
+not here.
+
+- `crates/ely-editor/Cargo.toml`: gains `[dev-dependencies]` with `gpui` and its `test-support` feature
+  (the same entry `ely-core` has), so the plain `#[cfg(test)]` module below builds without the crate's
+  own `test-support` feature.
+- `crates/ely-editor/src/hosting_tests.rs` (new, plain `#[cfg(test)]`): the four tests moved from the old
+  crate's `editor/tests/mod.rs` (`a_crlf_paste_lands_as_lf_with_the_caret_after_it`,
+  `a_composed_text_with_a_crlf_lands_as_lf`, and the two `a_silent_reset_*`), unchanged in intent.
+- `crates/ely-editor/src/lib.rs`: declares that module; exports `SingleCursor`, `ViewOptions`, `Finder`
+  and `GlobFilter`.
+- `crates/ely-editor/src/state.rs`: `ViewOptions` with `set_view_options` and `view_options`; the
+  `EditorEvent` variants `Pointer`, `SecondaryClick`, `PlatformClick` and `GitMarkPressed` (so no `Eq`);
+  `Options::{read_only_banner, hard_tabs, line_highlighter, breakpoints}`; `Press` and
+  `CodeEditor::pressed`; the builders and setters `without_read_only_banner`, `draws_read_only_banner`,
+  `hard_tabs`, `set_hard_tabs`, `uses_hard_tabs`, `without_breakpoints`, `line_highlighter`,
+  `set_line_highlighter`; `diagnostics()`; `reset_keeping_view`; and `piece_colors`.
+- `crates/ely-editor/src/view.rs`: `offset_over_code`; the body takes the id `code-editor-body`, the
+  `Pointer` move and hover handlers and the `SecondaryClick` press; the left release calls `release`;
+  `on_mouse_up_out` clears `pressed`; the banner is drawn when `draws_read_only_banner()`; the sticky
+  header and the minimap colour through `piece_colors`.
+- `crates/ely-editor/src/line.rs`: `press` records `pressed`; `release` (the platform click); the code
+  column sets `CursorStyle::IBeam`; rulers and indent guides are a one-pixel fill; with a line
+  highlighter set the bracket pass leaves the host's colour; `styles` colours through `piece_colors`.
+- `crates/ely-editor/src/row.rs`: the ghost row's tail colours through `piece_colors`.
+- `crates/ely-editor/src/gutter.rs`: `without_breakpoints` hides the dot and the press; the git bar's hit
+  area is 4px and emits `GitMarkPressed`.
+- `crates/ely-editor/src/edit.rs`: `lf_text` (applied in `paste`); `chosen`, `select` and
+  `select_in_place`; `indent_step` and the hard-tab paths of Tab, Shift-Tab and Enter.
+- `crates/ely-editor/src/ime.rs`: both commit paths apply `lf_text`.
+- `crates/ely-editor/src/keys.rs`: non-macOS add-cursor is `shift-alt-up` and `shift-alt-down`; `Copy`
+  propagates when every selection is empty; `SingleCursor` gains the doc line `deny(missing_docs)` needs
+  now that it is exported.
+- `crates/ely-editor/src/moves.rs`: `reveal_primary`.
+- `crates/ely-editor/src/find.rs`: `Finder`; `find_all` delegates to it.
+- `crates/ely-editor/src/filters.rs`: `GlobFilter`; `passes` delegates to it.
+- `crates/ely-editor/src/search.rs`: `SearchPanel::{unsaved, selected, full_counts, without_summary}`,
+  `SearchResultItem::selected`, and the private `Drawing` struct `results` takes.
+- `crates/ely-editor/src/problems.rs`: `ProblemsPanel::counts`.
+
+The line-indexed highlighter keeps upstream's `highlighter` untouched, because `ely-documents` calls it
+(`document/mod.rs:173`, `modes.rs:142`). Sirio's is `CodeEditor::line_highlighter(..)` and
+`set_line_highlighter(..)`, `Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)>`, held in its
+own option (`IndexedHighlighter`); it wins when both are set. Without it `piece_colors` falls back to
+upstream's `line_colors`, so upstream's behaviour is unchanged. Renamed API: Sirio's
+`file_view/code_surface.rs` and `sirio_ui/examples/ely_editor_probe.rs` call `.highlighter(..)` with the
+indexed signature; Task 8 re-points them to `line_highlighter`.
+
+The row selector stays upstream's `editor-line-{n}` (row 127): `ely-documents`' own tests look it up
+(`document::tests::secondary::a_right_press_in_source_keeps_the_selection`). Sirio's tests that look up
+`code-editor-line-{n}` (seven uses, all in `sirio_ui/src/file_view.rs`: lines 3638, 3648, 3695, 4308, 4374, 5666 and 5815) follow at
+Task 8.
+
+Outcomes:
+
+- Row 89: absorbed. Upstream carries the three panels and their inline tests, ahead of the old copy.
+  Proofs (ran, each alone, 1 test): `problems::tests::files_with_worse_problems_lead_and_filters_hide`,
+  `filters::tests::globs_take_includes_then_drop_excludes`.
+- Rows 90, 91, 92: re-applied. Proofs (ran): `find_all` and `passes` now run through `Finder` and
+  `GlobFilter`, so `find::tests::finds_by_case_word_and_pattern`, `filters::tests::globs_take_includes_then_drop_excludes`
+  and `tests::stale::a_glob_too_big_for_a_regex_matches_nothing` go red if either breaks; the public
+  `Finder::new` and `GlobFilter::new` call paths run at Task 8 (`drawer/search_engine.rs`, E2E
+  `test-editor-e2e.sh` scenarios `search_options` and `search_scope`).
+- Rows 93, 94, 95, 96: re-applied. Proof: unproven. The E2E scenarios `search_dirty`, `search_open`,
+  `search_cap` and `search_scope` assert Sirio's own state (`search_unsaved`, `search_selected`, the
+  summary line), which stays true if Ely's panel drew none of the label, the wash, the `3 of 412` badge
+  or the missing summary; only their captures show the drawing. Named hand check at Task 10: the captures
+  `search-results` and `search-cap` (the `unsaved` label, the chosen row's wash, the badge, one totals line).
+- Row 97: re-applied (internal). Proof: unproven beyond the closure build; `ReferencesPanel` passes the
+  empty values.
+- Row 98: re-applied. Proof: unproven. `problems_volume` asserts the store's counts, not the toggles'
+  labels. Named hand check at Task 10: its capture `problems-volume` shows 1250, 2500 and 1250 on the
+  toggles, not the 1 500 drawn.
+- Rows 99, 100, 103: re-decided. Upstream's wider module set, its newer base files and its test module
+  are taken whole; the old crate's ports from upstream `main` are in them. All 15 old window tests of
+  `tests/mod.rs` have a same-named counterpart upstream, which ran green here; the old inline tests with
+  no counterpart (the lookup by range, the edit log, the bracket index, the one-pass folds, the nesting
+  index, `rows_are_lines`, the minimap plan) belong to Task 6's performance changes. Two further upstream
+  tests stand for old ones (ran, each alone, 1 test, `--features test-support` for the second):
+  `anchors::tests::anchors_go_after_text_written_at_them` for the old `offsets_ride_their_edits`, and
+  `tests::escape_in_the_find_query_closes_the_box`.
+- Rows 101, 102: absorbed (`ely-core` has `Breadcrumb` and `StatusBarItem`).
+- Row 104: dropped. Upstream's `InlineChat` is vendored and `chat_row` draws it. Sirio never calls
+  `set_chat` (grep of `rust/crates`), so nothing on screen changes.
+- Row 105: absorbed (`ely_charts::tint`, through `use ely_charts as charts`).
+- Row 106: dropped; upstream's `pub use layout::stack` and `code_colors` stay.
+- Row 107: re-decided: `init_editor` is the facade's at Task 8 (spec section 5.4); `ely-editor` keeps
+  upstream's `bind_keys`.
+- Row 108: re-applied. Proof: runs at Task 8, `file_view.rs`
+  `escape_closes_find_then_a_hunk_and_leaves_the_cursors_until_none_is_open` (it `capture_action`s
+  `SingleCursor`, so it does not compile without the export).
+- Row 109: re-applied. Proof: runs at Task 8, E2E `test-editor-e2e.sh` scenario `pane_keys`
+  (shift-alt-down adds a cursor, ctrl-alt-down moves the pane focus). Linux only; macOS keeps `cmd-alt`.
+- Row 110: re-applied. Proof: runs at Task 8, E2E scenario `copy_propagates` (an empty-selection copy
+  copies nothing). Upstream's copy of the current line with no selection is gone, as before.
+- Row 111: absorbed (same binding upstream). Upstream's handler also closes the chat first when one is
+  open, which Sirio never opens. Proof: runs at Task 8, as row 108.
+- Rows 112, 113, 114, 115: re-applied under the new name (above). Proof: runs at Task 8,
+  `Scripts/Tests/test-ely-editor-probe.sh` (step 1: the highlighter's colour on line 3, the lexer's keyword
+  colour kept out, the bracket run on line 4 drawn unlike the lexer's, with a control run) and E2E scenario
+  `colour`. Unproven: the clipping and logging of out-of-range spans (113) and the ghost tail (114); the
+  probe's own header says it does not cover them.
+- Row 116: re-applied. Proof: unproven (no test reads `view_options` back; the probe says the options'
+  effect on the frame is not covered).
+- Row 117: re-applied. Proof: runs at Task 8, the probe's step 4 (no toggle from a click in the slot) and its
+  step 8 (the `breakpoints-on` control run toggles).
+- Row 118: absorbed. Upstream's `prose.rs` `reset` has the same body (new buffer, caret 0, history, folds,
+  marked and composing, marks cleared, `Changed`, blink). Proof: unproven (no test; the probe does not
+  cover `reset`).
+- Rows 119, 120, 121: re-applied. Proof: runs at Task 8, the probe's steps 2 (Pointer offset inside line 3),
+  3 (the git bar is not the code) and 5 (`SecondaryClick` from a right click); for 119 also
+  `file_view.rs` `the_pointer_sliding_from_the_code_onto_the_find_bar_drops_the_card` (a pointer resting on
+  the code raises the diagnostic card from the `Pointer` offset).
+- Row 122: re-applied. Proof: runs at Task 8, the same test: the card is dropped when the pointer slides
+  onto the find bar, which only happens through the body's hover-leave `Pointer { offset: None }`.
+- Row 123: re-applied. Proof: runs at Task 8, the probe's step 6 (a plain click emits no `PlatformClick`, a
+  Super-held click does).
+- Row 124: re-applied. Proof: unproven (nothing presses outside and releases).
+- Row 125: re-applied. Proof: runs at Task 8, the probe's step 3 (`GitMarkPressed` from a real click on line
+  5's git bar) and E2E scenario `git_marks` (a mark opens its hunk).
+- Row 126: re-applied. Proof: the closure build (`Point<Pixels>` is not `Eq`, so the derive cannot stay).
+- Row 127: re-decided (above). Proof (ran): `ely-documents` `document::tests::secondary::a_right_press_in_source_keeps_the_selection`
+  finds `editor-line-0`, so renaming the selector would break it.
+- Row 128: re-applied. Proof: unproven. `file_view.rs` `revealing_a_line_scrolls_it_into_view` moves
+  the caret, so `select` scrolls on its own and the test passes with `reveal_primary` a no-op; no test
+  places the caret where it already is.
+- Rows 129, 130, 131: re-applied. Proofs (ran, each alone, 1 test): `hosting_tests::a_crlf_paste_lands_as_lf_with_the_caret_after_it`,
+  `hosting_tests::a_composed_text_with_a_crlf_lands_as_lf`,
+  `hosting_tests::a_silent_reset_keeps_its_cursors_clamped_and_its_history_empty`,
+  `hosting_tests::a_silent_reset_moves_a_cursor_inside_a_character_back_onto_it`. The first two went red
+  with `lf_text` made an identity, and green again after it was put back.
+- Row 132: re-applied. Proof: unproven (no test or probe step draws a ruler).
+- Row 133: re-applied. Proof: runs at Task 8, the probe's step 6b (the cursor X shows over text, gutter
+  digits and git bar).
+- Row 134: re-applied (`select` keeps its behaviour through `chosen`). Proof (ran): the upstream window
+  tests that call `select`, e.g. `tests::a_selection_inside_a_fold_opens_it`.
+- Row 135: re-applied. Proof: unproven (no test calls `select_in_place`; `file_view/code_surface.rs`
+  right-press placement has no test or E2E step that checks the view stays).
+- Row 136: re-applied. Proof: runs at Task 8, E2E scenario `diagnostics` (the hover card follows the
+  findings after a typed character and an undo). The upstream test
+  `tests::stale::a_diagnostic_rides_the_typing_before_it` reads the field, not the getter, so it is not
+  cited.
+- Rows 137, 138, 139: re-applied. Proof: runs at Task 8, E2E scenario `snapshot` (`ely_banner=false` through
+  `draws_read_only_banner`, no Ely banner on a snapshot). The default path (the banner drawn and its
+  Unlock) is proven by the upstream tests `tests::a_read_only_editor_ignores_typing_and_undo` and
+  `tests::enter_presses_the_banner_button_inside_the_editor`, which ran.
+- Rows 140, 141: re-applied. Proof: runs at Task 8, E2E scenario `status_actions` (with tabs Tab inserts a
+  tab and Shift-Tab takes it off; Enter after an opener and a block indent in Tabs mode).

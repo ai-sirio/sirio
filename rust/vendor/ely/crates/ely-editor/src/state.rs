@@ -1,8 +1,8 @@
-use std::{collections::BTreeSet, ops::Range, time::Duration};
+use std::{collections::BTreeSet, fmt, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
-    App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
-    Subscription, Task, UniformListScrollHandle, Window,
+    App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, HighlightStyle, Pixels,
+    Point, SharedString, Subscription, Task, UniformListScrollHandle, Window,
 };
 
 use super::{
@@ -41,8 +41,31 @@ pub enum CursorShape {
     Underline,
 }
 
+/// The view settings a host sets together; `view_options` reads them back as set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewOptions {
+    /// A small map of the whole file at the right.
+    pub minimap: bool,
+    /// The lines that open the blocks around the top line stay pinned above it.
+    pub sticky_scroll: bool,
+    /// The lines that mark each indent.
+    pub indent_guides: bool,
+    /// Brackets colored by how deep they sit.
+    pub rainbow_brackets: bool,
+    /// Dots for spaces and arrows for tabs.
+    pub whitespace: bool,
+    /// Thin lines at these columns.
+    pub rulers: Vec<usize>,
+    /// Spaces a Tab inserts and an indent guide spans. Zero is raised to one.
+    pub tab_size: usize,
+    /// How the gutter numbers lines.
+    pub line_numbers: LineNumbers,
+    /// How the cursor draws.
+    pub cursor_shape: CursorShape,
+}
+
 /// What the editor tells its owner.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EditorEvent {
     /// The text changed.
     Changed,
@@ -54,6 +77,43 @@ pub enum EditorEvent {
     ChatClosed,
     /// The read-only banner's action.
     Unlock,
+    /// The pointer moved with no button down: the offset of the code under it; `None` over the gutter, past the text, or on a row that is not text.
+    Pointer {
+        /// The offset of the code under the pointer.
+        offset: Option<usize>,
+        /// Where the pointer is, in window pixels.
+        position: Point<Pixels>,
+    },
+    /// A right-button press over the code: the offset under it; `None` over the gutter, past the text, or on a row that is not text.
+    SecondaryClick {
+        /// The offset of the code under the pointer.
+        offset: Option<usize>,
+        /// Where the pointer is, in window pixels.
+        position: Point<Pixels>,
+    },
+    /// A left press and release at one offset with the platform modifier held on either: the gesture that goes to a definition.
+    PlatformClick {
+        /// The offset pressed.
+        offset: usize,
+    },
+    /// A press on a line's git mark, the bar beside its fold chevron.
+    GitMarkPressed {
+        /// The line whose mark was pressed.
+        line: usize,
+    },
+}
+
+/// Colors for one line of text, given the line's index and its whole text. Its spans are byte offsets into that text.
+type IndexedPaint = dyn Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)>;
+
+/// The owner's colors for each line, given the line's index, in place of code's lexer.
+#[derive(Clone)]
+pub(crate) struct IndexedHighlighter(Rc<IndexedPaint>);
+
+impl fmt::Debug for IndexedHighlighter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IndexedHighlighter")
+    }
 }
 
 /// The editor's look and manners.
@@ -69,8 +129,16 @@ pub(crate) struct Options {
     pub minimap: bool,
     pub sticky: bool,
     pub read_only: bool,
+    /// Whether a read-only editor draws its own banner.
+    pub read_only_banner: bool,
     pub tab: usize,
+    /// Whether indenting inserts a tab character in place of spaces.
+    pub hard_tabs: bool,
     pub highlighter: Option<super::prose::LineHighlighter>,
+    /// The host's line-indexed colors; they win over `highlighter`.
+    pub line_highlighter: Option<IndexedHighlighter>,
+    /// Whether the gutter's breakpoint slot takes presses and draws breakpoints.
+    pub breakpoints: bool,
     /// Text size against the theme's.
     pub scale: f32,
     /// Lines but the caret's fade.
@@ -93,6 +161,14 @@ pub(crate) struct Marks {
     pub chat: Option<usize>,
     /// The owner's offsets; an edit over one drops it.
     pub anchors: Vec<Option<usize>>,
+}
+
+/// A left press in progress: where it began, whether the platform modifier was held on it, and whether it was a single press with neither Shift nor Alt, the only kind a platform click can be.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Press {
+    pub offset: usize,
+    pub platform: bool,
+    pub single: bool,
 }
 
 /// The text and cursors one undo step returns to.
@@ -159,6 +235,8 @@ pub struct CodeEditor {
     /// Typewriter room rows at each end.
     pub(crate) pad: usize,
     pub(crate) dragging: bool,
+    /// The left press in progress, for a platform click.
+    pub(crate) pressed: Option<Press>,
     pub(crate) caret_on: bool,
     /// Blink runs only while focused, or unseen cursors redraw forever.
     focused: bool,
@@ -175,6 +253,15 @@ impl Focusable for CodeEditor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// `offset` clamped to `text` and moved back onto a character boundary.
+fn floor_boundary(text: &str, offset: usize) -> usize {
+    let mut at = offset.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 /// Whether a mark the owner sent fits the text; one that does not is logged and dropped.
@@ -234,8 +321,12 @@ impl CodeEditor {
                 minimap: false,
                 sticky: false,
                 read_only: false,
+                read_only_banner: true,
                 tab: 4,
+                hard_tabs: false,
                 highlighter: None,
+                line_highlighter: None,
+                breakpoints: true,
                 scale: 1.0,
                 focus_line: false,
                 typewriter: false,
@@ -247,6 +338,7 @@ impl CodeEditor {
             centered: None,
             pad: 0,
             dragging: false,
+            pressed: None,
             caret_on: true,
             focused: false,
             chat_field,
@@ -317,6 +409,12 @@ impl CodeEditor {
         self
     }
 
+    /// A read-only editor draws no banner of its own and offers no way to unlock it; its owner says why it is read-only.
+    pub fn without_read_only_banner(mut self) -> Self {
+        self.options.read_only_banner = false;
+        self
+    }
+
     /// Spaces a Tab inserts and an indent guide spans.
     pub fn tab_size(mut self, size: usize) -> Self {
         assert!(size > 0, "a tab spans at least one column");
@@ -324,9 +422,35 @@ impl CodeEditor {
         self
     }
 
+    /// Indents with a tab character in place of spaces: Tab, Shift-Tab, a selection's indent and the line after an opener.
+    pub fn hard_tabs(mut self) -> Self {
+        self.options.hard_tabs = true;
+        self
+    }
+
+    /// Colors each line with the owner's highlighter in place of code's lexer. It is called with a line's index and the line's whole text, whatever part of the line is shown; its spans are byte offsets into that text. It wins over `highlighter`.
+    pub fn line_highlighter(
+        mut self,
+        highlight: impl Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)> + 'static,
+    ) -> Self {
+        self.options.line_highlighter = Some(IndexedHighlighter(Rc::new(highlight)));
+        self
+    }
+
+    /// The gutter's breakpoint slot draws nothing and takes no press; diagnostics still show there.
+    pub fn without_breakpoints(mut self) -> Self {
+        self.options.breakpoints = false;
+        self
+    }
+
     /// The whole text.
     pub fn text(&self) -> &str {
         self.buffer.text()
+    }
+
+    /// The findings the owner set, as they stand for the current text: an edit moves their ranges, and an undo, a reset or a `set_text` clears them.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.marks.diagnostics
     }
 
     /// Every selection, the primary last.
@@ -360,6 +484,11 @@ impl CodeEditor {
         self.options.read_only
     }
 
+    /// Whether the editor draws its own read-only banner: read-only, and not built `without_read_only_banner`. The render asks the same question.
+    pub fn draws_read_only_banner(&self) -> bool {
+        self.options.read_only && self.options.read_only_banner
+    }
+
     /// Replaces the text, as one undo step, one caret at the start.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         let before = self.snapshot();
@@ -369,6 +498,83 @@ impl CodeEditor {
         (self.marked, self.composing) = (None, None);
         anchors::clear(&mut self.marks);
         self.commit(before, false, cx);
+    }
+
+    /// New text like `reset`, but the view stays where it is and each cursor keeps its place: both ends are clamped to the new text and moved back onto a character, and cursors that now share an offset are joined. History and folds are cleared, as `reset` clears them. For a change the owner makes on its own (a reload, a disk adoption), so the reader is not moved.
+    pub fn reset_keeping_view(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.buffer = Buffer::new(text);
+        let text = self.buffer.text();
+        let kept: Vec<Selection> = self
+            .selections
+            .iter()
+            .map(|selection| Selection {
+                anchor: floor_boundary(text, selection.anchor),
+                head: floor_boundary(text, selection.head),
+                goal: None,
+            })
+            .collect();
+        self.selections = merged(kept);
+        self.history = History::default();
+        self.folded.clear();
+        (self.marked, self.composing) = (None, None);
+        anchors::clear(&mut self.marks);
+        cx.emit(EditorEvent::Changed);
+        self.restart_blink(cx);
+    }
+
+    /// Replaces the owner's colors for each line, in place of code's lexer; see `line_highlighter` for what it is called with.
+    pub fn set_line_highlighter(
+        &mut self,
+        highlight: impl Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)> + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.options.line_highlighter = Some(IndexedHighlighter(Rc::new(highlight)));
+        cx.notify();
+    }
+
+    /// Whether the editor indents with a tab character in place of spaces.
+    pub fn uses_hard_tabs(&self) -> bool {
+        self.options.hard_tabs
+    }
+
+    /// Chooses between a tab character and spaces for what the editor indents with; the text already there is left as it is.
+    pub fn set_hard_tabs(&mut self, hard_tabs: bool, cx: &mut Context<Self>) {
+        if self.options.hard_tabs != hard_tabs {
+            self.options.hard_tabs = hard_tabs;
+            cx.notify();
+        }
+    }
+
+    /// Sets the view settings together. A tab size of zero is raised to one and logged.
+    pub fn set_view_options(&mut self, options: ViewOptions, cx: &mut Context<Self>) {
+        if options.tab_size == 0 {
+            log::error!("code editor: a tab of zero columns; one used");
+        }
+        self.options.minimap = options.minimap;
+        self.options.sticky = options.sticky_scroll;
+        self.options.guides = options.indent_guides;
+        self.options.rainbow = options.rainbow_brackets;
+        self.options.whitespace = options.whitespace;
+        self.options.rulers = options.rulers;
+        self.options.tab = options.tab_size.max(1);
+        self.options.numbers = options.line_numbers;
+        self.options.cursor = options.cursor_shape;
+        cx.notify();
+    }
+
+    /// The view settings in force.
+    pub fn view_options(&self) -> ViewOptions {
+        ViewOptions {
+            minimap: self.options.minimap,
+            sticky_scroll: self.options.sticky,
+            indent_guides: self.options.guides,
+            rainbow_brackets: self.options.rainbow,
+            whitespace: self.options.whitespace,
+            rulers: self.options.rulers.clone(),
+            tab_size: self.options.tab,
+            line_numbers: self.options.numbers,
+            cursor_shape: self.options.cursor,
+        }
     }
 
     /// How the cursor draws.
@@ -539,6 +745,48 @@ impl CodeEditor {
             })
         });
         cx.notify();
+    }
+
+    /// Colors for `piece`, the part of `line` that starts `from` bytes into it. With the owner's line highlighter, it is called with the line's index and the line's whole text, and the spans are cut to the piece; without one, upstream's colors read the piece as it is. The owner's spans past the line's text are clipped, and one that cuts a character is dropped; either is logged.
+    pub(crate) fn piece_colors(
+        &self,
+        line: usize,
+        from: usize,
+        piece: &str,
+        cx: &App,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let Some(IndexedHighlighter(highlight)) = &self.options.line_highlighter else {
+            return self.line_colors(piece, cx);
+        };
+        let whole = self.buffer.line(line);
+        let mut off = 0;
+        let spans: Vec<_> = highlight(line, whole, cx)
+            .into_iter()
+            .filter_map(|(span, style)| {
+                if span.start > span.end || span.end > whole.len() {
+                    off += 1;
+                }
+                let start = span.start.min(whole.len());
+                let end = span.end.min(whole.len());
+                if start >= end {
+                    return None;
+                }
+                if !whole.is_char_boundary(start) || !whole.is_char_boundary(end) {
+                    off += 1;
+                    return None;
+                }
+                // The part of the span the piece shows, in the piece's own offsets.
+                let start = start.max(from);
+                let end = end.min(from + piece.len());
+                (start < end).then(|| (start - from..end - from, style))
+            })
+            .collect();
+        if off > 0 {
+            log::error!(
+                "code editor: {off} highlights of line {line} do not fit its text; clipped or dropped"
+            );
+        }
+        spans
     }
 
     pub(crate) fn editable(&self) -> bool {

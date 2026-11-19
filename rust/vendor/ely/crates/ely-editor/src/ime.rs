@@ -7,6 +7,7 @@ use gpui::{
 
 use super::{
     cursor::Selection,
+    edit::lf_text,
     layout::{Row, Shown},
     measure::Measured,
     state::CodeEditor,
@@ -187,6 +188,7 @@ impl EntityInputHandler for CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let text = lf_text(text);
         let range = range_utf16
             .map(|range| self.byte_range(&range))
             .or(self.marked.clone());
@@ -195,7 +197,7 @@ impl EntityInputHandler for CodeEditor {
                 self.marked = None;
                 self.apply(vec![(range, text.to_string())], true, cx);
             }
-            None => self.type_text(text, cx),
+            None => self.type_text(&text, cx),
         }
         self.end_composition();
     }
@@ -211,6 +213,7 @@ impl EntityInputHandler for CodeEditor {
         if !self.editable() {
             return;
         }
+        let text = lf_text(text);
         let range = range_utf16
             .map(|range| self.byte_range(&range))
             .or(self.marked.clone())
@@ -224,7 +227,7 @@ impl EntityInputHandler for CodeEditor {
             self.end_composition();
         }
         let caret = match selected_utf16 {
-            Some(inner) => range.start + from_utf16(text, inner.end),
+            Some(inner) => range.start + from_utf16(&text, inner.end),
             None => range.start + text.len(),
         };
         self.set_selections(vec![Selection::caret(caret)], cx);

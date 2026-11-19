@@ -92,6 +92,7 @@ pub struct SearchResultItem {
     path: SharedString,
     hit: Hit,
     replacement: Option<SharedString>,
+    selected: bool,
     on_open: Option<OnOpen>,
 }
 
@@ -103,8 +104,15 @@ impl SearchResultItem {
             path: path.into(),
             hit,
             replacement: None,
+            selected: false,
             on_open: None,
         }
+    }
+
+    /// Draws the row as the chosen one.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
     }
 
     /// Previews replacing each match with this.
@@ -180,6 +188,7 @@ impl RenderOnce for SearchResultItem {
             .rounded(theme.radius(Radius::Sm))
             .cursor_pointer()
             .hover(|row| row.bg(colors.hover))
+            .when(self.selected, |row| row.bg(colors.active))
             .text_size(theme.text_size(TextSize::Sm))
             .when_some(self.on_open, |row, open| {
                 row.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
@@ -210,16 +219,28 @@ impl RenderOnce for SearchResultItem {
     }
 }
 
-/// Results grouped by file, each with its count and a chevron that folds it; the totals lead.
-fn results(
-    id: &ElementId,
-    files: &[FileHits],
-    folded: &[SharedString],
-    replacement: Option<&SharedString>,
+/// What a results list is drawn with besides its files: which are folded, which hold unsaved text, which line is the chosen one, and what the handlers hear.
+struct Drawing<'a> {
+    folded: &'a [SharedString],
+    unsaved: &'a [SharedString],
+    counts: &'a [(SharedString, usize)],
+    selected: Option<&'a (SharedString, usize)>,
+    replacement: Option<&'a SharedString>,
     on_open: Option<OnOpen>,
     on_fold: Option<OnPath>,
-    cx: &App,
-) -> Vec<AnyElement> {
+}
+
+/// Results grouped by file, each with its count and a chevron that folds it; the totals lead.
+fn results(id: &ElementId, files: &[FileHits], drawing: Drawing, cx: &App) -> Vec<AnyElement> {
+    let Drawing {
+        folded,
+        unsaved,
+        counts,
+        selected,
+        replacement,
+        on_open,
+        on_fold,
+    } = drawing;
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let mut out = Vec::new();
@@ -231,6 +252,18 @@ fn results(
         };
         let fold = on_fold.clone();
         let path = file.path.clone();
+        // A file given fewer lines than it matched on says so: `3 of 412`; a folded one
+        // shows its whole count.
+        let drawn = file.hits.len();
+        let full = counts
+            .iter()
+            .find(|(counted, _)| *counted == file.path)
+            .map_or(drawn, |(_, full)| *full);
+        let badge = if open && full > drawn {
+            format!("{drawn} of {full}")
+        } else {
+            full.max(drawn).to_string()
+        };
         out.push(
             div()
                 .id((id.clone(), format!("file-{file_ix}")))
@@ -270,8 +303,16 @@ fn results(
                         .bg(colors.hover)
                         .text_size(theme.text_size(TextSize::Xs))
                         .text_color(colors.fg_muted)
-                        .child(file.hits.len().to_string()),
+                        .child(badge),
                 )
+                .when(unsaved.contains(&file.path), |row| {
+                    row.child(
+                        div()
+                            .text_size(theme.text_size(TextSize::Xs))
+                            .text_color(colors.warning)
+                            .child("unsaved"),
+                    )
+                })
                 .into_any_element(),
         );
         if !open {
@@ -283,7 +324,11 @@ fn results(
                 file.path.clone(),
                 hit.clone(),
             );
-            let item = match replacement {
+            let item = item.selected(
+                selected.is_some_and(|(path, line)| *path == file.path && *line == hit.line),
+            );
+            // A file with unsaved text is skipped by Replace all: no preview there.
+            let item = match replacement.filter(|_| !unsaved.contains(&file.path)) {
                 Some(text) => item.replacement(text.clone()),
                 None => item,
             };
@@ -314,6 +359,10 @@ pub struct SearchPanel {
     id: ElementId,
     files: Vec<FileHits>,
     folded: Vec<SharedString>,
+    unsaved: Vec<SharedString>,
+    counts: Vec<(SharedString, usize)>,
+    selected: Option<(SharedString, usize)>,
+    summary: bool,
     replacement: Option<SharedString>,
     on_open: Option<OnOpen>,
     on_fold: Option<OnPath>,
@@ -326,10 +375,38 @@ impl SearchPanel {
             id: id.into(),
             files: files.into_iter().collect(),
             folded: Vec::new(),
+            unsaved: Vec::new(),
+            counts: Vec::new(),
+            selected: None,
+            summary: true,
             replacement: None,
             on_open: None,
             on_fold: None,
         }
+    }
+
+    /// Paths whose files hold unsaved text: each is marked beside its count.
+    pub fn unsaved(mut self, paths: impl IntoIterator<Item = impl Into<SharedString>>) -> Self {
+        self.unsaved = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// How many lines each path matched on in all, for an owner that gives the panel only some of them.
+    pub fn full_counts(mut self, counts: impl IntoIterator<Item = (SharedString, usize)>) -> Self {
+        self.counts = counts.into_iter().collect();
+        self
+    }
+
+    /// The line of `path` (0-based) drawn as the chosen one.
+    pub fn selected(mut self, path: impl Into<SharedString>, line: usize) -> Self {
+        self.selected = Some((path.into(), line));
+        self
+    }
+
+    /// Leaves out the totals line, for an owner that says its own.
+    pub fn without_summary(mut self) -> Self {
+        self.summary = false;
+        self
     }
 
     /// Paths whose results are folded away.
@@ -375,24 +452,31 @@ impl RenderOnce for SearchPanel {
         let rows = results(
             &self.id,
             &self.files,
-            &self.folded,
-            self.replacement.as_ref(),
-            self.on_open,
-            self.on_fold,
+            Drawing {
+                folded: &self.folded,
+                unsaved: &self.unsaved,
+                counts: &self.counts,
+                selected: self.selected.as_ref(),
+                replacement: self.replacement.as_ref(),
+                on_open: self.on_open,
+                on_fold: self.on_fold,
+            },
             cx,
         );
         div()
             .flex()
             .flex_col()
             .gap_0p5()
-            .child(
-                div()
-                    .px_1()
-                    .pb_1()
-                    .text_size(theme.text_size(TextSize::Xs))
-                    .text_color(theme.colors.fg_subtle)
-                    .child(summary),
-            )
+            .when(self.summary, |panel| {
+                panel.child(
+                    div()
+                        .px_1()
+                        .pb_1()
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .text_color(theme.colors.fg_subtle)
+                        .child(summary),
+                )
+            })
             .children(rows)
     }
 }
@@ -444,7 +528,20 @@ impl RenderOnce for ReferencesPanel {
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let count = references(&self.files);
-        let rows = results(&self.id, &self.files, &[], None, self.on_open, None, cx);
+        let rows = results(
+            &self.id,
+            &self.files,
+            Drawing {
+                folded: &[],
+                unsaved: &[],
+                counts: &[],
+                selected: None,
+                replacement: None,
+                on_open: self.on_open,
+                on_fold: None,
+            },
+            cx,
+        );
         div()
             .flex()
             .flex_col()

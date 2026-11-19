@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 use gpui::{ClipboardItem, Context, ScrollStrategy};
 
@@ -130,7 +130,7 @@ impl CodeEditor {
         if !self.editable() {
             return;
         }
-        let tab = self.options.tab;
+        let step = self.indent_step();
         let edits = self
             .selections
             .iter()
@@ -148,9 +148,9 @@ impl CodeEditor {
                 let opens = before.is_some_and(|ch| "{[(:".contains(ch));
                 let text = match (opens, after) {
                     (true, Some(close)) if "}])".contains(close) => {
-                        format!("\n{indent}{}\n{indent}", " ".repeat(tab))
+                        format!("\n{indent}{step}\n{indent}")
                     }
-                    (true, _) => format!("\n{indent}{}", " ".repeat(tab)),
+                    (true, _) => format!("\n{indent}{step}"),
                     _ => format!("\n{indent}"),
                 };
                 (selection.range(), text)
@@ -175,6 +175,15 @@ impl CodeEditor {
             })
             .collect();
         self.set_selections(placed, cx);
+    }
+
+    /// What one level of indent is made of: a tab character with hard tabs, else a tab size of spaces.
+    fn indent_step(&self) -> String {
+        if self.options.hard_tabs {
+            "\t".to_owned()
+        } else {
+            " ".repeat(self.options.tab)
+        }
     }
 
     /// The lines the selections touch, each once.
@@ -208,6 +217,7 @@ impl CodeEditor {
             return self.insert(&ghost.text, false, cx);
         }
         let tab = self.options.tab;
+        let step = self.indent_step();
         let spans_lines = self.selections.iter().any(|selection| {
             self.buffer.line_of(selection.range().start)
                 != self.buffer.line_of(selection.range().end)
@@ -218,7 +228,12 @@ impl CodeEditor {
                 .iter()
                 .map(|selection| {
                     let column = self.buffer.point(selection.range().start).1;
-                    (selection.range(), " ".repeat(tab - column % tab))
+                    let fill = if self.options.hard_tabs {
+                        step.clone()
+                    } else {
+                        " ".repeat(tab - column % tab)
+                    };
+                    (selection.range(), fill)
                 })
                 .collect();
             return self.apply(edits, false, cx);
@@ -230,7 +245,7 @@ impl CodeEditor {
             .filter(|line| !self.buffer.line(*line).trim().is_empty())
             .map(|line| {
                 let start = self.buffer.line_range(line).start;
-                (start..start, " ".repeat(tab))
+                (start..start, step.clone())
             })
             .collect();
         self.shift_lines(edits, kept, cx);
@@ -248,7 +263,12 @@ impl CodeEditor {
             .into_iter()
             .filter_map(|line| {
                 let start = self.buffer.line_range(line).start;
-                let cut = self.buffer.indent(line).min(tab);
+                // With hard tabs one level is one leading tab, when the line has one.
+                let cut = if self.options.hard_tabs && self.buffer.line(line).starts_with('\t') {
+                    1
+                } else {
+                    self.buffer.indent(line).min(tab)
+                };
                 (cut > 0).then(|| (start..start + cut, String::new()))
             })
             .collect();
@@ -396,6 +416,7 @@ impl CodeEditor {
         if !self.editable() {
             return;
         }
+        let text = lf_text(text);
         let lines: Vec<&str> = text.split('\n').collect();
         let edits = if lines.len() == self.selections.len() && lines.len() > 1 {
             self.in_order()
@@ -420,6 +441,14 @@ impl CodeEditor {
     }
 }
 
+/// `text` with each `\r\n` and each lone `\r` read as `\n`, the buffer's only line break. Borrowed when there is no carriage return to change.
+pub(crate) fn lf_text(text: &str) -> Cow<'_, str> {
+    if !text.contains('\r') {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
 /// Edits sorted, with overlapping ranges joined; the first text of a joined run is kept.
 fn joined(mut edits: Vec<(Range<usize>, String)>) -> Vec<(Range<usize>, String)> {
     edits.sort_by_key(|(range, _)| range.start);
@@ -434,12 +463,34 @@ fn joined(mut edits: Vec<(Range<usize>, String)>) -> Vec<(Range<usize>, String)>
 }
 
 impl CodeEditor {
-    /// Selects these ranges, the last one primary.
+    /// Selects these ranges, the last one primary, and centres the view on it.
     pub fn select(
         &mut self,
         ranges: impl IntoIterator<Item = Range<usize>>,
         cx: &mut Context<Self>,
     ) {
+        let Some(chosen) = self.chosen(ranges) else {
+            return;
+        };
+        self.set_selections(chosen, cx);
+        self.scroll
+            .scroll_to_item(self.primary_row(), ScrollStrategy::Center);
+    }
+
+    /// Selects these ranges as `select` does, but leaves the view where it is. A host that places a caret under the pointer (a right press) uses this, so the text under the pointer does not move.
+    pub fn select_in_place(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(chosen) = self.chosen(ranges) {
+            self.set_selections(chosen, cx);
+            cx.notify();
+        }
+    }
+
+    /// The selections `ranges` make when they are whole characters of the text and change the current selection; `None` otherwise.
+    fn chosen(&self, ranges: impl IntoIterator<Item = Range<usize>>) -> Option<Vec<Selection>> {
         let chosen: Vec<Selection> = ranges
             .into_iter()
             .filter(|range| {
@@ -458,15 +509,10 @@ impl CodeEditor {
                 goal: None,
             })
             .collect();
-        if chosen.is_empty() {
-            return;
+        if chosen.is_empty() || merged(chosen.clone()) == self.selections {
+            return None;
         }
-        if merged(chosen.clone()) == self.selections {
-            return;
-        }
-        self.set_selections(chosen, cx);
-        self.scroll
-            .scroll_to_item(self.primary_row(), ScrollStrategy::Center);
+        Some(chosen)
     }
 
     /// Replaces ranges of the text at once, as one undo step; read-only text refuses.

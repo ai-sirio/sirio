@@ -1,11 +1,11 @@
 use gpui::{
     AnyElement, Context, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    SharedString, Styled, div, prelude::*,
+    SharedString, Styled, div, prelude::*, px,
 };
 
 use super::{
     decor::GitMark,
-    state::{CodeEditor, LineNumbers},
+    state::{CodeEditor, EditorEvent, LineNumbers},
 };
 use crate::{
     primitives::{Disclosure, Icon, Severity},
@@ -125,7 +125,7 @@ impl CodeEditor {
             Cell::Blank => return base.into_any_element(),
         };
         let current = self.buffer.line_of(self.primary().head) == line;
-        let breakpoint = self.marks.breakpoints.contains(&line);
+        let breakpoint = self.options.breakpoints && self.marks.breakpoints.contains(&line);
         let slot = match (breakpoint, self.worst(line)) {
             (true, _) => div()
                 .size(advance * 1.1)
@@ -143,16 +143,21 @@ impl CodeEditor {
         let chevron = opens.then(|| Disclosure::new(("fold", line), !folded).into_any_element());
         let entity = cx.entity();
         let toggle = entity.clone();
+        let mark = entity.clone();
         let git = self.git_color(line, cx);
         let number = self.number(line);
+        let breakpoints = self.options.breakpoints;
         base.child(
             frame()
                 .id(("breakpoint", line))
                 .w(advance * 2.0)
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    window.prevent_default();
-                    entity.update(cx, |editor, cx| editor.toggle_breakpoint(line, cx));
+                .when(breakpoints, |target| {
+                    target
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            window.prevent_default();
+                            entity.update(cx, |editor, cx| editor.toggle_breakpoint(line, cx));
+                        })
                 })
                 .child(slot),
         )
@@ -183,9 +188,21 @@ impl CodeEditor {
         .child(
             div()
                 .flex_none()
-                .w_0p5()
+                .w(px(4.0))
                 .h_full()
-                .when_some(git, |bar, color| bar.bg(color)),
+                .when(git.is_some(), |hit| {
+                    hit.cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            window.prevent_default();
+                            mark.update(cx, |_, cx| cx.emit(EditorEvent::GitMarkPressed { line }));
+                        })
+                })
+                .child(
+                    div()
+                        .w_0p5()
+                        .h_full()
+                        .when_some(git, |bar, color| bar.bg(color)),
+                ),
         )
         .into_any_element()
     }

@@ -1,9 +1,9 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, FontWeight, HighlightStyle, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Stateful, Styled, StyledText, UnderlineStyle,
-    Window, canvas, div, prelude::*,
+    AnyElement, Context, CursorStyle, FontWeight, HighlightStyle, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Stateful, Styled,
+    StyledText, UnderlineStyle, Window, canvas, div, prelude::*, px,
 };
 
 use super::{
@@ -11,7 +11,7 @@ use super::{
     gutter::Cell,
     layout::{Shown, stack},
     measure::Measured,
-    state::{CodeEditor, CursorShape},
+    state::{CodeEditor, CursorShape, EditorEvent, Press},
 };
 use crate::{
     charts::tint,
@@ -33,7 +33,7 @@ impl CodeEditor {
         let touches = |span: &Range<usize>| {
             span.start < range.end.max(range.start + 1) && range.start < span.end
         };
-        let mut spans = self.line_colors(self.row_text(line), cx);
+        let mut spans = self.piece_colors(line, 0, self.row_text(line), cx);
         // Offsets found in an older text are left out.
         let fresh = self.frame.stamp == self.buffer.stamp();
         let brackets = self
@@ -43,8 +43,11 @@ impl CodeEditor {
             .filter(|bracket| fresh && range.contains(&bracket.offset));
         for bracket in brackets {
             let at = bracket.offset - range.start;
+            // With the owner's line highlighter its colors stand; only rainbow brackets recolour them.
             let color = if self.options.rainbow {
                 tint(colors, bracket.depth % 3)
+            } else if self.options.line_highlighter.is_some() {
+                continue;
             } else {
                 colors.syntax.punctuation
             };
@@ -231,9 +234,8 @@ impl CodeEditor {
                 .top_0()
                 .left(grid(*column))
                 .h(height)
-                .w_0()
-                .border_l_1()
-                .border_color(colors.border.opacity(0.6))
+                .w(px(1.))
+                .bg(colors.border.opacity(0.6))
         });
         let guides = guides.into_iter().map(|column| {
             let strong = active == Some(column);
@@ -242,9 +244,8 @@ impl CodeEditor {
                 .top_0()
                 .left(grid(column))
                 .h(height)
-                .w_0()
-                .border_l_1()
-                .border_color(if strong {
+                .w(px(1.))
+                .bg(if strong {
                     colors.border_strong
                 } else {
                     colors.border.opacity(0.6)
@@ -323,6 +324,7 @@ impl CodeEditor {
             .flex_1()
             .h_full()
             .overflow_hidden()
+            .cursor(CursorStyle::IBeam)
             .when(current && focused, |code| code.bg(colors.hover))
             .when(added, |code| code.bg(colors.success.opacity(0.08)))
             .children(selections)
@@ -395,6 +397,11 @@ impl CodeEditor {
         let Some(at) = self.offset_in(line, event.position.x, window, cx) else {
             return;
         };
+        self.pressed = Some(Press {
+            offset: at,
+            platform: event.modifiers.platform,
+            single: event.click_count == 1 && !event.modifiers.shift && !event.modifiers.alt,
+        });
         let chosen = match event.click_count {
             2 => {
                 let word = self.buffer.word_at(at);
@@ -475,5 +482,27 @@ impl CodeEditor {
         primary.head = at;
         primary.goal = None;
         self.set_selections(all, cx);
+    }
+
+    /// A release ends a press. A single press with neither Shift nor Alt, released at its own offset with the platform modifier held on either, is a platform click: the caret stays and no drag selection is left. Any other press keeps Ely's selection.
+    pub(crate) fn release(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dragging = false;
+        let Some(press) = self.pressed.take() else {
+            return;
+        };
+        let Some(up) = self.offset_over_code(event.position, window, cx) else {
+            return;
+        };
+        let plain = press.single && !event.modifiers.shift && !event.modifiers.alt;
+        if !plain || up != press.offset || !(press.platform || event.modifiers.platform) {
+            return;
+        }
+        self.set_selections(vec![Selection::caret(up)], cx);
+        cx.emit(EditorEvent::PlatformClick { offset: up });
     }
 }

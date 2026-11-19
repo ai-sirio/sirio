@@ -19,6 +19,8 @@ mod filters;
 mod find;
 mod gutter;
 mod hints;
+#[cfg(test)]
+mod hosting_tests;
 mod hover;
 mod ime;
 mod keybindings;
@@ -53,20 +55,20 @@ pub use decor::{
     VimModeIndicator,
 };
 pub use extensions::{Extension, ExtensionAction, ExtensionState, ExtensionsPanel};
-pub use filters::{SearchFilters, passes};
-pub use find::{FindOptions, FindWidget, find_all};
+pub use filters::{GlobFilter, SearchFilters, passes};
+pub use find::{FindOptions, FindWidget, Finder, find_all};
 pub use hints::{CompletionItem, CompletionMenu, Signature, SignatureHelp, completions};
 pub use hover::HoverInfo;
 pub use keybindings::{KeySource, Keybinding, KeybindingsEditor, conflicts};
 pub use keys::bind_keys;
-pub use keys::{Newline, Paste};
+pub use keys::{Newline, Paste, SingleCursor};
 pub use layout::stack;
 pub use preview::ThemePreview;
 pub use problems::{Problem, ProblemsPanel};
 pub use refactor::{ActionKind, CodeAction, CodeActionMenu, RenameInput};
 pub use search::{FileHits, Hit, ReferencesPanel, SearchPanel, SearchResultItem};
 pub use settings::{Setting, SettingValue, SettingsEditor, settings_json};
-pub use state::{CodeEditor, CursorShape, EditorEvent, LineNumbers, Metrics};
+pub use state::{CodeEditor, CursorShape, EditorEvent, LineNumbers, Metrics, ViewOptions};
 pub use status::{
     BranchIndicator, CursorPosition, Encoding, IndentSettings, LanguageMode, LineEnding, LspState,
     LspStatus, NotificationBell,

@@ -45,6 +45,7 @@ actions!(
         AddCursorAbove,
         AddCursorBelow,
         SelectNext,
+        /// Drops every cursor but the primary; a host may `capture_action` it to use Escape for its own surface.
         SingleCursor,
         ToggleComment,
         Fold,
@@ -118,8 +119,9 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("ctrl-end", DocumentEnd, context),
             KeyBinding::new("ctrl-shift-home", SelectDocumentStart, context),
             KeyBinding::new("ctrl-shift-end", SelectDocumentEnd, context),
-            KeyBinding::new("ctrl-alt-up", AddCursorAbove, context),
-            KeyBinding::new("ctrl-alt-down", AddCursorBelow, context),
+            // Sirio's FocusPaneAbove/Below take ctrl-alt-up/down.
+            KeyBinding::new("shift-alt-up", AddCursorAbove, context),
+            KeyBinding::new("shift-alt-down", AddCursorBelow, context),
             KeyBinding::new("ctrl-y", Redo, context),
         ]);
     }
@@ -259,7 +261,16 @@ pub(crate) fn listen<E: InteractiveElement>(root: E, cx: &mut Context<CodeEditor
     let root = on!(root, Undo, |e, _, cx| e.undo(cx));
     let root = on!(root, Redo, |e, _, cx| e.redo(cx));
     let root = on!(root, SelectAll, |e, _, cx| e.select_all(cx));
-    let root = on!(root, Copy, |e, _, cx| e.copy(cx));
+    let root = on!(root, Copy, |e, _, cx| {
+        // With no selection the chord is handed on, never swallowed: the
+        // host's own copy of selected text gets it. `text_selection::on_copy`
+        // declines while the editor has focus, so it is not blocked either.
+        if e.selections().iter().all(|selection| selection.is_empty()) {
+            cx.propagate()
+        } else {
+            e.copy(cx)
+        }
+    });
     let root = on!(root, Cut, |e, _, cx| e.cut(cx));
     let root = on!(root, Paste, |e, _, cx| {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {

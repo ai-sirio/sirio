@@ -23,5 +23,8 @@ log = "0.4"
 regex = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui = { workspace = true, features = ["wayland", "x11"] }

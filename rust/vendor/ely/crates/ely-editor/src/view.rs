@@ -2,7 +2,8 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Bounds, Context, ElementInputHandler, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, Role, ScrollHandle,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Role,
+    ScrollHandle,
     ScrollStrategy, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, fill,
     font, point, size, uniform_list,
 };
@@ -91,7 +92,7 @@ impl CodeEditor {
         }
         let rows = headers.into_iter().map(|line| {
             let text = self.buffer.line(line).to_string();
-            let styles = self.line_colors(&text, cx);
+            let styles = self.piece_colors(line, 0, &text, cx);
             let jump = cx.entity();
             div()
                 .id(("sticky", line))
@@ -139,6 +140,20 @@ impl CodeEditor {
         )
     }
 
+    /// The offset under a window point over the code column: none over the gutter, past the text, or on a row that is not text.
+    pub(super) fn offset_over_code(
+        &self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<usize> {
+        // The code column begins one advance before the text, past the gutter.
+        if position.x < self.metrics.left - self.metrics.advance {
+            return None;
+        }
+        self.offset_at(position, window, cx)
+    }
+
     fn minimap_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors.clone();
         let (advance, line) = (self.frame.advance, self.frame.line);
@@ -149,7 +164,7 @@ impl CodeEditor {
             .map(|row| match row {
                 Row::Line(at) => {
                     let text = self.buffer.line(*at);
-                    self.line_colors(text, cx)
+                    self.piece_colors(*at, 0, text, cx)
                         .into_iter()
                         .filter_map(|(range, style)| {
                             let start = text[..range.start].chars().count();
@@ -339,7 +354,7 @@ impl Render for CodeEditor {
         .size_full();
         let (top, focus, input) = (cx.entity(), self.focus.clone(), cx.entity());
         let unlock = cx.entity();
-        let banner = self.options.read_only.then(|| {
+        let banner = self.draws_read_only_banner().then(|| {
             ReadOnlyBanner::new(
                 ("read-only", cx.entity_id().as_u64()),
                 "This file is read-only.",
@@ -352,6 +367,7 @@ impl Render for CodeEditor {
             })
         });
         let body = div()
+            .id(("code-editor-body", cx.entity_id().as_u64()))
             .relative()
             .flex_1()
             .h_full()
@@ -381,6 +397,36 @@ impl Render for CodeEditor {
                 .top_0()
                 .left_0()
                 .size_full(),
+            )
+            .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, window, cx| {
+                if event.dragging() {
+                    return;
+                }
+                let offset = editor.offset_over_code(event.position, window, cx);
+                cx.emit(EditorEvent::Pointer {
+                    offset,
+                    position: event.position,
+                });
+            }))
+            // A pointer that leaves the code moves nothing here, so the owner
+            // would keep what it drew for the place the pointer last rested.
+            .on_hover(cx.listener(|_, hovered: &bool, window, cx| {
+                if !hovered {
+                    cx.emit(EditorEvent::Pointer {
+                        offset: None,
+                        position: window.mouse_position(),
+                    });
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|editor, event: &MouseDownEvent, window, cx| {
+                    let offset = editor.offset_over_code(event.position, window, cx);
+                    cx.emit(EditorEvent::SecondaryClick {
+                        offset,
+                        position: event.position,
+                    });
+                }),
             );
         let root = div()
             .id(("code-editor", cx.entity_id().as_u64()))
@@ -398,11 +444,16 @@ impl Render for CodeEditor {
             .text_color(colors.fg)
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|editor, _, _, _| editor.dragging = false),
+                cx.listener(|editor, event: &MouseUpEvent, window, cx| {
+                    editor.release(event, window, cx)
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|editor, _, _, _| editor.dragging = false),
+                cx.listener(|editor, _, _, _| {
+                    editor.dragging = false;
+                    editor.pressed = None;
+                }),
             )
             .children(banner)
             .child(
