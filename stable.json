@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.46.0",
-  "notes": "A native Claude chat now shows what a subagent says and thinks, and on\nLinux it shows MCP Apps widgets inline. Sirio also runs on a new version of\nits UI engine.\n\n**Subagents in the chat**\n\nWhen Claude starts a subagent, the call is now a folded **Task** card instead\nof a plain tool row. Unfold it to read the subagent's prompt, its text, its\ntool calls and their results, in the order they arrived. Its thinking is\nthere too, folded. File paths in a subagent's text open in Sirio's editor.\nIn the Trace, a subagent's lane is labelled with the last thing it said.\n\n**MCP Apps widgets (Linux)**\n\nAn MCP server can ship a small HTML view for a tool, called an MCP App. In a\nnative Claude chat on Linux, Sirio now shows that view inline in the\ntranscript, under the tool call. This works under X11, and on a Wayland\ndesktop where Sirio runs through XWayland, its default there.\n\n- The widget runs in an isolated web view. It reaches only the domains its\n  server declares, and it cannot open windows, download files or ask for\n  permissions.\n- When a widget wants to call one of its server's tools, Sirio asks you\n  first with a card in the transcript. The card answers only to a click,\n  starts on **Reject**, and arms **Allow** only once you have seen the\n  arguments.\n- A widget's buttons take clicks. Typing into a widget does not work yet.\n\nOn macOS, on Windows and on native Wayland, the call still shows as the\nplain tool row.\n\n**A new engine**\n\nSirio now draws its windows with gpui-pre 0.3.12 instead of bezel-gpui\n0.3.8. Nothing should look different. If something does, please open an\nissue.",
+  "version": "0.46.1",
+  "notes": "Sirio's chat and editor now run on the current release of Ely, the UI library\nthey are built on, and on macOS every window is paced the same way again.\n\n**Ely brought up to date**\n\nThe chat, the editor and the dialogs now use Ely's own crates as published\nupstream, with Sirio's changes kept on top. Most of it should look the same.\nA few things changed on purpose:\n\n- Pressing Enter in a dialog confirms on the press, not on the release. A\n  dialog also puts the keyboard on its first control when it opens; in a\n  dialog that deletes something, that control is Cancel.\n- Hover effects (scroll bars, tooltips, hover cards) react to the pointer\n  alone, without a click first.\n- Tooltips use the theme's font, so a long one can wrap at another word.\n- The items on the right of the editor's status bar sit a few pixels further\n  left, and the popovers above them open 1 px higher.\n- In a file with no line wider than the editor, a sideways scroll on the\n  wheel or trackpad now scrolls the file up and down. A sideways step is also a little\n  longer than before.\n\nIf something looks or behaves differently in a way that is not listed here,\nplease open an issue.\n\n**macOS: one frame clock for every window**\n\nOn macOS 14 and later, Sirio now paces every window with the same display\ntimer it used before 0.46.0. This aims at a slow first draw of a tab opened\nwhile Sirio is in the background.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.0/Sirio-0.46.0.dmg",
-      "sha256": "3cbd373b2a901ff2773189b3b436fb703e09a756a7a6a91b40d97d3f6b6fb230",
-      "signature": "u8kVF0Vut/i7o1Tpfy7pzLOWKI/lrPTX6V1BJBEN0p2vzSNtgeOmHKNkULYtz873AFak0vqdyDj8uZxXA+9XCQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.1/Sirio-0.46.1.dmg",
+      "sha256": "a23474d5b8742948569f406f5527c56acfd2aa3c79a3bdc7f061a68dcb55a377",
+      "signature": "c5pPXl1/w3uxmK5KZSZUDGj7XlcRv5/CFgGVPZcyt5U/FMxmMSIj7BXLf8NwLXtYJFi0v0Oybq/yn5ufrPwnAA=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.0/Sirio-0.46.0-x86_64.AppImage",
-      "sha256": "d1a7ccc5b06ca0d6acfe76b219af39f347e104c533a41908f2afbf3b8789c516",
-      "signature": "qd6VAQoFYqJukFEOGrSOhhPBxDaMvnHgHR/bh1A8ep8enRaG9cdwzutOKikZaVzMjKMdG9cr8mk+UCcaRL0ZAw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.1/Sirio-0.46.1-x86_64.AppImage",
+      "sha256": "7da29e9b159c8d137549cdd4e51312a678f8ceba95d61e3d2f2ff95f47d6ff6e",
+      "signature": "xkLVbtGtx2QDRUQ8FHAoWXExiXIPlua8tFU2E34U9mFl3b8YgKLYUS4wPmVAraJTgeX0kdN43pZd8Z7zWBNEBg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.0/SirioSetup-0.46.0.exe",
-      "sha256": "0c26b703ed714611e002b6b1635f19d998f267f3c325b40e9f530c9f0b3d0b7c",
-      "signature": "tDRdNgWlt5DR51o9cqqMo2tTLFUsv/m35rb5+K9EdaqgcveMI0Idiya3azwsYuAao8K3fJGtLGMjWbF9VAfIBw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.46.1/SirioSetup-0.46.1.exe",
+      "sha256": "9d8b3aa4be6874e9bd0a048394bb9c74bd6b5a1a2d3e5ba4d394e281c55d03a2",
+      "signature": "QPn5CD2FcXA24GQT+NFDnPAHVTHNsqkS1P6z4srLt+OmUtt9P6/DJFpdLbpAMFpN9JAkyBjo7DET9jcvdPUaBw=="
     }
   }
 }
