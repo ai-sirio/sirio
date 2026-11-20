@@ -54,7 +54,7 @@ mod composer_height;
 mod composer_row;
 mod composer_view;
 mod controls;
-mod file_links;
+pub(crate) mod file_links;
 use file_links::file_link_target;
 mod history;
 mod limit_notice;
@@ -723,7 +723,7 @@ pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
 /// Ten megabytes: past this point a stray drop or paste would stall a turn
 /// (base64 costs about a third more than the file) instead of enriching it
 /// — the same cap as the Swift original's `FileDrop`.
-const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Caps the model picker's result list at roughly 8 rows before it scrolls,
 /// so an agent advertising dozens of models (`github-copilot/*`, `nvidia/*`)

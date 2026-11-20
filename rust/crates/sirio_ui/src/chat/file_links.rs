@@ -7,9 +7,13 @@
 //! entry instead of once per streamed chunk.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 
+use ely_gpui_component::documents::{Inline, Style};
 use sirio_project::{FileLinkTarget, resolve_file_link};
+
+use crate::markdown::FileLinkInputs;
 
 /// Candidate string -> what it resolved to, for one chat entry. Not keyed by
 /// working directory or home: an entry's memo lives and dies with its entry.
@@ -212,7 +216,7 @@ pub(crate) fn link_file_paths(
 /// anything else: the resolver would trim it, while bezel paints it as written
 /// (and fetches it, if it holds `://`). A line suffix means nothing to a
 /// picture and is dropped.
-fn local_image_path(
+pub(crate) fn local_image_path(
     url: &str,
     cwd: &Path,
     home: Option<&Path>,
@@ -265,12 +269,9 @@ fn link_text(text: &mut bezel_markdown::Text, cwd: &Path, home: Option<&Path>, m
         let bezel_markdown::Mark::Link(target) = &span.mark else {
             return true;
         };
-        if is_web_target(target) {
-            return true;
-        }
-        match memo.resolve(target, cwd, home) {
-            Some(found) => {
-                span.mark = bezel_markdown::Mark::Link(file_link_url(&found));
+        match allowed_target(target, Some((cwd, home, &mut *memo))) {
+            Some(url) => {
+                span.mark = bezel_markdown::Mark::Link(url);
                 true
             }
             None => false,
@@ -285,16 +286,10 @@ fn link_text(text: &mut bezel_markdown::Text, cwd: &Path, home: Option<&Path>, m
         if span.mark != bezel_markdown::Mark::Code || inside_a_link(&text.marks, &span.range) {
             continue;
         }
-        let Some(slice) = text.text.get(span.range.clone()) else {
+        let Some(range) = code_candidate(&text.text, &span.range) else {
             continue;
         };
-        let trimmed = slice.trim();
-        if trimmed.is_empty() || trimmed.contains("://") {
-            continue;
-        }
-        let start = span.range.start + (slice.len() - slice.trim_start().len());
-        let range = start..start + trimmed.len();
-        if let Some(found) = memo.resolve(trimmed, cwd, home) {
+        if let Some(found) = memo.resolve(&text.text[range.clone()], cwd, home) {
             before_code.push((
                 index,
                 bezel_markdown::MarkSpan {
@@ -311,7 +306,7 @@ fn link_text(text: &mut bezel_markdown::Text, cwd: &Path, home: Option<&Path>, m
                 continue;
             };
             let candidate = &text.text[range.clone()];
-            if !(candidate.contains('/') || candidate.contains('.')) || candidate.contains("://") {
+            if !may_name_a_file_in_prose(candidate) {
                 continue;
             }
             if let Some(found) = memo.resolve(candidate, cwd, home) {
@@ -327,6 +322,121 @@ fn link_text(text: &mut bezel_markdown::Text, cwd: &Path, home: Option<&Path>, m
         text.marks.insert(index, span);
     }
     text.marks.extend(in_prose);
+}
+
+/// The links an agent wrote are an allowlist: a web link stays as written, a path to a
+/// file that was checked becomes a link to that file, anything else (a path that is not
+/// there, a share, a drive path, `smb:`, `vscode:`, an anchor) would be handed to the
+/// system opener by a click, so it goes. Without a lookup only the web survives.
+fn allowed_target(
+    target: &str,
+    files: Option<(&Path, Option<&Path>, &mut FileLinkMemo)>,
+) -> Option<String> {
+    if is_web_target(target) {
+        return Some(target.to_owned());
+    }
+    let (cwd, home, memo) = files?;
+    let found = memo.resolve(target, cwd, home)?;
+    Some(file_link_url(&found))
+}
+
+/// [`allowed_target`] for a tree's links.
+pub(crate) fn allowed_link(
+    target: &str,
+    files: &mut Option<FileLinkInputs<'_>>,
+) -> Option<String> {
+    let files = files
+        .as_mut()
+        .map(|files| (files.worktree, files.home, &mut *files.memo));
+    allowed_target(target, files)
+}
+
+/// The part of inline code `range` that may name a file: its trimmed text, unless it is
+/// empty or an address with a scheme.
+fn code_candidate(text: &str, range: &Range<usize>) -> Option<Range<usize>> {
+    let slice = text.get(range.clone())?;
+    let trimmed = slice.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return None;
+    }
+    let start = range.start + (slice.len() - slice.trim_start().len());
+    Some(start..start + trimmed.len())
+}
+
+/// Whether a token of prose may name a file: it holds a `/` or a `.`, and no scheme.
+fn may_name_a_file_in_prose(candidate: &str) -> bool {
+    (candidate.contains('/') || candidate.contains('.')) && !candidate.contains("://")
+}
+
+/// [`link_text`] on a tree's text: the links an agent wrote are an allowlist
+/// ([`allowed_link`]), and the files it names in inline code and in prose become links.
+/// The text is never touched, only its styles and links grow; a link that goes takes its
+/// look with it.
+pub(crate) fn link_inline(inline: &mut Inline, files: &mut Option<FileLinkInputs<'_>>) {
+    let mut gone = Vec::new();
+    let mut kept = Vec::with_capacity(inline.links.len());
+    for (range, target) in std::mem::take(&mut inline.links) {
+        match allowed_link(&target, files) {
+            Some(url) => kept.push((range, url)),
+            None => gone.push(range),
+        }
+    }
+    inline.links = kept;
+    inline
+        .styles
+        .retain(|(range, style)| *style != Style::Link || !gone.contains(range));
+    let Some(files) = files.as_mut() else {
+        return;
+    };
+
+    let mut added: Vec<(Range<usize>, String)> = Vec::new();
+    // Inline code: the trimmed span is the candidate. Code already inside a link keeps it.
+    for (range, style) in &inline.styles {
+        let in_a_link = inline
+            .links
+            .iter()
+            .any(|(link, _)| link.start <= range.start && range.end <= link.end);
+        if *style != Style::Code || in_a_link {
+            continue;
+        }
+        let Some(candidate) = code_candidate(&inline.text, range) else {
+            continue;
+        };
+        let written = &inline.text[candidate.clone()];
+        if let Some(found) = files.memo.resolve(written, files.worktree, files.home) {
+            added.push((candidate, file_link_url(&found)));
+        }
+    }
+    // Prose: whitespace-delimited tokens outside code, links, formulas and notes.
+    let covered = (inline.styles.iter())
+        .filter(|(_, style)| {
+            matches!(
+                style,
+                Style::Code | Style::Link | Style::Math | Style::Footnote
+            )
+        })
+        .map(|(range, _)| range.clone())
+        .chain(inline.links.iter().map(|(range, _)| range.clone()))
+        .collect();
+    for segment in uncovered(inline.text.len(), covered) {
+        for (token_start, token) in tokens(&inline.text, segment) {
+            let Some(range) = trim_token(token, token_start) else {
+                continue;
+            };
+            let candidate = &inline.text[range.clone()];
+            if !may_name_a_file_in_prose(candidate) {
+                continue;
+            }
+            if let Some(found) = files.memo.resolve(candidate, files.worktree, files.home) {
+                added.push((range, file_link_url(&found)));
+            }
+        }
+    }
+    for (range, url) in added {
+        inline.styles.push((range.clone(), Style::Link));
+        inline.links.push((range, url));
+    }
+    inline.links.sort_by_key(|(range, _)| range.start);
 }
 
 fn inside_a_link(marks: &[bezel_markdown::MarkSpan], range: &std::ops::Range<usize>) -> bool {
@@ -361,7 +471,7 @@ fn is_web_target(target: &str) -> bool {
 
 /// The byte ranges of `text` that no code, link, mention or image mark covers.
 fn prose_segments(text: &bezel_markdown::Text) -> Vec<std::ops::Range<usize>> {
-    let mut covered: Vec<std::ops::Range<usize>> = text
+    let covered = text
         .marks
         .iter()
         .filter(|span| {
@@ -375,17 +485,22 @@ fn prose_segments(text: &bezel_markdown::Text) -> Vec<std::ops::Range<usize>> {
         })
         .map(|span| span.range.clone())
         .collect();
+    uncovered(text.text.len(), covered)
+}
+
+/// The byte ranges of a text `len` bytes long that `covered` leaves out.
+fn uncovered(len: usize, mut covered: Vec<Range<usize>>) -> Vec<Range<usize>> {
     covered.sort_by_key(|range| range.start);
     let mut segments = Vec::new();
     let mut cursor = 0;
     for range in covered {
         if range.start > cursor {
-            segments.push(cursor..range.start.min(text.text.len()));
+            segments.push(cursor..range.start.min(len));
         }
         cursor = cursor.max(range.end);
     }
-    if cursor < text.text.len() {
-        segments.push(cursor..text.text.len());
+    if cursor < len {
+        segments.push(cursor..len);
     }
     segments
 }
