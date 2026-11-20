@@ -153,7 +153,7 @@ row, recorded, never a silent edit.
 
 ### 5.3 The patched `pulldown-cmark` (decided)
 
-Take it. Vendor upstream Ely's `vendor/pulldown-cmark` (0.13.5 plus the one-line `e71b644b` change:
+Take it. Vendor upstream Ely's `vendor/pulldown-cmark` (0.13.6, the lock's 0.13.5 plus the one-line `e71b644b` change:
 a link may hold a footnote reference, as GFM reads it) at `rust/vendor/pulldown-cmark`, wire it with
 `[patch.crates-io]`, exclude it from the workspace members, record it in `rust/vendor/README.md`,
 and remove the two `#[ignore]`s (`a_note_in_a_markdown_link_frees_the_math_after_it`,
