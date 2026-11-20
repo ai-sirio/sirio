@@ -204,3 +204,12 @@ auto-merge over REST, since GraphQL has no mutation for it. A reviewer or label
 picker sends one `Set*` when its popover closes; that relies on two vendored
 Ely hooks, `Popover::on_close` and `Popover::open` (`LOCAL-CHANGES.md`). The
 `merge`, `metadata` and `ui` stages of `test-forge-actions-e2e.sh` prove it.
+
+## Markdown bodies
+
+A description, a timeline body and a review comment are forge text, drawn by
+`sirio_ui::markdown` with `Surface::ChangeRequest` (`change_request_tab::forge_body`): every
+picture becomes its alt text (a link to it when it is on the web), and Ely never loads one.
+Links go through one handler, `open_links()`, which opens only `http://`, `https://` and
+`mailto:`; a `file:` address, an `#anchor` and a relative path open nothing, from a click and
+from the menu's Open link alike (the tab owns that menu, `body_menu.rs`).

@@ -1,4 +1,4 @@
-# Text you can select and copy (`sirio_ui::text_selection`, `selectable_markdown`)
+# Text you can select and copy (`sirio_ui::text_selection`, `markdown_view`)
 
 gpui paints a `&str`/`String`/`SharedString` child and does nothing else with it —
 no hitbox, no mouse handlers — and bezel has no selectable text, so **text drawn as a
@@ -28,9 +28,9 @@ workspace root's `root_focus`) so a terminal or composer is never handed a copy.
   (`TranscriptInteraction::extend_selection`) and `text_selection::extend` therefore take
   focus on the drag, once something is selected: a plain click leaves the composer
   focused, and a drag leaves Ctrl/Cmd+C to the selection.
-- Rendered Markdown outside the chat goes through
-  `Chat::render_markdown_document_with_link_override` → `SelectableMarkdown`, which
-  keeps a link's click when nothing was selected. The chat's own cards use the
+- Rendered Markdown outside the chat goes through `sirio_ui::markdown::markdown_view`
+  (a change request's bodies through `change_request_tab::forge_body`), which keeps a link's
+  click when nothing was selected. The chat's own cards use the
   transcript selection (`Chat::render_plain_text`) so Select All highlights what it copies.
 - The host wires three things: `text_selection::init`, `set_sink(root_focus)`, and
   `.on_action(text_selection::on_copy)` on the root of **each** render branch (Settings
