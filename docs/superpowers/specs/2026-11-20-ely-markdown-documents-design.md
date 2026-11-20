@@ -332,6 +332,16 @@ comparison (§6.3); each is accepted by this spec unless the comparison shows it
   (Ely's reader splits a paragraph at each picture). `an_image_in_running_text_stays_a_paragraph`
   (`markdown_preview.rs:487`) is rewritten to the new behaviour, recorded.
 - **D11 The Preview's right-click menu** gains Markdown items above the file items (§5.6).
+- **D12 A copied list has no blank lines between its items.** Bezel kept one block per list item,
+  so a copy put an empty line between items; the plain text now joins a list's items with one line
+  break, each with its marker (`• one`, `[x] done`, `3. three`). Table rows keep today's shape:
+  cells joined by a tab, rows by a line break, so a paste into a spreadsheet still works.
+  Builder's call (Task 3); wrong costs one separator change in `markdown/text.rs`.
+- **D13 Preview refuses network and device picture paths.** A picture whose decoded address starts
+  with two separators in any mix, a Windows verbatim or device prefix (`\\?\`, `\\.\`), or a single
+  leading backslash (Markdown reads `\\host` as `\host`) shows its alt text: on Windows such a path
+  would open an SMB connection when the picture is painted. Chat and change requests already refused
+  them.
 
 ### 5.10 Order of work (one PR)
 
@@ -391,7 +401,7 @@ It ends with `MARKDOWN DOCUMENTS E2E OK (…)` and leaves captures plus a JSON t
 The same fixture, opened in the Preview, pasted as a chat reply through the fake-agent chat E2E
 harness, and shown as a change-request description through the forge fixtures; captured at step 0
 and after step 6 with the same display settings, compared with `Scripts/capture-diff.py`. Every
-differing pair is attributed to D1–D11 or to an added capability in `differences.md` (gitignored
+differing pair is attributed to D1–D13 or to an added capability in `differences.md` (gitignored
 evidence) and summarised in the PR; an unattributed difference blocks the PR.
 
 ### 6.4 Existing suites
