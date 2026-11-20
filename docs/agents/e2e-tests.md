@@ -945,6 +945,16 @@ Scripts/Tests/test-ide-bridge-e2e.sh --xvfb --live   # -> prints "IDE BRIDGE LIV
 # FAIL, the proof it can go red. --xvfb | --display :N, --out-dir DIR.
 Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN REMOTE IMAGE E2E OK (block <n>x<n>, <n> GET, display <d>)"
 
+# One Markdown document (Scripts/Tests/fixtures/markdown-documents/showcase.md) drawn on the three
+# surfaces that render Markdown, for a build-against-build comparison: the file Preview, a native
+# chat reply (chat_fixture.py mode reply-file) and the description of change request #101 on the
+# fake forge. Isolated instances on a private Xvfb (:120-:139, started and stopped by the script),
+# a 1600x1000 window, the wheel turned in steps until a step changes nothing, PID-matched captures.
+# Writes preview-<k>.png, chat-<k>.png, cr-description-<k>.png and transcript.json to --out-dir.
+# --bin-dir holds sirio and sirio-host (sirioctl too, else rust/target/debug/sirioctl); the chat leg
+# needs rust/target/debug/examples/ely_chat_seed. --display :N, --only preview,chat,cr-description.
+Scripts/Tests/capture-markdown-surfaces.sh --bin-dir DIR --out-dir DIR   # -> prints "MARKDOWN SURFACES CAPTURED (<n> frames)"
+
 # The environment of an opened link: the app starts through a fake AppImage mount's AppRun on a
 # private Xvfb with both WAYLAND_DISPLAY and a DISPLAY set (so it forces X11 for itself), a
 # Claude chat on the file-links stub draws a web link, and a real click on it reaches an

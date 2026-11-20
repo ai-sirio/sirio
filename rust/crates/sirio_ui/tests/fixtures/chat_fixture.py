@@ -32,6 +32,8 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                    session/cancel notification and answers the prompt with
                    stopReason "cancelled". Later prompts complete normally.
   plain            Every prompt completes immediately: one chunk, end_turn.
+  reply-file <dir> Every prompt is answered with the text of <dir>/reply.md as one chunk, then
+                   end_turn: a way to put an exact Markdown document in the transcript.
   death-then-ok <dir>  On the first invocation (no <dir>/died marker) stream a
                    partial reply and die; later invocations stream normally.
                    Lets the drawn Retry click be followed by a real recovery.
@@ -561,6 +563,10 @@ def main():
                     response(request["id"], {"stopReason": "end_turn"})
             if mode == "plain":
                 message_chunk("reply ")
+                response(request["id"], {"stopReason": "end_turn"})
+            if mode == "reply-file":
+                with open(os.path.join(extra, "reply.md"), encoding="utf-8") as reply:
+                    message_chunk(reply.read())
                 response(request["id"], {"stopReason": "end_turn"})
             if mode in COMPOSER_LIKE or mode == "ely-catalogue":
                 message_chunk("reply ")
