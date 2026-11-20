@@ -222,40 +222,46 @@ fn deep_nesting_falls_back_to_plain_text() {
     falls_back(format!("{}x{}", "![".repeat(N), "](u)".repeat(N)));
     falls_back(format!("{}x{}", "*a _a ".repeat(N / 2), " a_ a*".repeat(N / 2)));
 
-    // Markdown and HTML depth add up in the tree: each is under the cap, the sum is not (30 + 100 tags). The
-    // HTML block, not the quotes around it, is what reads as plain text, and nothing recurses.
+    // Markdown and HTML depth add up in the tree: each is under the cap, the sum is not
+    // (30 quotes, 100 nested tags). The HTML is built to what the Markdown leaves.
     let html = format!("{}x{}", "<blockquote>".repeat(100), "</blockquote>".repeat(100));
     let source = format!("{} {html}", ">".repeat(30));
     let nodes = on_stack(256 * 1024, move || {
         build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
     });
-    let quotes = all(&nodes)
-        .into_iter()
-        .filter(|node| matches!(node, Node::Quote(_)))
-        .count();
-    assert_eq!(quotes, 30);
-    assert!(texts(&nodes).contains(&html));
+    assert!(depth(&nodes) <= MAX_NESTING, "{}", depth(&nodes));
+    assert!(depth(&nodes) > 30, "the quotes around it are kept");
 
-    // An HTML block falls back alone: its neighbours are read as ever. A closer that closes
-    // nothing open does not hide the depth.
+    // Block HTML is built to the depth the cap leaves, however its tags cross or hide
+    // their closers: it renders, its neighbours are read as ever, and nothing is deeper
+    // than the cap.
+    let n = N;
     for html in [
-        format!("{}x{}", "<blockquote>".repeat(N), "</blockquote>".repeat(N)),
-        "<blockquote></b>".repeat(N),
-        // A tag inside an attribute value is no closer: the tokenizer opens 10 000.
-        "<blockquote title=\"</blockquote>\">".repeat(N),
+        format!("{}x{}", "<blockquote>".repeat(n), "</blockquote>".repeat(n)),
+        "<blockquote></b>".repeat(n),
+        "<blockquote title=\"</blockquote>\">".repeat(n),
+        format!("<div>{}", "<b><blockquote></b>".repeat(n)),
+        format!("<div>{}{}", "<b><i></b>".repeat(n), "</i></b>".repeat(n)),
+        format!("<div>{}", "<div><blockquote></div>".repeat(n)),
     ] {
         let source = format!("before\n\n{html}\n\nafter\n");
         let nodes = on_stack(256 * 1024, move || {
             build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
         });
-        assert_eq!(nodes.len(), 3, "{:.40}", html);
-        assert_eq!(texts(&nodes[..1]), ["before"]);
-        assert_eq!(texts(&nodes[2..]), ["after"]);
-        let Node::Paragraph(block) = &nodes[1] else {
-            panic!("not a paragraph: {:?}", nodes[1]);
-        };
-        assert_eq!(block.text, html);
+        assert!(depth(&nodes) <= MAX_NESTING, "{:.40}: {}", html, depth(&nodes));
+        let shown = texts(&nodes);
+        assert_eq!(shown.first().map(String::as_str), Some("before"), "{:.40}", html);
+        assert_eq!(shown.last().map(String::as_str), Some("after"), "{:.40}", html);
     }
+}
+
+/// How deep `nodes` nest, a leaf counting one.
+fn depth(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| 1 + bodies(node).into_iter().map(depth).max().unwrap_or(0))
+        .max()
+        .unwrap_or(0)
 }
 
 #[test]
@@ -801,8 +807,13 @@ fn plain_text_parts_follow_the_drawing_order() {
     let table = build("| a | b |\n|---|---|\n| c | d |\n", &mut plain(Surface::Preview));
     assert_eq!(table.text.text, "a\tb\nc\td");
     assert_eq!(table.text.parts.len(), 4);
-    let seps: Vec<_> = table.text.parts.iter().map(|part| part.sep).collect();
+    let seps: Vec<_> = table.text.parts.iter().map(|part| part.sep.as_str()).collect();
     assert_eq!(seps, ["", "\t", "\n", "\t"]);
+    // An empty cell is no text, and keeps its place: every cell position has its separator.
+    let copied = |source: &str| build(source, &mut plain(Surface::Preview)).text.text.clone();
+    assert_eq!(copied("| h1 | h2 |\n|---|---|\n|  | d |\n"), "h1\th2\n\td");
+    assert_eq!(copied("| a |  | c |\n|---|---|---|\n"), "a\t\tc");
+    assert_eq!(copied("|  | b |\n|---|---|\n| c | d |\n"), "\tb\nc\td");
     // A list marker leads the text it belongs to, and says how long it is.
     let leads: Vec<_> = text
         .parts

@@ -29,6 +29,10 @@ pub(crate) use text::{Part, PartKind, PlainText};
 /// cap `sirio_markdown` keeps for the same reason.
 pub(crate) const MAX_NESTING: usize = 128;
 
+/// The deepest block HTML is built: a reader sees nothing in more levels, and what is built
+/// is walked, dropped and drawn by recursion on whatever stack the caller has.
+pub(crate) const MAX_HTML_NESTING: usize = 32;
+
 /// Who shows the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Surface {
@@ -146,7 +150,7 @@ pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     let depth = markdown_depth(source);
     if depth <= MAX_NESTING {
         // What depth the Markdown leaves is all block HTML may nest to, wherever it stands.
-        let room = MAX_NESTING - depth;
+        let room = (MAX_NESTING - depth).min(MAX_HTML_NESTING);
         let parsed = parse_markdown_with(source, &|raw: &str| rewrite::html_block(raw, room));
         // Block HTML nests on top of the Markdown around it: each is under the cap, their
         // sum may not be, and every walk after this one recurses over the tree.
