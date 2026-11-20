@@ -15,15 +15,30 @@ use pulldown_cmark::{Event, Options, Parser};
 use crate::chat::file_links::FileLinkMemo;
 use crate::markdown_preview::{DiagramRequest, Diagrams};
 
+mod code;
+mod gather;
+mod menu;
 mod rewrite;
+mod sideways;
 mod slug;
 mod text;
+mod view;
 
 #[cfg(test)]
 mod tests;
 
+// Consumers arrive with Tasks 5-7 (the Preview, change requests, the chat).
+#[allow(unused_imports)]
+pub(crate) use gather::BodyLayouts;
+#[allow(unused_imports)]
+pub(crate) use menu::{MarkdownMenuItem, perform};
 pub(crate) use slug::slug;
 pub(crate) use text::{Part, PartKind, PlainText};
+#[allow(unused_imports)]
+pub(crate) use view::{
+    BodyActions, LinkHandler, MarkdownView, MenuHandler, MenuPress, SelectionHost, ViewFlags,
+    markdown_view, probe_view,
+};
 
 /// The deepest nesting drawn as written; past it the source is one plain paragraph. The
 /// cap `sirio_markdown` keeps for the same reason.

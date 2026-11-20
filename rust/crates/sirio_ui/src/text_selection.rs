@@ -254,7 +254,7 @@ pub(crate) fn focus_sink(window: &mut Window, cx: &mut App) {
 /// the nearest caret, or the right half of a word's last letter would take
 /// the separator after it. A line clipped with an ellipsis answers with the
 /// end of `text` for anywhere on or past the "…" — see [`caret_index`].
-fn hit_index(layout: &TextLayout, position: Point<Pixels>, text: &str) -> (usize, bool) {
+pub(crate) fn hit_index(layout: &TextLayout, position: Point<Pixels>, text: &str) -> (usize, bool) {
     let hit = layout.index_for_position(position);
     let raw = match hit {
         Ok(index) | Err(index) => index,
@@ -281,7 +281,7 @@ fn hit_index(layout: &TextLayout, position: Point<Pixels>, text: &str) -> (usize
 /// `text`, so those need no translation; a caret on or past the ellipsis
 /// means "and the rest" and reads as the end of `text`, which is what
 /// copying a truncated title or path is expected to give.
-fn caret_index(layout: &TextLayout, position: Point<Pixels>, text: &str) -> usize {
+pub(crate) fn caret_index(layout: &TextLayout, position: Point<Pixels>, text: &str) -> usize {
     let (index, inside) = hit_index(layout, position, text);
     if !inside {
         return index;
