@@ -36,7 +36,9 @@ fn chat_with<'a>(
 
 /// Where the first link the last paint drew can be pressed: a few pixels into its label.
 fn link_point(chat: &Entity<Chat>, cx: &VisualTestContext, label: &str) -> (Point<Pixels>, f32) {
-    let rows = chat.read_with(&cx.cx, |chat, _| chat.transcript_links.borrow().clone());
+    let rows = chat.read_with(&cx.cx, |chat, _| {
+        super::transcript_link_rows(&chat.transcript_links.borrow())
+    });
     let row = rows
         .iter()
         .find(|row| row.get("label").map(String::as_str) == Some(label))
@@ -304,21 +306,27 @@ async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
         source.push_str("\n\n");
     }
     let (chat, cx) = chat_with(cx, &[]);
-    let (mut from, mut built, mut drawn) = (0, Vec::new(), Vec::new());
+    let (mut from, mut handles, mut built, mut drawn) = (0, Vec::new(), Vec::new(), Vec::new());
     for step in 1..=200usize {
         let mut cut = (source.len() * step / 200).min(source.len());
         while !source.is_char_boundary(cut) {
             cut += 1;
         }
         let started = std::time::Instant::now();
+        let mut handled = std::time::Duration::ZERO;
         chat.update(cx, |chat, cx| {
+            let handling = std::time::Instant::now();
             chat.handle_event(
                 sirio_chat::ChatEvent::AgentMessageChunk(source[from..cut].into()),
                 cx,
             );
+            handled = handling.elapsed();
         });
+        // `update` flushes effects and draws the window when its closure returns, so this
+        // holds a whole draw besides the parse; `handled` is the parse alone.
         let parsed = started.elapsed();
         refresh_frame(cx);
+        handles.push(handled);
         built.push(parsed);
         drawn.push(started.elapsed());
         from = cut;
@@ -336,6 +344,7 @@ async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
             total
         );
     };
+    stats("handle_event per chunk", handles);
     stats("parse per chunk", built);
     stats("parse + frame per chunk", drawn);
 }

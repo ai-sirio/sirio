@@ -151,13 +151,13 @@ fn reply_body(
     )
     .on_menu(remember_pressed_link(chat.clone()));
     let layouts = view.layouts();
-    // Painted after the view, so the layouts it fills are this frame's: position arithmetic
-    // only, no disk.
+    // Painted after the view: it only notes whose layouts this frame filled (a handle, no
+    // arithmetic); the rows are made from them when someone reads them.
     let report = canvas(
         |_, _, _| (),
         move |_, _, _, cx| {
-            let rows = chat.read(cx).transcript_links.clone();
-            record_links(&layouts, &mut rows.borrow_mut());
+            let painted = chat.read(cx).transcript_links.clone();
+            painted.borrow_mut().push(layouts.clone());
         },
     )
     .absolute()
@@ -181,6 +181,15 @@ fn card_body(document: &MarkdownBlocks, chat: Entity<Chat>, key: String) -> impl
         )
         .on_menu(menu),
     )
+}
+
+/// The rows for every link the last painted frame drew, body by body in paint order.
+fn transcript_link_rows(painted: &[markdown::BodyLayouts]) -> Vec<BTreeMap<String, String>> {
+    let mut rows = Vec::new();
+    for layouts in painted {
+        record_links(layouts, &mut rows);
+    }
+    rows
 }
 
 /// Adds a row to `out` for every link the last paint of a body drew, in window pixels: the
@@ -2073,7 +2082,8 @@ pub struct Chat {
     file_link_memo: file_links::FileLinkMemo,
     /// Every link the transcript's last paint drew, for the control socket.
     /// Cleared as the chat renders and refilled by each response painted.
-    transcript_links: Rc<RefCell<Vec<BTreeMap<String, String>>>>,
+    /// The bodies the last painted frame drew, in paint order: where their links are read.
+    transcript_links: Rc<RefCell<Vec<markdown::BodyLayouts>>>,
     /// F-CHAT-22, turn half: turns the reader has explicitly folded, keyed
     /// by the entry index of the [`Entry::TurnFooter`] that closes each one.
     /// Nothing is ever added here except by the reader's click: a turn is
@@ -4561,7 +4571,7 @@ impl Chat {
             composer: self.composer_snapshot(),
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
             last_visible_entry: self.last_visible_entry(),
-            transcript_links: self.transcript_links.borrow().clone(),
+            transcript_links: transcript_link_rows(&self.transcript_links.borrow()),
             effort: self
                 .effort
                 .as_ref()
