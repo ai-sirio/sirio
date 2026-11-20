@@ -5,6 +5,8 @@
 //! button and the sideways frame, highlights with `bezel_syntax`, and pushes the code to
 //! the body's gather as Ely would, so code stays selectable and copyable.
 
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -61,15 +63,113 @@ impl CodeStyle {
     }
 }
 
-/// The syntax colours of `code` as highlights: sorted, on character boundaries, none
-/// overlapping another.
-fn syntax_highlights(
-    style: &CodeStyle,
-    language: Option<&str>,
-    code: &str,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let Some(spans) = language.and_then(|language| bezel_syntax::highlight(code, language)) else {
-        return Vec::new();
+/// The syntax kinds of a code block: sorted, on character boundaries, none overlapping
+/// another. Colourless, so the result outlives a change of theme.
+type Kinds = Rc<[(Range<usize>, bezel_theme::HighlightKind)]>;
+
+/// Kinds held by the memo, in code bytes (plus language and a nominal cost per span), before
+/// the least recently used go.
+const KINDS_MEMO_BYTES: usize = 4 * 1024 * 1024;
+
+/// What one span costs the memo, besides the code it is keyed by.
+const SPAN_BYTES: usize = std::mem::size_of::<(Range<usize>, bezel_theme::HighlightKind)>();
+
+struct Held {
+    kinds: Kinds,
+    tick: u64,
+}
+
+/// A least-recently-used memo of [`Kinds`] by language and code, compared in full (never by
+/// a hash alone), bounded by the bytes it holds.
+struct KindsMemo {
+    cap: usize,
+    bytes: usize,
+    tick: u64,
+    by_language: HashMap<Rc<str>, HashMap<Rc<str>, Held>>,
+    /// Least recently used first: tick -> (language, code).
+    order: BTreeMap<u64, (Rc<str>, Rc<str>)>,
+}
+
+impl KindsMemo {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            bytes: 0,
+            tick: 0,
+            by_language: HashMap::new(),
+            order: BTreeMap::new(),
+        }
+    }
+
+    fn cost(language: &str, code: &str, kinds: &Kinds) -> usize {
+        language.len() + code.len() + kinds.len() * SPAN_BYTES
+    }
+
+    /// The kinds of `code` under `language`: held ones for a block seen before, else what
+    /// `compute` makes, held in turn when it fits the cap at all.
+    fn get_or_insert_with(
+        &mut self,
+        language: &str,
+        code: &str,
+        compute: impl FnOnce() -> Kinds,
+    ) -> Kinds {
+        self.tick += 1;
+        let tick = self.tick;
+        if let Some(held) = self
+            .by_language
+            .get_mut(language)
+            .and_then(|codes| codes.get_mut(code))
+        {
+            let (kinds, was) = (held.kinds.clone(), held.tick);
+            held.tick = tick;
+            if let Some(key) = self.order.remove(&was) {
+                self.order.insert(tick, key);
+            }
+            return kinds;
+        }
+        let kinds = compute();
+        let cost = Self::cost(language, code, &kinds);
+        if cost > self.cap {
+            return kinds;
+        }
+        while self.bytes + cost > self.cap {
+            let Some((_, (language, code))) = self.order.pop_first() else {
+                break;
+            };
+            self.evict(&language, &code);
+        }
+        let (language, code): (Rc<str>, Rc<str>) = (language.into(), code.into());
+        self.by_language
+            .entry(language.clone())
+            .or_default()
+            .insert(code.clone(), Held { kinds: kinds.clone(), tick });
+        self.order.insert(tick, (language, code));
+        self.bytes += cost;
+        kinds
+    }
+
+    fn evict(&mut self, language: &str, code: &str) {
+        let Some(codes) = self.by_language.get_mut(language) else {
+            return;
+        };
+        if let Some(held) = codes.remove(code) {
+            self.bytes -= Self::cost(language, code, &held.kinds);
+        }
+        if codes.is_empty() {
+            self.by_language.remove(language);
+        }
+    }
+}
+
+thread_local! {
+    // GPUI draws on one thread, so the memo is per thread and needs no lock.
+    static KINDS: RefCell<KindsMemo> = RefCell::new(KindsMemo::new(KINDS_MEMO_BYTES));
+}
+
+/// `bezel_syntax`'s spans of `code`, clipped to what a highlight may carry.
+fn clipped_kinds(code: &str, language: &str) -> Kinds {
+    let Some(spans) = bezel_syntax::highlight(code, language) else {
+        return Rc::from([]);
     };
     let mut spans: Vec<_> = spans.into_iter().collect();
     spans.sort_by_key(|(range, _)| (range.start, range.end));
@@ -82,15 +182,40 @@ fn syntax_highlights(
             continue;
         }
         floor = end;
-        out.push((
-            start..end,
-            HighlightStyle {
-                color: Some(style.syntax.color(kind)),
-                ..Default::default()
-            },
-        ));
+        out.push((start..end, kind));
     }
-    out
+    out.into()
+}
+
+/// The syntax colours of `code` as highlights. The kinds are memoized across draws, so a
+/// closed block of a streaming reply is highlighted once; the colours come from `style` each
+/// time.
+fn syntax_highlights(
+    style: &CodeStyle,
+    language: Option<&str>,
+    code: &str,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(language) = language else {
+        return Vec::new();
+    };
+    let kinds = KINDS.with(|memo| {
+        (memo.borrow_mut()).get_or_insert_with(language, code, || clipped_kinds(code, language))
+    });
+    coloured(style, &kinds)
+}
+
+fn coloured(style: &CodeStyle, kinds: &Kinds) -> Vec<(Range<usize>, HighlightStyle)> {
+    (kinds.iter())
+        .map(|(range, kind)| {
+            (
+                range.clone(),
+                HighlightStyle {
+                    color: Some(style.syntax.color(*kind)),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
 }
 
 /// Ely's `code` hook: id, language, code.
@@ -244,5 +369,163 @@ impl RenderOnce for CopyButton {
                     });
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use bezel_theme::HighlightKind;
+    use gpui::hsla;
+
+    use super::*;
+
+    fn kinds(spans: &[(usize, usize, HighlightKind)]) -> Kinds {
+        spans.iter().map(|(a, b, k)| (*a..*b, *k)).collect()
+    }
+
+    /// A palette whose every colour carries `hue`.
+    fn palette(hue: f32) -> bezel_theme::SyntaxPalette {
+        let c = |lightness: f32| hsla(hue, 1.0, lightness, 1.0);
+        bezel_theme::SyntaxPalette {
+            comment: c(0.01),
+            keyword: c(0.02),
+            string: c(0.03),
+            string_special: c(0.04),
+            escape: c(0.05),
+            number: c(0.06),
+            boolean: c(0.07),
+            type_name: c(0.08),
+            type_builtin: c(0.09),
+            constructor: c(0.10),
+            function: c(0.11),
+            function_builtin: c(0.12),
+            macro_name: c(0.13),
+            property: c(0.14),
+            constant: c(0.15),
+            variable: c(0.16),
+            variable_special: c(0.17),
+            parameter: c(0.18),
+            operator: c(0.19),
+            punctuation: c(0.20),
+            tag: c(0.21),
+            attribute: c(0.22),
+            label: c(0.23),
+            invalid: c(0.24),
+        }
+    }
+
+    fn style(hue: f32) -> CodeStyle {
+        let color = hsla(0.0, 0.0, 0.5, 1.0);
+        CodeStyle {
+            syntax: palette(hue),
+            mono: "mono".into(),
+            text: color,
+            label: color,
+            muted: color,
+            fill: color,
+            band: color,
+            border: color,
+            selection: color,
+            hover: color,
+            radius: gpui::rems(0.5),
+            size: gpui::rems(0.8),
+            label_size: gpui::rems(0.7),
+        }
+    }
+
+    /// The memo, asked for `(language, code)`; the second value says whether `compute` ran.
+    fn ask(memo: &mut KindsMemo, language: &str, code: &str, made: Kinds) -> (Kinds, bool) {
+        let ran = Cell::new(false);
+        let got = memo.get_or_insert_with(language, code, || {
+            ran.set(true);
+            made
+        });
+        (got, ran.get())
+    }
+
+    #[test]
+    fn a_block_seen_again_is_not_computed_again() {
+        let mut memo = KindsMemo::new(1 << 20);
+        let spans = kinds(&[(0, 2, HighlightKind::Keyword)]);
+        assert!(ask(&mut memo, "rust", "fn a() {}", spans.clone()).1);
+        let (got, ran) = ask(&mut memo, "rust", "fn a() {}", kinds(&[]));
+        assert!(!ran, "the second ask must be served from the memo");
+        assert_eq!(got, spans);
+    }
+
+    #[test]
+    fn the_same_code_under_two_languages_keeps_two_answers() {
+        let mut memo = KindsMemo::new(1 << 20);
+        let as_rust = kinds(&[(0, 1, HighlightKind::Keyword)]);
+        let as_python = kinds(&[(0, 1, HighlightKind::Function)]);
+        ask(&mut memo, "rust", "x", as_rust.clone());
+        ask(&mut memo, "python", "x", as_python.clone());
+        let (rust, ran) = ask(&mut memo, "rust", "x", kinds(&[]));
+        assert!(!ran);
+        assert_eq!(rust, as_rust);
+        let (python, ran) = ask(&mut memo, "python", "x", kinds(&[]));
+        assert!(!ran);
+        assert_eq!(python, as_python);
+    }
+
+    #[test]
+    fn code_that_changes_by_one_byte_is_not_served_the_old_spans() {
+        let mut memo = KindsMemo::new(1 << 20);
+        let old = kinds(&[(0, 3, HighlightKind::Keyword)]);
+        let new = kinds(&[(0, 4, HighlightKind::Keyword)]);
+        ask(&mut memo, "rust", "let a", old.clone());
+        let (got, ran) = ask(&mut memo, "rust", "let ab", new.clone());
+        assert!(ran, "a grown fence is a different key");
+        assert_eq!(got, new);
+        let (got, _) = ask(&mut memo, "rust", "let a", kinds(&[]));
+        assert_eq!(got, old, "the first block is still its own");
+    }
+
+    #[test]
+    fn the_cap_evicts_the_least_recently_used_and_holds_the_bytes_under_it() {
+        let code = |n: usize| format!("{n:0>200}");
+        let cost = KindsMemo::cost("rust", &code(0), &kinds(&[]));
+        let mut memo = KindsMemo::new(cost * 3);
+        for n in 0..3 {
+            ask(&mut memo, "rust", &code(n), kinds(&[]));
+        }
+        // Block 0 is read again, so block 1 is the least recently used.
+        assert!(!ask(&mut memo, "rust", &code(0), kinds(&[])).1);
+        ask(&mut memo, "rust", &code(3), kinds(&[]));
+        assert!(memo.bytes <= memo.cap, "{} held over a cap of {}", memo.bytes, memo.cap);
+        assert!(!ask(&mut memo, "rust", &code(0), kinds(&[])).1, "recently used stays");
+        assert!(ask(&mut memo, "rust", &code(1), kinds(&[])).1, "least recently used went");
+        for n in 4..40 {
+            ask(&mut memo, "rust", &code(n), kinds(&[]));
+            assert!(memo.bytes <= memo.cap);
+        }
+    }
+
+    #[test]
+    fn a_block_larger_than_the_cap_is_computed_each_time_and_evicts_nothing() {
+        let mut memo = KindsMemo::new(100);
+        ask(&mut memo, "rust", "small", kinds(&[]));
+        let big = "x".repeat(500);
+        assert!(ask(&mut memo, "rust", &big, kinds(&[])).1);
+        assert!(ask(&mut memo, "rust", &big, kinds(&[])).1);
+        assert!(!ask(&mut memo, "rust", "small", kinds(&[])).1);
+        assert!(memo.bytes <= memo.cap);
+    }
+
+    #[test]
+    fn a_hit_paints_what_a_miss_paints_in_the_colours_of_the_style_asked() {
+        let code = "fn main() {\n    let n = 42; // answer\n    println!(\"{n}\");\n}\n";
+        let (dark, light) = (style(0.6), style(0.1));
+        let direct = |style: &CodeStyle| coloured(style, &clipped_kinds(code, "rust"));
+        let first = syntax_highlights(&dark, Some("rust"), code);
+        assert!(!first.is_empty(), "the fixture must highlight");
+        assert_eq!(first, direct(&dark));
+        // The memo now holds the block: served for a different theme, with its colours.
+        let again = syntax_highlights(&light, Some("rust"), code);
+        assert_eq!(again, direct(&light));
+        assert_ne!(again, first, "a theme change must repaint");
+        assert!(syntax_highlights(&light, None, code).is_empty());
     }
 }
