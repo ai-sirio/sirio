@@ -92,7 +92,7 @@ their sideways scroll bar.
 - For: every kept feature survives; parse once per change; untrusted text is filtered before it is
   drawn; Ely's reader decides syntax, so math, alerts, footnotes, emoji and `[toc]` come from
   upstream unchanged.
-- Against: seven small local changes in the vendored crates (§5.2) to carry on each sync.
+- Against: eight small local changes in the vendored crates (§5.2) to carry on each sync.
 
 **B. Ely owns everything (`MarkdownRenderer::new(source).selectable(..)`).** Almost no Sirio code.
 Rejected: Ely's selection is per body, takes focus on press, handles Ctrl+C in its own key handler,
@@ -113,7 +113,7 @@ diverging from upstream's reader on every sync.
 rust/vendor/
 ├── bezel_markdown/                  # deleted
 ├── pulldown-cmark/                  # new: upstream Ely's patched copy (§5.3)
-└── ely/crates/ely-documents, ely-core   # local changes L1–L7 (§5.2)
+└── ely/crates/ely-documents, ely-core   # local changes L1–L8 (§5.2)
 rust/crates/sirio_ui/src/
 ├── markdown/                        # new home of all Markdown drawing
 │   ├── mod.rs        # MarkdownBlocks: parse once + rewrite; per-surface Policy
@@ -146,6 +146,7 @@ the crate where the crate's own tests can show it.
 | L5 | `ely-documents` `render.rs` | `MarkdownRenderer::diagrams(bool)`, default `true`: when `false`, a `mermaid` fence goes to the `code` hook like any other fence. | Sirio keeps its own diagram pipeline in the Preview and code-only fences elsewhere. |
 | L6 | `ely-core` `navigation/toc.rs` | `Sections::reveal(&mut self, value, …)`: scrolls the section's spot to the top, the same arithmetic `TableOfContents` uses on a click. | `#heading` links and the `[[toc]]` list jump within the Preview. |
 | L7 | workspace `Cargo.toml`, `rust/vendor/pulldown-cmark` | §5.3. | Upstream's footnote-in-link fix; restores two ignored tests. |
+| L8 | `ely-documents` `render.rs`, `render/table.rs` | `MarkdownRenderer::table_frame(f)` where `f: Fn(ElementId, AnyElement) -> AnyElement`: when set, a table is laid at its natural width (columns do not shrink or wrap below their content) and handed to `f`, which places it. Unset, upstream's wrapping table is unchanged. | Sirio wraps each table in its own horizontal scroll area with `scroll::horizontal_bar`, as fences are, on all three surfaces: tables keep their sideways scroll bar (Enzo, #649; `test-markdown-scroll-probe.sh`). |
 
 Names are proposals; the builder may rename, recording it. Anything else found necessary is a new
 row, recorded, never a silent edit.
@@ -195,6 +196,7 @@ run renders without overflowing the stack).
 | Paths to files in the worktree → file links (`link_file_paths`) | — | yes | — |
 | `[[toc]]` and `[toc]` paragraph → a list of `#slug` links | yes | yes, links inert | yes, links inert |
 | Ely `diagrams(false)`, `web_pictures` | false, true | false, true | false, false |
+| Tables in a sideways scroll area (L8) | yes | yes | yes |
 
 - **HTML.** Inline HTML is Ely's (its reader maps `u`, `b`, `i`, `s`, `code`, `kbd`, `mark`, `br`,
   `a`). Block HTML goes through the L2 hook to `expand_html` (the GitHub subset it maps today:
@@ -295,7 +297,7 @@ offset space.
 |---|---|---|
 | Code/Preview toggle, 256 KiB lock | `file_view.rs` tests, `test-editor-e2e.sh` `scenario_markdown` | same, green |
 | Preview selection, double/triple click, Ctrl+C, link click vs drag | `selectable_markdown.rs` gpui tests, `test-markdown-selection-probe.sh`, `test-text-selection-e2e.sh` | ported to Ely; probe passes |
-| Preview scroll bars (vertical, horizontal page, fence) | `test-markdown-scroll-probe.sh` | passes for page and fences; table part removed (D3) |
+| Preview scroll bars (vertical, horizontal page, fence) | `test-markdown-scroll-probe.sh` | passes for page, fences and tables (L8) |
 | Remote image | `test-markdown-remote-image-e2e.sh` | passes (L4) |
 | Local/relative images | `file_view.rs` local image test | green |
 | HTML subset | `sirio_markdown` `html.rs` 34 tests + `markdown_preview.rs` tests | green; new tree-level tests where the converter needs them |
@@ -314,7 +316,7 @@ comparison (§6.3); each is accepted by this spec unless the comparison shows it
   resolved UI and code fonts; Ely's layout (line height 1.6, heading steps 2.25/1.75/1.5/1.25).
 - **D2 Chat-only bezel syntax goes.** `<url>` chips, lone-URL bookmark cards and `![alt|480]` widths
   render as plain links and natural-size pictures.
-- **D3 Tables** wrap their cells to the column instead of scrolling sideways.
+- **D3** (withdrawn by Enzo via t2s, 2026-11-20: tables keep their sideways scroll, L8).
 - **D4 Not highlighted:** math, alert titles and footnote labels are copied but cannot be hit or
   highlighted; diagrams and pictures are neither (§5.6).
 - **D5 Gained syntax in Preview and change requests:** strikethrough and bare-URL links, which
@@ -336,7 +338,7 @@ comparison (§6.3); each is accepted by this spec unless the comparison shows it
 0. **Baseline.** On the untouched branch head, build and capture the Preview, a chat reply and a
    change request from the one fixture of §6.2, so differences can be listed. Nothing is changed
    before this exists.
-1. **Vendor seams.** L1–L7, upstream suites green with `--features test-support`, `check-vendor.sh`
+1. **Vendor seams.** L1–L8, upstream suites green with `--features test-support`, `check-vendor.sh`
    OK, LOCAL-CHANGES updated, facade re-export.
 2. **`sirio_ui::markdown`.** `MarkdownBlocks`, the rewrites, the plain-text walk, the gather, the code
    hook, the menu. Unit tests where a unit needs isolation, failure modes first.
@@ -409,7 +411,7 @@ is called pre-existing.
   fix here (step 3 brings `StreamingMarkdown`).
 - **Untrusted math.** ratex on forge text: a parse failure draws Ely's error note; a panic would be a
   finding. The E2E fixture includes malformed TeX.
-- **Upstream sync cost.** L1–L7 must be re-applied on each sync; they are additive and listed.
+- **Upstream sync cost.** L1–L8 must be re-applied on each sync; they are additive and listed.
 
 ## 8. Left to the builder
 
@@ -423,7 +425,7 @@ handling of `expand_html` output the tree has no node for (falls back to a parag
 Taken as the recommended option, per Enzo's delegation; each with what it costs if wrong.
 
 1. **Approach A** (Sirio owns tree and selection). Wrong if a lighter integration was wanted: the
-   cost is seven local changes carried on each sync.
+   cost is eight local changes carried on each sync.
 2. **Patched `pulldown-cmark` taken** (§5.3). Wrong: one vendored crate to drop and two tests to
    re-ignore.
 3. **Diagrams stay Preview-only;** chat and change requests show fences as code, as today. Wrong:
@@ -431,8 +433,9 @@ Taken as the recommended option, per Enzo's delegation; each with what it costs 
    renderer).
 4. **Web pictures load in Preview and chat** (as bezel did), never in change requests. Wrong: one
    policy flag.
-5. **Tables wrap instead of scrolling sideways** (D3). Wrong: a further local change wrapping Ely's
-   table in a horizontal scroll area.
+5. **Tables keep their sideways scroll bar** through L8 on every surface. Decided by Enzo via t2s
+   (2026-11-20), reversing this document's first call (tables wrapping, D3): every current Preview
+   feature is kept, scroll bars included, and the chat's table bar was Enzo's request (#649).
 6. **Chat-only bezel syntax dropped** (D2). Wrong: a rewrite pass restores `|480` widths (L3 already
    carries width); chips and bookmark cards would need new drawing.
 7. **`[[toc]]` and `[toc]` both accepted**, drawn as a list of links that jump in the Preview only.
