@@ -30,7 +30,7 @@ pub(crate) struct Part {
     pub kind: PartKind,
     /// The separator written before this part (empty for the first): a blank line between
     /// blocks, a line end between texts of one block, a tab between the cells of a table row.
-    pub sep: &'static str,
+    pub sep: String,
 }
 
 /// Whether the renderer pushes a text to the gather.
@@ -49,22 +49,23 @@ struct Walk {
     lead: String,
     /// Lists open around the node: a marker's indent and its bullet.
     lists: usize,
-    parts: Vec<(String, usize, PartKind, &'static str)>,
-    /// The separator for the next part pushed, when it is not a line end.
-    next_sep: Option<&'static str>,
+    parts: Vec<(String, usize, PartKind, Option<String>)>,
+    /// The separators of the table cells since the last text, for the next part pushed:
+    /// an empty cell is no text and keeps only its separator. `None` is a line end.
+    pending: Option<String>,
 }
 
 impl Walk {
     fn drawn(&mut self, text: &str) {
         let lead = std::mem::take(&mut self.lead);
-        let sep = self.next_sep.take().unwrap_or("\n");
+        let sep = self.pending.take();
         self.parts
             .push((format!("{lead}{text}"), lead.len(), PartKind::Drawn, sep));
     }
 
     /// A silent text takes no marker: the renderer does not push it.
     fn silent(&mut self, text: &str) {
-        let sep = self.next_sep.take().unwrap_or("\n");
+        let sep = self.pending.take();
         self.parts.push((text.to_owned(), 0, PartKind::Silent, sep));
     }
 
@@ -126,15 +127,22 @@ impl Walk {
                     self.nodes(body);
                 }
             }
-            // A row reads as a spreadsheet row: cells by tabs, rows by line ends.
+            // A row reads as a spreadsheet row: cells by tabs, rows by line ends. Every cell
+            // position adds its separator, whether the cell holds text or not.
             Node::Table { head, rows, .. } => {
-                for row in std::iter::once(head).chain(rows) {
-                    for (column, cell) in row.iter().enumerate() {
-                        self.next_sep = Some(if column == 0 { "\n" } else { "\t" });
+                for (row, cells) in std::iter::once(head).chain(rows).enumerate() {
+                    for (column, cell) in cells.iter().enumerate() {
+                        let sep = match (row, column) {
+                            (_, 1..) => "\t",
+                            (0, 0) if self.parts.is_empty() => "",
+                            _ => "\n",
+                        };
+                        self.pending.get_or_insert_with(String::new).push_str(sep);
                         self.nodes(cell);
-                        self.next_sep = None;
                     }
                 }
+                // Separators no text followed have nothing to separate.
+                self.pending = None;
             }
             Node::Rule | Node::Image { .. } => {}
         }
@@ -153,12 +161,12 @@ pub(crate) fn plain_text(nodes: &[Node]) -> PlainText {
         }
         let between = !std::mem::take(&mut first);
         for (ix, (text, lead, kind, sep)) in walk.parts.into_iter().enumerate() {
-            let sep = match (ix, between) {
-                (0, true) => "\n\n",
-                (0, false) => "",
-                _ => sep,
+            let sep = match (ix, between, sep) {
+                (0, true, sep) => format!("\n\n{}", sep.unwrap_or_default()),
+                (0, false, sep) => sep.unwrap_or_default(),
+                (_, _, sep) => sep.unwrap_or_else(|| "\n".to_owned()),
             };
-            out.text.push_str(sep);
+            out.text.push_str(&sep);
             let start = out.text.len();
             out.text.push_str(&text);
             out.parts.push(Part {

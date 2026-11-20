@@ -7,7 +7,7 @@
 use ely_gpui_component::documents::{AlignKind, Inline, MarkdownBlock as Node, Style};
 use sirio_diagram::DiagramKind;
 use sirio_markdown::{
-    Alignment, Block, Document, Inline as Leaf, ListKind, TableCell, expand_html, html_nesting_depth,
+    Alignment, Block, Document, Inline as Leaf, ListKind, TableCell, expand_html_capped,
 };
 
 use super::{DiagramInputs, FileLinkInputs, Heading, MAX_NESTING, Policy, Surface};
@@ -128,20 +128,17 @@ fn is_data_image(url: &str) -> bool {
 
 // ---- block HTML -------------------------------------------------------------------------
 
-/// The blocks that replace one HTML block: what `expand_html` maps it to, unless its tags
-/// nest deeper than `room`, which reads as the block's own text. It always
+/// The blocks that replace one HTML block: what `expand_html` maps it to, built no deeper
+/// than `room` levels (past that its tags keep their text and make no level). It always
 /// answers, so Ely's own reading of the block as text never shows; an HTML block of
 /// nothing a reader sees gives no blocks.
 pub(super) fn html_block(raw: &str, room: usize) -> Option<Vec<Node>> {
-    if html_nesting_depth(raw) > room {
-        return Some(vec![plain_paragraph(raw.trim_end_matches(['\r', '\n']))]);
-    }
     let document = Document {
         blocks: vec![Block::Html {
             text: raw.to_owned(),
         }],
     };
-    Some(blocks(expand_html(document).blocks))
+    Some(blocks(expand_html_capped(document, room).blocks))
 }
 
 fn blocks(blocks: Vec<Block>) -> Vec<Node> {
