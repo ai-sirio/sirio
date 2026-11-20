@@ -549,7 +549,10 @@ with Enzo through t2s.
     `tree/sources.rs`, `tree/emoji.rs`) and fail under load. Sirio keeps wall-clock tests out of
     its gate, so those three functions compile only with `test-support`: a `#[cfg]` on the
     function, not an `#[ignore]`, so the two ignores of §9 stay the only ones and the three still
-    run in the closure check (t2s, 2026-11-19).
+    run in the closure check (t2s, 2026-11-19). The final review found more of the same kind (the
+    `clock::spent` CPU-time ratio tests of `ely-documents`); every test whose assertion depends on
+    elapsed time is gated the same way, on the timing statements only where the test also holds
+    behaviour assertions (`LOCAL-CHANGES.md`, "Timing tests off the featureless build").
 - **The closure's upstream suites run on two test threads.** `ely-documents`'
   `references_and_long_runs_read_as_a_browser_reads_them` has a 2 s budget that fails when the
   whole closure runs in parallel in a debug build; at two threads all pass.

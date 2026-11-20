@@ -10,8 +10,12 @@ two Bezel crates the shell still draws with, repointed at the new engine.
 and licensed MIT; they build as workspace path dependencies on the same gpui-pre packages and
 the patches described below. Its `LOCAL-CHANGES.md` records provenance, the file set taken, every
 path that differs from upstream with the checklist row it carries and its proof, and the visible
-changes the sync accepted. `ely/check-vendor.sh` re-extracts each crate at the rev and fails on
-any difference `LOCAL-CHANGES.md` does not name (`ELY_UPSTREAM=<clone> rust/vendor/ely/check-vendor.sh`).
+changes the sync accepted. `ely/check-vendor.sh` re-extracts each crate at the rev and compares the
+set of differing paths (text files, binary files, files on one side only) with the list under
+"Differing paths" in `LOCAL-CHANGES.md`: an unlisted difference fails, and so does a listed path that
+no longer differs (`ELY_UPSTREAM=<clone> rust/vendor/ely/check-vendor.sh`). It checks paths, not
+hunks: that each hunk is the one its section describes is a review by hand, and it does not look at
+`ely-palette` or the facade.
 
 `ely-gpui-component/` is not a copy of anything: it is a thin facade (`Cargo.toml` and `src/lib.rs`)
 that keeps Sirio's `ely_gpui_component::*` paths over the vendored crates, with `init_chat`,
@@ -20,6 +24,15 @@ that keeps Sirio's `ely_gpui_component::*` paths over the vendored crates, with 
 `ely-palette/` holds Ely's palette and syntax colours, re-extracted from `ely-core`'s theme files
 at that rev, into a small crate, so a host's theme crate can use Ely's palette without compiling
 Ely's components; `ely-core` re-exports those types at their original paths.
+
+Two things the sync brings that no Sirio file asks for, both from upstream's manifests taken as they
+are. `ely-core` turns on gpui's `stacker` feature (`ely-core/Cargo.toml`), and Cargo unifies features,
+so every crate that links gpui has it: taffy layout and the element tree run through `stacksafe`, and
+`stacksafe`, `stacker` and `psm` are new in `Cargo.lock`, `psm` with a native assembler build step.
+`windows-check.yml` builds no gpui crate, so the first compile of the app on Windows with them is the
+nightly after the merge. And `ely-core` and `ely-documents` embed IBM Plex Sans and the KaTeX fonts
+(SIL OFL 1.1); whether a release binary keeps them is not settled, and `THIRD_PARTY_NOTICES.md`
+carries their licences either way, with Ely's own MIT licence.
 
 ## What is here
 

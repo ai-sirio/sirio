@@ -10,13 +10,104 @@
   the `ely_gpui_component::*` paths (see "The facade and the switch" below).
 - Check: `ELY_UPSTREAM=<a clone of upstream with the rev> rust/vendor/ely/check-vendor.sh [out-dir]`
   extracts each crate at the rev, diffs it against this directory (`<out-dir>/<crate>.diff`; a
-  fresh temporary directory when none is given) and fails on any differing path not named below.
-  It prints `VENDOR CHECK OK`. Run it after any edit here, and before and after a sync.
+  fresh temporary directory when none is given) and compares the differing paths (changed text and
+  binary files, files on one side only) with the list under "Differing paths" below: a path that
+  differs and is not listed fails, and so does a listed path that no longer differs. It checks
+  paths, not hunks; that a hunk is the one its section describes is a review by hand. It does not
+  look at `ely-palette` or the facade. It prints `VENDOR CHECK OK`. Run it after any edit here, and
+  before and after a sync.
+
+## Differing paths
+
+The set `check-vendor.sh` accepts: every path under `crates/` that differs from upstream at the rev, one
+bullet each, and nothing else. A path counts as listed only here, not when it is named elsewhere in these
+notes; a path listed here that no longer differs fails the check as stale. The sections below say what each
+change is and carries its proof. The check compares paths, not hunks: whether a hunk is the one its section
+describes is a review by hand.
+
+- `crates/ely-agent/Cargo.toml`
+- `crates/ely-agent/src/control.rs`
+- `crates/ely-agent/src/permission.rs`
+- `crates/ely-agent/src/tools.rs`
+- `crates/ely-charts/Cargo.toml`
+- `crates/ely-chat/Cargo.toml`
+- `crates/ely-chat/src/attach.rs`
+- `crates/ely-chat/src/composer.rs`
+- `crates/ely-chat/src/expansion.rs`
+- `crates/ely-chat/src/lib.rs`
+- `crates/ely-chat/src/message.rs`
+- `crates/ely-chat/src/status.rs`
+- `crates/ely-collab/Cargo.toml`
+- `crates/ely-core/Cargo.toml`
+- `crates/ely-core/icons/clipboard-list.svg`
+- `crates/ely-core/icons/file-pen.svg`
+- `crates/ely-core/icons/shield-off.svg`
+- `crates/ely-core/src/feedback/messages.rs`
+- `crates/ely-core/src/forms/input.rs`
+- `crates/ely-core/src/forms/mod.rs`
+- `crates/ely-core/src/forms/text/actions.rs`
+- `crates/ely-core/src/forms/text/edit.rs`
+- `crates/ely-core/src/forms/text/element.rs`
+- `crates/ely-core/src/forms/text/mod.rs`
+- `crates/ely-core/src/menus/draw.rs`
+- `crates/ely-core/src/menus/model.rs`
+- `crates/ely-core/src/menus/mod.rs`
+- `crates/ely-core/src/menus/panel.rs`
+- `crates/ely-core/src/navigation/tabs.rs`
+- `crates/ely-core/src/overlays/dialog_keys.rs`
+- `crates/ely-core/src/overlays/dialog.rs`
+- `crates/ely-core/src/overlays/dialogs.rs`
+- `crates/ely-core/src/overlays/mod.rs`
+- `crates/ely-core/src/overlays/popover_close.rs`
+- `crates/ely-core/src/overlays/popover.rs`
+- `crates/ely-core/src/primitives/icon/names.rs`
+- `crates/ely-core/src/theme/mod.rs`
+- `crates/ely-core/src/theme/palette.rs`
+- `crates/ely-core/src/theme/syntax.rs`
+- `crates/ely-core/src/theme/tokens.rs`
+- `crates/ely-core/src/typography/effects.rs`
+- `crates/ely-core/src/typography/fit.rs`
+- `crates/ely-documents/Cargo.toml`
+- `crates/ely-documents/src/lib.rs`
+- `crates/ely-documents/src/markdown/build/tests.rs`
+- `crates/ely-documents/src/markdown/tex/tests.rs`
+- `crates/ely-documents/src/math.rs`
+- `crates/ely-documents/src/modes.rs`
+- `crates/ely-documents/src/render/math_text.rs`
+- `crates/ely-documents/src/render.rs`
+- `crates/ely-documents/src/render/select.rs`
+- `crates/ely-documents/src/tree/emoji.rs`
+- `crates/ely-documents/src/tree/html_block.rs`
+- `crates/ely-documents/src/tree/sources.rs`
+- `crates/ely-documents/src/tree/tests/inline.rs`
+- `crates/ely-editor/Cargo.toml`
+- `crates/ely-editor/src/anchors.rs`
+- `crates/ely-editor/src/buffer.rs`
+- `crates/ely-editor/src/edit.rs`
+- `crates/ely-editor/src/filters.rs`
+- `crates/ely-editor/src/find.rs`
+- `crates/ely-editor/src/gutter.rs`
+- `crates/ely-editor/src/hosting_tests.rs`
+- `crates/ely-editor/src/ime.rs`
+- `crates/ely-editor/src/keys.rs`
+- `crates/ely-editor/src/layout.rs`
+- `crates/ely-editor/src/lib.rs`
+- `crates/ely-editor/src/line.rs`
+- `crates/ely-editor/src/moves.rs`
+- `crates/ely-editor/src/problems.rs`
+- `crates/ely-editor/src/row.rs`
+- `crates/ely-editor/src/search.rs`
+- `crates/ely-editor/src/sideways.rs`
+- `crates/ely-editor/src/state.rs`
+- `crates/ely-editor/src/syntax.rs`
+- `crates/ely-editor/src/view.rs`
+- `crates/ely-git/Cargo.toml`
+- `crates/ely-git/src/rows.rs`
 
 ## Changed paths
 
-Every path below is a path the check accepts as different from upstream. Anything else differing
-is a failure.
+The sections below say what each path listed under "Differing paths" carries, and its proof. The
+list is what the check accepts as different from upstream; anything else differing is a failure.
 
 ### Manifests (all eight)
 
@@ -29,6 +120,16 @@ is a failure.
   the same section the old `ely-gpui-component` carries.
 - `ely-core`: `default = []` (was `["fonts"]`), and the `five_icons` `[[example]]` is dropped with
   `examples/`.
+- `ely-core` also keeps upstream's `gpui = { workspace = true, features = ["stacker"] }`
+  (`crates/ely-core/Cargo.toml:28`), verbatim. This is not a Sirio change, and it reaches the whole
+  app: Cargo unifies gpui's features across the graph, so gpui's `stacker` feature is on for every
+  crate that links gpui, and taffy layout and the element tree now run through `stacksafe`. It adds
+  `stacksafe`, `stacker` and `psm` to `Cargo.lock` (none is on `main`), and `psm` has a native
+  assembler build step on every platform. Nothing in the tree runs that step on Windows before the
+  release: `windows-check.yml` builds no gpui crate, so the first compile of the app on Windows is
+  the nightly after the merge (`cargo check --target x86_64-pc-windows-msvc` stopped at `psm`'s
+  assembler during the sync's own check). Dropping the feature would mean editing `ely-core`'s
+  manifest or overriding it from the workspace; neither is done.
 
 - `crates/ely-core/Cargo.toml`
 - `crates/ely-chat/Cargo.toml`
@@ -65,7 +166,10 @@ types Sirio's theme crate holds.
 In `rust/vendor/ely-palette`: `Palette` and `Syntax` derive `Copy` (all fields are `Hsla`, so
 Sirio's `Theme` stays `Copy`), and `color_blind_chart` is `pub` instead of `pub(crate)`. The colour
 values are upstream's at this rev (the dark palette and the chart hues moved on since the old
-extraction); upstream's `.clone()` calls stay (row 61 is cosmetic and not carried here).
+extraction). `ely-palette` is upstream's two theme files plus `Copy` and `pub`, and
+`SyntaxTheme::of` returns `self.light` and `self.dark` where upstream clones them (a `.clone()` on a
+`Copy` type once `Syntax` is `Copy`); upstream's other `.clone()` calls stay (row 61 is cosmetic and
+not carried). `check-vendor.sh` does not look at `ely-palette`, so these are held by review alone.
 
 Outcomes:
 
@@ -309,9 +413,13 @@ Outcomes:
   bytes (`svg().data(name.svg())`), so drawing an Ely icon looks nothing up in an asset source, and
   `assets.rs` stays verbatim. Where Sirio's code still needs a path (`IconName::path()`, the chat probe),
   that is the facade's job at Task 8 (spec 5.4: the facade's `AssetSource` maps `ely/`).
-- Row 7, re-decided: Inter and JetBrains Mono are not bundled: `ely-core`'s `fonts` feature is off by
-  default here (see Manifests), and Sirio's facade does not call upstream's `init`. IBM Plex Sans (for
-  svg text) stays, as upstream always embeds it.
+- Row 7, re-decided: Inter and JetBrains Mono are not bundled in a release build: `ely-core`'s `fonts`
+  feature is off by default here (see Manifests), and Sirio's facade does not call upstream's `init`.
+  A test build is another matter: `ely-git`'s Linux dev-dependency
+  `ely-core = { features = ["fonts"] }` turns `fonts` on in `--workspace --all-targets` and nextest
+  builds, so those fonts are compiled into the test binaries. IBM Plex Sans (for svg text) stays, as
+  upstream always embeds it; whether the release binary keeps it is not settled (see
+  `THIRD_PARTY_NOTICES.md`, which carries its licence either way).
 
 ## ely-chat and ely-agent hooks (Task 4)
 
@@ -693,16 +801,15 @@ Outcomes:
 
 `Scripts/ci.sh` runs `cargo nextest run --workspace` with no features. Upstream always tests with
 `test-support`: its own `mod tests` and `init_for_tests` are gated `all(test, feature = "test-support")`.
-Seven plain `#[cfg(test)]` modules in `ely-git` and `ely-documents` call `init_for_tests`,
+Six plain `#[cfg(test)]` modules in `ely-git` and `ely-documents` call `init_for_tests`,
 `gpui::TestAppContext` or `#[gpui::test]`, which exist only with that feature, so the featureless
-build did not compile. Each of the seven takes upstream's gate, `#[cfg(all(test, feature = "test-support"))]`,
+build did not compile. Each of the six takes upstream's gate, `#[cfg(all(test, feature = "test-support"))]`,
 in place of `#[cfg(test)]`; nothing else in them changes. With test-support on, `test` is on too, so
 the modules compiled in a test-support build are the same as before.
 
 Changed paths (each is one attribute line):
 
 - `crates/ely-git/src/rows.rs`: inline `mod tests` (was line 134).
-- `crates/ely-documents/src/templates.rs`: inline `mod tests` (was line 351).
 - `crates/ely-documents/src/render/math_text.rs`: inline `mod tests` (was line 306).
 - `crates/ely-documents/src/math.rs`: `mod tests;` (was line 285), whose file is `math/tests.rs`.
 - `crates/ely-documents/src/modes.rs`: `mod tests;` (was line 491), whose file is `modes/tests.rs`.
@@ -710,50 +817,94 @@ Changed paths (each is one attribute line):
 - `crates/ely-documents/src/render/select.rs`: `mod tests;` (was line 326), whose file is
   `render/select/tests.rs`.
 
+`ely-documents`' `templates.rs` was a seventh and no longer is: upstream already gates each item of its
+`mod tests` that uses gpui (`Sized`, `drawn` and the two `#[gpui::test]` functions), so the module
+compiles featureless as upstream wrote it, and the file is upstream's again. Its plain test
+`templates_keep_by_category_and_query` runs in `ci.sh`.
+
 Why: `ci.sh` runs `nextest --workspace` with no features; upstream always tests with test-support.
 
-Cost: the 17 plain `#[test]` functions in these modules (2 in `rows.rs`, 1 in `templates.rs`, 1 in
-`math_text.rs`, 10 in `math/tests.rs`, 2 in `modes/tests.rs`, 1 in `render/select/tests.rs`) now run
-only under test-support. No CI job runs the ely crates with test-support (`Scripts/ci-linux.sh`
-enables it for the gpui copy only), so `ci.sh` no longer runs them. The gpui tests in the same
-modules could not compile featureless before and still cannot. Moving the gate onto the gpui tests
-alone, so the 17 run again, is the follow-up if they must run in CI; it is not done here, because the
-task fixes the gate on the module.
+Cost: the 16 plain `#[test]` functions in the six modules (2 in `rows.rs`, 1 in `math_text.rs`, 10 in
+`math/tests.rs`, 2 in `modes/tests.rs`, 1 in `render/select/tests.rs`) run only under test-support.
+No CI job runs the ely crates with test-support (`Scripts/ci-linux.sh` enables it for the gpui copy
+only), so `ci.sh` does not run them. The gpui tests in the same modules could not compile featureless
+before and still cannot. Moving the gate onto the gpui tests alone, so the 16 run again, is the
+follow-up if they must run in CI; it is not done here, because the task fixes the gate on the module.
 
 Outcome: local change, re-decided against the featureless build. Proof: `cd rust && cargo nextest run
 -p ely-git -p ely-documents --no-run` and `cargo nextest run -p ely-core -p ely-chat -p ely-agent
 -p ely-editor -p ely-collab -p ely-charts --no-run` both exit 0 with no error and no warning; the
-second needed no further gate. The featureless run of `ely-git` and `ely-documents` (`--no-fail-fast`)
-runs 186 tests: 185 pass, one fails, and 2 are ignored (the step-2 pair). The failure is
-`tree::html_block::tests::references_and_long_runs_read_as_a_browser_reads_them`, a 2 s wall-clock
-budget for 256 KiB of `&`: it took 3.3 s in the full run and 2.6 s alone under load, and 1.97 s alone
-at `--test-threads 2`, so on this machine it sits at its budget and `ci.sh` may fail on it. That test
-is upstream's own and is not touched here. With `--features test-support` the same two crates run 617
-tests, all passing (2 ignored), that test included (1.59 s).
+second needed no further gate. The featureless run is `ely-git` 21 tests and `ely-documents` 159, all
+passing, with the step-2 pair (see "Ignored tests") skipped. With `--features test-support`,
+`-p ely-palette -p ely-documents -p ely-core` runs 1193 tests, all passing, 2 skipped.
 
-## Wall-clock tests off the featureless build
+## Timing tests off the featureless build
 
 `Scripts/ci.sh` runs `cargo nextest run --workspace` with no features, so upstream's plain `#[cfg(test)]`
-unit tests run in Sirio's gate. Three of them in `ely-documents` assert a wall-clock budget, timed with
-`web_time::Instant::now()` and `elapsed()`, and fail under load: `html_block` took 3.3 s against its 2 s
-budget in the full run. The project keeps wall-clock tests out of its gate. Each of the three test
-functions takes `#[cfg(feature = "test-support")]` above its `#[test]`, so it compiles only with the
-crate's `test-support` feature. The closure check runs with `--features test-support`, so it still runs
-them. This is not an `#[ignore]`: the spec's two ignores (see "Ignored tests" above) are untouched.
+unit tests run in Sirio's gate, and `pr.yml` runs that script. A test whose assertion depends on elapsed
+time does not belong there: it fails under load (`html_block`'s 2 s wall-clock budget took 3.3 s in a
+full run), and the project keeps timing tests out of its gate. That covers both kinds in `ely-documents`:
+the wall-clock budgets (`web_time::Instant`), and the ratio tests that compare two runs' thread CPU time
+through `clock::spent` ("four times the input in at most eight times the time"; a loaded host still
+moves a CPU-time ratio, through cache and frequency effects). Each such assertion takes
+`#[cfg(feature = "test-support")]`, so it compiles only with the crate's `test-support` feature, and
+the closure check, which runs with that feature, still runs them. This is not an `#[ignore]`: the
+spec's two ignores (see "Ignored tests" above) are untouched.
 
-Changed paths (one attribute line each, on the test function only):
+A test that carries behaviour assertions besides its timing keeps them in the featureless run: the gate
+is on the timing statements only, and nothing else in the test changes.
 
-- `crates/ely-documents/src/tree/html_block.rs`: `tree::html_block::tests::references_and_long_runs_read_as_a_browser_reads_them`.
-- `crates/ely-documents/src/tree/sources.rs`: `tree::sources::tests::a_long_paragraph_reads_back_in_one_pass`.
-- `crates/ely-documents/src/tree/emoji.rs`: `tree::emoji::tests::long_runs_scan_in_linear_time`.
+Gated whole (the test is only a timing; one attribute line above its `#[test]`):
 
-Why: `ci.sh` runs upstream's plain unit tests featureless, and these three assert wall-clock budgets that
-fail under load. The crate's other timing tests go through `clock::spent`, which reads the thread's CPU
-time, not the wall clock, so they stay as they are.
+- `crates/ely-documents/src/tree/html_block.rs`: `nested_tables_read_in_linear_time` and
+  `hostile_html_reads_in_linear_time` (both `clock::spent` ratios).
+- `crates/ely-documents/src/tree/sources.rs`: `a_long_paragraph_reads_back_in_one_pass` (a 500 ms
+  wall-clock budget; its one other assertion, the offset of the fifth character, is a result of the
+  same input).
+- `crates/ely-documents/src/tree/emoji.rs`: `long_runs_scan_in_linear_time` (a 2 s budget).
+- `crates/ely-documents/src/markdown/build/tests.rs`: `closing_parentheses_trail_off_in_linear_time`,
+  `many_literal_links_read_in_linear_time` and `rejected_domains_read_in_linear_time`.
+
+Gated on the timing part only:
+
+- `crates/ely-documents/src/tree/html_block.rs`: `references_and_long_runs_read_as_a_browser_reads_them`
+  keeps its entity-decoding assertion (`&notit; &amp &ampx &lt3 &nope;` read as a browser reads it)
+  featureless; the 256 KiB `Instant` budget is inside a `#[cfg(feature = "test-support")]` block. The
+  test carries no attribute on its function, as upstream has none.
+- `crates/ely-documents/src/tree/tests/inline.rs`: `a_close_rebuilds_at_most_three_alike` and
+  `a_crossed_close_keeps_marks_nested_and_linear` keep their style and mark assertions; each
+  `clock::spent` ratio loop is inside a `#[cfg(feature = "test-support")]` block (in the second the
+  `source` closure moved into the block with it).
+- `crates/ely-documents/src/markdown/build/tests.rs`: `dollar_fences_inside_open_code_stay_code` and
+  `cells_past_the_head_keep_their_text_as_written` keep their tree assertions; the `linear(..)` call at
+  the end of each has the attribute as a statement.
+
+Support for the above, in the same files: the `linear` helper and the `spent` import of
+`markdown/build/tests.rs` are gated with their callers, and `crates/ely-documents/src/lib.rs` declares
+`mod clock;` under `#[cfg(all(test, feature = "test-support"))]` (was `#[cfg(test)]`), because no
+featureless test calls `clock::spent` any more and the function would be dead code.
+
+Already behind `test-support`: `document/tests/` (its module is gated, so `format.rs`'s
+`many_paragraphs_format_in_linear_time` was never in the featureless build). The other `Instant`
+users in the vendored crates (`feedback/clock.rs`'s two tests) build their own instants and assert
+exact values; they are deterministic and stay.
+
+Changed paths: the five files above plus `lib.rs`: `tree/html_block.rs`, `tree/sources.rs`,
+`tree/emoji.rs`, `tree/tests/inline.rs`, `markdown/build/tests.rs` and `lib.rs`, all under
+`crates/ely-documents/src/`.
+
+Why: `ci.sh` runs upstream's plain unit tests featureless, and these assert timings that fail under load.
 
 Outcome: local change. Proof: `cd rust && cargo nextest list -p ely-documents` (no features) lists none
-of the three names, and `cd rust && cargo nextest run -p ely-documents --features test-support -E
-'test(=<full::path::name>)' --test-threads 2` runs each one, exactly once.
+of the seven gated-whole names and still lists the `references_and_long_runs...`,
+`a_close_rebuilds_at_most_three_alike`, `a_crossed_close_keeps_marks_nested_and_linear`,
+`dollar_fences_inside_open_code_stay_code` and `cells_past_the_head_keep_their_text_as_written` tests;
+`cargo nextest run -p ely-documents --features test-support` runs them all, timing parts included.
+
+Also in `markdown/build/`: the repository's `.gitignore` has a bare `build/` rule, which hid this
+directory (`node.rs`, `tests.rs`, `text.rs`) from git, so it was on disk and not in any commit. The root
+`.gitignore` now un-ignores `rust/vendor/ely/crates/ely-documents/src/markdown/build/`, and the three
+files are committed.
 
 ## The facade and the switch (Task 8)
 
@@ -762,17 +913,22 @@ vendored crates; its old sources, assets, licences and notes are deleted (they s
 `aacddd7ec`). It is not a vendored copy of anything, so `check-vendor.sh` does not look at it.
 
 - Chapters `buttons`, `data_display`, `feedback`, `forms`, `layout`, `lists`, `menus`, `motion`,
-  `navigation`, `overlays`, `primitives`, `theme`, `typography` are `pub use ely_core::<chapter>`;
+  `navigation`, `overlays`, `primitives`, `shell`, `theme`, `typography` are `pub use ely_core::<chapter>`
+  (`shell` is there because the old crate exposed it; no Sirio code calls it);
   `chat` = `ely_chat`, `agent` = `ely_agent`, `editor` = `ely_editor`; `git` = `ely_git` plus
   `ely_core::lists::GitStatus`.
 - `init_chat` (the theme and `forms::bind_keys` only, never upstream's `setup`: its Tab, Shift-Tab and
   F6 bindings stay out, guarded by `ely_ui::tests::ely_init_binds_no_focus_keys`, which passed on the
-  old crate and passes after the switch) and `init_editor` (checklist row 107: `init_chat`, then
+  old crate and passes after the switch; it binds a `FocusNext` first as a control, to show its filter
+  finds a focus binding, and clears the bindings before it runs Sirio's setup) and `init_editor` (checklist row 107: `init_chat`, then
   `editor::bind_keys`, behind a private `EditorKeysBound` global).
 - `Assets` serves `ely/icons/<name>.svg` from `IconName::ALL`'s embedded bytes (Task 3's decision:
   `ely-core`'s `assets.rs` stays verbatim). `IconName::path()` is a trait in the facade, `IconPath`
   (an inherent method cannot be added to upstream's type), returning that path; the chat probe imports it.
-- `test-support` forwards to each crate's, for runs by hand: no Sirio manifest enables it.
+- `test-support` forwards to the five crates the facade depends on (`ely-core`, `ely-chat`, `ely-agent`,
+  `ely-editor`, `ely-git`), for runs by hand: no Sirio manifest enables it. It does not reach
+  `ely-documents`, `ely-collab` or `ely-charts`, which the facade does not depend on; the closure
+  check runs each crate with `-p <crate> --features test-support`.
 - Sirio call sites re-pointed: `CodeEditor::highlighter(..)` and `set_highlighter(..)` of the old
   line-indexed signature became `line_highlighter(..)` and `set_line_highlighter(..)`
   (`file_view/code_surface.rs`, `proposal_tab.rs`, `examples/ely_editor_probe.rs`); the debug selector
@@ -833,7 +989,8 @@ is present by construction in the verbatim files.
 
 ### Git and palette leftovers (rows 61, 85, 86)
 
-- Row 61 (`.clone()` on `Copy` types replaced): not carried, cosmetic; upstream's `.clone()` calls stay.
+- Row 61 (`.clone()` on `Copy` types replaced): not carried, cosmetic; upstream's `.clone()` calls stay,
+  except the two in `SyntaxTheme::of`, which are dropped (see the palette split).
 - Rows 85, 86 (`GitStatus`): absorbed. `ely_core::lists::GitStatus` is upstream's own; `ely-git` imports
   it, and the facade's `git` chapter re-exports it (`sirio_ui/src/changes.rs` uses it). Proof: the
   variants are identical to the old copy's (Task 7, by `diff`), and `cargo build -p sirio`.
@@ -891,7 +1048,8 @@ row 4. Proof for the lot: the closure's own tests (1447 with `--features test-su
 ## Evidence from the switch (Tasks 8 and 10)
 
 "Runs at Task 8" in the sections above means the 36 `sirio_ui` tests below, all green on the
-facade, plus the full `sirio_ui` suite (2435 run, 2435 passed after the round-1 fixes). Names, as
+facade, plus the suites of the three crates `-p sirio_ui -p sirio -p sirio_theme` (2435 run, 2435 passed after
+the round-1 fixes: 1838 in `sirio_ui`, 556 in `sirio`, 41 in `sirio_theme`). Names, as
 `cargo nextest` prints them:
 
 - `chat::band_tests`: `a_blocked_fast_row_is_disabled`, `composer_band_spans_the_chat_column_on_one_row`,
@@ -955,27 +1113,77 @@ Hand checks owed (nothing automated holds them; do not read these rows as proven
 - Row 143: with the perf trace on, `CodeEditor.render` spans appear and carry no text.
 - Typewriter room (new code in `Rows`): Settings, Editor, turn typewriter scrolling on and type below
   the fold. The caret line stays about a third from the bottom.
-- Section 6.4 (a), dialog Enter: open the discard dialog and hold Enter. It confirms once, not twice.
-- Section 6.4 (f), the horizontal wheel: in a short file (no line wider than the column) a purely
+- Dialog Enter (row 17): open the discard dialog and hold Enter. It confirms once, not twice.
+- The horizontal wheel (row 161): in a short file (no line wider than the column) a purely
   horizontal wheel scrolls the rows; an event with a vertical delta is left to the list.
 - On Mac and Windows, the owed checks of the PR: composer chords, a long draft under the wheel, the
   effort list, a dialog's Enter, and the editor's sideways scroll, hard tabs and find.
 
+## Dropped tests of the old crate
+
+Two Sirio-local tests of the old `ely-gpui-component` have no counterpart in the new tree.
+
+- `primitives::icon::tests::every_icon_ships_in_the_bundle` (every `IconName` loads through the crate's
+  `Assets` under `ely/icons/<name>.svg`). Dropped because the facade's `Assets` is now derived from
+  `IconName::ALL` itself (`load` looks the name up in that list and returns the icon's embedded bytes),
+  so every icon is served by construction and the old check, written against a `rust-embed` folder that
+  could miss a file, would assert what the code does. What covers the icon files themselves is
+  upstream's `primitives::icon::tests::every_icon_carries_its_own_lucide_svg`. Nothing tests the facade's
+  `Assets::load` or `list` directly: `ely_chat_probe` draws icons through `Assets::icon`, and the load-miss
+  branch and `list` never run in-tree (no caller).
+- `theme::palette_copy_tests::palette_and_syntax_are_copy` (`Palette` and `Syntax` are `Copy`). Dropped
+  because the compiler holds it: `sirio_theme`'s `ThemeColors` derives `Copy` over a `Palette` field and
+  `SyntaxTheme::of` returns `Syntax` by value from `&self`, so neither compiles if the type stops being
+  `Copy`.
+
 ## Visible changes accepted by the sync
 
-Three things changed on screen, proven by captures and traced to upstream (details and the
-frames: Task 10's `differences.md`, F1, F2 and D1). All three are pending Enzo's approval; none is
-overridden locally.
+Everything on screen or under the fingers that the sync changed, each traced to upstream or to a row
+this file re-decided. Enzo accepted F1, F2 and D1 on 2026-11-20 (through the coordinator); F1 is
+accepted as upstream ships it, and he can still ask for an override in the facade or in `ely-core`.
+The frames and the method are in the sync's own evidence (`artifacts/ely-sync/`, not committed).
 
 - F1, status bar items 2 px wider and 2 px taller: upstream `2d827752`
   (`crates/ely-core/src/shell/bars.rs`, `StatusBarItem::render`) gives a clickable item a
   transparent 1 px border and a focus ring. Every editor status row's text sits 1, 3 and 5 px further
   left, and the popover or list above an item opens 1 px higher. Proven by a revert (17 of 23 frames
-  identical to before). The same commit makes the item a Tab stop, inert in Sirio (nothing binds
-  `focus_next`; the item's mouse-down prevents default), so the ring is never drawn, only the border.
-  The override, if wanted, is two lines in `ely-core` or the facade.
+  identical to before). The same commit makes the item a gpui Tab stop (`tab_index(0)`). Nothing in
+  Sirio moves focus onto it by key, so the ring is never drawn, only the border: gpui-pre has no
+  built-in Tab handling (it only runs the `focus_next` and `focus_prev` the host dispatches), no Sirio
+  binding calls them (`ely_init_binds_no_focus_keys`), and the item's mouse-down calls
+  `prevent_default`, so a click does not take focus. The only code in Sirio that dispatches `FocusNext`
+  is `file_view/status_actions.rs` (two sites, one for the list popovers and one for the bell), and it
+  dispatches from the popover's own panel, a trapping `FocusScope`: its step advances until the focus is
+  inside the panel and puts it back where it started when the panel has no stop, so a status bar item
+  cannot keep it. The override, if wanted, is two lines in `ely-core` or the facade.
 - F2, tooltips in the theme font: `crates/ely-core/src/primitives/tooltip.rs:30` sets the theme's font
   family. A tooltip's label is a little narrower and a long one can wrap at another word.
 - D1, a dialog focuses its first control: its focus ring or caret shows a frame after opening, and
   whatever sat behind loses its focus look (spec 5.4's re-decided row 4, upstream's change log).
-  Related and listed with row 17: Enter confirms on press, not release.
+
+The rows that change behaviour and are not a frame difference (the list the spec's §6.4 asks to go to Enzo):
+
+- Dialog Enter confirms on press, not on release (row 17). Hand check: open the discard dialog and hold
+  Enter; it confirms once.
+- Hover reacts without a click: scroll bars, tooltips and hover cards take upstream's
+  `HoverListenerMode::InputModalityIndependent` (row 19). Hand check: row 19 below.
+- `ely-palette`'s dark defaults (`bg` `#252525` instead of `#131110`, and the greys near it) and the chart
+  hues changed (the palette split). No Sirio draw path reads them, and no dark capture differs for them.
+- The stop button draws the same variant as send (row 33): `Primary` by default, where upstream's stop was
+  `Secondary`. Sirio always sets the variant through `PromptInput::custom` (`Subtle`), so nothing changes
+  in Sirio; a host that does not call `variant` would see it.
+- The editor's right press runs upstream's `secondary_press` (focus, caret, keeps a selection it lands in)
+  before Sirio's `SecondaryClick` handling. The end state matches the old crate, so it is not visible.
+- A pure horizontal wheel scrolls the rows when no line is wider than the column
+  (`ely-editor/src/view.rs`, row 161): in a short file Shift and the wheel move the list vertically,
+  where the old crate did nothing. An event with a vertical delta is left to the list. Hand check: open
+  a short file and wheel it sideways.
+- The sideways wheel step on a file that does have wide lines changed: it now reads the wheel in
+  `metrics.wheel` units (the list's own text style) where the old crate used `window.line_height()` at
+  event time (`view.rs`, the `on_scroll` handler). Three wheel lines moved about 78 px against 57 px
+  (26 px a line against 19), so sideways scrolling is faster than before and steps by the same line the
+  rows do.
+
+Hand checks owed in the PR, not run here: on a Mac and on Windows, the composer chords, a long draft
+under the wheel, the effort list, a dialog's Enter, and the editor's sideways scroll, hard tabs and find;
+and on a Mac, whether the blurred window looks as before (`rust/vendor/README.md`, the blend factor).
