@@ -193,6 +193,12 @@ impl BodyLayouts {
             .collect()
     }
 
+    /// Where the `index`-th text of the last frame was laid out.
+    #[cfg(test)]
+    pub(crate) fn text_bounds(&self, index: usize) -> Option<Bounds<Pixels>> {
+        self.0.borrow().texts.get(index).map(|drawn| drawn.layout.bounds())
+    }
+
     /// Where the `ordinal`-th sideways frame sat in the last frame.
     pub(crate) fn frame_bounds(&self, ordinal: usize) -> Option<Bounds<Pixels>> {
         self.0.borrow().frames.get(ordinal).copied().flatten()
