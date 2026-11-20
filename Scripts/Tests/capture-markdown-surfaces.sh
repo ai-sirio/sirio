@@ -196,7 +196,7 @@ ORIGINAL_PATH="$PATH"
 PORT="$(free_port)"
 prepare_showcase() { # destination directory
   mkdir -p "$1"
-  sed "s/PORT/$PORT/g" "$FIXTURE_DIR/showcase.md" >"$1/showcase.md"
+  sed "s/{{REMOTE_PORT}}/$PORT/g" "$FIXTURE_DIR/showcase.md" >"$1/showcase.md"
   cp "$FIXTURE_DIR/pixel.png" "$1/pixel.png"
 }
 start_image_server() { # serves pixel.png on $PORT; its log is kept

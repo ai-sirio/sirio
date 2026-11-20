@@ -70,7 +70,7 @@ Bob --> Alice: Hi
 
 ![local](pixel.png)
 
-![remote](http://127.0.0.1:PORT/pixel.png)
+![remote](http://127.0.0.1:{{REMOTE_PORT}}/pixel.png)
 
 Tail line 1: scrolling needs a long page.
 Tail line 2: scrolling needs a long page.

@@ -5,7 +5,7 @@
 opens it in the file Preview, as a chat reply and as a change request description.
 `pixel.png` is a 64x64 solid magenta (250, 40, 190) PNG, a colour the app's palette never draws.
 
-`PORT` in the remote image address is replaced by the script with the port of its loopback server.
+`{{REMOTE_PORT}}` in the remote image address is replaced by the script with the port of its loopback server.
 
 | Section (in order) | What it exercises |
 | --- | --- |
@@ -21,5 +21,5 @@ opens it in the file Preview, as a chat reply and as a change request descriptio
 | `rust` fence | one line of 200+ columns, the code block's horizontal scroll |
 | `mermaid`, `plantuml` fences | diagrams (PlantUML draws a note when `plantuml` is not installed) |
 | README HTML | a centred `<img>` and a `<details>` block |
-| `![local](pixel.png)`, `![remote](http://127.0.0.1:PORT/pixel.png)` | a picture beside the file and one over loopback HTTP |
+| `![local](pixel.png)`, `![remote](http://127.0.0.1:{{REMOTE_PORT}}/pixel.png)` | a picture beside the file and one over loopback HTTP |
 | 60 numbered lines | a tail long enough that every surface scrolls |
