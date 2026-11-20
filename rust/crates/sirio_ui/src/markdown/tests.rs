@@ -232,6 +232,15 @@ fn deep_nesting_falls_back_to_plain_text() {
     assert!(depth(&nodes) <= MAX_NESTING, "{}", depth(&nodes));
     assert!(depth(&nodes) > 30, "the quotes around it are kept");
 
+    // The same under about 90 Markdown quotes: the room left is small, and nothing recurses.
+    let html = format!("{}<b>{}x{}", "<blockquote>".repeat(N), "<b>".repeat(N), "</b>".repeat(N));
+    let source = format!("{} {html}", ">".repeat(90));
+    // (Ely's own reading of 90 nested quotes does not fit 256 KiB in a debug build.)
+    let nodes = on_stack(4 * 1024 * 1024, move || {
+        build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
+    });
+    assert!(depth(&nodes) <= MAX_NESTING, "{}", depth(&nodes));
+
     // Block HTML is built to the depth the cap leaves, however its tags cross or hide
     // their closers: it renders, its neighbours are read as ever, and nothing is deeper
     // than the cap.
@@ -243,6 +252,8 @@ fn deep_nesting_falls_back_to_plain_text() {
         format!("<div>{}", "<b><blockquote></b>".repeat(n)),
         format!("<div>{}{}", "<b><i></b>".repeat(n), "</i></b>".repeat(n)),
         format!("<div>{}", "<div><blockquote></div>".repeat(n)),
+        format!("{}<b>{}x{}", "<blockquote>".repeat(n), "<b>".repeat(n), "</b>".repeat(n)),
+        format!("{}<summary>{}x{}", "<blockquote>".repeat(n), "<b>".repeat(n), "</b>".repeat(n)),
     ] {
         let source = format!("before\n\n{html}\n\nafter\n");
         let nodes = on_stack(256 * 1024, move || {
