@@ -2176,7 +2176,7 @@ impl TranscriptInteraction {
     /// Focus taken at the press does not hold: the pane's own press handler
     /// runs after it and hands focus to the composer (`select_pane`), which is
     /// where a plain click on the transcript is meant to leave it.
-    fn extend_selection(&self, head: usize, window: &mut Window, cx: &mut App) {
+    pub(crate) fn extend_selection(&self, head: usize, window: &mut Window, cx: &mut App) {
         let selecting = self.chat.update(cx, |chat, cx| {
             cx.notify();
             chat.transcript_selection.as_mut().is_some_and(|selection| {
@@ -2187,6 +2187,48 @@ impl TranscriptInteraction {
         if selecting && !self.focus.is_focused(window) {
             window.focus(&self.focus, cx);
         }
+    }
+}
+
+impl TranscriptInteraction {
+    /// The selected span of the whole transcript, while it is not empty.
+    pub(crate) fn selected_span(&self, cx: &App) -> Option<Range<usize>> {
+        let range = self
+            .chat
+            .read(cx)
+            .transcript_selection
+            .as_ref()
+            .map(TranscriptSelection::range)?;
+        (!range.is_empty()).then_some(range)
+    }
+
+    /// Starts a selection at `anchor..head` and takes focus into the transcript.
+    pub(crate) fn begin_selection(
+        &self,
+        (anchor, head): (usize, usize),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.chat.update(cx, |chat, cx| {
+            chat.transcript_selection = Some(TranscriptSelection { anchor, head });
+            chat.transcript_dragging = true;
+            cx.notify();
+        });
+        window.focus(&self.focus, cx);
+    }
+
+    /// Whether a drag of the transcript's selection is in progress.
+    pub(crate) fn is_dragging(&self, cx: &App) -> bool {
+        self.chat.read(cx).transcript_dragging
+    }
+
+    /// Ends the drag; whether a selection remains.
+    pub(crate) fn end_drag(&self, cx: &mut App) -> bool {
+        self.chat.update(cx, |chat, cx| {
+            chat.transcript_dragging = false;
+            cx.notify();
+        });
+        self.selected_span(cx).is_some()
     }
 }
 

@@ -45,6 +45,25 @@ pub(crate) fn selectable_markdown(
     }
 }
 
+/// A selectable, link-following rendering of `blocks` through Ely's renderer, for the
+/// Preview and change requests. Its identity is the call site, under whatever identified
+/// elements enclose it, as [`selectable_markdown`]'s is.
+#[allow(dead_code)]
+#[track_caller]
+pub(crate) fn selectable_blocks(
+    blocks: &crate::markdown::MarkdownBlocks,
+    link_click: LinkClickOverride,
+) -> crate::markdown::MarkdownView {
+    crate::markdown::markdown_view(
+        blocks,
+        crate::markdown::SelectionHost::Run {
+            id: ElementId::CodeLocation(*Location::caller()),
+        },
+        link_click,
+        crate::markdown::ViewFlags::default(),
+    )
+}
+
 pub(crate) struct SelectableMarkdown {
     id: ElementId,
     document: Rc<bezel_markdown::Doc>,

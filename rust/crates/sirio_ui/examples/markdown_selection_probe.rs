@@ -1,5 +1,5 @@
-//! Native probe for the selection bezel-markdown paints under a rendered
-//! document — the painter a chat response and the file view's Preview share.
+//! Native probe for the selection painted under a Markdown body drawn through Ely's
+//! renderer — the body the file view's Preview, change requests and the chat share.
 //!
 //! The whole document is selected, so every row of it should be washed from
 //! its first glyph. The window is narrow, so the first paragraph soft-wraps;
@@ -22,29 +22,17 @@ of the previous compact, 3 times in a row.\\\nA file being read or a tool output
 large for the context window. Try reading in smaller chunks, or use `/clear to start fresh in a new session` \
 instead.\n\nSecond paragraph, a block of its own.";
 
-struct Probe {
-    document: bezel_markdown::Doc,
-}
+struct Probe;
 
 impl Render for Probe {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *sirio_theme::Theme::get(cx);
-        let selection = bezel_markdown::Selection::all(&self.document);
-        let rendered = bezel_markdown::render_with_selection(
-            &self.document,
-            Some(selection),
-            None,
-            None,
-            bezel_markdown::Caption::Shown,
-            window,
-            cx,
-        );
         div()
             .size_full()
             .p(px(24.0))
             .bg(theme.ely.bg)
             .text_color(theme.ely.fg)
-            .child(rendered)
+            .child(sirio_ui::markdown_probe_view_selected("selection", SOURCE))
     }
 }
 
@@ -70,9 +58,7 @@ fn main() {
                 },
                 |window, cx| {
                     window.set_window_title("Markdown Selection Probe");
-                    cx.new(|_| Probe {
-                        document: bezel_markdown::parse(SOURCE),
-                    })
+                    cx.new(|_| Probe)
                 },
             )
             .unwrap();

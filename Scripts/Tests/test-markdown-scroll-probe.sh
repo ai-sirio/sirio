@@ -1,11 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
-# Native check of the horizontal scroll bezel-markdown gives a wide fenced
-# block and a wide table under a rendered document (the painter a chat
-# response and the file view's Preview share), drawn by
+# Native check of the horizontal scroll a wide fenced block and a wide table get
+# under a Markdown body drawn through Ely's renderer (the body the file view's
+# Preview, change requests and the chat share), drawn by
 # rust/crates/sirio_ui/examples/markdown_scroll_probe.rs with Sirio's theme,
 # on an isolated X display.
+#
+# Re-derived for Ely (they were bezel metrics): the probe's table now has cells
+# as wide as their words (Ely draws a table at its natural width, bezel gave
+# each column a 96 px floor); a block's bounds are the whole block, label band
+# included, as `BLOCK doc` lines from the sideways frames (they were bezel's
+# block boxes); the code area starts at y+36 of a block, under the band's
+# bottom border at y+33 (it started at y+32 under bezel's thinner band).
+# Every check that proved something is kept as it was.
 #
 # Both blocks are `overflow_x_scroll` containers, and a container that
 # scrolls without drawing a bar hides whatever is past its edge. The probe
@@ -121,7 +129,9 @@ PY
 # Pixel readers over one captured frame.
 #   thumb FRAME X Y W H   -> "start end" (columns) of the longest run of the bar
 #                            strip that differs from the block's background, or "none"
-#   reach FRAME X Y W H   -> the right-most column of the fence's code area that
+#   reach FRAME X Y W H   -> (the code area starts below the label band: its bottom border
+#                            is the row y+33 of a block, so the scan starts at y+36)
+#                            the right-most column of the fence's code area that
 #                            differs from the code area's background, or "none"
 PIXELS=$(cat <<'PY'
 import subprocess, sys
@@ -165,7 +175,7 @@ elif mode == "reach":
     background = pixel(x + 4, y + h - 14)
     last = None
     for c in range(x + 1, x + w - 1):
-        if any(differs(pixel(c, r), background) for r in range(y + 32, y + h - 11)):
+        if any(differs(pixel(c, r), background) for r in range(y + 36, y + h - 11)):
             last = c
     print("none" if last is None else last)
 PY

@@ -1,10 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Native check of the selection bezel-markdown paints under a rendered
-# document (the painter a chat response and the file view's Preview share),
-# drawn by rust/crates/sirio_ui/examples/markdown_selection_probe.rs with
-# Sirio's theme, on an isolated X display.
+# Native check of the selection painted under a Markdown body drawn through
+# Ely's renderer (the body the file view's Preview, change requests and the
+# chat share), drawn by rust/crates/sirio_ui/examples/markdown_selection_probe.rs
+# with Sirio's theme, on an isolated X display. The pixel columns (x 26 edge,
+# x 84 reference) held unchanged on Ely's layout: the probe's 24 px padding
+# still puts every row's first glyph at x 24.
 #
 # The probe selects its whole document, so every row is washed. It proves
 # that each row's wash begins at the row's first glyph: for every pixel row
@@ -12,7 +14,9 @@ set -euo pipefail
 # background, the column just inside the text's left edge (x 26) is not
 # background either. A soft-wrapped row whose wash began one glyph late --
 # the defect rust/vendor/README.md's `bezel_markdown` section describes --
-# leaves that edge bare for a whole line height. The probe's text soft-wraps,
+# leaves that edge bare for a whole line height (the defect bezel had, see
+# rust/vendor/README.md's `bezel_markdown` section; Ely's gather paints each
+# text's own highlight, so it is the wrap that is checked). The probe's text soft-wraps,
 # carries a markdown line break inside one paragraph, wraps an inline code
 # span, and ends with a second paragraph; dark and light are both checked.
 #
