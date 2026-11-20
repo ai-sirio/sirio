@@ -3635,7 +3635,7 @@ mod tests {
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
 
         assert!(
-            cx.debug_bounds("code-editor-line-350").is_none(),
+            cx.debug_bounds("editor-line-350").is_none(),
             "line 350 starts off screen, or the test proves nothing"
         );
         view.update(&mut cx.cx, |view, cx| view.reveal(RevealTarget::Line(350), cx));
@@ -3645,7 +3645,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("code-editor-line-350").is_some(),
+            cx.debug_bounds("editor-line-350").is_some(),
             "reveal scrolls the line into view"
         );
     }
@@ -3692,7 +3692,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("code-editor-line-350").is_some(),
+            cx.debug_bounds("editor-line-350").is_some(),
             "the reveal was held until the content existed, not dropped"
         );
     }
@@ -4305,7 +4305,7 @@ mod tests {
         };
 
         let line_bounds = cx
-            .debug_bounds("code-editor-line-0")
+            .debug_bounds("editor-line-0")
             .expect("the first line is drawn");
         // Past the gutter.
         let on_code = point(line_bounds.origin.x + px(300.), line_bounds.center().y);
@@ -4371,7 +4371,7 @@ mod tests {
             view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned))
         };
         let line_bounds = cx
-            .debug_bounds("code-editor-line-0")
+            .debug_bounds("editor-line-0")
             .expect("the first line is drawn");
         let on_code = point(line_bounds.origin.x + px(300.), line_bounds.center().y);
         cx.simulate_mouse_move(on_code, None, Modifiers::none());
@@ -5663,7 +5663,7 @@ mod tests {
             .read_with(&cx.cx, |view, _| view.code_editor().cloned())
             .expect("the snapshot's code editor is drawn");
         assert!(
-            cx.debug_bounds("code-editor-line-0").is_some(),
+            cx.debug_bounds("editor-line-0").is_some(),
             "the revision's text is on screen"
         );
         assert!(
@@ -5812,7 +5812,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("code-editor-line-350").is_some(),
+            cx.debug_bounds("editor-line-350").is_some(),
             "the held reveal scrolls the line into view once the retry lands"
         );
     }

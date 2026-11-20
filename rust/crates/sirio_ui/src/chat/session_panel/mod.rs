@@ -25,7 +25,7 @@ use super::*;
 use ely_gpui_component::{
     forms::Checkbox,
     primitives::{Icon, IconName},
-    theme::{ActiveTheme as _, IconSize as ElyIconSize},
+    theme::IconSize as ElyIconSize,
 };
 use crate::text_selection::selectable_text;
 

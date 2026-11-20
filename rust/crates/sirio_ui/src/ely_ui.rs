@@ -273,6 +273,44 @@ mod tests {
         }
     }
 
+    /// Tab, Shift-Tab and F6 keep their meaning in Sirio: the terminal's shell gets `\t`, the
+    /// editor inserts, Sirio's own fields move as before. Ely's own setup would bind them to
+    /// its focus actions, so no binding may name them after Sirio's setup.
+    #[gpui::test]
+    fn ely_init_binds_no_focus_keys(cx: &mut TestAppContext) {
+        use ely_gpui_component::primitives::FocusNext;
+
+        let named_focus = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.key_bindings()
+                    .borrow()
+                    .bindings()
+                    .filter(|binding| {
+                        let action = binding.action().name();
+                        let context = binding
+                            .predicate()
+                            .map(|predicate| format!("{predicate:?}"))
+                            .unwrap_or_default();
+                        action.ends_with("FocusNext")
+                            || action.ends_with("FocusPrev")
+                            || context.contains("ElyFocus")
+                    })
+                    .map(|binding| binding.action().name())
+                    .collect::<Vec<_>>()
+            })
+        };
+        // The control: the filter finds a focus binding when there is one, so an empty result
+        // below means no binding, not a filter that matches nothing.
+        cx.update(|cx| cx.bind_keys([KeyBinding::new("tab", FocusNext, Some("ElyFocus"))]));
+        assert_eq!(named_focus(cx).len(), 1, "the filter must find a FocusNext binding");
+        cx.update(|cx| cx.clear_key_bindings());
+
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let named_focus = named_focus(cx);
+        assert!(named_focus.is_empty(), "{named_focus:?}");
+    }
+
     /// What the app has when a field is hosted: Sirio's theme and Ely's chat setup.
     fn boot(cx: &mut TestAppContext) {
         cx.update(Theme::init);

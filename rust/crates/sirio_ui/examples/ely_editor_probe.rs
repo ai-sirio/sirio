@@ -97,7 +97,7 @@ impl Probe {
             let editor = if std::env::var("ELY_PROBE_LEXER").as_deref() == Ok("on") {
                 editor
             } else {
-                editor.highlighter(|line, row: &str, _| {
+                editor.line_highlighter(|line, row: &str, _| {
                     if line != HIGHLIGHTED {
                         return Vec::new();
                     }

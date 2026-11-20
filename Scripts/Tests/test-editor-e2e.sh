@@ -2394,7 +2394,7 @@ scenario_status_actions() {
   # What Tab Size does to a tab character: the same file at 2 and at 8. The two
   # captures are for the eye, not compared: in Tabs mode the text system draws a
   # tab at its own advance, so N moves the guides and the row's label only
-  # (rust/vendor/ely-gpui-component/LOCAL-CHANGES.md).
+  # (rust/vendor/ely/LOCAL-CHANGES.md).
   printf '\tabc\n' >"$WT/status-tabsize.txt"
   open_file "$WT/status-tabsize.txt"
   expect_state state loaded

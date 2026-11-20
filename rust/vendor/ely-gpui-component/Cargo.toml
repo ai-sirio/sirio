@@ -2,36 +2,30 @@
 name = "ely-gpui-component"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/ELY-Open-Source/Ely-GPUI-Components"
+rust-version = "1.98"
+license = "MIT"
 publish = false
-autoexamples = false
+description = "Sirio's one name for Ely: a facade over the upstream ely crates vendored under vendor/ely."
 
 [features]
 default = ["sirio-chat"]
 sirio-chat = []
-test-support = ["gpui/test-support"]
+# For runs by hand only: it turns on gpui's leak detection, so no Sirio manifest enables it.
+test-support = [
+    "ely-core/test-support",
+    "ely-chat/test-support",
+    "ely-agent/test-support",
+    "ely-editor/test-support",
+    "ely-git/test-support",
+]
 
 [dependencies]
-ely-palette.workspace = true
-sirio_perf = { path = "../../crates/sirio_perf" }
+ely-core.workspace = true
+ely-chat.workspace = true
+ely-agent.workspace = true
+ely-editor.workspace = true
+ely-git.workspace = true
 gpui.workspace = true
-gpui_platform.workspace = true
-anyhow.workspace = true
-smallvec.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-futures = "0.3"
-jiff = "0.2"
-log = "0.4"
-regex = "1"
-rust-embed = "8.12"
-unicode-segmentation = "1"
-web-time = "1.1"
-image = { version = "0.25", default-features = false }
-iso_currency = { version = "0.7", features = ["iterator"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui = { workspace = true, features = ["wayland", "x11"] }
-gpui_platform = { workspace = true, features = ["wayland", "x11"] }

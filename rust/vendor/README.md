@@ -5,17 +5,34 @@ backends under it). This directory holds what that family does not give us as it
 platform backends carrying Sirio's patches, the HTTP client gpui-pre no longer installs, and the
 two Bezel crates the shell still draws with, repointed at the new engine.
 
-`ely-gpui-component/` is the pinned Ely chat/agent component source, licensed
-MIT OR Apache-2.0 and built as a workspace path dependency. Its
-`LOCAL-CHANGES.md` records provenance, the supported module closure and the
-compatibility changes. It builds on the same gpui-pre packages and
-the patches described below.
+`ely/` holds upstream Ely's eight crates (`ely-core`, `ely-chat`, `ely-agent`, `ely-editor`,
+`ely-git`, `ely-documents`, `ely-collab`, `ely-charts`) under `crates/`, vendored at rev `8d7723ec`
+and licensed MIT; they build as workspace path dependencies on the same gpui-pre packages and
+the patches described below. Its `LOCAL-CHANGES.md` records provenance, the file set taken, every
+path that differs from upstream with the checklist row it carries and its proof, and the visible
+changes the sync accepted. `ely/check-vendor.sh` re-extracts each crate at the rev and compares the
+set of differing paths (text files, binary files, files on one side only) with the list under
+"Differing paths" in `LOCAL-CHANGES.md`: an unlisted difference fails, and so does a listed path that
+no longer differs (`ELY_UPSTREAM=<clone> rust/vendor/ely/check-vendor.sh`). It checks paths, not
+hunks: that each hunk is the one its section describes is a review by hand, and it does not look at
+`ely-palette` or the facade.
 
-`ely-palette/` extracts Ely's upstream `src/theme/palette.rs` and
-`src/theme/syntax.rs` at `e17e31a6890c09ebcfa8b61133d7bc7c625edf69` into a
-small crate, so a host's theme crate can use Ely's palette without compiling
-Ely's components; `ely-gpui-component` re-exports those types at their original
-paths.
+`ely-gpui-component/` is not a copy of anything: it is a thin facade (`Cargo.toml` and `src/lib.rs`)
+that keeps Sirio's `ely_gpui_component::*` paths over the vendored crates, with `init_chat`,
+`init_editor` and the `Assets` that serve the `ely/icons/` names.
+
+`ely-palette/` holds Ely's palette and syntax colours, re-extracted from `ely-core`'s theme files
+at that rev, into a small crate, so a host's theme crate can use Ely's palette without compiling
+Ely's components; `ely-core` re-exports those types at their original paths.
+
+Two things the sync brings that no Sirio file asks for, both from upstream's manifests taken as they
+are. `ely-core` turns on gpui's `stacker` feature (`ely-core/Cargo.toml`), and Cargo unifies features,
+so every crate that links gpui has it: taffy layout and the element tree run through `stacksafe`, and
+`stacksafe`, `stacker` and `psm` are new in `Cargo.lock`, `psm` with a native assembler build step.
+`windows-check.yml` builds no gpui crate, so the first compile of the app on Windows with them is the
+nightly after the merge. And `ely-core` and `ely-documents` embed IBM Plex Sans and the KaTeX fonts
+(SIL OFL 1.1); whether a release binary keeps them is not settled, and `THIRD_PARTY_NOTICES.md`
+carries their licences either way, with Ely's own MIT licence.
 
 ## What is here
 
@@ -27,7 +44,8 @@ paths.
 | `bezel_theme/` | `bezel-theme` 0.1.4 | pristine `src/`, manifest repointed | `[patch.crates-io]` |
 | `bezel_markdown/` | `bezel-markdown` 0.1.4 | four changes in `src/render.rs` (+ `lib.rs` re-export), manifest repointed | `[patch.crates-io]` |
 | `reqwest_client/` | `sirio-reqwest-client` | zed's `reqwest_client`, republished by bezel | workspace member |
-| `ely-palette/`, `ely-gpui-component/` | as above | Ely sources | workspace members |
+| `ely/crates/*` | eight upstream Ely crates at `8d7723ec` | verbatim plus the changes in `ely/LOCAL-CHANGES.md` | workspace members |
+| `ely-palette/`, `ely-gpui-component/` | as above | Ely palette split out; Sirio's facade | workspace members |
 
 macOS builds on the upstream `gpui-pre-apple` 0.3.12, unpatched, and on `gpui-pre-macos` 0.3.12
 with the one change described under `gpui_macos` below. One item is open: against bezel's
@@ -39,7 +57,7 @@ window's look may differ. Checking it by hand on a Mac is owed before release; i
 verified. If a Mac shows a regression, the follow-up is to vendor `gpui-pre-apple` the way
 `gpui_windows/` is vendored and restore the blend. Two
 other differences do not touch Sirio: there is no backdrop-blur pass, and the shadow shader lost
-the `inset == 2` mode. A search of `rust/crates`, `vendor/ely-gpui-component` and
+the `inset == 2` mode. A search of `rust/crates`, `vendor/ely` and
 `vendor/ely-palette` finds no use of either.
 
 `gpui_platform` is not patched. `gpui-pre-platform` takes `gpui-pre-linux`, `gpui-pre-windows` and

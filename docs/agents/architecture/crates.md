@@ -7,7 +7,8 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
                     sirio_activity, sirio_forge, sirio_lsp, sirio_term_session,
                     sirio_ui, sirio, and the vendored gpui_windows
                     (gpui-pre-windows 0.3.12 plus Sirio's patches, see
-                    rust/vendor/README.md) and ely-gpui-component)
+                    rust/vendor/README.md), the vendored Ely crates under
+                    rust/vendor/ely and the ely-gpui-component facade over them)
 sirio_env        (below everything, beside sirio_perf — no dependencies. It is
                     the user environment every child process starts in: the
                     launch snapshot minus the launcher's own variables (APPIMAGE,

@@ -26,7 +26,7 @@ refreshing or adding a file.
 ## `star-filled.svg`
 
 Not a byte-for-byte copy: the `star` path of Lucide (the one vendored in
-`rust/vendor/ely-gpui-component/assets/icons/star.svg`, lucide-static 1.48.0)
+`rust/vendor/ely/crates/ely-core/icons/star.svg`, lucide-static 1.48.0)
 drawn with `fill="currentColor"` and no stroke (ISC, from lucide-static 1.48.0, not
 the 1.66.0 tag above). It is the Primary's filled star
 (`Icon::StarFilled`); a text glyph drew it as a dot.

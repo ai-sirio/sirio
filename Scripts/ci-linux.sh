@@ -213,14 +213,20 @@ run_root_stage() {
 }
 
 echo "==> Rust format and clippy"
+# fmt walks the whole workspace, the vendored Ely crates included: neither upstream nor Sirio has a
+# rustfmt.toml, and the old ely-gpui-component was a member too. Only clippy leaves them out, below.
 run_cargo_stage "cargo fmt --check" cargo fmt --all -- --check
 
 # The shell entry point and the chat surface are being edited by other owners
 # in this shared worktree. Their current warnings are routed to those owners
 # rather than grandfathered into this gate. Every other workspace crate is
-# ours here and must fail the gate on its first new warning.
+# ours here and must fail the gate on its first new warning. The eight vendored upstream
+# ely crates (vendor/ely) are upstream's code, verbatim, and are not ours to lint.
 run_cargo_stage "cargo clippy (owned crates)" cargo clippy --workspace --all-targets \
-    --exclude sirio --exclude sirio_ui -- -D warnings
+    --exclude sirio --exclude sirio_ui \
+    --exclude ely-core --exclude ely-chat --exclude ely-agent --exclude ely-editor \
+    --exclude ely-git --exclude ely-documents --exclude ely-collab --exclude ely-charts \
+    -- -D warnings
 
 run_cargo_stage "cargo build" cargo build -p sirio -p sirio_control
 # Per-crate, not `cargo test --workspace`.

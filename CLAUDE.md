@@ -25,7 +25,7 @@ Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github
 ### External references
 
 - [bezel](https://github.com/crabtalk/bezel) — the engine is no longer bezel's: Sirio builds on `gpui-pre` 0.3.12 (patched copies of its Linux and Windows backends under `rust/vendor`, see its `README.md`). Only `bezel-theme`, `bezel-markdown` (both vendored, repointed at gpui-pre), `bezel-syntax` and `bezel-zed-http-client-tls` 0.3.8 (the TLS half of the vendored HTTP client) remain. The shell's UI is Ely plus Sirio's own `motion`, `scroll`, `popup`, `combobox` and `settings::scaffold` modules in `sirio_ui`.
-- [Ely GPUI Components](https://github.com/ELY-Open-Source/Ely-GPUI-Components) — the AI chat's presentation library, adapted under `rust/vendor/ely-gpui-component` to the gpui-pre engine. `rust/vendor/ely-palette` holds its palette, the vocabulary of Sirio's colours. When changing chat presentation, read its `LOCAL-CHANGES.md` and `docs/superpowers/specs/2026-09-30-ely-agent-chat-design.md`; retain Sirio's theme and existing Chat controllers.
+- [Ely GPUI Components](https://github.com/ELY-Open-Source/Ely-GPUI-Components) — the AI chat's presentation library, vendored at `rust/vendor/ely/crates` (upstream's eight crates at a pinned rev, plus Sirio's recorded local changes), with `rust/vendor/ely-gpui-component` a thin facade that keeps the `ely_gpui_component::*` paths. `rust/vendor/ely-palette` holds its palette, the vocabulary of Sirio's colours. When changing chat presentation, read `rust/vendor/ely/LOCAL-CHANGES.md` and `docs/superpowers/specs/2026-09-30-ely-agent-chat-design.md`; retain Sirio's theme and existing Chat controllers.
 - [gpui-component](https://github.com/longbridge/gpui-component) — secondary structural reference when the surface's primary library has no equivalent.
 - [waku](https://github.com/egoist/waku) — a comparable app (multiple coding agents, one pane each). Reference for prior art on the same problem, not a dependency.
 
@@ -112,7 +112,7 @@ everywhere, read or not.
   terminal's Ctrl+C stays SIGINT.
 - [File editor on Ely](docs/agents/architecture/file-editor.md) (`sirio_ui::file_view`, the drawer): `CodeEditor` owns
   the text and the keys, `Editor` the disk; the buffer is LF only; keep every hook
-  `rust/vendor/ely-gpui-component/LOCAL-CHANGES.md` lists.
+  `rust/vendor/ely/LOCAL-CHANGES.md` lists.
 - [Agent adapters](docs/agents/architecture/agent-adapters.md) (`sirio_agents`): `prepare` writes only worktree-local
   files and never user-global config; `json_string_literal` must not escape slashes, because Codex
   parses its `-c` override as TOML.

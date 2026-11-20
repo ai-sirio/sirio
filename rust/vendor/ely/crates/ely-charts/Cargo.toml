@@ -1,0 +1,26 @@
+[package]
+name = "ely-charts"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "Ely's charts for GPUI: lines, bars, areas, pies, scatter and the axes under them."
+repository = "https://github.com/ELY-Open-Source/Ely-GPUI-Components"
+homepage = "https://elygpui.com"
+readme = "README.md"
+keywords = ["gpui", "ui", "components", "widgets", "gui"]
+categories = ["gui"]
+
+[features]
+test-support = ["ely-core/test-support", "gpui/test-support", "gpui/leak-detection"]
+
+[dependencies]
+ely-core.workspace = true
+gpui.workspace = true
+jiff = "0.2"
+log = "0.4"
+web-time = "1.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }

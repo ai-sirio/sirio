@@ -574,8 +574,9 @@ jobs:
       # three binaries the package below ships.
       # Without the sccache wrapper on Windows. Since Cargo 1.100 every
       # dependency's output sits in a directory of its own, so rustc gets one
-      # `-L dependency=` per crate: ely-gpui-component's command reached ~40K
-      # characters, past Windows' 32K limit, and v0.41.0's build stopped on
+      # `-L dependency=` per crate: the command of a crate with many
+      # dependencies (at v0.41.0, ely-gpui-component's) reached ~40K
+      # characters, past Windows' 32K limit, and that build stopped on
       # "os error 206". Cargo answers that error by passing rustc an @argfile,
       # but through sccache the spawn that fails is sccache's own. An empty
       # wrapper overrides rust/.cargo/config.toml for this step only.

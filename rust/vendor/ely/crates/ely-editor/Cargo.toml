@@ -1,0 +1,31 @@
+[package]
+name = "ely-editor"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "Ely's code editor for GPUI: text, highlighting, find, folds and the panels around them."
+repository = "https://github.com/ELY-Open-Source/Ely-GPUI-Components"
+homepage = "https://elygpui.com"
+readme = "README.md"
+keywords = ["gpui", "ui", "components", "widgets", "gui"]
+categories = ["gui"]
+
+[features]
+test-support = ["ely-core/test-support", "gpui/test-support", "gpui/leak-detection"]
+
+[dependencies]
+ely-core.workspace = true
+ely-charts.workspace = true
+gpui.workspace = true
+log = "0.4"
+regex = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sirio_perf = { path = "../../../../crates/sirio_perf" }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }

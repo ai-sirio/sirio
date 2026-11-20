@@ -8,7 +8,7 @@ many in a once-a-second `health` row named `trace.dropped` (the count rides in
 the `entity` column), so **a trace is allowed to lose events and says when it
 did** — read those rows before trusting a count. Instrumentation is
 deliberately shallow: a `span` at the top of a `Render::render`, an `event`
-where something decides to `notify`. The vendored `ely-gpui-component` takes
+where something decides to `notify`. The vendored `ely-editor` (behind the `ely-gpui-component` facade) takes
 `sirio_perf` for the code editor's `CodeEditor.*` spans (the render and its
 steps, each with the editor's entity id in the `entity` column).
 

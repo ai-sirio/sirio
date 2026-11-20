@@ -3,10 +3,10 @@ name = "ely-palette"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/ELY-Open-Source/Ely-GPUI-Components"
 publish = false
-description = "Ely GPUI Components' colour vocabulary, split out of ely-gpui-component so a host's theme crate can hold it without Ely's components."
+description = "Ely's colour vocabulary, split out of upstream ely-core's theme files (vendor/ely) so a host's theme crate can hold it without Ely's components."
 
 [dependencies]
 gpui.workspace = true

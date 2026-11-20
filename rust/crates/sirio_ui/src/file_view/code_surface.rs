@@ -61,7 +61,7 @@ impl FileView {
         let code = cx.new(|cx| {
             let mut code = CodeEditor::new(text, window, cx)
                 .language(language.name())
-                .highlighter(code_highlighter(language, spans, drawn))
+                .line_highlighter(code_highlighter(language, spans, drawn))
                 .without_breakpoints();
             if read_only {
                 // The view draws the snapshot's banner itself, above the find
@@ -429,7 +429,7 @@ impl FileView {
             self.span_cache.clone(),
             self.highlight_drawn.clone(),
         );
-        code.update(cx, |code, cx| code.set_highlighter(highlighter, cx));
+        code.update(cx, |code, cx| code.set_line_highlighter(highlighter, cx));
     }
 
     /// What the code editor's highlighter last gave the first line, for the
