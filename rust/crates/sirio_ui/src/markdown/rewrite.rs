@@ -6,7 +6,9 @@
 
 use ely_gpui_component::documents::{AlignKind, Inline, MarkdownBlock as Node, Style};
 use sirio_diagram::DiagramKind;
-use sirio_markdown::{Alignment, Block, Document, Inline as Leaf, ListKind, TableCell, expand_html};
+use sirio_markdown::{
+    Alignment, Block, Document, Inline as Leaf, ListKind, TableCell, expand_html, html_nesting_depth,
+};
 
 use super::{DiagramInputs, FileLinkInputs, Heading, MAX_NESTING, Policy, Surface};
 use crate::chat::file_links;
@@ -126,48 +128,12 @@ fn is_data_image(url: &str) -> bool {
 
 // ---- block HTML -------------------------------------------------------------------------
 
-/// Whether `raw` opens more tags at once than [`MAX_NESTING`], read loosely and without
-/// recursion: a tag that closes nothing open is ignored, a closer ends what it names and
-/// whatever sits inside it, and `<x/>` closes nothing (HTML does not read it as closed).
-/// It errs towards counting more, never fewer, so the check errs towards the plain text.
-fn tags_nest_too_deep(raw: &str) -> bool {
-    const VOID: [&str; 14] = [
-        "br", "hr", "img", "input", "meta", "link", "area", "base", "col", "embed", "source",
-        "track", "wbr", "param",
-    ];
-    let mut open: Vec<String> = Vec::new();
-    let mut at = 0;
-    while let Some(found) = raw[at..].find('<') {
-        at += found + 1;
-        let closing = raw[at..].starts_with('/');
-        let rest = &raw[at + usize::from(closing)..];
-        // Comments, doctypes and a stray `<` open nothing.
-        if !rest.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
-            continue;
-        }
-        let end = rest
-            .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
-            .unwrap_or(rest.len());
-        let name = rest[..end].to_ascii_lowercase();
-        if closing {
-            if let Some(from) = open.iter().rposition(|open| *open == name) {
-                open.truncate(from);
-            }
-        } else if !VOID.contains(&name.as_str()) {
-            open.push(name);
-            if open.len() > MAX_NESTING {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// The blocks that replace one HTML block: what `expand_html` maps it to. It always
+/// The blocks that replace one HTML block: what `expand_html` maps it to, unless its tags
+/// nest deeper than `room`, which reads as the block's own text. It always
 /// answers, so Ely's own reading of the block as text never shows; an HTML block of
 /// nothing a reader sees gives no blocks.
-pub(super) fn html_block(raw: &str) -> Option<Vec<Node>> {
-    if tags_nest_too_deep(raw) {
+pub(super) fn html_block(raw: &str, room: usize) -> Option<Vec<Node>> {
+    if html_nesting_depth(raw) > room {
         return Some(vec![plain_paragraph(raw.trim_end_matches(['\r', '\n']))]);
     }
     let document = Document {
@@ -450,33 +416,47 @@ pub(super) fn pictures(nodes: Vec<Node>, policy: &mut Policy<'_>) -> Vec<Node> {
     })
 }
 
+/// Whether a picture address, as written or once decoded, names a network share or a
+/// device (see [`file_links::is_network_or_device_path`]), or is rooted with one backslash
+/// (a drive-relative path on Windows, no folder's file anywhere). Opening one would
+/// connect out (NTLM on Windows) or hang.
+fn names_a_network_path(address: &str) -> bool {
+    let rooted = |text: &str| {
+        text.starts_with('\\')
+            || file_links::is_network_or_device_path(std::path::Path::new(text))
+    };
+    rooted(address) || rooted(&crate::markdown_preview::percent_decode(address))
+}
+
 /// Where the Preview loads `url` from, or none: an absolute path, a `data:` or `http(s)`
 /// address. A `file:` address becomes the path it names, so the renderer is handed no
-/// address that points at a file.
+/// address that points at a file. A network or device path is never one.
 fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> {
-    if url.is_empty() || url.starts_with("//") {
+    if url.is_empty() || (!is_web_image(url) && !is_data_image(url) && names_a_network_path(url)) {
         return None;
     }
     if is_web_image(url) || is_data_image(url) {
         return Some(url.to_owned());
     }
-    if std::path::Path::new(url).is_absolute() {
-        return Some(url.to_owned());
-    }
     let scheme = url.split_once(':').map(|(scheme, _)| scheme);
-    match scheme {
-        Some(scheme) if scheme.eq_ignore_ascii_case("file") => file_address_path(&url[5..]),
-        // Another scheme is no folder's file and no address the renderer loads.
-        Some(scheme)
-            if !scheme.is_empty()
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
-        {
-            None
+    let found = if std::path::Path::new(url).is_absolute() {
+        Some(url.to_owned())
+    } else {
+        match scheme {
+            Some(scheme) if scheme.eq_ignore_ascii_case("file") => file_address_path(&url[5..]),
+            // Another scheme is no folder's file and no address the renderer loads.
+            Some(scheme)
+                if !scheme.is_empty()
+                    && scheme
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
+            {
+                None
+            }
+            _ => base.map(|base| crate::markdown_preview::resolve_image(url, base)),
         }
-        _ => base.map(|base| crate::markdown_preview::resolve_image(url, base)),
-    }
+    };
+    found.filter(|path| !names_a_network_path(path))
 }
 
 /// The local path a `file:` address names, after its scheme: no host or `localhost`, no

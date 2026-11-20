@@ -25,6 +25,31 @@ pub fn expand_html(document: Document) -> Document {
     }
 }
 
+/// The most tags open at once in `html`, read by the tokenizer `expand_html` uses (so
+/// attribute values, comments and raw-text elements read as it reads them): a void or
+/// self-closing tag opens nothing, an end tag closes the nearest open tag of its name and
+/// everything inside it, and one that closes nothing is ignored. A caller that recurses
+/// over the translation checks this first.
+pub fn html_nesting_depth(html: &str) -> usize {
+    let mut open: Vec<String> = Vec::new();
+    let mut deepest = 0;
+    for piece in pieces(html, html.to_ascii_lowercase().contains("</embed")) {
+        match piece {
+            Piece::Open { name, .. } => {
+                open.push(name);
+                deepest = deepest.max(open.len());
+            }
+            Piece::Close { name } => {
+                if let Some(at) = open.iter().rposition(|open| *open == name) {
+                    open.truncate(at);
+                }
+            }
+            Piece::Text(_) => {}
+        }
+    }
+    deepest
+}
+
 fn expand_blocks(blocks: Vec<Block>) -> Vec<Block> {
     let mut out = Vec::with_capacity(blocks.len());
     for block in blocks {
@@ -978,5 +1003,23 @@ mod tests {
                 tight: true,
             }]
         );
+    }
+
+    #[test]
+    fn nesting_depth_follows_the_tokenizer() {
+        use super::html_nesting_depth as depth;
+        assert_eq!(depth("<div><p>x</p></div>"), 2);
+        assert_eq!(depth("<b></b><b></b>"), 1);
+        // A tag inside an attribute value is not a tag; the real tags are.
+        assert_eq!(depth(&"<blockquote title=\"</blockquote>\">".repeat(10_000)), 10_000);
+        // A comment, CDATA and raw text open nothing.
+        let comment = format!("<!-- {} -->", "<blockquote>".repeat(10_000));
+        assert_eq!(depth(&comment), 0);
+        assert_eq!(depth(&format!("<script>{}</script>", "<blockquote>".repeat(100))), 1);
+        assert!(depth(&"<br>".repeat(10_000)) <= 1);
+        assert!(depth(&"<blockquote/>".repeat(10_000)) <= 1);
+        // An end tag that closes nothing open is ignored; one that closes pops what is inside.
+        assert_eq!(depth(&"<blockquote></b>".repeat(100)), 100);
+        assert_eq!(depth("<div><b><i></div><p>"), 3);
     }
 }

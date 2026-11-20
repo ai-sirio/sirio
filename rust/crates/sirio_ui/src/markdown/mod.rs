@@ -104,40 +104,63 @@ fn reader_options() -> Options {
         | Options::ENABLE_MATH
 }
 
-/// Whether `source` nests deeper than the tree is built and drawn for. Ely's reader and
-/// its drawing recurse once per level, and chat and forge text is not ours: this walks the
+/// How deep `source` nests, or one past the cap when it nests deeper. Ely's reader and its
+/// drawing recurse once per level, and chat and forge text is not ours: this walks the
 /// event stream, which takes no stack, before any tree exists.
-fn nests_too_deep(source: &str) -> bool {
-    let mut depth = 0usize;
+fn markdown_depth(source: &str) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
     for event in Parser::new_ext(source, reader_options()) {
         match event {
             Event::Start(_) => {
                 depth += 1;
+                deepest = deepest.max(depth);
                 if depth > MAX_NESTING {
-                    return true;
+                    return depth;
                 }
             }
             Event::End(_) => depth = depth.saturating_sub(1),
             _ => {}
         }
     }
-    false
+    deepest
+}
+
+/// How deep `nodes` nest, a leaf counting one.
+fn tree_depth(nodes: &[MarkdownBlock]) -> usize {
+    (nodes.iter())
+        .map(|node| {
+            let inner = (rewrite::bodies(node).into_iter())
+                .map(tree_depth)
+                .max()
+                .unwrap_or(0);
+            1 + inner
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// `source` as the tree `policy.surface` draws.
 pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     let mut missing = Vec::new();
     let mut nodes = vec![rewrite::plain_paragraph(source)];
-    if !nests_too_deep(source) {
-        nodes = parse_markdown_with(source, &rewrite::html_block);
-        if policy.surface == Surface::Preview
-            && let Some(inputs) = &policy.diagrams
-        {
-            nodes = rewrite::diagrams(nodes, inputs, &mut missing);
-        }
-        nodes = rewrite::pictures(nodes, policy);
-        if policy.surface == Surface::Chat {
-            rewrite::chat_links(&mut nodes, &mut policy.file_links);
+    let depth = markdown_depth(source);
+    if depth <= MAX_NESTING {
+        // What depth the Markdown leaves is all block HTML may nest to, wherever it stands.
+        let room = MAX_NESTING - depth;
+        let parsed = parse_markdown_with(source, &|raw: &str| rewrite::html_block(raw, room));
+        // Block HTML nests on top of the Markdown around it: each is under the cap, their
+        // sum may not be, and every walk after this one recurses over the tree.
+        if tree_depth(&parsed) <= MAX_NESTING {
+            nodes = parsed;
+            if policy.surface == Surface::Preview
+                && let Some(inputs) = &policy.diagrams
+            {
+                nodes = rewrite::diagrams(nodes, inputs, &mut missing);
+            }
+            nodes = rewrite::pictures(nodes, policy);
+            if policy.surface == Surface::Chat {
+                rewrite::chat_links(&mut nodes, &mut policy.file_links);
+            }
         }
     }
 
