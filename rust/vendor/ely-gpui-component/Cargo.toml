@@ -26,7 +26,6 @@ ely-agent.workspace = true
 ely-editor.workspace = true
 ely-git.workspace = true
 gpui.workspace = true
-anyhow.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui = { workspace = true, features = ["wayland", "x11"] }

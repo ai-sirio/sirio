@@ -2121,7 +2121,6 @@ dependencies = [
 name = "ely-gpui-component"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "ely-agent",
  "ely-chat",
  "ely-core",
