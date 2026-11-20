@@ -90,6 +90,29 @@ pub struct FileContextItem {
     pub group: u8,
 }
 
+/// One row of the menu a Markdown Preview draws: the Markdown body's rows first, then a
+/// separator, then the file's rows as the table gives them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MenuRow {
+    Markdown(crate::markdown::MarkdownMenuItem),
+    Separator,
+    File(FileContextItem),
+}
+
+/// The rows of a Preview's menu: the Markdown body's, then (when there are any) a separator,
+/// then `file`'s, unchanged.
+pub(crate) fn merged(
+    markdown: &[crate::markdown::MarkdownMenuItem],
+    file: Vec<FileContextItem>,
+) -> Vec<MenuRow> {
+    let mut rows: Vec<MenuRow> = markdown.iter().cloned().map(MenuRow::Markdown).collect();
+    if !rows.is_empty() {
+        rows.push(MenuRow::Separator);
+    }
+    rows.extend(file.into_iter().map(MenuRow::File));
+    rows
+}
+
 /// What a row is, beyond its label. `disabled_reason: Option<String>`
 /// carried two facts in one — *why*, and *clickable or not* — and could not
 /// express a row that shows its reason and is still clickable, on a

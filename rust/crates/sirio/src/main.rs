@@ -24551,6 +24551,36 @@ impl SirioWorkspace {
             ("format_buttons".to_string(), format_buttons.to_string()),
             ("conflict".to_string(), conflict.to_string()),
             ("mode".to_string(), mode.to_string()),
+            // What the Markdown Preview holds, empty outside it: the node counts of its tree,
+            // the headings, whether the outline column is drawn, how far the page is read.
+            (
+                "preview_nodes".to_string(),
+                view.preview_state()
+                    .map(|p| {
+                        format!(
+                            "math={} alerts={} footnotes={} images={} tables={} code={} toc={}",
+                            p.math, p.alerts, p.footnotes, p.images, p.tables, p.code, p.toc
+                        )
+                    })
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_headings".to_string(),
+                view.preview_state().map(|p| p.headings.to_string()).unwrap_or_default(),
+            ),
+            (
+                "preview_outline".to_string(),
+                view.preview_state()
+                    .map(|p| if p.outline_open { "open" } else { "closed" }.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_progress".to_string(),
+                view.preview_state()
+                    .and_then(|p| p.progress)
+                    .map(|share| format!("{share:.2}"))
+                    .unwrap_or_default(),
+            ),
             ("hover".to_string(), hover),
             ("message".to_string(), message),
             ("diagnostics".to_string(), diagnostics.to_string()),

@@ -33,6 +33,9 @@ pub(crate) enum DiagramState {
 #[derive(Debug, Default)]
 pub(crate) struct Diagrams {
     states: HashMap<String, DiagramState>,
+    /// Moves with every change to `states`: part of the Preview's cache key, so a diagram
+    /// becoming ready, failing or being forgotten draws the tree again.
+    version: u64,
 }
 
 impl Diagrams {
@@ -40,13 +43,20 @@ impl Diagrams {
         self.states.get(key)
     }
 
+    /// How many times the states have changed.
+    pub(crate) fn version(&self) -> u64 {
+        self.version
+    }
+
     pub(crate) fn insert(&mut self, key: String, state: DiagramState) {
         self.states.insert(key, state);
+        self.version += 1;
     }
 
     /// Drops the entry for `key`, so the next frame requests it again.
     pub(crate) fn remove(&mut self, key: &str) {
         self.states.remove(key);
+        self.version += 1;
     }
 
     /// Drops every failure, so the next frame tries again when settings
@@ -55,6 +65,7 @@ impl Diagrams {
     pub(crate) fn forget_failures(&mut self) {
         self.states
             .retain(|_, state| !matches!(state, DiagramState::Failed(_)));
+        self.version += 1;
     }
 }
 
@@ -70,6 +81,9 @@ pub(crate) struct DiagramRequest {
 /// that nobody has scheduled yet.
 pub(crate) struct Preview {
     pub(crate) doc: bezel_markdown::Doc,
+    /// Only the file view read it, and it reads `preview_blocks` now; the bezel build goes
+    /// with the change requests' move to Ely.
+    #[allow(dead_code)]
     pub(crate) missing: Vec<DiagramRequest>,
 }
 
@@ -165,6 +179,34 @@ pub(crate) fn build(
         doc: bezel_markdown::Doc { blocks },
         missing,
     }
+}
+
+/// The Preview's document as the tree Ely draws: `source` read once, the HTML in it
+/// expanded, the pictures resolved against `base` (the Markdown file's folder) and the
+/// diagram fences replaced by what `diagrams` holds for them. `cache_dir` is where the
+/// rendered diagrams live; without it (no diagram settings) a fence stays code and asks
+/// for nothing.
+pub(crate) fn preview_blocks(
+    source: &str,
+    base: &Path,
+    diagrams: &Diagrams,
+    palette: &Palette,
+    cache_dir: Option<&Path>,
+) -> crate::markdown::MarkdownBlocks {
+    let _perf = sirio_perf::span("Preview.build", source.len() as u64);
+    crate::markdown::build(
+        source,
+        &mut crate::markdown::Policy {
+            surface: crate::markdown::Surface::Preview,
+            base: Some(base),
+            diagrams: cache_dir.map(|dir| crate::markdown::DiagramInputs {
+                states: diagrams,
+                palette,
+                dir,
+            }),
+            file_links: None,
+        },
+    )
 }
 
 /// A relative image path joined onto the Markdown file's directory, because
@@ -308,8 +350,8 @@ impl PlantUmlQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bezel_markdown::BlockKind;
-    use sirio_markdown::parse;
+    use crate::markdown::MarkdownBlocks;
+    use ely_gpui_component::documents::MarkdownBlock as Node;
 
     fn test_palette() -> Palette {
         Palette {
@@ -327,8 +369,39 @@ mod tests {
         PathBuf::from("/repo/docs")
     }
 
-    fn preview(source: &str, diagrams: &Diagrams) -> Preview {
-        build(parse(source), &base(), diagrams, &test_palette())
+    fn preview(source: &str, diagrams: &Diagrams) -> MarkdownBlocks {
+        preview_blocks(
+            source,
+            &base(),
+            diagrams,
+            &test_palette(),
+            Some(Path::new("/cache")),
+        )
+    }
+
+    fn is_fence(node: &Node, fence_language: &str) -> bool {
+        matches!(node, Node::Code { language: Some(language), .. } if language == fence_language)
+    }
+
+    /// Every picture of the tree, at any depth.
+    fn pictures(blocks: &MarkdownBlocks) -> Vec<Node> {
+        fn walk(nodes: &[Node], out: &mut Vec<Node>) {
+            for node in nodes {
+                match node {
+                    Node::Image { .. } => out.push(node.clone()),
+                    Node::Quote(inner) => walk(inner, out),
+                    Node::List { items, .. } => {
+                        for (_, inner) in items {
+                            walk(inner, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&blocks.nodes, &mut out);
+        out
     }
 
     const FENCE: &str = "# D\n\n```mermaid\nflowchart TD\n  A --> B\n```\n";
@@ -336,17 +409,19 @@ mod tests {
     #[test]
     fn an_unknown_diagram_stays_code_and_is_requested() {
         let preview = preview(FENCE, &Diagrams::default());
-        assert!(matches!(
-            &preview.doc.blocks[1].kind,
-            BlockKind::Code { language: Some(language), .. } if language == "mermaid"
-        ));
-        assert_eq!(preview.missing.len(), 1);
-        assert_eq!(preview.missing[0].kind, DiagramKind::Mermaid);
-        assert_eq!(preview.missing[0].source, "flowchart TD\n  A --> B");
+        assert!(is_fence(&preview.nodes[1], "mermaid"));
+        assert_eq!(preview.missing_diagrams.len(), 1);
+        assert_eq!(preview.missing_diagrams[0].kind, DiagramKind::Mermaid);
+        assert_eq!(
+            preview.missing_diagrams[0].source,
+            "flowchart TD\n  A --> B"
+        );
     }
 
     fn key_of(source: &str) -> String {
-        preview(source, &Diagrams::default()).missing[0].key.clone()
+        preview(source, &Diagrams::default()).missing_diagrams[0]
+            .key
+            .clone()
     }
 
     #[test]
@@ -360,10 +435,10 @@ mod tests {
             },
         );
         let preview = preview(FENCE, &diagrams);
-        assert!(preview.missing.is_empty());
+        assert!(preview.missing_diagrams.is_empty());
         assert!(matches!(
-            &preview.doc.blocks[1].kind,
-            BlockKind::Image { url, width: Some(120), .. } if url == "/cache/k.svg"
+            &preview.nodes[1],
+            Node::Image { url, width: Some(width), .. } if url == "/cache/k.svg" && *width == 120.0
         ));
     }
 
@@ -375,13 +450,13 @@ mod tests {
             DiagramState::Failed("Mermaid diagram is invalid: x".into()),
         );
         let preview = preview(FENCE, &diagrams);
+        assert!(is_fence(&preview.nodes[1], "mermaid"));
+        let Node::Quote(note) = &preview.nodes[2] else {
+            panic!("the note is the muted block after the fence: {:?}", preview.nodes[2]);
+        };
         assert!(matches!(
-            &preview.doc.blocks[1].kind,
-            BlockKind::Code { .. }
-        ));
-        assert!(matches!(
-            &preview.doc.blocks[2].kind,
-            BlockKind::Quote(text) if text.text == "Mermaid diagram is invalid: x"
+            note.as_slice(),
+            [Node::Paragraph(inline)] if inline.text == "Mermaid diagram is invalid: x"
         ));
     }
 
@@ -390,30 +465,24 @@ mod tests {
         let mut diagrams = Diagrams::default();
         diagrams.insert(key_of(FENCE), DiagramState::Pending);
         let preview = preview(FENCE, &diagrams);
-        assert!(preview.missing.is_empty());
-        assert!(matches!(
-            &preview.doc.blocks[1].kind,
-            BlockKind::Code { .. }
-        ));
+        assert!(preview.missing_diagrams.is_empty());
+        assert!(is_fence(&preview.nodes[1], "mermaid"));
     }
 
     #[test]
     fn the_same_diagram_twice_is_requested_once() {
         let twice = format!("{FENCE}\n```mermaid\nflowchart TD\n  A --> B\n```\n");
         let preview = preview(&twice, &Diagrams::default());
-        assert_eq!(preview.missing.len(), 1);
-        let fences = preview
-            .doc
-            .blocks
-            .iter()
-            .filter(|block| matches!(block.kind, BlockKind::Code { .. }))
+        assert_eq!(preview.missing_diagrams.len(), 1);
+        let fences = (preview.nodes.iter())
+            .filter(|node| is_fence(node, "mermaid"))
             .count();
         assert_eq!(fences, 2, "both fences still show as code");
     }
 
     /// Review Focus 3.
     #[test]
-    fn a_fence_inside_a_list_item_is_rewritten_at_its_indent() {
+    fn a_fence_inside_a_list_item_is_rewritten_where_it_stands() {
         let source = "- item\n\n  ```mermaid\n  flowchart TD\n    A --> B\n  ```\n";
         let mut diagrams = Diagrams::default();
         diagrams.insert(
@@ -424,32 +493,30 @@ mod tests {
             },
         );
         let preview = preview(source, &diagrams);
-        let image = preview
-            .doc
-            .blocks
-            .iter()
-            .find(|block| matches!(block.kind, BlockKind::Image { .. }))
-            .expect("the nested fence became an image");
-        assert_eq!(image.indent, 1);
+        let Node::List { items, .. } = &preview.nodes[0] else {
+            panic!("a list: {:?}", preview.nodes[0]);
+        };
+        assert!(
+            items[0].1.iter().any(|node| matches!(node, Node::Image { .. })),
+            "the picture stays inside its list item: {:?}",
+            items[0].1
+        );
     }
 
     #[test]
     fn a_plain_code_block_is_left_alone() {
         let preview = preview("```rust\nfn main() {}\n```\n", &Diagrams::default());
-        assert!(preview.missing.is_empty());
-        assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Code { .. }
-        ));
+        assert!(preview.missing_diagrams.is_empty());
+        assert!(is_fence(&preview.nodes[0], "rust"));
     }
 
     #[test]
     fn a_lone_image_is_a_picture_resolved_against_the_file() {
         let preview = preview("![Logo](logo.png)\n", &Diagrams::default());
         assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Image { url, alt, width: None }
-                if Path::new(url) == base().join("logo.png") && alt.text == "Logo"
+            &preview.nodes[0],
+            Node::Image { url, alt, width: None, .. }
+                if Path::new(url) == base().join("logo.png") && alt == "Logo"
         ));
     }
 
@@ -457,8 +524,8 @@ mod tests {
     fn a_lone_image_in_a_quote_is_a_picture() {
         let preview = preview("> ![Logo](logo.png)\n", &Diagrams::default());
         assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Image { .. }
+            &preview.nodes[0],
+            Node::Quote(inner) if matches!(inner.as_slice(), [Node::Image { .. }])
         ));
     }
 
@@ -469,27 +536,31 @@ mod tests {
             &Diagrams::default(),
         );
         assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Image { .. }
+            &preview.nodes[0],
+            Node::Image { link: Some(link), .. } if link == "https://example.com"
         ));
     }
 
+    /// D10 (design §5.9): a badge row used to stay one paragraph of bezel's inline pictures;
+    /// Ely's reader splits a paragraph at each picture, so each badge is its own block.
     #[test]
-    fn a_badge_row_stays_a_paragraph() {
+    fn a_badge_row_splits_into_its_pictures() {
         let preview = preview("![a](a.svg) ![b](b.svg)\n", &Diagrams::default());
-        assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Paragraph(_)
-        ));
+        assert_eq!(pictures(&preview).len(), 2, "{:?}", preview.nodes);
     }
 
+    /// D10 (design §5.9), the rewrite of `an_image_in_running_text_stays_a_paragraph`: a
+    /// picture inside a sentence becomes its own block between the text before and after it.
     #[test]
-    fn an_image_in_running_text_stays_a_paragraph() {
+    fn an_image_in_running_text_splits_the_paragraph() {
         let preview = preview("See ![a](a.png) here\n", &Diagrams::default());
-        assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Paragraph(_)
-        ));
+        let [Node::Paragraph(before), Node::Image { .. }, Node::Paragraph(after)] =
+            preview.nodes.as_ref()
+        else {
+            panic!("text, picture, text: {:?}", preview.nodes);
+        };
+        assert_eq!(before.text.trim(), "See");
+        assert_eq!(after.text.trim(), "here");
     }
 
     #[test]
@@ -499,8 +570,9 @@ mod tests {
             &Diagrams::default(),
         );
         assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Image { url, width: Some(120), .. } if Path::new(url) == base().join("logo.png")
+            &preview.nodes[0],
+            Node::Image { url, width: Some(width), .. }
+                if Path::new(url) == base().join("logo.png") && *width == 120.0
         ));
     }
 
@@ -508,8 +580,8 @@ mod tests {
     fn a_remote_image_is_passed_through() {
         let preview = preview("![b](https://example.com/b.png)\n", &Diagrams::default());
         assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Image { url, .. } if url == "https://example.com/b.png"
+            &preview.nodes[0],
+            Node::Image { url, .. } if url == "https://example.com/b.png"
         ));
     }
 
@@ -518,8 +590,8 @@ mod tests {
     fn a_percent_encoded_relative_image_is_decoded() {
         let preview = preview("![a](my%20logo.png)\n", &Diagrams::default());
         assert!(matches!(
-            &preview.doc.blocks[0].kind,
-            BlockKind::Image { url, .. } if Path::new(url) == base().join("my logo.png")
+            &preview.nodes[0],
+            Node::Image { url, .. } if Path::new(url) == base().join("my logo.png")
         ));
     }
 
@@ -559,62 +631,69 @@ mod tests {
         assert!(light.background.starts_with('#') && light.background.len() == 7);
     }
 
-    /// Draws one heading and one paragraph through the renderer the preview
-    /// uses and reports each block's height.
+    /// Draws one heading, one paragraph and one code fence through the renderer the Preview
+    /// uses, and reports where each landed.
     struct Page {
-        doc: bezel_markdown::Doc,
-        layouts: bezel_markdown::BlockLayouts,
+        blocks: MarkdownBlocks,
+        layouts: std::rc::Rc<std::cell::RefCell<Option<crate::markdown::BodyLayouts>>>,
     }
 
     impl gpui::Render for Page {
         fn render(
             &mut self,
-            window: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             use gpui::{ParentElement, Styled};
-            gpui::div().w(gpui::px(600.0)).child(bezel_markdown::render_with_selection(
-                &self.doc,
-                None,
-                Some(&self.layouts),
-                None,
-                bezel_markdown::Caption::Shown,
-                window,
-                cx,
-            ))
+            let view = crate::markdown::markdown_view(
+                &self.blocks,
+                crate::markdown::SelectionHost::None,
+                std::rc::Rc::new(|_, _, _| {}),
+                crate::markdown::ViewFlags::default(),
+            );
+            *self.layouts.borrow_mut() = Some(view.layouts());
+            gpui::div().w(gpui::px(600.0)).child(view)
         }
     }
 
-    fn heights(layouts: &bezel_markdown::BlockLayouts) -> [f32; 3] {
-        let height = |ix| {
-            f32::from(
-                layouts
-                    .block_bounds(ix)
-                    .expect("the block was drawn")
-                    .size
-                    .height,
-            )
-        };
-        [height(0), height(1), height(2)]
+    /// The heading's, the paragraph's and the code fence's heights, as drawn.
+    fn heights(
+        cx: &mut gpui::VisualTestContext,
+        layouts: &crate::markdown::BodyLayouts,
+    ) -> [f32; 3] {
+        let heading = cx
+            .debug_bounds("markdown-heading-0")
+            .expect("the heading was drawn");
+        let paragraph = layouts.text_bounds(1).expect("the paragraph was drawn");
+        let code = layouts.frame_bounds(0).expect("the fence was drawn");
+        [
+            f32::from(heading.size.height),
+            f32::from(paragraph.size.height),
+            f32::from(code.size.height),
+        ]
     }
 
+    /// D1 (design §5.9): Ely sets the sizes, so a paragraph is one body step taller as the
+    /// interface font grows and a heading keeps its Ely ratio to the body (x2.25 for H1),
+    /// where bezel's renderer added the same +5 px offset to every size.
     #[gpui::test]
     async fn rendered_markdown_follows_the_interface_font_size(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             Theme::init(cx);
             crate::ely::init(cx);
         });
-        let layouts = bezel_markdown::BlockLayouts::default();
+        let layouts = std::rc::Rc::new(std::cell::RefCell::new(None));
         let shared = layouts.clone();
         let (_, _, cx) = crate::text_selection::testing::host(cx, move |_, _| Page {
-            doc: bezel_markdown::parse(
-                "# Title\n\nBody paragraph.\n\n```rust\nlet x = 1;\n```\n",
-            ),
+            blocks: preview("# Title\n\nBody paragraph.\n\n```rust\nlet x = 1;\n```\n", &Diagrams::default()),
             layouts: shared,
         });
+        let drawn = |layouts: &std::rc::Rc<std::cell::RefCell<Option<crate::markdown::BodyLayouts>>>| {
+            layouts.borrow().clone().expect("the page rendered")
+        };
         cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
         cx.run_until_parked();
-        let at_13 = heights(&layouts);
+        let at_13 = heights(cx, &drawn(&layouts));
 
         cx.update(|_, cx| {
             Theme::set_interface_font_size(18, cx);
@@ -623,20 +702,21 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_resize(gpui::size(gpui::px(801.0), gpui::px(400.0)));
         cx.run_until_parked();
-        let at_18 = heights(&layouts);
+        let at_18 = heights(cx, &drawn(&layouts));
         let [heading_growth, body_growth, code_growth] =
             std::array::from_fn(|ix| at_18[ix] - at_13[ix]);
-        // The offset is +5; applied twice it would be +10.
+        // The interface step is +5 pt; the body's line is 1.6 of it, a heading's 1.3 of
+        // its own size, which is the body's x2.25.
         assert!(
-            (heading_growth - 5.0).abs() <= 0.5,
-            "heading grew {heading_growth}"
-        );
-        assert!(
-            (body_growth - 5.0).abs() <= 0.5,
+            (body_growth - 5.0 * 1.6).abs() <= 1.0,
             "paragraph grew {body_growth}"
         );
-        // Its one code line grows by 5, and its header band grows besides.
-        assert!(code_growth >= 9.0, "code block grew {code_growth}");
+        assert!(
+            (heading_growth - 5.0 * 2.25 * 1.3).abs() <= 1.5,
+            "heading grew {heading_growth}"
+        );
+        // Its one code line grows with the interface too.
+        assert!(code_growth >= 5.0, "code block grew {code_growth}");
 
         cx.update(|_, cx| {
             Theme::set_interface_font_size(13, cx);
@@ -645,6 +725,6 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
         cx.run_until_parked();
-        assert_eq!(heights(&layouts), at_13);
+        assert_eq!(heights(cx, &drawn(&layouts)), at_13);
     }
 }
