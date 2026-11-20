@@ -1823,17 +1823,6 @@ impl FileView {
             .map_or(&[], |preview| &preview.blocks.headings)
     }
 
-    /// The titles the outline lists: the headings of the Preview, while it is drawn.
-    #[cfg(test)]
-    pub(crate) fn outline_entries(&self) -> Vec<String> {
-        if !self.outline_open {
-            return Vec::new();
-        }
-        (self.preview_headings().iter())
-            .map(|heading| heading.title.to_string())
-            .collect()
-    }
-
     fn toggle_outline(&mut self, cx: &mut Context<Self>) {
         if self.preview_headings().is_empty() {
             return;
@@ -2961,7 +2950,7 @@ fn render_content(
                 .border_l_1()
                 .border_color(theme.ely.border)
                 .bg(theme.ely.surface)
-                .child(toc)
+                .child(div().debug_selector(|| "file-preview-outline-toc".into()).child(toc))
         });
         // The column is a fixed width, not a cap: a pane narrower than it
         // scrolls the page sideways rather than rewrapping the prose into a
@@ -6550,14 +6539,18 @@ mod tests {
 
     /// Where the outline's `k`-th row is: the rows are stacked under the panel's padding,
     /// each a small control tall with a gap of two pixels.
-    fn outline_row_center(cx: &mut VisualTestContext, k: usize) -> Point<Pixels> {
+    fn outline_row_height(cx: &mut VisualTestContext) -> Pixels {
         use ely_gpui_component::theme::{ActiveTheme as _, ControlSize};
+        cx.update(|window, cx| {
+            cx.theme().control_height(ControlSize::Sm).to_pixels(window.rem_size())
+        })
+    }
+
+    fn outline_row_center(cx: &mut VisualTestContext, k: usize) -> Point<Pixels> {
         let panel = cx
             .debug_bounds("file-preview-outline-panel")
             .expect("the outline is drawn");
-        let row = cx.update(|window, cx| {
-            cx.theme().control_height(ControlSize::Sm).to_pixels(window.rem_size())
-        });
+        let row = outline_row_height(cx);
         point(
             panel.left() + px(40.0),
             panel.top() + px(OUTLINE_PADDING) + (row + px(2.0)) * k as f32 + row / 2.0,
@@ -6585,22 +6578,30 @@ mod tests {
         cx.simulate_click(toggle.center(), Modifiers::none());
         preview_frames(&mut cx, 3);
         assert!(cx.debug_bounds("file-preview-outline-panel").is_some());
-        let titles = view.read_with(&cx.cx, |view, _| view.outline_entries());
+        // What the panel draws: three rows (its height is three rows and two gaps), and
+        // row k brings heading k to the top, in the document's order.
+        let toc = cx.debug_bounds("file-preview-outline-toc").expect("the rows are drawn");
+        let row = outline_row_height(&mut cx);
+        assert!(
+            (toc.size.height - (row * 3.0 + px(4.0))).abs() <= px(1.0),
+            "three rows drawn, not {:?} tall",
+            toc.size.height
+        );
+        for k in [1, 2, 0] {
+            let at = outline_row_center(&mut cx, k);
+            cx.simulate_click(at, Modifiers::none());
+            preview_frames(&mut cx, 4);
+            let after = heading_below_top(&mut cx, k);
+            assert!(after.abs() <= px(1.0), "row {k} brings heading {k} to the top: {after:?}");
+        }
         let headings = view
             .update(&mut cx.cx, |view, cx| view.preview_blocks(cx))
             .expect("a Preview")
             .headings;
         assert_eq!(
-            titles,
-            headings.iter().map(|heading| heading.title.to_string()).collect::<Vec<_>>()
+            headings.iter().map(|heading| heading.title.to_string()).collect::<Vec<_>>(),
+            ["Alpha", "Beta", "Gamma"]
         );
-        assert_eq!(titles, ["Alpha", "Beta", "Gamma"]);
-
-        let second = outline_row_center(&mut cx, 1);
-        cx.simulate_click(second, Modifiers::none());
-        preview_frames(&mut cx, 4);
-        let after = heading_below_top(&mut cx, 1);
-        assert!(after.abs() <= px(1.0), "heading 2 is at the top: {after:?}");
     }
 
     #[gpui::test]
@@ -6910,24 +6911,29 @@ mod tests {
             point(column_left + px(25.0), scroll.origin.y + px(30.0)),
             point(scroll.right() - px(1.0), scroll.bottom() - px(1.0)),
         );
-        // Shorter, and multi-byte where the selection ended.
+        // Something is selected before the change, and Ctrl+C says what.
+        testing::reset_clipboard(cx);
+        cx.simulate_keystrokes("ctrl-c");
+        let old = testing::clipboard(cx).expect("a clipboard");
+        assert!(
+            old != testing::SENTINEL && old.contains("Select this long paragraph"),
+            "the drag selected the old text: {old:?}"
+        );
+        // Shorter, and multi-byte where the selection ended; the next frames draw it.
         std::fs::write(&note, "# é\n\nçà\n").unwrap();
         cx.update(|_, cx| view.update(cx, |view, cx| view.reload(cx)))
             .expect("the file reloads");
         preview_frames(cx, 3);
         testing::reset_clipboard(cx);
         cx.simulate_keystrokes("ctrl-c");
-        let copied = testing::clipboard(cx);
-        // `text_selection` keeps the text a selection began on, so a copy after the file
-        // changed is what the reader had selected (it was on screen), never a slice of the
-        // new text by the old range and never anything that was not on screen.
-        assert!(
-            copied.as_deref().is_none_or(|text| {
-                text == testing::SENTINEL
-                    || "Notes\n\nSelect this long paragraph of words.".contains(text)
-                    || "é\n\nçà".contains(text)
-            }),
-            "a copy is from the old text, the new one, or nothing: {copied:?}"
+        // The outcome the code has: `text_selection::Active.text` keeps the text the
+        // selection began on, so Ctrl+C copies exactly what the reader selected (it was on
+        // screen); the new text is not highlighted. A slice of the new text cut at the old
+        // offsets is the failure.
+        assert_eq!(
+            testing::clipboard(cx).as_deref(),
+            Some(old.as_str()),
+            "Ctrl+C after the file changed copies the selection as it was"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
