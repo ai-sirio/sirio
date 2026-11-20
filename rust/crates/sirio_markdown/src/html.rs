@@ -458,8 +458,8 @@ struct BlockBuilder {
     pre: Option<String>,
     /// Inside a removed-with-content element (see [`skip`]).
     skipping: Option<(String, usize)>,
-    /// How deep the result may nest: quotes and inline wrappers each stop here, one level
-    /// being kept for the paragraph inside and one for a summary's emphasis.
+    /// How deep the result may nest in all: one budget for the quotes, the paragraph (and a
+    /// summary's emphasis) and the inline wrappers, so no mix of them goes past it.
     limit: usize,
     /// `<blockquote>`s opened past the limit, which made no level: their end tags make none.
     unopened: usize,
@@ -469,13 +469,20 @@ impl BlockBuilder {
     fn with_limit(limit: usize) -> Self {
         Self {
             levels: vec![Vec::new()],
-            fold: InlineFold::with_limit(limit.saturating_sub(1)),
+            fold: InlineFold::with_limit(limit.saturating_sub(2)),
             run: Run::Paragraph,
             pre: None,
             skipping: None,
             limit,
             unopened: 0,
         }
+    }
+
+    /// An empty fold for the run that starts now: what the budget leaves after the quotes
+    /// open, the paragraph and a summary's emphasis (kept whatever the run turns out to be).
+    fn fresh_fold(&self) -> InlineFold {
+        let quotes = self.levels.len() - 1;
+        InlineFold::with_limit(self.limit.saturating_sub(quotes + 2))
     }
 }
 
@@ -530,8 +537,11 @@ impl BlockBuilder {
             "blockquote" => {
                 self.end_run();
                 // `levels[0]` is the chunk's own: the quotes open are the others.
-                match self.levels.len() <= self.limit.saturating_sub(1) {
-                    true => self.levels.push(Vec::new()),
+                match self.levels.len() <= self.limit.saturating_sub(2) {
+                    true => {
+                        self.levels.push(Vec::new());
+                        self.fold = self.fresh_fold();
+                    }
                     false => self.unopened += 1,
                 }
             }
@@ -558,6 +568,7 @@ impl BlockBuilder {
                 } else if self.levels.len() > 1 {
                     let blocks = self.levels.pop().expect("more than one level");
                     self.emit(Block::BlockQuote { blocks });
+                    self.fold = self.fresh_fold();
                 }
             }
             _ if is_block_boundary(&name) => self.end_run(),
@@ -566,7 +577,8 @@ impl BlockBuilder {
     }
 
     fn end_run(&mut self) {
-        let fold = std::mem::replace(&mut self.fold, InlineFold::with_limit(self.limit.saturating_sub(1)));
+        let fresh = self.fresh_fold();
+        let fold = std::mem::replace(&mut self.fold, fresh);
         let inline = trim_run(fold.finish());
         let run = std::mem::replace(&mut self.run, Run::Paragraph);
         if is_blank(&inline) {
@@ -1072,6 +1084,16 @@ mod tests {
             format!("{}x{}", "<blockquote>".repeat(N), "</blockquote>".repeat(N)),
             format!("{}x{}", "<b>".repeat(N), "</b>".repeat(N)),
             format!("<blockquote title=\"</blockquote>\">{}", "<i>x".repeat(N)),
+            // Quotes, then wrappers that do close: one budget, not one each.
+            format!("{}{}x{}", "<blockquote>".repeat(N), "<b>".repeat(N), "</b>".repeat(N)),
+            format!(
+                "{}<summary>{}x{}",
+                "<blockquote>".repeat(N),
+                "<b>".repeat(N),
+                "</b>".repeat(N)
+            ),
+            format!("<h1>{}x{}", "<i>".repeat(N), "</i>".repeat(N)),
+            format!("<div>{}{}x{}", "<b><blockquote></b>".repeat(N), "<b>".repeat(N), "</b>".repeat(N)),
         ];
         for (n, html) in inputs.into_iter().enumerate() {
             // On a small stack: building, measuring and dropping the tree must not recurse deeply.
