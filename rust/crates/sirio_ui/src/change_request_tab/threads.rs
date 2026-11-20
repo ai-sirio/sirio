@@ -120,7 +120,7 @@ fn annotation_side(side: Side) -> AnnotationSide {
 /// small before/after change.
 #[derive(Clone)]
 pub(crate) enum Part {
-    Doc(bezel_markdown::Doc),
+    Doc(crate::markdown::MarkdownBlocks),
     Suggestion { before: Option<Vec<String>>, after: Vec<String> },
 }
 
@@ -137,7 +137,7 @@ fn replaced_count(thread: &ReviewThread, above: u32, below: u32) -> Option<usize
 }
 
 /// Each comment's body as parts: Markdown, and suggestions as changes.
-fn comment_docs(thread: &ReviewThread, theme: &Theme) -> Vec<Vec<Part>> {
+fn comment_docs(thread: &ReviewThread) -> Vec<Vec<Part>> {
     thread
         .comments
         .iter()
@@ -145,7 +145,7 @@ fn comment_docs(thread: &ReviewThread, theme: &Theme) -> Vec<Vec<Part>> {
             suggestion::split(&comment.body)
                 .into_iter()
                 .map(|part| match part {
-                    suggestion::BodyPart::Text(text) => Part::Doc(markdown_doc(&text, theme)),
+                    suggestion::BodyPart::Text(text) => Part::Doc(markdown_doc(&text)),
                     suggestion::BodyPart::Suggestion { lines, above, below } => Part::Suggestion {
                         before: thread
                             .diff_hunk
@@ -208,10 +208,10 @@ pub(crate) struct ThreadView {
 }
 
 impl ThreadView {
-    fn new(thread: ReviewThread, owner: WeakEntity<ChangeRequestTab>, theme: &Theme) -> Self {
+    fn new(thread: ReviewThread, owner: WeakEntity<ChangeRequestTab>) -> Self {
         Self {
             key: thread_key(&thread.id),
-            docs: comment_docs(&thread, theme),
+            docs: comment_docs(&thread),
             expanded: !thread.resolved,
             reply: None,
             editing: None,
@@ -224,14 +224,14 @@ impl ThreadView {
 
     /// A reload's copy of the same thread; a change of resolution folds or
     /// opens it the way a fresh card would be.
-    fn set_thread(&mut self, thread: ReviewThread, theme: &Theme, cx: &mut Context<Self>) {
+    fn set_thread(&mut self, thread: ReviewThread, cx: &mut Context<Self>) {
         if thread == self.thread {
             return;
         }
         if thread.resolved != self.thread.resolved {
             self.expanded = !thread.resolved;
         }
-        self.docs = comment_docs(&thread, theme);
+        self.docs = comment_docs(&thread);
         self.thread = thread;
         self.revision += 1;
         cx.notify();
@@ -502,8 +502,13 @@ impl ThreadView {
                     .into_any_element()
             } else {
                 let owner = self.owner.clone();
+                let mut part_no = 0u64;
                 let drawn: Vec<AnyElement> = parts.into_iter().map(|part| match part {
-                    Part::Doc(doc) => Chat::render_markdown_document_with_link_override(doc, theme, open_links()),
+                    Part::Doc(doc) => {
+                        let id = ElementId::NamedInteger(format!("change-request-thread-markdown-{}-{index}", self.key).into(), part_no);
+                        part_no += 1;
+                        forge_body(&doc, id, self.owner.clone()).into_any_element()
+                    }
                     Part::Suggestion { before, after } => {
                         let no = suggestion_no;
                         suggestion_no += 1;
@@ -1155,6 +1160,7 @@ impl ChangeRequestTab {
         let first = first_published(thread).expect("merged entries have a published comment");
         let published = thread.comments.iter().filter(|comment| !comment.pending).count();
         let where_ = thread.line.filter(|_| !thread.file_level).map_or("file".to_string(), |line| line.to_string());
+        let body_entity = entity.clone();
         let (entity, id) = (entity.clone(), thread.id.clone());
         RailItem::new(
             div().id(("change-request-thread-entry-head", index)).flex().gap(px(6.0))
@@ -1176,7 +1182,7 @@ impl ChangeRequestTab {
         )
         .children(self.thread_bodies.get(&thread.id).map(|doc| {
             div().id(("change-request-thread-entry-body", index)).child(
-                Chat::render_markdown_document_with_link_override(doc.clone(), theme, open_links()),
+                self.body_view(doc, ("change-request-thread-entry-markdown", index), &body_entity),
             )
         }))
     }
@@ -1298,9 +1304,8 @@ impl ChangeRequestTab {
 
     fn apply_threads(&mut self, result: Result<Listing<ReviewThread>, ForgeError>, cx: &mut Context<Self>) {
         self.threads.finish(result);
-        let theme = *Theme::get(cx);
         self.thread_bodies = self.threads.value().map(|listing| listing.items.iter()
-            .filter_map(|thread| first_published(thread).map(|comment| (thread.id.clone(), markdown_doc(&comment.body, &theme))))
+            .filter_map(|thread| first_published(thread).map(|comment| (thread.id.clone(), markdown_doc(&comment.body))))
             .collect()).unwrap_or_default();
         self.thread_ids = self.threads.value().map(|listing| listing.items.iter()
             .map(|thread| (thread_key(&thread.id), thread.id.clone())).collect()).unwrap_or_default();
@@ -1318,7 +1323,6 @@ impl ChangeRequestTab {
         };
         let drawn: Vec<ReviewThread> = drawn_in_diff(&listing.items).into_iter().cloned().collect();
         let owner = cx.entity().downgrade();
-        let theme = *Theme::get(cx);
         let mut thread_views = HashMap::new();
         let mut outdated: Vec<(String, Vec<Entity<ThreadView>>)> = Vec::new();
         for thread in drawn {
@@ -1326,12 +1330,12 @@ impl ChangeRequestTab {
             let (path, is_outdated) = (thread.path.clone(), thread.outdated);
             let view = match self.thread_views.remove(&key) {
                 Some(view) => {
-                    view.update(cx, |view, cx| view.set_thread(thread, &theme, cx));
+                    view.update(cx, |view, cx| view.set_thread(thread, cx));
                     view
                 }
                 None => {
                     let owner = owner.clone();
-                    cx.new(|_| ThreadView::new(thread, owner, &theme))
+                    cx.new(|_| ThreadView::new(thread, owner))
                 }
             };
             if is_outdated {
@@ -1511,7 +1515,7 @@ mod tests {
             edit: None,
             pending: false,
         }];
-        let docs = comment_docs(&absurd, &theme);
+        let docs = comment_docs(&absurd);
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].len(), 1);
         let (before, after) = match &docs[0][0] {

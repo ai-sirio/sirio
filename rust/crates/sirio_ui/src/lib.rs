@@ -61,7 +61,6 @@ pub fn markdown_probe_view(id: &'static str, source: &str) -> gpui::AnyElement {
 pub fn markdown_probe_view_selected(id: &'static str, source: &str) -> gpui::AnyElement {
     markdown::probe_view(id, source, true)
 }
-mod selectable_markdown;
 pub mod modal;
 pub mod motion;
 // The Linux XCB-to-Xlib parent fallback the browser and the widget webview share.

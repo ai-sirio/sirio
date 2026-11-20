@@ -1,4 +1,4 @@
-//! The file view's Markdown Preview: the parsed document as bezel's `Doc`,
+//! The file view's Markdown Preview: the document as the tree Ely draws,
 //! with raw HTML expanded, lone images turned into pictures and diagram
 //! fences replaced by what they render to (design §3 and §5,
 //! `docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md`).
@@ -9,12 +9,8 @@ use std::sync::Arc;
 
 use gpui::App;
 
-use bezel_markdown::BlockKind;
 use sirio_diagram::{DiagramKind, Palette};
-use sirio_markdown::{Document, expand_html};
 use sirio_theme::{Appearance, Theme};
-
-use crate::chat::bezel_doc_from_legacy;
 
 /// Where one diagram stands, by its cache key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,110 +71,6 @@ pub(crate) struct DiagramRequest {
     pub(crate) key: String,
     pub(crate) kind: DiagramKind,
     pub(crate) source: String,
-}
-
-/// One frame's Preview: the document to draw, and the diagrams it names
-/// that nobody has scheduled yet.
-pub(crate) struct Preview {
-    pub(crate) doc: bezel_markdown::Doc,
-    /// Only the file view read it, and it reads `preview_blocks` now; the bezel build goes
-    /// with the change requests' move to Ely.
-    #[allow(dead_code)]
-    pub(crate) missing: Vec<DiagramRequest>,
-}
-
-/// Builds the Preview's document. `base` is the Markdown file's directory.
-pub(crate) fn build(
-    document: Document,
-    base: &Path,
-    diagrams: &Diagrams,
-    palette: &Palette,
-) -> Preview {
-    let source_blocks = document.blocks.len() as u64;
-    let expanded = {
-        let _perf = sirio_perf::span("Preview.expand_html", source_blocks);
-        expand_html(document)
-    };
-    let converted = bezel_doc_from_legacy(expanded);
-    let mut blocks = Vec::with_capacity(converted.blocks.len());
-    let mut missing = Vec::new();
-    for block in converted.blocks {
-        let indent = block.indent;
-        match block.kind {
-            BlockKind::Code {
-                language: Some(language),
-                code,
-            } => {
-                let Some(kind) = DiagramKind::from_fence(&language) else {
-                    blocks.push(bezel_markdown::Block::at(
-                        BlockKind::Code {
-                            language: Some(language),
-                            code,
-                        },
-                        indent,
-                    ));
-                    continue;
-                };
-                let key = sirio_diagram::cache_key(kind, &code.text, palette);
-                let source = code.text.clone();
-                let fence = bezel_markdown::Block::at(
-                    BlockKind::Code {
-                        language: Some(language),
-                        code,
-                    },
-                    indent,
-                );
-                match diagrams.get(&key) {
-                    Some(DiagramState::Ready { path, width }) => {
-                        blocks.push(bezel_markdown::Block::at(
-                            BlockKind::Image {
-                                url: path.to_string_lossy().into_owned(),
-                                alt: bezel_markdown::Text::default(),
-                                width: Some(*width),
-                            },
-                            indent,
-                        ));
-                    }
-                    Some(DiagramState::Failed(note)) => {
-                        blocks.push(fence);
-                        blocks.push(bezel_markdown::Block::at(
-                            BlockKind::Quote(bezel_markdown::Text::plain(note.clone())),
-                            indent,
-                        ));
-                    }
-                    Some(DiagramState::Pending) => blocks.push(fence),
-                    None => {
-                        // The same diagram twice in one document is rendered
-                        // once: first occurrence wins, both fences show as code.
-                        if !missing
-                            .iter()
-                            .any(|existing: &DiagramRequest| existing.key == key)
-                        {
-                            missing.push(DiagramRequest {
-                                key: key.clone(),
-                                kind,
-                                source,
-                            });
-                        }
-                        blocks.push(fence);
-                    }
-                }
-            }
-            BlockKind::Image { url, alt, width } => blocks.push(bezel_markdown::Block::at(
-                BlockKind::Image {
-                    url: resolve_image(&url, base),
-                    alt,
-                    width,
-                },
-                indent,
-            )),
-            kind => blocks.push(bezel_markdown::Block::at(kind, indent)),
-        }
-    }
-    Preview {
-        doc: bezel_markdown::Doc { blocks },
-        missing,
-    }
 }
 
 /// The Preview's document as the tree Ely draws: `source` read once, the HTML in it
