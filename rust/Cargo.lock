@@ -2124,6 +2124,7 @@ dependencies = [
  "ely-agent",
  "ely-chat",
  "ely-core",
+ "ely-documents",
  "ely-editor",
  "ely-git",
  "gpui-pre",

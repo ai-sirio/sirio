@@ -214,6 +214,32 @@ impl Gather {
     }
 }
 
+/// Who is told of each text drawn, in order: Ely's selection, or an owner's own.
+pub trait TextGather {
+    /// Highlights laid over `text`, the next drawn.
+    fn over(&self, text: &str, cx: &App) -> Vec<(Range<usize>, HighlightStyle)>;
+
+    /// Notes a drawn text, its layout and its links.
+    fn push(&self, text: &str, layout: TextLayout, links: &[(Range<usize>, String)]);
+
+    /// Sets the marker the next text copies with; empty drops it.
+    fn lead(&self, lead: String);
+}
+
+impl TextGather for Gather {
+    fn over(&self, text: &str, cx: &App) -> Vec<(Range<usize>, HighlightStyle)> {
+        Gather::over(self, text, cx)
+    }
+
+    fn push(&self, text: &str, layout: TextLayout, links: &[(Range<usize>, String)]) {
+        Gather::push(self, text, layout, links)
+    }
+
+    fn lead(&self, lead: String) {
+        Gather::lead(self, lead)
+    }
+}
+
 /// A right press on a picture, its selection kept.
 pub(crate) fn picture_press(
     state: &Entity<Selection>,

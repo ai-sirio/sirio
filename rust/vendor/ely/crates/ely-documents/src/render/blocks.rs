@@ -68,7 +68,7 @@ impl Draw<'_> {
                         .child(bullet)
                         .into_any_element(),
                 };
-                if let Some(select) = self.select {
+                if let Some(select) = self.gather() {
                     let mark = match (task, start) {
                         (Some(true), _) => "[x]".to_owned(),
                         (Some(false), _) => "[ ]".to_owned(),
@@ -78,7 +78,7 @@ impl Draw<'_> {
                     select.lead(format!("{}{mark} ", "  ".repeat(depth)));
                 }
                 let inner = self.nodes(body, cx);
-                if let Some(select) = self.select {
+                if let Some(select) = self.gather() {
                     select.lead(String::new());
                 }
                 div()

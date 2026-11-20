@@ -31,6 +31,18 @@ impl Sections {
             .find(|(name, _)| name == value)
             .map(|(_, bounds)| *bounds)
     }
+
+    /// Scrolls the section `value` to the top of the container; false when no anchor of that name has drawn.
+    pub fn reveal(&self, value: &SharedString) -> bool {
+        let Some(spot) = self.spot(value) else {
+            log::error!("table of contents: no anchor {value} has drawn");
+            return false;
+        };
+        let offset = self.scroll.offset();
+        let lift = spot.top() - self.scroll.bounds().top();
+        self.scroll.set_offset(point(offset.x, offset.y - lift));
+        true
+    }
 }
 
 /// The last entry whose section starts above `line`: a quarter down the view, or its bottom at the end.
@@ -274,9 +286,69 @@ impl RenderOnce for TableOfContents {
 
 #[cfg(test)]
 mod tests {
-    use gpui::px;
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement, Render, ScrollHandle,
+        SharedString, Styled, TestAppContext, Window, div, point, prelude::*, px,
+    };
 
-    use super::in_view;
+    use super::{Anchor, Sections, in_view};
+
+    /// A 100-point scroller of three 300-point sections.
+    struct Scroller {
+        scroll: ScrollHandle,
+        sections: Entity<Sections>,
+    }
+
+    impl Render for Scroller {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let section = |name: &'static str| {
+                Anchor::new(&self.sections, name).child(div().h(px(300.0)).child(name))
+            };
+            div()
+                .id("scroller")
+                .h(px(100.0))
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(section("one"))
+                .child(section("two"))
+                .child(section("three"))
+        }
+    }
+
+    fn drawn(cx: &mut TestAppContext) -> (Entity<Scroller>, &mut gpui::VisualTestContext) {
+        let (scroller, cx) = cx.add_window_view(|_, cx| {
+            let scroll = ScrollHandle::new();
+            let sections = cx.new(|_| Sections::new(scroll.clone()));
+            Scroller { scroll, sections }
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+        (scroller, cx)
+    }
+
+    #[gpui::test]
+    fn reveal_scrolls_a_known_section_to_the_top(cx: &mut TestAppContext) {
+        let (scroller, cx) = drawn(cx);
+        let (scroll, sections) = scroller.read_with(cx, |s, _| (s.scroll.clone(), s.sections.clone()));
+        let found = sections.read_with(cx, |sections, _| sections.reveal(&SharedString::from("two")));
+        assert!(found, "two has drawn");
+        assert_eq!(scroll.offset(), point(px(0.0), px(-300.0)));
+        // The anchors measure again once the page has moved.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let found = sections.read_with(cx, |sections, _| sections.reveal(&SharedString::from("one")));
+        assert!(found);
+        assert_eq!(scroll.offset(), point(px(0.0), px(0.0)));
+    }
+
+    #[gpui::test]
+    fn reveal_of_an_unknown_section_is_false(cx: &mut TestAppContext) {
+        let (scroller, cx) = drawn(cx);
+        let (scroll, sections) = scroller.read_with(cx, |s, _| (s.scroll.clone(), s.sections.clone()));
+        let found = sections.read_with(cx, |sections, _| sections.reveal(&SharedString::from("nine")));
+        assert!(!found);
+        assert_eq!(scroll.offset(), point(px(0.0), px(0.0)));
+    }
 
     #[test]
     fn the_section_in_view_is_the_last_one_started() {
