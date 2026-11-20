@@ -84,10 +84,15 @@ pub(crate) fn resolve_chat_path(
 /// lookup, and again before a click opens it.
 pub(crate) fn is_network_or_device_path(path: &Path) -> bool {
     let text = path.to_string_lossy();
-    if text.starts_with("//") || text.starts_with("\\\\") {
+    // Two separators in any mix: `//host`, `\\host`, `\\?\`, `\\.\`, and the odd `\/`.
+    let mut chars = text.chars();
+    if matches!(
+        (chars.next(), chars.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    ) {
         return true;
     }
-    #[cfg(windows)]
+    // On Windows a UNC, device or verbatim prefix; no other platform reads a prefix.
     if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
         use std::path::Prefix;
         return matches!(

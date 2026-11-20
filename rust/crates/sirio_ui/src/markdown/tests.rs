@@ -222,12 +222,27 @@ fn deep_nesting_falls_back_to_plain_text() {
     falls_back(format!("{}x{}", "![".repeat(N), "](u)".repeat(N)));
     falls_back(format!("{}x{}", "*a _a ".repeat(N / 2), " a_ a*".repeat(N / 2)));
 
+    // Markdown and HTML depth add up in the tree: each is under the cap, the sum is not (30 + 100 tags). The
+    // HTML block, not the quotes around it, is what reads as plain text, and nothing recurses.
+    let html = format!("{}x{}", "<blockquote>".repeat(100), "</blockquote>".repeat(100));
+    let source = format!("{} {html}", ">".repeat(30));
+    let nodes = on_stack(256 * 1024, move || {
+        build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
+    });
+    let quotes = all(&nodes)
+        .into_iter()
+        .filter(|node| matches!(node, Node::Quote(_)))
+        .count();
+    assert_eq!(quotes, 30);
+    assert!(texts(&nodes).contains(&html));
+
     // An HTML block falls back alone: its neighbours are read as ever. A closer that closes
-    // nothing open, and a slash on a tag HTML does not close, do not hide the depth.
+    // nothing open does not hide the depth.
     for html in [
         format!("{}x{}", "<blockquote>".repeat(N), "</blockquote>".repeat(N)),
         "<blockquote></b>".repeat(N),
-        "<blockquote/>".repeat(N),
+        // A tag inside an attribute value is no closer: the tokenizer opens 10 000.
+        "<blockquote title=\"</blockquote>\">".repeat(N),
     ] {
         let source = format!("before\n\n{html}\n\nafter\n");
         let nodes = on_stack(256 * 1024, move || {
@@ -384,7 +399,8 @@ fn chat_keeps_only_small_regular_local_images() {
     edge.set_len(crate::chat::MAX_IMAGE_BYTES).unwrap();
     let absolute = fx.wt.join("small.png");
     let source = format!(
-        "![abs]({})\n\n![rel](small.png)\n\n![dir](adir)\n\n![missing](none.png)\n\n\
+        "![n1](/\\host/s/x.png)\n\n![n2](\\/host/s/x.png)\n\n![n3](//host/s/x.png)\n\n\
+         ![abs]({})\n\n![rel](small.png)\n\n![dir](adir)\n\n![missing](none.png)\n\n\
          ![big](big.png)\n\n![edge](edge.png)\n\n![web](https://x/y.png)\n",
         absolute.display()
     );
@@ -407,7 +423,30 @@ fn chat_keeps_only_small_regular_local_images() {
         ]
     );
     let shown = texts(&built.nodes);
-    for alt in ["dir", "missing", "big"] {
+    for alt in ["dir", "missing", "big", "n1", "n2", "n3"] {
+        assert!(shown.contains(&alt.to_owned()), "{alt}: {shown:?}");
+    }
+}
+
+#[test]
+fn preview_never_names_a_network_path() {
+    let base = Path::new("/repo/docs");
+    let source = "![a](//host/s/x.png)\n\n![b](\\\\host\\s\\x.png)\n\n\
+                  ![c](%5C%5Chost%5Cs%5Cx.png)\n\n![d](file://host/s/x.png)\n\n\
+                  ![e](file:////host/s/x.png)\n\n![f](%2F%2Fhost%2Fx.png)\n\n\
+                  <img src=\"\\\\host\\s\\x.png\">\n\n![g](\\\\?\\C:\\x.png)\n\n\
+                  ![h](/\\host/s/x.png)\n\n<img src=\"\\/host/s/x.png\" alt=\"i\">\n\n![ok](fine.png)\n";
+    let built = build(source, &mut preview_in(base));
+    let urls: Vec<_> = images(&built.nodes)
+        .into_iter()
+        .map(|node| match node {
+            Node::Image { url, .. } => url.clone(),
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(urls, [base.join("fine.png").to_string_lossy().into_owned()]);
+    let shown = texts(&built.nodes);
+    for alt in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
         assert!(shown.contains(&alt.to_owned()), "{alt}: {shown:?}");
     }
 }
@@ -962,3 +1001,4 @@ fn file_paths_in_chat_become_file_links() {
     let third = build("see README.md", &mut chat(&fx, &mut memo));
     assert!(file_links_of(&third.nodes).is_empty());
 }
+
