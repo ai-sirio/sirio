@@ -1,6 +1,6 @@
 # Verifying the Ely agent chat
 
-The AI chat is drawn with the vendored [Ely GPUI components](../../rust/vendor/ely-gpui-component/LOCAL-CHANGES.md)
+The AI chat is drawn with the vendored [Ely GPUI components](../../rust/vendor/ely/LOCAL-CHANGES.md)
 over Sirio's own theme and state (`docs/superpowers/specs/2026-09-30-ely-agent-chat-design.md`).
 This page says how that is checked, what each check does and does not prove,
 and which platforms have been seen with real input and rendering.

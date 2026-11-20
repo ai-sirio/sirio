@@ -6,10 +6,12 @@
   `ely-collab`, `ely-charts`, under `crates/`.
 - File set taken from each crate: `Cargo.toml`, `src/`, and `icons/`, `assets/` and `LICENSE` where
   present. Never `AGENTS.md` or `examples/`. `LICENSE` at this directory's root is upstream's.
-- Nothing in Sirio depends on these crates yet.
-- Check: `artifacts/ely-sync/drivers/check-vendor.sh` extracts each crate at the rev, diffs it
-  against this directory and fails on any differing path not named below. It prints
-  `VENDOR CHECK OK`.
+- Sirio reaches these crates only through `rust/vendor/ely-gpui-component`, a facade that keeps
+  the `ely_gpui_component::*` paths (see "The facade and the switch" below).
+- Check: `ELY_UPSTREAM=<a clone of upstream with the rev> rust/vendor/ely/check-vendor.sh [out-dir]`
+  extracts each crate at the rev, diffs it against this directory (`<out-dir>/<crate>.diff`; a
+  fresh temporary directory when none is given) and fails on any differing path not named below.
+  It prints `VENDOR CHECK OK`. Run it after any edit here, and before and after a sync.
 
 ## Changed paths
 
@@ -87,6 +89,8 @@ the chart hues differ from the old extraction. No Sirio draw path reads them: Si
 literals); the old `ely-gpui-component` calls `Palette::dark` only as `Theme::target()`'s fallback
 (`theme/mod.rs:196`), overridden by `sirio_ui/src/ely.rs:75` `set_palette`; colour-blind mode is
 enabled nowhere. Task 10's section 6.4 captures confirm it.
+
+Changed paths of the palette split:
 
 - `crates/ely-core/src/theme/mod.rs`
 - `crates/ely-core/src/theme/palette.rs`
@@ -778,8 +782,199 @@ One more hook, found by the switch: `crates/ely-core/src/menus/draw.rs`. Upstrea
 sets `debug_selector("menu-row-<label>")` on a row after the row's own builder ran, so it replaced the
 name a host gave through `MenuItem::selectors`, and Sirio's `changes-menu-copy-path` and the other
 `changes-menu-*` and `change-request-menu-*` names were never drawn. The row now uses its own selector
-when it has one, and `menu-row-<label>` otherwise (upstream's tests keep finding their rows). Proof
+when it has one, and `menu-row-<label>` otherwise (upstream's tests keep finding their rows). The
+hunk clones the row's selector and label (both `SharedString`, a reference count) into the
+`debug_selector` closure, which builds `format!("menu-row-{label}")` only when the item has no
+selector of its own: the first version built that string for every row on every frame. Proof
 (ran): `changes::tests::a_right_click_on_a_file_row_copies_its_path`,
 `changes::tests::a_change_requests_row_offers_its_file_on_the_forge` and
 `right_panel::change_requests::tests::a_right_click_on_a_row_offers_its_link_to_copy`, red before,
-green after.
+green after, and green again on the lazy form (3 run, 3 passed); upstream's menu tests, 612 `ely-core`
+tests with `--features test-support`, pass.
+
+## Row outcomes the sections above do not give
+
+The checklist (`docs/superpowers/plans/2026-11-19-ely-upstream-sync-local-changes-checklist.md`, 234
+rows) is gitignored, so each row's outcome is spelled out here. Rows named in a section above keep
+that section's outcome; the rest follow. Upstream `8d7723ec` is an ancestor-complete superset of
+every upstream-main commit Sirio had ported, so a row whose change was "carry an upstream commit"
+is present by construction in the verbatim files.
+
+### Manifest, init and assets (rows 1 to 12, 21, 26, 83)
+
+- Row 1 (the `sirio-chat` default feature and the narrowed dependency set): the feature lives on in
+  the facade's `Cargo.toml`; the eight crates are workspace members with `ely-core`'s `default = []`.
+  Proof: `cargo build -p sirio`.
+- Row 2 (local `mod.rs` files declaring only the closure): dropped. Every upstream module is
+  vendored whole and the declared sets are upstream's.
+- Row 3 (`init_chat` early return): kept, in the facade's `init_chat` (`has_global::<theme::Theme>()`,
+  then `Theme::init` and `forms::bind_keys`). Proof: `ely_ui::tests::ely_init_binds_no_focus_keys`
+  runs the facade's init.
+- Row 4 (no global Tab, Shift-Tab or F6): kept by never calling upstream's `setup()`, which binds them
+  under `ElyFocus`. Proof (ran): `ely_ui::tests::ely_init_binds_no_focus_keys` (passed on the old crate
+  and passes after the switch).
+- Row 5 (no eager asset validation): kept; the facade calls neither upstream's `init` nor
+  `assets::missing`. Proof: `ely_chat_probe` in Task 8's fix round, which loads icons through the
+  facade's `Assets`.
+- Rows 6, 7, 8: see "Icons and assets" under the `ely-core` hooks.
+- Rows 9, 10, 11, 12 (the image-source helper, the code colours, the palette search helpers, `tint`):
+  absorbed. Upstream makes them public where the old crate carried copies
+  (`ely_documents::blocks::media::source`, `ely_editor::code_colors`,
+  `ely_core::navigation::palette::{Fit, fuzzy, marked}`, `ely_charts::tint`). No Sirio crate calls
+  any of them (grep of `rust/crates`). Proof: the closure build.
+- Row 21 (what the old crate left out): re-decided. Upstream's tests, i18n and the rest are vendored
+  whole and unused.
+- Row 26 (a host rule: `ChatContainer` with Sirio's own `ListState`, row ids scoped to the chat entity,
+  the transcript generation and the row index): nothing vendored. Proof: none of its own; the
+  `ely-chat-ui` and `chat-session-panel` E2Es, which drive the host's rows, ran green at Task 10.
+- Row 83 (the engine, bezel-gpui `=0.3.8`): re-decided to `gpui-pre` 0.3.12 by the sync itself (the
+  workspace's `gpui` entry); nothing here depends on bezel's engine.
+
+### Git and palette leftovers (rows 61, 85, 86)
+
+- Row 61 (`.clone()` on `Copy` types replaced): not carried, cosmetic; upstream's `.clone()` calls stay.
+- Rows 85, 86 (`GitStatus`): absorbed. `ely_core::lists::GitStatus` is upstream's own; `ely-git` imports
+  it, and the facade's `git` chapter re-exports it (`sirio_ui/src/changes.rs` uses it). Proof: the
+  variants are identical to the old copy's (Task 7, by `diff`), and `cargo build -p sirio`.
+
+### Compared and not ported (rows 176 to 178, 186 to 206)
+
+All 24 verified against the vendored sources (this directory), not against the checklist's wording.
+"Taken" means the file is upstream's, unchanged by Sirio.
+
+- Row 176 (`HoverCard`'s `HoverListenerMode`): taken (`overlays/hover.rs:89,119`); the hover mode is
+  row 19, a hand check below.
+- Row 177 (`ScrollSource`, the press-blocking track): taken (`layout/scroll/source.rs`,
+  `layout/scroll.rs`).
+- Row 178 (`Disclosure`, `Collapsible`, `DotBadge`): taken; the differences were documentation only.
+- Row 186 (focus handed back past overlays): taken (`primitives/focus.rs`); behaviour not re-run.
+- Row 187 (Tab, Shift-Tab and F6 under `ElyFocus`): the code is vendored (`lib.rs:86-90`) and
+  deliberately never bound: row 4.
+- Row 188 (submenu hover intent, flip left, occlusion): taken (`menus/aim.rs`, `mod aim`).
+- Row 189 (`Menu::buttons` rows): taken (`menus/model.rs:195`); Sirio builds none.
+- Row 190 (the manual `ContextMenu` mode, its `Styled` impl): taken (`menus/hosts.rs:293,305`).
+- Row 191 (the floating option list occludes the wheel): taken (`forms/options.rs:204`).
+- Row 192 (comments only): taken.
+- Row 193 (code colours per language): taken (`forms/syntax.rs`).
+- Row 194 (i18n, documents, git, typewriter, `BlockEditor`, `Retired`, `Held`): all vendored, none used.
+- Row 195 (`Role::TextInput`, `aria_label`, `aria_value`): taken (`forms/text/mod.rs:503`).
+- Row 196: re-decided toward upstream (see the text field): `select` logs and leaves a bad range
+  (`forms/text/mod.rs:489`).
+- Row 197 (`forms/files.rs` `file_name`): taken; Sirio has no `FileInput` or `DropZone` caller.
+- Row 198 (narrow `ScrollArea`): taken, with row 19's hover mode.
+- Row 199 (property rows, segments, shrinking status items): taken; `StatusBarItem` carries F1 below.
+- Row 200 (`Breadcrumb`, button and icon-button hunks, the dialog's IME Enter): taken. The dialog's
+  Enter is row 17 (press, not release).
+- Rows 201, 203, 204, 205 (navigation, forms and buttons tests; cron, units, segmented): taken
+  (`navigation/tests/`, `forms/tests/`, `forms/date/cron.rs`, `forms/unit.rs`, `buttons/segmented.rs`,
+  `buttons/tests.rs`).
+- Row 202 (`collab/remote.rs`, `terminal/paint.rs`): `ely-collab` is vendored whole (`remote.rs`
+  present); there is no terminal crate and Sirio has its own terminal.
+- Row 206 (`BlockEditor`'s `self.edits`): taken (`forms/text/ime.rs:110`).
+
+### Ports from upstream main (rows 207 to 234)
+
+Every one of these commits is an ancestor of `8d7723ec`, so each is present in the vendored files;
+none is a Sirio change. Rows 207 to 211 (the find-box Escape, owner offsets riding edits, `select` and
+`edit` in `edit.rs`, `offset_in`, the glob's `inspect_err`), 213 to 226 (the new files, `Metrics::size`,
+whitespace, `line_row`, `press` and `drag` taking a window, `mod measure`/`wide`, the text stamp,
+`Frame::stamp`, `column`, the `fresh` gate, whole-pixel carets, `shape_text` errors), 227 (an
+unfocused one-line field shows its start), 229 (`ime.rs`), 230 and 231 (the tab strip's sideways
+scroll and `narrow`), 232 (`Theme::hairline`) and 233 (`slide`'s missing marker) are upstream's.
+Row 212 is upstream's `tests/` module taken whole, so the one `stale.rs` test the old crate dropped is
+back. Row 228 is in the text field section. Row 234 (a caveat: arrows act only while the
+strip holds focus, and there is no Tab traversal) still holds, because the facade never binds Tab:
+row 4. Proof for the lot: the closure's own tests (1447 with `--features test-support` at Task 6) and
+`check-vendor.sh`, which would flag any local edit to these files.
+
+## Evidence from the switch (Tasks 8 and 10)
+
+"Runs at Task 8" in the sections above means the 36 `sirio_ui` tests below, all green on the
+facade, plus the full `sirio_ui` suite (2435 run, 2435 passed after the round-1 fixes). Names, as
+`cargo nextest` prints them:
+
+- `chat::band_tests`: `a_blocked_fast_row_is_disabled`, `composer_band_spans_the_chat_column_on_one_row`,
+  `narrow_row_fits_from_its_measured_minimum`, `the_background_tasks_row_is_informational`.
+- `chat::ely_tests`: `ely_composer_enter_respects_completion_and_ime`,
+  `ely_composer_sends_an_attachment_without_text`, `ely_expired_request_cannot_answer_the_next_request`,
+  `ely_request_sends_only_the_advertised_option_id`,
+  `ely_tool_and_thought_expansion_survives_virtualization`.
+- `chat::tests`: `a_run_is_one_box_and_same_verb_calls_fold`, `a_subagent_task_card_expands_nested_tool_calls`,
+  `attach_control_accepts_one_image_and_rejects_the_rest`, `enter_sends_and_shift_return_inserts_a_newline`,
+  `the_composer_answers_the_editing_chords_of_its_platform`,
+  `the_composer_moves_the_caret_a_row_with_its_platforms_keys`.
+- `chat::composer_height::tests::every_open_chat_takes_a_new_maximum`,
+  `chat::session_panel::trace::tests::the_card_asks_for_no_frame_but_its_own`.
+- `ely_ui::tests`: `a_delete_to_line_end_is_one_undo_step`,
+  `a_detached_field_first_drawn_in_an_inactive_window_reports_focus_once_it_activates`,
+  `a_detached_field_focused_before_its_first_frame_reports_focus_and_types`,
+  `a_host_binding_registered_after_ely_wins_and_can_hand_the_key_on`,
+  `a_host_binding_still_wins_in_a_multi_line_field`, `a_long_multi_line_draft_scrolls_under_the_wheel`,
+  `a_wheel_scrolls_a_draft_alone_and_reaches_the_page_at_its_limit`,
+  `a_wheeled_draft_follows_the_caret_again_on_the_next_edit`,
+  `ctrl_n_and_ctrl_p_do_not_move_a_single_line_field_the_way_down_and_up_do`,
+  `only_a_multi_line_field_names_the_multi_line_context`, `reset_text_starts_a_fresh_history`,
+  `the_delete_to_line_and_word_actions_delete_what_bezels_did`, `ely_init_binds_no_focus_keys`.
+- `ely::tests::a_theme_swapped_without_an_installer_reaches_both_consumers`.
+- `file_view::tests`: `escape_closes_find_then_a_hunk_and_leaves_the_cursors_until_none_is_open`,
+  `revealing_a_line_scrolls_it_into_view`,
+  `the_pointer_sliding_from_the_code_onto_the_find_bar_drops_the_card`.
+- `settings::agents_page::tests::the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size`,
+  `project_forms::tests::the_project_name_field_tracks_font_preferences_and_keeps_native_editing`.
+
+Task 10 ran the framed E2Es and capture sweeps against the pre-sync tree and this one and read every
+pair that differs (the method and its limit are in `differences.md`, which the PR description carries). Several rows above say
+"unproven" or "runs at Task 8" where no test asserts the output; Task 10 closed them by capture
+(the output is on screen in a green run, which is weaker than an assertion):
+
+- Proven by capture: rows 13 (dialog text colour), 25 (`Alert::content`), 54 (`row_frame`, the effort
+  list), 22, 29, 30, 31, 32, 33, 35, 36, 44, 45, 171 (the chat captures: avatars, tool groups, thinking
+  label and glyph, send and stop, permission selectors, composer colours and hint, a long system
+  line), 47 to 57 and 172 to 175 (the composer menus), 70 (`composer_resize`), 93 to 96, 98, 116, 128,
+  132, 135 and 148, 149, 151, 154 (editor E2E scenarios and frames), the horizontal bar selector and
+  the sticky and hunk clipping (probe step 7 and frames).
+- Row 107 (`init_editor`) is proven: the 47 editor-e2e scenarios, `ely_editor_probe`, and
+  `ely_init_binds_no_focus_keys`.
+- Row 6, facade side: the draw path is proven (every icon in every capture, and `ely_chat_probe`
+  through `Assets::icon`). `Assets::list` and the load-miss branch never run (no in-tree caller of
+  either), so a missing icon would show as an empty box.
+
+Hand checks owed (nothing automated holds them; do not read these rows as proven):
+
+- Row 19, hover mode: focus the terminal, move the mouse over a scroll bar, a tooltip trigger and a
+  hover card without clicking. Each must react, the tooltip after its delay.
+- Row 84, compact tabs: on the change-requests tab, drag the right panel narrow until the tabs lose
+  their labels. A tab with no label must stay icon-only.
+- Row 81, on a Mac: Ctrl-K in a chat composer and in the file editor deletes to the line end; in a
+  terminal it still reaches readline.
+- Rows 75 to 77, on a Mac: the composer answers `cmd-backspace`, the emacs chords and `ctrl-n` and
+  `ctrl-p` (the platform's tests run only in the release gate).
+- Row 124: in the editor press the mouse in text, drag out of the window, release outside and come
+  back. No selection follows the pointer.
+- Row 143: with the perf trace on, `CodeEditor.render` spans appear and carry no text.
+- Typewriter room (new code in `Rows`): Settings, Editor, turn typewriter scrolling on and type below
+  the fold. The caret line stays about a third from the bottom.
+- Section 6.4 (a), dialog Enter: open the discard dialog and hold Enter. It confirms once, not twice.
+- Section 6.4 (f), the horizontal wheel: in a short file (no line wider than the column) a purely
+  horizontal wheel scrolls the rows; an event with a vertical delta is left to the list.
+- On Mac and Windows, the owed checks of the PR: composer chords, a long draft under the wheel, the
+  effort list, a dialog's Enter, and the editor's sideways scroll, hard tabs and find.
+
+## Visible changes accepted by the sync
+
+Three things changed on screen, proven by captures and traced to upstream (details and the
+frames: Task 10's `differences.md`, F1, F2 and D1). All three are pending Enzo's approval; none is
+overridden locally.
+
+- F1, status bar items 2 px wider and 2 px taller: upstream `2d827752`
+  (`crates/ely-core/src/shell/bars.rs`, `StatusBarItem::render`) gives a clickable item a
+  transparent 1 px border and a focus ring. Every editor status row's text sits 1, 3 and 5 px further
+  left, and the popover or list above an item opens 1 px higher. Proven by a revert (17 of 23 frames
+  identical to before). The same commit makes the item a Tab stop, inert in Sirio (nothing binds
+  `focus_next`; the item's mouse-down prevents default), so the ring is never drawn, only the border.
+  The override, if wanted, is two lines in `ely-core` or the facade.
+- F2, tooltips in the theme font: `crates/ely-core/src/primitives/tooltip.rs:30` sets the theme's font
+  family. A tooltip's label is a little narrower and a long one can wrap at another word.
+- D1, a dialog focuses its first control: its focus ring or caret shows a frame after opening, and
+  whatever sat behind loses its focus look (spec 5.4's re-decided row 4, upstream's change log).
+  Related and listed with row 17: Enter confirms on press, not release.
