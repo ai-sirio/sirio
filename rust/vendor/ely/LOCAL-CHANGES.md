@@ -808,14 +808,15 @@ is present by construction in the verbatim files.
 - Row 2 (local `mod.rs` files declaring only the closure): dropped. Every upstream module is
   vendored whole and the declared sets are upstream's.
 - Row 3 (`init_chat` early return): kept, in the facade's `init_chat` (`has_global::<theme::Theme>()`,
-  then `Theme::init` and `forms::bind_keys`). Proof: `ely_ui::tests::ely_init_binds_no_focus_keys`
-  runs the facade's init.
+  then `Theme::init` and `forms::bind_keys`). Proof (indirect): `ely_ui::tests::ely_init_binds_no_focus_keys`
+  runs the facade's init but asserts row 4, not the early return; no test calls `init_chat` twice.
 - Row 4 (no global Tab, Shift-Tab or F6): kept by never calling upstream's `setup()`, which binds them
   under `ElyFocus`. Proof (ran): `ely_ui::tests::ely_init_binds_no_focus_keys` (passed on the old crate
   and passes after the switch).
 - Row 5 (no eager asset validation): kept; the facade calls neither upstream's `init` nor
-  `assets::missing`. Proof: `ely_chat_probe` in Task 8's fix round, which loads icons through the
-  facade's `Assets`.
+  `assets::missing`, which reading the facade's `lib.rs` shows. Proof (indirect): `ely_chat_probe` in
+  Task 8's fix round loads icons through the facade's `Assets`; it does not show the absence of a
+  validation pass.
 - Rows 6, 7, 8: see "Icons and assets" under the `ely-core` hooks.
 - Rows 9, 10, 11, 12 (the image-source helper, the code colours, the palette search helpers, `tint`):
   absorbed. Upstream makes them public where the old crate carried copies
