@@ -8,7 +8,7 @@ use ely_core::{
 use ely_editor as editor;
 
 mod blocks;
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod clock;
 mod contents;
 mod counts;

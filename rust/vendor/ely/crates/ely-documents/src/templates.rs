@@ -348,7 +348,7 @@ impl RenderOnce for TemplatePicker {
     }
 }
 
-#[cfg(all(test, feature = "test-support"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

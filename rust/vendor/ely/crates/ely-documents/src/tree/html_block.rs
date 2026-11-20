@@ -370,6 +370,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn nested_tables_read_in_linear_time() {
         let source = |n: usize| {
@@ -388,6 +389,7 @@ mod tests {
         assert!(large < small * 8, "{small:?} then {large:?}");
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn hostile_html_reads_in_linear_time() {
         let sources = |n: usize| {
@@ -420,17 +422,19 @@ mod tests {
         assert!(large < small * 8, "{small:?} then {large:?}");
     }
 
-    #[cfg(feature = "test-support")]
     #[test]
     fn references_and_long_runs_read_as_a_browser_reads_them() {
         let line = html("<div>&notit; &amp &ampx &lt3 &nope;</div>").expect("text");
         assert_eq!(line.text, "¬it; & &x <3 &nope;");
-        let amps = "&".repeat(1 << 18);
-        let started = web_time::Instant::now();
-        let line = html(&format!("<div>{amps}</div>")).expect("text");
-        assert_eq!(line.text.len(), amps.len());
-        let spent = started.elapsed();
-        assert!(spent.as_secs() < 2, "256 KiB took {spent:?}");
+        #[cfg(feature = "test-support")]
+        {
+            let amps = "&".repeat(1 << 18);
+            let started = web_time::Instant::now();
+            let line = html(&format!("<div>{amps}</div>")).expect("text");
+            assert_eq!(line.text.len(), amps.len());
+            let spent = started.elapsed();
+            assert!(spent.as_secs() < 2, "256 KiB took {spent:?}");
+        }
     }
 
     #[test]

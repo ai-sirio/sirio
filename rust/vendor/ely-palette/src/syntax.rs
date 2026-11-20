@@ -17,8 +17,8 @@ impl SyntaxTheme {
     /// Its colors in `mode`.
     pub fn of(&self, mode: Mode) -> Syntax {
         match mode {
-            Mode::Light => self.light.clone(),
-            Mode::Dark => self.dark.clone(),
+            Mode::Light => self.light,
+            Mode::Dark => self.dark,
         }
     }
 }

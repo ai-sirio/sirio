@@ -3,6 +3,8 @@ artifacts/
 .swiftpm/
 App/Info.plist
 build/
+# Upstream Ely's markdown/build/ module is source: the rule above would hide it.
+!/rust/vendor/ely/crates/ely-documents/src/markdown/build/
 .tokensave/
 .superpowers/
 .worktrees/

@@ -9,7 +9,7 @@ use gpui::{App, AssetSource, Global, Result, SharedString};
 
 pub use ely_core::{
     buttons, data_display, feedback, forms, layout, lists, menus, motion, navigation, overlays,
-    primitives, theme, typography,
+    primitives, shell, theme, typography,
 };
 
 pub use ely_agent as agent;

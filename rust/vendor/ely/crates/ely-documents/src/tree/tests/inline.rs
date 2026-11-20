@@ -271,17 +271,20 @@ fn a_close_rebuilds_at_most_three_alike() {
     };
     assert!(bold(z), "the rebuilt `b` still holds z: {text:?}");
     // Past `DEEPEST`; rebuilding every `b` was quadratic.
-    let texts = [source(1 << 11), source(1 << 13)];
-    let mut best = [std::time::Duration::MAX; 2];
-    for _ in 0..5 {
-        for (text, best) in texts.iter().zip(&mut best) {
-            *best = (*best).min(crate::clock::spent(|| {
-                parse(text);
-            }));
+    #[cfg(feature = "test-support")]
+    {
+        let texts = [source(1 << 11), source(1 << 13)];
+        let mut best = [std::time::Duration::MAX; 2];
+        for _ in 0..5 {
+            for (text, best) in texts.iter().zip(&mut best) {
+                *best = (*best).min(crate::clock::spent(|| {
+                    parse(text);
+                }));
+            }
         }
+        let [small, large] = best;
+        assert!(large < small * 8, "{small:?} then {large:?}");
     }
-    let [small, large] = best;
-    assert!(large < small * 8, "{small:?} then {large:?}");
 }
 
 #[test]
@@ -339,26 +342,29 @@ fn a_crossed_close_keeps_marks_nested_and_linear() {
             (5..6, Style::Underline)
         ]
     );
-    let source = |n: usize| {
-        format!(
-            "a {}<pre>{}{} z",
-            "<i>".repeat(n),
-            "<b>".repeat(n),
-            "</i>".repeat(n)
-        )
-    };
     // Both past `DEEPEST`, where each tag's cost is bounded.
-    let texts = [source(1 << 11), source(1 << 13)];
-    let mut best = [std::time::Duration::MAX; 2];
-    for _ in 0..5 {
-        for (text, best) in texts.iter().zip(&mut best) {
-            *best = (*best).min(crate::clock::spent(|| {
-                parse(text);
-            }));
+    #[cfg(feature = "test-support")]
+    {
+        let source = |n: usize| {
+            format!(
+                "a {}<pre>{}{} z",
+                "<i>".repeat(n),
+                "<b>".repeat(n),
+                "</i>".repeat(n)
+            )
+        };
+        let texts = [source(1 << 11), source(1 << 13)];
+        let mut best = [std::time::Duration::MAX; 2];
+        for _ in 0..5 {
+            for (text, best) in texts.iter().zip(&mut best) {
+                *best = (*best).min(crate::clock::spent(|| {
+                    parse(text);
+                }));
+            }
         }
+        let [small, large] = best;
+        assert!(large < small * 8, "{small:?} then {large:?}");
     }
-    let [small, large] = best;
-    assert!(large < small * 8, "{small:?} then {large:?}");
 }
 
 #[test]
