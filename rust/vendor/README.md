@@ -21,6 +21,8 @@ hunks: that each hunk is the one its section describes is a review by hand, and 
 that keeps Sirio's `ely_gpui_component::*` paths over the vendored crates, with `init_chat`,
 `init_editor` and the `Assets` that serve the `ely/icons/` names.
 
+`pulldown-cmark/` is upstream Ely's patched pulldown-cmark 0.13.6 (`vendor/pulldown-cmark` at `8d7723ec`), taken verbatim and wired through `[patch.crates-io]` (L7 in `ely/LOCAL-CHANGES.md`). It is what two `ely-documents` tests need; `ely/check-vendor.sh` fails on any difference from upstream.
+
 `ely-palette/` holds Ely's palette and syntax colours, re-extracted from `ely-core`'s theme files
 at that rev, into a small crate, so a host's theme crate can use Ely's palette without compiling
 Ely's components; `ely-core` re-exports those types at their original paths.

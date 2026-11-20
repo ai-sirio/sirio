@@ -71,7 +71,6 @@ describes is a review by hand.
 - `crates/ely-documents/Cargo.toml`
 - `crates/ely-documents/src/lib.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
-- `crates/ely-documents/src/markdown/tex/tests.rs`
 - `crates/ely-documents/src/math.rs`
 - `crates/ely-documents/src/modes.rs`
 - `crates/ely-documents/src/picture.rs`
@@ -148,13 +147,23 @@ list is what the check accepts as different from upstream; anything else differi
 - `crates/ely-collab/Cargo.toml`
 - `crates/ely-charts/Cargo.toml`
 
-### Ignored tests
+### Upstream's patched pulldown-cmark (L7)
 
-Two `ely-documents` tests of upstream's `e71b644b` need upstream's patched pulldown-cmark. Each
-gains `#[ignore = "needs upstream's patched pulldown-cmark; step 2"]` and nothing else.
+Two `ely-documents` tests of upstream's `e71b644b` (`markdown::tex::tests::a_note_in_a_markdown_link_frees_the_math_after_it`
+and `tree::tests::inline::a_link_around_a_footnote_reference_stays_a_link`) need upstream's patched
+pulldown-cmark. They were `#[ignore]`d until this change; the `#[ignore]` lines are gone and those two
+`tex/tests.rs` no longer differs from upstream (`tree/tests/inline.rs` still does, for the reasons in its other sections).
 
-- `crates/ely-documents/src/markdown/tex/tests.rs`
-- `crates/ely-documents/src/tree/tests/inline.rs`
+What: `rust/vendor/pulldown-cmark` is upstream's `vendor/pulldown-cmark` at `8d7723ec` (0.13.6, 47 files),
+taken verbatim, wired through `[patch.crates-io]` in `rust/Cargo.toml` (and listed in the workspace
+`exclude`). `Cargo.lock`'s `pulldown-cmark` entry becomes 0.13.6 with no registry `source`. Nothing in
+it differs from upstream, and `check-vendor.sh` also compares this directory with upstream's: any
+differing path (changed, or on one side only) fails, since this change is taken whole and has no
+differing-paths entry.
+
+Proof: `cd rust && cargo nextest run -p ely-documents --features test-support -E 'test(a_note_in_a_markdown_link_frees_the_math_after_it) | test(a_link_around_a_footnote_reference_stays_a_link)'`
+failed both tests with the `#[ignore]`s removed and registry 0.13.5, and passes both (2 run, 2 passed)
+with the vendored 0.13.6; `cargo nextest run -p sirio_markdown` runs 65 tests, all passing, before and after.
 
 ### The palette split (`ely-palette`), rows 58 to 60
 
@@ -886,7 +895,7 @@ Outcome: local change, re-decided against the featureless build. Proof: `cd rust
 -p ely-git -p ely-documents --no-run` and `cargo nextest run -p ely-core -p ely-chat -p ely-agent
 -p ely-editor -p ely-collab -p ely-charts --no-run` both exit 0 with no error and no warning; the
 second needed no further gate. The featureless run is `ely-git` 21 tests and `ely-documents` 159, all
-passing, with the step-2 pair (see "Ignored tests") skipped. With `--features test-support`,
+passing, with nothing skipped. With `--features test-support`,
 `-p ely-palette -p ely-documents -p ely-core` runs 1193 tests, all passing, 2 skipped.
 
 ## Timing tests off the featureless build
@@ -900,7 +909,7 @@ through `clock::spent` ("four times the input in at most eight times the time"; 
 moves a CPU-time ratio, through cache and frequency effects). Each such assertion takes
 `#[cfg(feature = "test-support")]`, so it compiles only with the crate's `test-support` feature, and
 the closure check, which runs with that feature, still runs them. This is not an `#[ignore]`: the
-spec's two ignores (see "Ignored tests" above) are untouched.
+spec's two ignores are gone (see L7).
 
 A test that carries behaviour assertions besides its timing keeps them in the featureless run: the gate
 is on the timing statements only, and nothing else in the test changes.
