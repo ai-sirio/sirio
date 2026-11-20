@@ -756,8 +756,14 @@ fn plain_text_parts_follow_the_drawing_order() {
         text.text,
         "Title\n\nHello bold and link.\n\nquoted\n\nlet a = 1;\n\n\
          • one\n  ◦ nested\n[x] done\n[ ] todo\n\n3. three\n4. four\n\n\
-         h1\nh2\na\nb\n\nx^2\n\nNote\nin alert\n\nInline y math.\n\nNote¹.\n\n[1]\nthe note"
+         h1\th2\na\tb\n\nx^2\n\nNote\nin alert\n\nInline y math.\n\nNote¹.\n\n[1]\nthe note"
     );
+    // A table copies as a spreadsheet takes it, and each cell is still its own part.
+    let table = build("| a | b |\n|---|---|\n| c | d |\n", &mut plain(Surface::Preview));
+    assert_eq!(table.text.text, "a\tb\nc\td");
+    assert_eq!(table.text.parts.len(), 4);
+    let seps: Vec<_> = table.text.parts.iter().map(|part| part.sep).collect();
+    assert_eq!(seps, ["", "\t", "\n", "\t"]);
     // A list marker leads the text it belongs to, and says how long it is.
     let leads: Vec<_> = text
         .parts
