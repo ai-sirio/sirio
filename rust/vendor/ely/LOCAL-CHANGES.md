@@ -54,6 +54,7 @@ describes is a review by hand.
 - `crates/ely-core/src/menus/mod.rs`
 - `crates/ely-core/src/menus/panel.rs`
 - `crates/ely-core/src/navigation/tabs.rs`
+- `crates/ely-core/src/navigation/toc.rs`
 - `crates/ely-core/src/overlays/dialog_keys.rs`
 - `crates/ely-core/src/overlays/dialog.rs`
 - `crates/ely-core/src/overlays/dialogs.rs`
@@ -73,12 +74,19 @@ describes is a review by hand.
 - `crates/ely-documents/src/markdown/tex/tests.rs`
 - `crates/ely-documents/src/math.rs`
 - `crates/ely-documents/src/modes.rs`
+- `crates/ely-documents/src/picture.rs`
+- `crates/ely-documents/src/render/blocks.rs`
 - `crates/ely-documents/src/render/math_text.rs`
 - `crates/ely-documents/src/render.rs`
 - `crates/ely-documents/src/render/select.rs`
+- `crates/ely-documents/src/render/table.rs`
+- `crates/ely-documents/src/render/tests.rs`
+- `crates/ely-documents/src/tests.rs`
 - `crates/ely-documents/src/tree/emoji.rs`
 - `crates/ely-documents/src/tree/html_block.rs`
+- `crates/ely-documents/src/tree/mod.rs`
 - `crates/ely-documents/src/tree/sources.rs`
+- `crates/ely-documents/src/tree/tests.rs`
 - `crates/ely-documents/src/tree/tests/inline.rs`
 - `crates/ely-editor/Cargo.toml`
 - `crates/ely-editor/src/anchors.rs`
@@ -796,6 +804,49 @@ Outcomes:
   deleted-hunk and ghost rows' clip. The wheel fallback added to row 161 (a pure horizontal wheel scrolls the
   rows while nothing is wide) has its proof (ran): `ely-documents` `document::tests::scroll::source_margins_scroll`.
 - Row 167: re-applied (`measured` is `pub(super)`). Proof: the closure build (`view.rs` calls it).
+
+## ely-documents host seams (Markdown on ely-documents, rows L1 to L6 and L8)
+
+Spec `docs/superpowers/specs/2026-11-20-ely-markdown-documents-design.md` §5.2. Sirio parses once,
+rewrites the tree and owns selection, links and menus, so the vendored renderer gains opt-in seams.
+Each is off unless a host asks; an upstream caller draws exactly as before. Paths: `ely-documents`
+`render.rs`, `render/select.rs`, `render/blocks.rs`, `render/table.rs`, `picture.rs`, `tree/mod.rs`,
+`lib.rs` and `ely-core` `navigation/toc.rs`. `Node::Image` gained `width`, so its in-crate literals
+in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests.rs` (`mod host`),
+`tree/tests.rs` and `toc.rs`.
+
+- L1 `TextGather` (trait, re-exported) and `MarkdownRenderer::gather(Rc<dyn TextGather>)`. Ely's private
+  `Gather` implements it by delegating to its inherent methods. With a host gather the body is not wrapped
+  by `select::selectable` (no `track_focus`, no mouse or key handler, `selectable` ignored), a picture's
+  right press is off, and a linked picture takes no `tab_index`, so a press on it moves no focus. Why: Sirio
+  owns selection (§5.3). Proofs: `a_host_gather_sees_every_drawn_text_in_order`,
+  `a_host_gather_body_takes_no_focus` (it also checks that an Ely selectable body and an unhosted linked
+  picture do take focus).
+- L2 `parse_markdown(source)` (today's crate-private `parse`) and `parse_markdown_with(source, html_block)`:
+  `Reader` carries the hook and `block` asks it for each HTML node, at any depth, replacing it when it
+  returns some. Why: Sirio rewrites HTML blocks into blocks (details, images) before drawing. Proof:
+  `parse_markdown_with_replaces_html_blocks_at_any_depth`.
+- L3 `Node::Image { width: Option<f32> }`; the reader sets `None`; `Picture` draws at `width` logical pixels
+  when some, `max_w_full` kept. Why: sized HTML images. Proof: `a_picture_with_a_width_draws_that_wide`.
+- L4 `MarkdownRenderer::web_pictures(bool)` (default off): on, `http(s)://` and `//` addresses load through
+  gpui's `ImageAssetLoader` with `Resource::Uri`; off, the "Not loaded from the web" note stays. The note is
+  wrapped in a block `div` with a debug selector `markdown-picture-web-note` for the test (layout unchanged).
+  Why: the web-image policy (§5.5) is the host's. Proof: `web_pictures_off_keeps_the_note_on_drops_it`.
+- L5 `MarkdownRenderer::diagrams(bool)` (default on): off, `mermaid` fences go to the `code` hook, else the
+  default code path. `ely-chat`'s `StreamingMarkdown` keeps drawing diagrams. Proof:
+  `diagrams_off_hands_mermaid_to_the_code_hook` (it also checks that on, the hook is not called).
+- L6 `Sections::reveal(&SharedString) -> bool`: the arithmetic of `TableOfContents`' click (the click itself
+  is untouched); false when no anchor of that name has drawn. Proofs:
+  `reveal_scrolls_a_known_section_to_the_top`, `reveal_of_an_unknown_section_is_false`.
+- L8 `MarkdownRenderer::table_frame(Fn(ElementId, AnyElement) -> AnyElement)`: when set, each table is a
+  `display: grid` with `grid_cols_max_content(columns)` (columns size to their widest cell and align across
+  rows; short rows are padded with empty cells), `flex_none`, drawn at natural width and passed to the frame
+  closure, which must place it in a flex row or scroll area (a block parent would stretch it). Cells wear the
+  row look themselves (head fill, top border). The grid has debug selector `markdown-table-<n>`. Unset,
+  upstream's flex rows are unchanged. Proofs: `a_framed_table_keeps_its_natural_width_and_its_columns`,
+  `framed_table_off_keeps_upstreams_wrapping`.
+- Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
+  (the facade is outside `check-vendor.sh`).
 
 ## Featureless test build
 

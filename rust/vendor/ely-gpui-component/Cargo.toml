@@ -17,6 +17,7 @@ test-support = [
     "ely-agent/test-support",
     "ely-editor/test-support",
     "ely-git/test-support",
+    "ely-documents/test-support",
 ]
 
 [dependencies]
@@ -25,6 +26,7 @@ ely-chat.workspace = true
 ely-agent.workspace = true
 ely-editor.workspace = true
 ely-git.workspace = true
+ely-documents.workspace = true
 gpui.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
