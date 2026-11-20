@@ -28,6 +28,9 @@ pub(crate) struct Part {
     /// gather's own text starts that far into the part.
     pub lead: usize,
     pub kind: PartKind,
+    /// The separator written before this part (empty for the first): a blank line between
+    /// blocks, a line end between texts of one block, a tab between the cells of a table row.
+    pub sep: &'static str,
 }
 
 /// Whether the renderer pushes a text to the gather.
@@ -46,19 +49,23 @@ struct Walk {
     lead: String,
     /// Lists open around the node: a marker's indent and its bullet.
     lists: usize,
-    parts: Vec<(String, usize, PartKind)>,
+    parts: Vec<(String, usize, PartKind, &'static str)>,
+    /// The separator for the next part pushed, when it is not a line end.
+    next_sep: Option<&'static str>,
 }
 
 impl Walk {
     fn drawn(&mut self, text: &str) {
         let lead = std::mem::take(&mut self.lead);
+        let sep = self.next_sep.take().unwrap_or("\n");
         self.parts
-            .push((format!("{lead}{text}"), lead.len(), PartKind::Drawn));
+            .push((format!("{lead}{text}"), lead.len(), PartKind::Drawn, sep));
     }
 
     /// A silent text takes no marker: the renderer does not push it.
     fn silent(&mut self, text: &str) {
-        self.parts.push((text.to_owned(), 0, PartKind::Silent));
+        let sep = self.next_sep.take().unwrap_or("\n");
+        self.parts.push((text.to_owned(), 0, PartKind::Silent, sep));
     }
 
     fn nodes(&mut self, nodes: &[Node]) {
@@ -114,9 +121,19 @@ impl Walk {
             }
             Node::FrontMatter { text, .. } => self.silent(text),
             // Quotes and tables hold blocks; a rule and a picture hold no text.
-            Node::Quote(_) | Node::Table { .. } => {
+            Node::Quote(_) => {
                 for body in bodies(node) {
                     self.nodes(body);
+                }
+            }
+            // A row reads as a spreadsheet row: cells by tabs, rows by line ends.
+            Node::Table { head, rows, .. } => {
+                for row in std::iter::once(head).chain(rows) {
+                    for (column, cell) in row.iter().enumerate() {
+                        self.next_sep = Some(if column == 0 { "\n" } else { "\t" });
+                        self.nodes(cell);
+                        self.next_sep = None;
+                    }
                 }
             }
             Node::Rule | Node::Image { .. } => {}
@@ -134,19 +151,21 @@ pub(crate) fn plain_text(nodes: &[Node]) -> PlainText {
         if walk.parts.is_empty() {
             continue;
         }
-        if !std::mem::take(&mut first) {
-            out.text.push_str("\n\n");
-        }
-        for (ix, (text, lead, kind)) in walk.parts.into_iter().enumerate() {
-            if ix > 0 {
-                out.text.push('\n');
-            }
+        let between = !std::mem::take(&mut first);
+        for (ix, (text, lead, kind, sep)) in walk.parts.into_iter().enumerate() {
+            let sep = match (ix, between) {
+                (0, true) => "\n\n",
+                (0, false) => "",
+                _ => sep,
+            };
+            out.text.push_str(sep);
             let start = out.text.len();
             out.text.push_str(&text);
             out.parts.push(Part {
                 range: start..out.text.len(),
                 lead,
                 kind,
+                sep,
             });
         }
     }
