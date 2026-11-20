@@ -16673,6 +16673,17 @@ impl SirioWorkspace {
                         .hover_card_worktree
                         .map(|path| path.to_string_lossy().into_owned()),
                     "bell": shell.bell,
+                    "cards": shell
+                        .cards
+                        .iter()
+                        .map(|card| serde_json::json!({
+                            "worktree": card.worktree.to_string_lossy(),
+                            "name": card.name,
+                            "fallback": card.fallback,
+                            "missing": card.missing,
+                            "pills": card.pills,
+                        }))
+                        .collect::<Vec<_>>(),
                 })
                 .to_string(),
             ));
@@ -24373,11 +24384,13 @@ impl SirioWorkspace {
                     "sidebarNewChat": sidebar_probe.new_chat.map(rect),
                     "sidebarSectionHeader": sidebar_probe.section_header.map(rect),
                     "sidebarSection": sidebar_probe.section.map(rect),
+                    "sidebarSectionFolder": sidebar_probe.section_folder.map(rect),
                     "sidebarSectionAdd": sidebar_probe.section_add.map(rect),
                     "sidebarSectionMenu": sidebar_probe.section_menu.map(rect),
                     "sidebarHeaderExpandAll": sidebar_probe.header_expand_all.map(rect),
                     "sidebarHeaderCollapseAll": sidebar_probe.header_collapse_all.map(rect),
                     "sidebarCard": sidebar_probe.card.map(rect),
+                    "sidebarGuide": sidebar_probe.guide.map(rect),
                     "sidebarCardStar": sidebar_probe.card_star.map(rect),
                     "sidebarCardRemove": sidebar_probe.card_remove.map(rect),
                     "sidebarHoverCard": sidebar_probe.hover_card.map(rect),
@@ -30787,11 +30800,8 @@ fn sidebar_projects_with_comments(
                 .worktrees
                 .iter()
                 .map(|worktree| SidebarWorktree {
-                    branch: if catalog.is_worktree_missing(&worktree.path) {
-                        format!("{} (missing)", worktree.branch)
-                    } else {
-                        worktree.branch.clone()
-                    },
+                    branch: worktree.branch.clone(),
+                    missing: catalog.is_worktree_missing(&worktree.path),
                     path: worktree.path.clone(),
                     is_primary: worktree.is_primary,
                     comment: comments

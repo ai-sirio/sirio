@@ -1,5 +1,5 @@
-//! The hover card a worktree card opens beside the sidebar: its branch, how
-//! long ago it last moved, its project and one line per tab. Read-only; it
+//! The hover card a worktree card opens beside the sidebar: its name, how long
+//! ago it last moved, the worktree's comment, its project and one line per tab. Read-only; it
 //! never takes focus and has no click handlers.
 
 use std::time::Duration;
@@ -196,7 +196,7 @@ fn lead(pill: &SidebarPill, theme: &Theme) -> AnyElement {
     }
 }
 
-/// The card's content: branch and time, project, a rule, one line per tab.
+/// The card's content: name and time, comment, project, a rule, one line per tab.
 pub(super) fn render_card(
     row: &SidebarRow,
     project_name: &str,
@@ -205,6 +205,7 @@ pub(super) fn render_card(
     theme: &Theme,
 ) -> AnyElement {
     let last_event = pills.iter().filter_map(|pill| pill.last_event_at).max();
+    let (name, fallback) = Sidebar::card_name(row);
     div()
         .w(px(HOVER_CARD_WIDTH))
         .p(px(12.0))
@@ -226,9 +227,30 @@ pub(super) fn render_card(
                     div()
                         .min_w_0()
                         .flex_1()
-                        .line_clamp(2)
+                        .flex()
+                        .gap(px(4.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(row.title.clone()),
+                        .child(
+                            div()
+                                .min_w_0()
+                                .line_clamp(2)
+                                .text_color(if fallback {
+                                    theme.ely.fg_muted
+                                } else {
+                                    theme.ely.fg
+                                })
+                                .child(name),
+                        )
+                        .when(row.missing, |this| {
+                            this.child(
+                                div()
+                                    .debug_selector(|| "sidebar-hover-card-missing".to_owned())
+                                    .flex_none()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(theme.ely.fg_subtle)
+                                    .child("(missing)"),
+                            )
+                        }),
                 )
                 .when_some(last_event, |this, at| {
                     this.child(
@@ -243,6 +265,20 @@ pub(super) fn render_card(
                             .child(sessions::relative_time(now_ms, at)),
                     )
                 }),
+        )
+        // The comment a person left on the worktree (F-SID-11): the card's
+        // second line used to carry it.
+        .when_some(
+            row.comment.as_deref().filter(|comment| !comment.is_empty()),
+            |this, comment| {
+                this.child(
+                    div()
+                        .debug_selector(|| "sidebar-hover-card-comment".to_owned())
+                        .text_color(theme.ely.fg_muted)
+                        .line_clamp(2)
+                        .child(comment.to_owned()),
+                )
+            },
         )
         .child(
             div()

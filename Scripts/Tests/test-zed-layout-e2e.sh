@@ -11,7 +11,7 @@ set -eEuo pipefail
 #    1  a fresh database: at 1470x833 and at 1710x987 the sidebar is 300 and the
 #       right panel 240, the two centre halves 455.5 / 575.5 wide (+-1), the title
 #       bar 34, the tab strips 32, the status bar 30, the right header 32, a
-#       sidebar section header 31 and a two-line card 53 high, the right
+#       sidebar section header 31 and a one-line card 31 high, the right
 #       header's last icon and the Secondary's close button inside their
 #       parents, the sidebar's card filling the panel less its border; at
 #       1100x800 the halves are exactly 320 wide and the columns do not
@@ -26,7 +26,7 @@ set -eEuo pipefail
 #    6  the divider: a real drag moves the halves, the ratio is saved, and a
 #       relaunch draws the same halves (the case that fails when the drag does
 #       not schedule the save)
-#    7  light theme, interface font 18: the exact heights at 18 (the card is 58),
+#    7  light theme, interface font 18: the exact heights at 18 (the card is 36),
 #       the light background really drawn (and the dark one in dark-1470), every
 #       key of shellRects drawn
 #    7b interface font back to 13, light, at 1710x987: the case 1 heights and
@@ -599,7 +599,7 @@ HEIGHTS=(
   'status.h|status.h|==|30'
   'rightHeader.h|rightHeader.h|==|32'
   'sidebarSection.h|sidebarSection.h|==|31'
-  'sidebarCard.h|sidebarCard.h|==|53'
+  'sidebarCard.h|sidebarCard.h|==|31'
 )
 INSIDE=(
   'rightHeaderLastIcon inside right (px to spare)|right.x + right.w - 1 - (rightHeaderLastIcon.x + rightHeaderLastIcon.w)|>=|0'
@@ -728,7 +728,7 @@ start 1470 833
 ZL measure 7 1470 "$ALL" \
   'titlebar.h|titlebar.h|==|34' 'primaryStrip.h|primaryStrip.h|==|32' 'secondaryStrip.h|secondaryStrip.h|==|32' \
   'status.h|status.h|==|30' 'rightHeader.h|rightHeader.h|==|32' \
-  'sidebarSection.h at font 18|sidebarSection.h|==|31' 'sidebarCard.h at font 18 (53 + 5 for the title line)|sidebarCard.h|==|58' \
+  'sidebarSection.h at font 18|sidebarSection.h|==|31' 'sidebarCard.h at font 18 (31 + 5 for the title line)|sidebarCard.h|==|36' \
   || fail "a measurement of 7 is wrong"
 capture light-1470-font18
 check_luma 7 light-1470-font18 ">"

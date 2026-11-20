@@ -141,6 +141,9 @@ nothing new. **(my call)**
 
 ### §3.5 Project row — 31 px
 
+> **Superseded** by `2026-11-20-sidebar-codex-rows-design.md` (§1a, §3.2):
+> the row has no band and no hairlines, and its folder lines up with New Chat.
+
 Replaces today's section-style project header. The height stays 31, the
 Zed-parity section-header height, rather than Codex's 30. **(my call)**
 
@@ -154,6 +157,10 @@ Zed-parity section-header height, rather than Codex's 30. **(my call)**
 - 8 px of space after an expanded project's last card.
 
 ### §3.6 Worktree card — 53 px, as today
+
+> **Superseded** by `2026-11-20-sidebar-codex-rows-design.md` (§1b–d, §3.3):
+> the card is one 31 px line with its pills on it, no second line, and a
+> guide line runs down each open project.
 
 Today's two-line card (`row.rs` `render_row`), with these changes:
 
@@ -236,6 +243,8 @@ Ely's `raise` (deferred draw), because the sidebar's root clips its children.
 (a width-animated rail with no sections). D keeps Sirio's own rows.
 
 ## §5 What must keep working
+
+> The card is 31 px now, not 53 (`2026-11-20-sidebar-codex-rows-design.md`).
 
 The anti-goals' list (§2), plus: the Zed-parity measures that do not change
 (sidebar width 300, card 53); `set_projects` carrying folds over by catalog id;

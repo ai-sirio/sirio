@@ -1,6 +1,7 @@
 //! The project row, drawn as a folder: an open folder while expanded, a closed
 //! one while folded. The folder is the fold signal, so there is no chevron and
-//! no worktree count; `+` and `⋯` show only under the pointer.
+//! no worktree count; `+` and `⋯` show only under the pointer. It sits on the
+//! sidebar's own background: no band, no hairlines.
 
 use super::*;
 use gpui::SharedString;
@@ -9,11 +10,12 @@ use gpui::SharedString;
 /// list. (The Projects / Sessions header over the list is 28.)
 pub(super) const SECTION_HEIGHT: f32 = 31.0;
 
-/// Where the first project row, its `+` and its three dots paint, for the
+/// Where the first project row, its folder, its `+` and its three dots paint, for the
 /// debug layout read. Clones share the cells.
 #[derive(Clone)]
 pub(super) struct SectionProbes {
     pub(super) row: ProbeCell,
+    pub(super) folder: ProbeCell,
     pub(super) add: ProbeCell,
     pub(super) menu: ProbeCell,
 }
@@ -44,14 +46,11 @@ pub(super) fn render_section(
         .relative()
         .h(px(SECTION_HEIGHT))
         .w_full()
-        .px(px(ROW_PAD_X))
+        .pl(px(PROJECT_PAD_LEFT))
+        .pr(px(ROW_PAD_X))
         .flex()
         .items_center()
-        .gap(px(6.0))
-        .bg(theme.ely.surface)
-        .border_t_1()
-        .border_b_1()
-        .border_color(theme.ely.border)
+        .gap(px(PROJECT_NAME_GAP))
         .text_size(theme.typography.scaled(13.0))
         .text_color(theme.ely.fg_muted)
         .cursor_pointer()
@@ -63,17 +62,8 @@ pub(super) fn render_section(
                 .absolute()
                 .inset_0(),
         )
-        // Reaches over the header's two hairlines: an absolute child spans
-        // the padding box, and the header's bounds are what the person sees.
         .when_some(probes.clone().map(|probes| probes.row), |this, cell| {
-            this.child(
-                gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
-                    .absolute()
-                    .top(px(-1.0))
-                    .bottom(px(-1.0))
-                    .left_0()
-                    .right_0(),
-            )
+            this.child(probe_canvas(&cell))
         })
         .on_click(move |_, _, cx| {
             collapse_entity.update(cx, |sidebar, cx| {
@@ -126,7 +116,11 @@ pub(super) fn render_section(
                         format!("sidebar-section-folder-closed-{row_id}")
                     }
                 })
+                .relative()
                 .flex_none()
+                .when_some(probes.clone().map(|probes| probes.folder), |this, cell| {
+                    this.child(probe_canvas(&cell))
+                })
                 .child(
                     EIcon::new(if expanded {
                         IconName::FolderOpen
@@ -155,7 +149,7 @@ pub(super) fn render_section(
                 })
                 .child(row.title)
                 .child(
-                    super::fade::fade_right(theme.ely.surface, super::fade::FADE_WIDTH)
+                    super::fade::fade_right(theme.ely.bg, super::fade::FADE_WIDTH)
                         .id(("sidebar-section-fade", row_id))
                         .debug_selector(move || format!("sidebar-section-fade-{row_id}")),
                 ),
@@ -253,12 +247,14 @@ mod tests {
                         branch: "main".to_string(),
                         path: PathBuf::from("/tmp/sirio"),
                         is_primary: true,
+                        missing: false,
                         comment: None,
                     },
                     SidebarWorktree {
                         branch: "feat/x".to_string(),
                         path: PathBuf::from("/tmp/sirio-feat-x"),
                         is_primary: false,
+                        missing: false,
                         comment: Some("redesign".to_string()),
                     },
                 ],
@@ -370,6 +366,7 @@ mod tests {
                 branch: format!("feature-{index}"),
                 path: root_path.join(format!("feature-{index}")),
                 is_primary: index == 0,
+                missing: false,
                 comment: None,
             })
             .collect();

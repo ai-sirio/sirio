@@ -706,7 +706,7 @@ Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 # (`surface layout read`'s `shellRects`, debug builds): the sidebar 300 and the
 # right panel 240, the two centre halves 455.5 / 575.5 wide (+-1) at 1470x833 /
 # 1710x987, the title bar 34, the tab strips 32, the status bar 30, the right
-# header 32, a sidebar section header 31 and a two-line card 53 high, the
+# header 32, a sidebar section header 31 and a one-line card 31 high, the
 # right header's last icon and the Secondary's close button inside their
 # parents, the sidebar's card inside the panel less its border; at 1100x800
 # the halves are laid out exactly 320 wide; at all three sizes the Secondary
@@ -726,30 +726,38 @@ Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 # <case>-2.json ...) and PID-matched captures in frames/.
 Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 
-# The sidebar in Codex's shell (spec 2026-11-17-sidebar-codex-shell-design.md
-# §3, §6) in a real, isolated Sirio under a private Xvfb, driven by real X
-# clicks, wheel turns and keys at the rects the app reports (`shellRects`'
-# sidebar keys) and read over the control socket (`surface attention read`'s
-# `sidebar` object: listFocused, filterShown, hoverCardRow, bell; and the served
-# `primary` flag of `project list`). Steps: the header, New Chat row, section
-# header, project row (31) and card (53) drawn at their heights; the project row
-# folds and unfolds; the project row and the section header change under the
+# The sidebar in Codex's shell (specs 2026-11-17-sidebar-codex-shell-design.md
+# §3, §6 and 2026-11-20-sidebar-codex-rows-design.md §5) in a real, isolated
+# Sirio under a private Xvfb, driven by real X clicks, wheel turns and keys at
+# the rects the app reports (`shellRects`' sidebar keys) and read over the
+# control socket (`surface attention read`'s `sidebar` object: listFocused,
+# filterShown, hoverCardRow, bell, cards; and the served `primary` flag of
+# `project list`). Steps: the header, New Chat row, section header, project row
+# (31) and one-line card (31) drawn at their heights; the project row draws no
+# band (one colour, the section header's), its folder is centred under New
+# Chat's icon, and a 1 px guide runs from its bottom to its last card's bottom
+# and stops there; the project row folds and unfolds (its cards and its guide
+# leave the list); the project row and the section header change under the
 # pointer, and each hover-only control (the row's + and three dots, expand all /
-# collapse all, the card's star and cross), cropped at its own rect from the layout
+# collapse all, the card's cross), cropped at its own rect from the layout
 # read, holds more than one colour under the pointer and exactly one at rest (the
 # frames/ keep the by-eye record); the title menu
 # switches to Sessions and back; the hover card opens beside the sidebar (4 px
 # past its visible right edge) and closes when the pointer leaves; the main
 # worktree is the Primary, a click on its star unsets it (served flag true then
-# false, the star crop changes) and a second click restores it; a session left
-# unread (a codex stub reports running then done in the other worktree) lights
-# the bell, whose menu selects that session's tab; Search shows the filter and
+# false, the star crop changes) and a second click restores it, the Primary's
+# star being drawn at rest and under the pointer; a session left unread (a
+# codex stub reports running then done in the other worktree) lights the bell,
+# whose menu selects that session's tab; Search shows the filter and
 # Esc hides it; a click on the centre pane, then a card, then the centre pane
 # moves listFocused false, true, false, and the list's left edge is the same
-# focused and unfocused (no focus ring is drawn); a second project of 22 worktrees makes
-# the list overflow, and on idle frames with the pointer off the list the bar's
-# strip differs between right after a wheel turn and 2.2 s later while the list
-# body does not (it fails when no bar is drawn). --display :N is a private Xvfb
+# focused and unfocused (no focus ring is drawn); a plain folder project's card
+# is named after its folder (fallback), and reads missing after the folder is
+# moved away and Sirio relaunched; a worktree with 9 tabs keeps its star inside
+# its 31 px card (its tabs opened over the control socket); a project of 40
+# worktrees makes the list overflow, and on idle frames with the pointer off
+# the list the bar's strip differs between right after a wheel turn and 2.2 s
+# later while the list body does not (it fails when no bar is drawn). --display :N is a private Xvfb
 # of at least 1600x1000 with Mesa's lavapipe; --appearance light|dark (run both);
 # --state-only runs with no display and checks only that the sidebar read is
 # reported; --out-dir DIR (must be empty) keeps transcript.log, app.log,

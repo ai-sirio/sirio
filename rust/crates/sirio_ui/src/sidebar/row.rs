@@ -36,9 +36,8 @@ pub struct SidebarPill {
 /// and the status spelled out in words at the end of the title line. The
 /// bloom carries both facts on its own — motion says whether work is in
 /// flight, tint says which state it settled into — so the column is gone and
-/// the words with it. `Idle` and the parked-agent count are the exception:
-/// neither is a state a bloom can draw, so they stay text (see
-/// `Sidebar::status_text`).
+/// the words with it. An idle worktree and the parked-agent count used to stay
+/// text; the pills on the line now show each agent, so those words went too.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RowStatusGlyph {
     /// No glyph at all.
@@ -107,6 +106,26 @@ impl Render for RowView {
         self.render_count = self.render_count.wrapping_add(1);
         let theme = Theme::get(cx).with_sidebar_typography();
         let inputs = self.inputs.clone();
+        // "(missing)" is measured so the name's slot can keep it inside, whatever the width.
+        let missing_width = if inputs.row.missing {
+            let text = "(missing)";
+            window
+                .text_system()
+                .layout_line(
+                    text,
+                    theme.typography.scaled(ROW_TITLE_FONT_SIZE),
+                    &[gpui::TextRun {
+                        len: text.len(),
+                        font: gpui::font(theme.typography.ui_family),
+                        color: theme.ely.fg_subtle,
+                        ..Default::default()
+                    }],
+                    None,
+                )
+                .width
+        } else {
+            px(0.0)
+        };
         Sidebar::render_row(
             inputs.row,
             inputs.index,
@@ -118,6 +137,7 @@ impl Render for RowView {
             inputs.first_card,
             inputs.removable,
             inputs.first_removable,
+            missing_width,
             self.sidebar.clone(),
             theme,
             window,
@@ -138,9 +158,9 @@ impl Sidebar {
     /// black, and a branch name was drawn very nearly invisible on the dark
     /// surface behind it (measured at peak luma 15 against a 13 background,
     /// while the sub-line right under it read 115). Every other string in
-    /// the row — the sub-line, the count, the status, the star — names its
-    /// own token, which is exactly why the defect showed up as "only the
-    /// branch names are black".
+    /// the row — "(missing)", the pills, the star — names its own token,
+    /// which is exactly why the defect showed up as "only the branch names
+    /// are black".
     ///
     /// A parked tab keeps the faint tone it always had: it is a record of
     /// what the worktree holds, not a live surface.
@@ -148,89 +168,39 @@ impl Sidebar {
         if parked { theme.ely.fg_subtle } else { theme.ely.fg }
     }
 
-    /// The words at the end of the title line — now only the states no bloom
-    /// can draw.
-    ///
-    /// Running, done, needs-input and error each have a bloom of their own
-    /// (`RowStatusGlyph`), and writing the word next to it said the same
-    /// thing twice in the row's narrowest space. What is left is the quiet
-    /// half: a worktree sitting idle, and how many agents are parked in one.
-    ///
-    /// Only a pill with a brand mark is an agent: a plain shell or a chat
-    /// with no agent picked is a tab, and counting it said "2 agents" over a
-    /// worktree that had none.
-    pub(crate) fn status_text(row: &SidebarRow) -> Option<String> {
-        let agents = row.pills.iter().filter(|pill| pill.brand.is_some()).count();
-        match row.agent_status {
-            Some(ActivityStatus::Idle) | None if agents > 1 => Some(format!("{agents} agents")),
-            Some(ActivityStatus::Idle) => Some("idle".to_owned()),
-            _ => None,
+    /// What a worktree card is called, and whether that is the fallback. A
+    /// plain folder has no branch (its one synthesized row carries an empty
+    /// one), so its card names the folder instead of drawing nothing.
+    pub(crate) fn card_name(row: &SidebarRow) -> (String, bool) {
+        if !row.title.trim().is_empty() {
+            return (row.title.clone(), false);
         }
+        let name = row.path.as_ref().map_or_else(String::new, |path| {
+            path.file_name().map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        });
+        (name, true)
     }
 
-    /// The card's second line.
-    ///
-    /// It used to be the checkout path, which is the one thing on the card
-    /// the reader already knows: every worktree under a project repeats the
-    /// same prefix, and the tail that tells them apart is the branch name
-    /// already spelled on the line above — so the line cost a row of height
-    /// to say nothing, and said it truncated. What earns that line is the
-    /// work: the name of the worktree's most recent task. The host already
-    /// names a tab from the first thing the user typed and then lets the
-    /// summarizer rewrite it (`title_from_prompt` and `apply_auto_title` in
-    /// `sirio`'s `main.rs`), and that name arrives here on the pill, so the
-    /// card reads as "what I was doing in this worktree".
-    ///
-    /// A worktree comment (F-SID-11) still wins — a person put it there on
-    /// purpose. With neither a comment nor a task the line is left empty
-    /// rather than falling back to the path.
-    pub(crate) fn sub_line_text(row: &SidebarRow) -> String {
-        row.comment
-            .as_deref()
-            .filter(|comment| !comment.is_empty())
-            .map(str::to_owned)
-            .or_else(|| Self::last_task_title(row))
-            .unwrap_or_default()
+    /// The card's name as one string, "(missing)" included, for the places
+    /// that read it as text (the Sessions view, the bell and the filter).
+    pub(crate) fn branch_text(row: &SidebarRow) -> String {
+        let mut text = Self::card_name(row).0;
+        if row.missing {
+            text.push_str(" (missing)");
+        }
+        text
     }
 
-    /// Which task the card names: the selected pill when the worktree has
-    /// one, because that is the tab the user is actually looking at, and
-    /// otherwise the last of the strip, which is where a newly opened tab
-    /// lands. Parked pills count — a worktree nobody has mounted this
-    /// session still remembers what was last open in it.
-    fn last_task_title(row: &SidebarRow) -> Option<String> {
-        row.pills
-            .iter()
-            .find(|pill| pill.selected)
-            .or_else(|| row.pills.last())
-            .map(|pill| pill.title.clone())
-            .filter(|title| !title.trim().is_empty())
-    }
-
-    /// Whether a row draws a second line at all.
-    ///
-    /// The sub-line used to lead with the checkout path, which every project
-    /// and worktree row had, so "is a card" and "has a path" were the same
-    /// question. #151 dropped the path — it was almost always truncated,
-    /// repeated the project prefix on every child, and bought its second
-    /// line for every row in the tree. What remains on that line is the
-    /// `Primary` pill and the F-SID-11 worktree comment, either of which may
-    /// be absent, so both the sub-line and the taller height that pays for
-    /// it now follow whether there is anything left to put there.
-    ///
-    /// The render and the height read this one predicate, so they cannot
-    /// drift into disagreeing about whether a row has two lines.
-    fn has_sub_line(row: &SidebarRow) -> bool {
-        matches!(row.kind, RowKind::Worktree)
-    }
-
-    /// The minimum row rhythm: a single-line row is 34px (an 18px title line
-    /// with 8px of padding above and 8px below); a card with a context line
-    /// is 53px (8 + 18 + 4 + 15 + 8). The drawn height adds only the
-    /// interface-font delta (`row_drawn_height`); titles never wrap.
+    /// The minimum row rhythm: a worktree card is one 31px line (name, pills
+    /// and the trailing seat), a single-line row is 34px (an 18px title line
+    /// with 8px of padding above and 8px below). The drawn height adds only
+    /// the interface-font delta (`row_drawn_height`); titles never wrap.
     pub(super) fn row_min_height(row: &SidebarRow) -> f32 {
         if row.kind == RowKind::Worktree {
-            CARD_TWO_LINE_HEIGHT
+            WORKTREE_CARD_HEIGHT
         } else {
             ROW_HEIGHT
         }
@@ -387,86 +357,104 @@ impl Sidebar {
     ) -> impl IntoElement {
         let row_id = row.id;
         let worktree_path = row.path.clone();
+        // The "+" sits outside the pills' clip, so the pills give way before it (only the card's
+        // own clip, at the narrowest sidebar, can cut it).
         div()
             .flex()
-            .flex_none()
-            .ml_auto()
+            .min_w_0()
             .items_center()
-            .gap(px(4.0))
-            .children(row.pills.iter().enumerate().map(|(index, pill)| {
-                let select_entity = entity.clone();
-                let tab_id = pill.tab_id;
-                let parked = pill.parked_tab;
-                let path = worktree_path.clone();
+            .gap(px(2.0))
+            .child(
+                // Clipped at its right edge when the name leaves it too little, so the
+                // trailing seat never leaves the card. The padding keeps a pill's
+                // status dot, which sits 2px outside the pill, from being cut.
                 div()
-                    .id(("sidebar-pill", row_id * 32 + index))
-                    .debug_selector(move || format!("sidebar-pill-{row_id}-{index}"))
-                    .relative()
-                    .w(px(Self::PILL_SIZE))
-                    .h(px(Self::PILL_SIZE))
                     .flex()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .py(px(2.0))
+                    .pr(px(2.0))
                     .items_center()
-                    .justify_center()
-                    .rounded(theme.radii.chip)
-                    .bg(theme.ely.surface)
-                    .when(pill.selected || pill_cursor == Some(index), |this| {
-                        this.border_1().border_color(theme.sirio.quantity)
-                    })
-                    // Unread outranks the selection ring (the colour is the news), but
-                    // never the keyboard cursor's: that one must stay findable.
-                    .when(pill.unread && pill_cursor != Some(index), |this| {
-                        this.border_1().border_color(theme.ely.info)
-                    })
-                    .when(parked.is_some(), |this| this.opacity(0.6))
-                    .hover(|style| style.bg(theme.ely.hover))
-                    .child(
+                    .gap(px(4.0))
+                    .children(row.pills.iter().enumerate().map(|(index, pill)| {
+                        let select_entity = entity.clone();
+                        let tab_id = pill.tab_id;
+                        let parked = pill.parked_tab;
+                        let path = worktree_path.clone();
                         div()
-                            .debug_selector(move || {
-                                format!(
-                                    "sidebar-pill-mark-{row_id}-{index}-{}",
-                                    Self::icon_selector_name(pill.icon)
-                                )
+                            .id(("sidebar-pill", row_id * 32 + index))
+                            .debug_selector(move || format!("sidebar-pill-{row_id}-{index}"))
+                            .relative()
+                            .flex_none()
+                            .w(px(Self::PILL_SIZE))
+                            .h(px(Self::PILL_SIZE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radii.chip)
+                            .bg(theme.ely.surface)
+                            .when(pill.selected || pill_cursor == Some(index), |this| {
+                                this.border_1().border_color(theme.sirio.quantity)
                             })
+                            // Unread outranks the selection ring (the colour is the news), but
+                            // never the keyboard cursor's: that one must stay findable.
+                            .when(pill.unread && pill_cursor != Some(index), |this| {
+                                this.border_1().border_color(theme.ely.info)
+                            })
+                            .when(parked.is_some(), |this| this.opacity(0.6))
+                            .hover(|style| style.bg(theme.ely.hover))
                             .child(
-                                IconElement::new(pill.icon, IconSize::XSmall)
-                                    .text_color(Self::pill_icon_color(pill.brand, theme)),
-                            ),
-                    )
-                    .when_some(pill.status, |this, status| {
-                        this.when(status != ActivityStatus::Idle, |this| {
-                            this.child(
                                 div()
-                                    .absolute()
-                                    .top(px(-2.0))
-                                    .right(px(-2.0))
-                                    .w(px(6.0))
-                                    .h(px(6.0))
-                                    .rounded_full()
-                                    .bg(if pill.unread {
-                                        theme.ely.info
-                                    } else {
-                                        crate::status::status_color(status, theme)
-                                    }),
+                                    .debug_selector(move || {
+                                        format!(
+                                            "sidebar-pill-mark-{row_id}-{index}-{}",
+                                            Self::icon_selector_name(pill.icon)
+                                        )
+                                    })
+                                    .child(
+                                        IconElement::new(pill.icon, IconSize::XSmall)
+                                            .text_color(Self::pill_icon_color(pill.brand, theme)),
+                                    ),
                             )
-                        })
-                    })
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        select_entity.update(cx, |_, cx| match (tab_id, parked, path.clone()) {
-                            (Some(id), _, _) => cx.emit(SidebarEvent::SelectTab(id)),
-                            (None, Some(index), Some(path)) => {
-                                cx.emit(SidebarEvent::SelectParkedTab { path, index })
-                            }
-                            _ => {}
-                        });
-                    })
-            }))
+                            .when_some(pill.status, |this, status| {
+                                this.when(status != ActivityStatus::Idle, |this| {
+                                    this.child(
+                                        div()
+                                            .absolute()
+                                            .top(px(-2.0))
+                                            .right(px(-2.0))
+                                            .w(px(6.0))
+                                            .h(px(6.0))
+                                            .rounded_full()
+                                            .bg(if pill.unread {
+                                                theme.ely.info
+                                            } else {
+                                                crate::status::status_color(status, theme)
+                                            }),
+                                    )
+                                })
+                            })
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                select_entity.update(cx, |_, cx| {
+                                    match (tab_id, parked, path.clone()) {
+                                        (Some(id), _, _) => cx.emit(SidebarEvent::SelectTab(id)),
+                                        (None, Some(index), Some(path)) => {
+                                            cx.emit(SidebarEvent::SelectParkedTab { path, index })
+                                        }
+                                        _ => {}
+                                    }
+                                });
+                            })
+                    })),
+            )
             .when(row.selected, |this| {
                 let add_entity = entity.clone();
                 this.child(
                     div()
                         .id(("sidebar-pill-add", row_id))
                         .debug_selector(move || format!("sidebar-pill-add-{row_id}"))
+                        .flex_none()
                         .w(px(Self::PILL_SIZE))
                         .h(px(Self::PILL_SIZE))
                         .flex()
@@ -499,6 +487,7 @@ impl Sidebar {
         first_card: bool,
         removable: bool,
         first_removable: bool,
+        missing_width: Pixels,
         entity: gpui::Entity<Self>,
         theme: Theme,
         window: &mut Window,
@@ -507,7 +496,13 @@ impl Sidebar {
         let row_id = row.id;
         let selected = row.selected;
         let kind = row.kind;
-        let title = row.title.clone();
+        // The name the card draws: a plain folder has no branch, so its card
+        // names the folder, muted.
+        let (title, title_fallback) = if row.kind == RowKind::Worktree {
+            Self::card_name(&row)
+        } else {
+            (row.title.clone(), false)
+        };
         let path = row.path.clone();
         // The click closure reports the checkout path for worktree rows.
         let worktree_path = path.clone();
@@ -517,11 +512,9 @@ impl Sidebar {
         // context-menu item, it cannot be `git worktree remove`d. Nor does
         // git's main checkout, whatever the Primary marker says (`removable`).
         let is_removable_worktree = is_worktree && !row.is_primary && removable;
-        // Zed's row rhythm (34 / 53): a worktree row is always a two-line
-        // card (13px title over a 12.5px context line). Project rows draw
-        // through `render_section` at `SECTION_HEIGHT`, so no single-line
-        // row reaches this renderer today. See `has_sub_line`.
-        let has_sub_line = Self::has_sub_line(&row);
+        // A worktree row is one 31px line: name, pills, trailing seat. Project
+        // rows draw through `render_section` at `SECTION_HEIGHT`, so no other
+        // row reaches this renderer today.
         let row_height = Self::row_drawn_height(&row, &theme.typography);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
         // per distinct running agent, 3px apart, 7px clear of the title. It
@@ -592,9 +585,10 @@ impl Sidebar {
             .w_full()
             .rounded(px(6.0))
             .px(px(ROW_PAD_X))
-            .py(px(ROW_PAD_Y))
-            // The card's content lines up with the project's name; its box
-            // (and so the hover wash and the probe) stays full width.
+            // The card's one line is centred in its 31px; the name lines up
+            // with the project's name, and the box (so the hover wash and the
+            // probe) stays full width.
+            .when(!is_worktree, |this| this.py(px(ROW_PAD_Y)))
             .when(is_worktree, |this| this.pl(px(ROW_PAD_X + CARD_CONTENT_INDENT)))
             .flex()
             .gap(px(8.0))
@@ -741,6 +735,28 @@ impl Sidebar {
                         .items_center()
                         .children(slot_bloom),
                 )
+                // The primary's rest-state star stands in the ★ seat, where
+                // the ★ button appears under the pointer, so it does not jump
+                // when the pointer arrives.
+                .when(is_primary, |this| {
+                    this.child(
+                        div()
+                            .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(16.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .group_hover(hover_group.clone(), |style| style.invisible())
+                            .child(
+                                IconElement::new(Icon::StarFilled, IconSize::XSmall)
+                                    .text_color(theme.ely.fg_subtle),
+                            ),
+                    )
+                })
                 .child(
                     div()
                         .absolute()
@@ -859,7 +875,9 @@ impl Sidebar {
         let row_unread = is_worktree && row.pills.iter().any(|pill| pill.unread);
         let title_element = div()
             .min_w_0()
-            .flex_1()
+            // A card's name sizes to its text (so "(missing)" follows it) and
+            // shrinks first; any other title takes the line.
+            .when(!is_worktree, |this| this.flex_1())
             .whitespace_nowrap()
             .overflow_hidden()
             .text_ellipsis()
@@ -878,8 +896,57 @@ impl Sidebar {
             } else {
                 FontWeight::NORMAL
             })
-            .text_color(Self::title_color(parked_tab.is_some(), theme))
+            .text_color(if title_fallback {
+                theme.ely.fg_muted
+            } else {
+                Self::title_color(parked_tab.is_some(), theme)
+            })
             .child(title);
+        // The name and, after it, "(missing)": the state never ellipsises, the
+        // name is the detail and gives way. The slot's floor is the name's 40 px plus
+        // "(missing)", measured, so the label never runs onto the pills and the name keeps 40 px
+        // (only the card's own clip, at the narrowest sidebar, can cut the label's end).
+        let missing_reserve = if row.missing {
+            px(MISSING_GAP) + missing_width
+        } else {
+            px(0.0)
+        };
+        let name_slot = if !is_worktree {
+            title_element.into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w(px(NAME_MIN_WIDTH) + missing_reserve)
+                .flex()
+                .items_center()
+                .gap(px(MISSING_GAP))
+                .child(title_element)
+                .when(row.missing, |this| {
+                    this.child(
+                        div()
+                            .debug_selector(move || format!("sidebar-row-missing-{row_id}"))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_size(theme.typography.scaled(ROW_TITLE_FONT_SIZE))
+                            .line_height(Self::title_line_height(&theme.typography))
+                            .text_color(theme.ely.fg_subtle)
+                            .child("(missing)"),
+                    )
+                })
+                .into_any_element()
+        };
+        let mark = {
+            let slot = div().w(px(16.0)).flex_none().flex().items_center().justify_center();
+            if is_worktree {
+                let name = Self::icon_selector_name(glyph);
+                slot.id(("sidebar-worktree-mark", row_id))
+                    .debug_selector(move || format!("sidebar-worktree-mark-{row_id}-{name}"))
+                    .child(project_mark)
+                    .into_any_element()
+            } else {
+                slot.child(project_mark).into_any_element()
+            }
+        };
         let title_line = div()
             .relative()
             .w_full()
@@ -888,66 +955,31 @@ impl Sidebar {
             .gap(px(6.0))
             .when(row_unread, |this| {
                 this.child(Self::unread_dot(format!("sidebar-unread-dot-{row_id}"), &theme))
-            })
-            .child({
-                let slot = div().w(px(16.0)).flex().items_center().justify_center();
-                if is_worktree {
-                    let name = Self::icon_selector_name(glyph);
-                    slot.id(("sidebar-worktree-mark", row_id))
-                        .debug_selector(move || format!("sidebar-worktree-mark-{row_id}-{name}"))
-                        .child(project_mark)
-                        .into_any_element()
-                } else {
-                    slot.child(project_mark).into_any_element()
-                }
-            })
-            .child(title_element)
-            .when(row.is_primary, |this| {
-                this.child(
-                    div()
-                        .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
-                        .flex_none()
-                        .group_hover(hover_group.clone(), |style| style.invisible())
-                        .child(
-                            IconElement::new(Icon::StarFilled, IconSize::XSmall)
-                                .text_color(theme.ely.fg_subtle),
-                        ),
-                )
-            })
-            .when_some(Self::status_text(&row), |this, status| {
-                this.child(
-                    div()
-                        .debug_selector(move || format!("sidebar-row-status-{row_id}"))
-                        .flex_none()
-                        .text_size(theme.typography.scaled(11.0))
-                        .text_color(theme.ely.fg_subtle)
-                        .child(status),
-                )
             });
-        let sub_line = div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .line_height(px(ROW_SUB_LINE_HEIGHT))
-            .text_size(theme.typography.scaled(12.5))
-            .text_color(theme.ely.fg_subtle)
-            .child(
+        let title_line = if is_worktree {
+            // A card's content is clipped at its right edge, before the trailing seat, so the seat
+            // never moves or gets covered at the narrowest sidebar; the content's right end gives.
+            title_line.child(
                 div()
-                    .debug_selector(move || format!("sidebar-row-subline-{row_id}"))
-                    .min_w_0()
                     .flex_1()
-                    .whitespace_nowrap()
+                    .min_w_0()
                     .overflow_hidden()
-                    .text_ellipsis()
-                    .child(Self::sub_line_text(&row)),
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(mark)
+                    .child(name_slot)
+                    // The tab pills, before the trailing seat (below).
+                    .child(Self::render_pills(
+                        &row,
+                        cursor.then_some(pill_cursor).flatten(),
+                        entity.clone(),
+                        theme,
+                    )),
             )
-            .child(Self::render_pills(
-                &row,
-                cursor.then_some(pill_cursor).flatten(),
-                entity.clone(),
-                theme,
-            ));
+        } else {
+            title_line.child(mark).child(name_slot)
+        };
         let title_line = title_line
             .when(is_project, |this| {
                 this.child(
@@ -1010,14 +1042,13 @@ impl Sidebar {
             .flex()
             .flex_col()
             .justify_center()
-            .gap(px(ROW_GAP))
-            .child(title_line)
-            .when(has_sub_line, |this| this.child(sub_line));
+            .child(title_line);
 
         // The first worktree card records where it is drawn for the debug
         // layout read. The card has no border, so a full-size absolute child
         // spans its whole box.
         let card_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card.clone());
+        let guide_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.guide.clone());
         // A worktree card reports where it is and whether the pointer is on it,
         // for the hover card beside the sidebar.
         let hover_bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<Pixels>>));
@@ -1034,6 +1065,27 @@ impl Sidebar {
             row_view
         };
         row_view
+            // The guide line down an open project: Ely Tree's `guides()`
+            // recipe (a 1px line in the border colour), one segment per card.
+            // It starts `ROW_V_GAP` above the card, across the seam, so the
+            // segments join and the first one starts at the project row's
+            // bottom. It is drawn over the card's hover and selection wash,
+            // as Ely draws its guides over its rows. A 1px fill on the segment itself, the
+            // same pixels as Ely's `border_l`: drawn as a bordered full-size child here, the
+            // line did not paint (the E2E's pixel column stayed the ground).
+            .when(is_worktree, |this| {
+                this.child(
+                    div()
+                        .debug_selector(move || format!("sidebar-guide-{row_id}"))
+                        .absolute()
+                        .top(px(-ROW_V_GAP))
+                        .bottom_0()
+                        .left(px(GUIDE_X))
+                        .w(px(1.0))
+                        .bg(theme.ely.border)
+                        .when_some(guide_probe, |this, cell| this.child(probe_canvas(&cell))),
+                )
+            })
             .when_some(hover_probe, |this, cell| {
                 this.child(
                     gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
@@ -1061,128 +1113,6 @@ mod tests {
     use super::*;
     use crate::sidebar::tests_support;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
-    use std::path::PathBuf;
-
-    fn worktree(id: usize, title: &str) -> SidebarRow {
-        SidebarRow {
-            id,
-            kind: RowKind::Worktree,
-            depth: 1,
-            title: title.to_owned(),
-            selected: false,
-            expanded: true,
-            is_primary: false,
-            agent_status: None,
-            is_git: true,
-            path: None,
-            tab_id: None,
-            parked_tab: None,
-            tab_kind: None,
-            agent_icon: None,
-            agent_brand: None,
-            comment: None,
-            pills: Vec::new(),
-            unread_count: 0,
-        }
-    }
-
-    fn pill(tab_id: usize) -> SidebarPill {
-        SidebarPill {
-            tab_id: Some(tab_id),
-            parked_tab: None,
-            title: "Claude".to_owned(),
-            icon: Icon::MessageSquare,
-            brand: Some(AgentBrandColor::for_agent_id("claude")),
-            status: Some(ActivityStatus::Idle),
-            selected: false,
-            kind: TabKind::AgentChat,
-            persistence_id: format!("test-tab-{tab_id}"),
-            last_event_at: None,
-            unread: false,
-        }
-    }
-
-    /// The four notable statuses are drawn as a bloom now, not spelled out,
-    /// so the status line is left to the two things a bloom cannot say: that
-    /// a worktree is idle, and how many agents are parked in it.
-    #[test]
-    fn a_notable_status_is_a_bloom_and_the_words_are_left_to_the_quiet_states() {
-        let mut row = worktree(3, "main");
-        for status in [
-            ActivityStatus::Running,
-            ActivityStatus::NeedsInput,
-            ActivityStatus::Done,
-            ActivityStatus::Error,
-        ] {
-            row.agent_status = Some(status);
-            assert_eq!(
-                Sidebar::status_text(&row),
-                None,
-                "{status:?} is drawn, not written"
-            );
-        }
-        row.agent_status = Some(ActivityStatus::Idle);
-        row.pills = vec![pill(1), pill(2)];
-        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("2 agents"));
-        row.pills = vec![pill(1)];
-        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
-
-        // A plain shell and a chat with no agent picked are tabs, not agents:
-        // only a pill with a brand mark is counted.
-        let mut shell = pill(2);
-        shell.kind = TabKind::Terminal;
-        shell.brand = None;
-        let mut empty_chat = pill(3);
-        empty_chat.brand = None;
-        row.pills = vec![pill(1), shell.clone(), empty_chat.clone()];
-        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
-        row.agent_status = None;
-        row.pills = vec![shell, empty_chat];
-        assert_eq!(Sidebar::status_text(&row), None);
-    }
-
-    /// The second line names the worktree's most recent task, not its
-    /// checkout path. The path was the least informative thing the card
-    /// could carry — every sibling repeats the project prefix and the part
-    /// that differs is the branch name already on the line above — and it
-    /// pushed the one fact worth reading, what the user was doing here, off
-    /// the card entirely. A comment still wins, and with neither the line
-    /// is empty rather than falling back to the path.
-    #[test]
-    fn the_second_line_names_the_last_task_and_never_the_path() {
-        let mut row = worktree(4, "feat/x");
-        row.path = Some(PathBuf::from("/tmp/projects/sirio-wt/feat-x"));
-        assert_eq!(
-            Sidebar::sub_line_text(&row),
-            "",
-            "a worktree with no task and no comment leaves the line empty"
-        );
-
-        let mut first = pill(1);
-        first.title = "wire up the pill row".to_owned();
-        let mut second = pill(2);
-        second.title = "chase the ConPTY title".to_owned();
-        row.pills = vec![first, second];
-        assert_eq!(
-            Sidebar::sub_line_text(&row),
-            "chase the ConPTY title",
-            "with nothing selected the newest tab of the strip names the card"
-        );
-
-        row.pills[0].selected = true;
-        assert_eq!(
-            Sidebar::sub_line_text(&row),
-            "wire up the pill row",
-            "the tab the user is actually on wins over strip order"
-        );
-
-        row.comment = Some("redesign the sidebar".to_owned());
-        assert_eq!(
-            Sidebar::sub_line_text(&row),
-            "redesign the sidebar",
-            "a comment a person left on purpose still outranks a derived name"
-        );
-    }
 
     #[gpui::test]
     async fn clicking_a_pill_selects_its_tab(cx: &mut TestAppContext) {
