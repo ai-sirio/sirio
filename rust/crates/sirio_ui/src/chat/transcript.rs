@@ -260,8 +260,8 @@ impl Chat {
                                     .debug_selector(move || {
                                         format!("assistant-response-{entry_index}")
                                     })
-                                    .child(MarkdownBody::selectable(
-                                        document,
+                                    .child(super::reply_body(
+                                        &document,
                                         interaction.clone(),
                                         source_start,
                                     )),

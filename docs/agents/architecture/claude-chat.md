@@ -362,9 +362,10 @@ an agent to its card outlives the turn, even behind a later turn. None of this i
 restored chat shows the `Agent` row and the card's content is gone.
 
 A file path a subagent's text names is a link that opens in Sirio's editor only on a left click,
-with the press and the release on the same link; the card never stops an event, so a drop still
-lands. The vendored `bezel_markdown` never hands a `file:` URL to the system opener (a fourth
-local patch): see `rust/vendor/README.md`.
+with the press and the release on the same link; the card body is a `markdown_view` with
+`SelectionHost::None`, so its `ClickGate` is the one opener (a drag, a right or middle press and a
+drop never open it) and nothing else of the card is stopped. No `file:` URL reaches the system opener:
+the chat's link handler (`reply_links`) opens a file in Sirio and only a web address in the system's.
 
 The Trace labels a running subagent's lane with the latest sentence of its latest text, never
 its thinking, cleaned through `visible_text`, and only while the lane is open. The Trace already
@@ -804,17 +805,20 @@ the folded cards, the Trace card and the tab; `claude_streams_the_lines_the_trac
 gate) notices the day the CLI stops streaming the lines the trace reads.
 
 **What a response may make clickable or load** is an allowlist, enforced in one place:
-`sirio_ui::chat::file_links::link_file_paths`, run over an assistant entry's document whenever it is built
-(streamed chunk, restore). The text an agent writes can be prompt-injected, so a link, chip or picture in it
+`sirio_ui::markdown::build` with `Surface::Chat` (its `chat_links` and picture passes over `chat::file_links`),
+run over an assistant entry's text whenever it is built (streamed chunk, restore): one `build` per chunk. The text an agent writes can be prompt-injected, so a link, chip or picture in it
 survives only as a web URL (`http`, `https`, `mailto`, any case) or as a checked local file (an existing
 regular file, retargeted to a `file://` URL; a picture also non-empty and at most 10 MB, and read by its
 absolute path). Everything else (`smb:`, `vscode:`, `tel:`, a drive or UNC path, an unresolved path, an anchor)
-loses its mark and its text stays, a non-web bookmark or picture block becomes a paragraph, and a network or
+loses its mark and its text stays, a non-web picture becomes its alt text, and a network or
 device path (`//host/…`, `\\host\…`, `\\?\`, `\\.\`) is never even looked up on disk. The disk is asked while
 the document is built (memoised per entry), never while it paints, and once at a click (`may_open_on_click`). A
-file link is taken in `MarkdownBody`'s capture phase before bezel's text can hand its URL to the system opener,
-so a change that touches either half (the link pass, or the capture handler) must keep the other's
-assumption: nothing but web URLs reaches `cx.open_url`.
+link opens only through the view's `ClickGate` (left button, no drag, no live selection in that body) or the
+transcript menu's Open link, both calling `Chat::open_reply_link`: a file goes to `ChatEvent::OpenFileAt`, a web
+address to `cx.open_url`, anything else nowhere, so a change to either half (the link pass, or the handler) must
+keep the other's assumption: nothing but web URLs reaches `cx.open_url`. A drag that ends on a web link selects
+and does not open it. A plain click in a reply leaves the composer focused (the press is `prevent_default`ed and
+takes no focus; a drag that selects takes it).
 `Scripts/Tests/test-chat-session-panel-e2e.sh --only file_links` drives it with real clicks and drags.
 
 ## MCP Apps widgets
