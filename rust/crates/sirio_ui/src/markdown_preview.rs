@@ -172,7 +172,7 @@ pub(crate) fn build(
 /// working directory. Percent escapes are decoded, as a browser would
 /// (`my%20logo.png` is the file `my logo.png`). URLs and absolute paths pass
 /// through.
-fn resolve_image(url: &str, base: &Path) -> String {
+pub(crate) fn resolve_image(url: &str, base: &Path) -> String {
     if url.is_empty() || has_scheme(url) || Path::new(url).is_absolute() {
         return url.to_string();
     }
@@ -193,7 +193,7 @@ fn has_scheme(url: &str) -> bool {
     })
 }
 
-fn percent_decode(text: &str) -> String {
+pub(crate) fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;

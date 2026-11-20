@@ -42,6 +42,10 @@ mod horizontal_scroll;
 pub mod git_status_style;
 pub mod loading;
 pub mod mcp_widget;
+// Nothing draws or wires `markdown` yet: Task 4 (the drawing) and Tasks 5-7
+// (the Preview, change requests and chat) are its consumers.
+#[allow(dead_code)]
+pub(crate) mod markdown;
 pub mod markdown_preview;
 mod selectable_markdown;
 pub mod modal;

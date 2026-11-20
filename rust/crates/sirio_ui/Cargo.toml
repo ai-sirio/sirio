@@ -62,6 +62,9 @@ sha2 = "0.11"
 # Find seeds a regular-expression query with the text selected, escaped. The
 # same major Ely's `find_all` already uses.
 regex = "1"
+# The markdown module's nesting guard walks the same event stream Ely's reader
+# parses, before any tree is built. The workspace's patched copy.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # SF Symbol rasterization (NSImage -> bitmap); macOS-only, so the rest of
