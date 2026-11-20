@@ -5,7 +5,7 @@ resolver = "2"
 # table so `cargo test --manifest-path vendor/<crate>/Cargo.toml` can run its tests standalone;
 # excluded here so `cargo build/test --workspace` does not also try to treat them as members
 # (which conflicts with their own `[workspace]` tables).
-exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/gpui_macos", "vendor/bezel_theme"]
+exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/gpui_macos", "vendor/bezel_theme", "vendor/pulldown-cmark"]
 members = [
     "vendor/ely-palette",
     "vendor/ely-gpui-component",
@@ -157,6 +157,8 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # published `gpui-pre-platform` takes `gpui-pre-linux` as an ordinary registry dependency, so this
 # one entry substitutes the vendored tree for every consumer. See rust/vendor/README.md.
 [patch.crates-io]
+# Upstream Ely's patched pulldown-cmark 0.13.6, taken verbatim (L7 in rust/vendor/ely/LOCAL-CHANGES.md).
+pulldown-cmark = { path = "vendor/pulldown-cmark" }
 gpui-pre-linux = { path = "vendor/gpui_linux" }
 # Local override for Windows translucency: upstream `gpui_windows`'s no-DirectComposition path
 # (the one Sirio forces via GPUI_DISABLE_DIRECT_COMPOSITION so the WebView2 child HWND paints,
