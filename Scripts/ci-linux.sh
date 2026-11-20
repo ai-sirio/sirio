@@ -213,6 +213,8 @@ run_root_stage() {
 }
 
 echo "==> Rust format and clippy"
+# fmt walks the whole workspace, the vendored Ely crates included: neither upstream nor Sirio has a
+# rustfmt.toml, and the old ely-gpui-component was a member too. Only clippy leaves them out, below.
 run_cargo_stage "cargo fmt --check" cargo fmt --all -- --check
 
 # The shell entry point and the chat surface are being edited by other owners
