@@ -350,8 +350,11 @@ impl MarkdownView {
                     (from.x - event.position.x).abs() <= px(CLICK_SLOP)
                         && (from.y - event.position.y).abs() <= px(CLICK_SLOP)
                 });
+                // A drop (from the OS or from inside the app) ends over the link too, and is
+                // not a click.
+                let dropped = cx.has_active_drag();
                 gate.open
-                    .set(nothing_selected && near && hitbox.is_hovered(window));
+                    .set(!dropped && nothing_selected && near && hitbox.is_hovered(window));
             });
         }
     }
@@ -366,6 +369,12 @@ fn press(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // A press on a reply is the press of a reply wherever it lands, a picture included: the
+    // transcript must not take the focus for it (the composer keeps it, and a drag that
+    // selects something takes it later).
+    if matches!(actions.mode, Mode::Transcript { .. }) {
+        window.prevent_default();
+    }
     // A word is the glyph the pointer is on, not the nearer edge, which in the right half
     // of a word's last letter is the separator after it.
     let offset = match event.click_count {
@@ -412,7 +421,6 @@ fn press(
             interaction,
         } => {
             interaction.begin_selection((source_start + anchor, source_start + head), window, cx);
-            window.prevent_default();
         }
         Mode::None => {}
     }

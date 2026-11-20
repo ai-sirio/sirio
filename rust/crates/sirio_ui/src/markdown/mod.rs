@@ -114,6 +114,16 @@ pub(crate) struct MarkdownBlocks {
     pub kinds: NodeCounts,
 }
 
+impl std::fmt::Debug for MarkdownBlocks {
+    /// What is drawn is not content a log should carry: the sizes only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarkdownBlocks")
+            .field("nodes", &self.nodes.len())
+            .field("bytes", &self.text.text.len())
+            .finish()
+    }
+}
+
 /// The options Ely's reader parses with.
 fn reader_options() -> Options {
     Options::ENABLE_TABLES

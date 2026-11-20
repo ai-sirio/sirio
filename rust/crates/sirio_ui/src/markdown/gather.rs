@@ -33,6 +33,17 @@ pub(crate) struct Drawn {
     pub links: Vec<(Range<usize>, String)>,
 }
 
+/// A link the last frame drew.
+pub(crate) struct DrawnLink {
+    pub label: String,
+    pub url: String,
+    /// Where its label starts.
+    pub start: Point<Pixels>,
+    pub line_height: Pixels,
+    /// How wide its first line painted.
+    pub width: Pixels,
+}
+
 #[derive(Default)]
 struct Frame {
     texts: Vec<Drawn>,
@@ -181,6 +192,36 @@ impl BodyLayouts {
             }
         }
         rects
+    }
+
+    /// Every link drawn, one entry for each, as the control socket reports it: its label and
+    /// address, and where its first line sits, in window pixels.
+    pub(crate) fn links(&self) -> Vec<DrawnLink> {
+        let frame = self.0.borrow();
+        let mut found = Vec::new();
+        for drawn in &frame.texts {
+            let bounds = drawn.layout.bounds();
+            let line_height = drawn.layout.line_height();
+            for (range, url) in &drawn.links {
+                let (Some(from), Some(to)) = (
+                    drawn.layout.position_for_index(range.start),
+                    drawn.layout.position_for_index(range.end),
+                ) else {
+                    continue;
+                };
+                // A label that wraps ends its first line at the edge of the text.
+                let same_row = (to.y - from.y).abs() < line_height / 2.0;
+                let end = if same_row { to.x } else { bounds.right() };
+                found.push(DrawnLink {
+                    label: drawn.text.get(range.clone()).unwrap_or_default().to_owned(),
+                    url: url.clone(),
+                    start: from,
+                    line_height,
+                    width: end - from.x,
+                });
+            }
+        }
+        found
     }
 
     /// Every text pushed to the last frame's gather: the marker written before it and the

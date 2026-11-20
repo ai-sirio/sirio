@@ -33,6 +33,9 @@ use std::rc::Rc;
 
 use crate::caret;
 use crate::composer_prefs::ComposerPrefs;
+use crate::markdown::{
+    self, FileLinkInputs, MarkdownBlocks, Policy, SelectionHost, Surface, ViewFlags, markdown_view,
+};
 use crate::popup::{Filter, Popup, reap_popup};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
@@ -40,6 +43,8 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 mod band_tests;
 #[cfg(test)]
 mod ely_tests;
+#[cfg(test)]
+mod markdown_tests;
 pub(crate) mod identity;
 mod agent_title;
 mod background;
@@ -105,576 +110,105 @@ pub fn init(cx: &mut App) {
     );
 }
 
-pub(crate) fn markdown_link_at(
-    document: &bezel_markdown::Doc,
-    cursor: bezel_markdown::Cursor,
-) -> Option<String> {
-    let text = document.blocks.get(cursor.block)?.text_at(cursor.part)?;
-    text.marks.iter().rev().find_map(|span| {
-        if !span.range.contains(&cursor.offset) {
-            return None;
-        }
-        match &span.mark {
-            bezel_markdown::Mark::Link(target) | bezel_markdown::Mark::Image(target) => Some(target.clone()),
-            bezel_markdown::Mark::Mention { url, .. } => Some(url.clone()),
-            _ => None,
-        }
+/// The opener of a link in a reply or in a subagent's text. Only the view calls it, and only for a
+/// left click with nothing dragged or selected (`markdown::ClickGate`): a file the response named
+/// opens in Sirio's editor, a web address in the system's, and nothing else is opened (the
+/// build's allowlist leaves no other link, and a `#anchor` of a table of contents is inert here).
+fn reply_links(chat: Entity<Chat>) -> markdown::LinkHandler {
+    Rc::new(move |url, _window, cx| {
+        chat.update(cx, |chat, cx| chat.open_reply_link(url, cx));
     })
 }
 
-/// Defers bezel-markdown's build until gpui supplies the `Window` and `App`
-/// required by `bezel_markdown::render`. File Preview can therefore keep its
-/// existing source-only seam while chat entries use the same renderer.
-struct MarkdownBody {
-    /// Shared with the release handler of a transcript response, which looks
-    /// a link up in it without copying the document each frame.
-    document: Rc<bezel_markdown::Doc>,
-    selection: Option<MarkdownSelection>,
-    rendered: Option<AnyElement>,
-    /// What a transcript response's last layout recorded, read after paint to
-    /// report where its links are drawn.
-    hit: Option<DocHit>,
-    /// A body that is not part of the transcript selection but whose file
-    /// links still open in Sirio: the chat that handles them.
-    file_links: Option<(Entity<Chat>, String)>,
+/// A right press on a body leaves the link under it for the transcript's own handler, which
+/// opens the menu: the body hears the press first.
+fn remember_pressed_link(chat: Entity<Chat>) -> markdown::MenuHandler {
+    Rc::new(move |press, _, cx| {
+        chat.update(cx, |chat, _| chat.pressed_link = Some((press.position, press.link)));
+    })
 }
 
-/// Where an assistant response's rendered markdown sits in the transcript's
-/// one selection: the chat that owns it, and the entry's start in
-/// `transcript_text`, so a bezel cursor and a global offset convert both
-/// ways and a drag from user prose into the response is one highlight.
-#[derive(Clone)]
-struct MarkdownSelection {
+/// A transcript reply: part of the chat's one selection, so a drag across it selects its
+/// visible text and Copy reads that text. Where the last paint drew its links is reported to the
+/// control socket, and a right press leaves the link under it for the transcript's menu.
+fn reply_body(
+    document: &MarkdownBlocks,
     interaction: TranscriptInteraction,
     source_start: usize,
+) -> impl IntoElement {
+    let chat = interaction.chat.clone();
+    let view = markdown_view(
+        document,
+        SelectionHost::Transcript {
+            source_start,
+            interaction,
+        },
+        reply_links(chat.clone()),
+        ViewFlags {
+            web_pictures: true,
+            sections: None,
+        },
+    )
+    .on_menu(remember_pressed_link(chat.clone()));
+    let layouts = view.layouts();
+    // Painted after the view, so the layouts it fills are this frame's: position arithmetic
+    // only, no disk.
+    let report = canvas(
+        |_, _, _| (),
+        move |_, _, _, cx| {
+            let rows = chat.read(cx).transcript_links.clone();
+            record_links(&layouts, &mut rows.borrow_mut());
+        },
+    )
+    .absolute()
+    .size(px(0.0));
+    div().w_full().child(view).child(report)
 }
 
-/// One caret-enterable part of a rendered document: its block, which part,
-/// and where its text starts (and how long it is) in the document's plain
-/// text — the text `Entry::plain_text` reports for an assistant entry.
-struct DocPart {
-    block: usize,
-    part: bezel_markdown::Part,
-    start: usize,
-    len: usize,
-}
-
-/// A rendered document's plain text, and every part's place in it.
-/// Parts of one block are joined by a newline, blocks by a blank line, so
-/// a copied selection reads like the page rather than like the source.
-pub(crate) struct DocParts {
-    pub(crate) text: String,
-    parts: Vec<DocPart>,
-}
-
-impl DocParts {
-    pub(crate) fn of(doc: &bezel_markdown::Doc) -> Self {
-        let mut text = String::new();
-        let mut parts = Vec::new();
-        for (block, item) in doc.blocks.iter().enumerate() {
-            if block > 0 {
-                text.push_str("\n\n");
-            }
-            for (ordinal, part) in item.parts().into_iter().enumerate() {
-                if ordinal > 0 {
-                    text.push('\n');
-                }
-                let content = item
-                    .text_at(part)
-                    .map(|text| text.text.as_str())
-                    .unwrap_or("");
-                parts.push(DocPart {
-                    block,
-                    part,
-                    start: text.len(),
-                    len: content.len(),
-                });
-                text.push_str(content);
-            }
-        }
-        Self { text, parts }
-    }
-
-    /// A pointer hit as a plain-text offset. A block no caret can enter is
-    /// never hit, so a missing part means a document out of step with the
-    /// one that was laid out; the entry's start is the safe answer.
-    pub(crate) fn offset_of(&self, cursor: bezel_markdown::Cursor) -> usize {
-        self.parts
-            .iter()
-            .find(|part| part.block == cursor.block && part.part == cursor.part)
-            .map(|part| part.start + cursor.offset.min(part.len))
-            .unwrap_or(0)
-    }
-
-    /// The part holding `offset`, clamped to its end — an offset inside a
-    /// separator lands at the end of the part before it.
-    fn cursor_at(&self, offset: usize) -> Option<bezel_markdown::Cursor> {
-        let part = self.parts.iter().rev().find(|part| part.start <= offset)?;
-        Some(bezel_markdown::Cursor::new(
-            part.block,
-            part.part,
-            (offset - part.start).min(part.len),
-        ))
-    }
-
-    /// The transcript range as this document's own selection: `None` when
-    /// the range lies entirely outside the entry, or touches it only at an
-    /// edge.
-    pub(crate) fn selection_for(
-        &self,
-        range: Range<usize>,
-        source_start: usize,
-    ) -> Option<bezel_markdown::Selection> {
-        let start = range.start.max(source_start);
-        let end = range.end.min(source_start + self.text.len());
-        if start >= end {
-            return None;
-        }
-        Some(bezel_markdown::Selection::new(
-            self.cursor_at(start - source_start)?,
-            self.cursor_at(end - source_start)?,
-        ))
-    }
-}
-
-/// What a pointer over a rendered response resolves to: the transcript
-/// offset of the glyph under it, read off the layouts the last paint
-/// recorded.
-#[derive(Clone)]
-struct DocHit {
-    parts: Rc<DocParts>,
-    layouts: bezel_markdown::BlockLayouts,
-    source_start: usize,
-}
-
-impl DocHit {
-    fn offset_at(&self, position: gpui::Point<Pixels>) -> Option<usize> {
-        self.layouts
-            .hit(position)
-            .map(|cursor| self.source_start + self.parts.offset_of(cursor))
-    }
-}
-
-impl MarkdownBody {
-    fn new(document: bezel_markdown::Doc) -> Self {
-        Self {
-            document: Rc::new(document),
-            selection: None,
-            rendered: None,
-            hit: None,
-            file_links: None,
-        }
-    }
-
-    /// A body outside the transcript selection (a subagent card's text) whose
-    /// file links open through `chat`, as a response's do. `key` names this
-    /// body among the others on screen, the same on every frame (a card's
-    /// entry and part index).
-    fn with_file_links(document: bezel_markdown::Doc, chat: Entity<Chat>, key: String) -> Self {
-        Self {
-            file_links: Some((chat, key)),
-            ..Self::new(document)
-        }
-    }
-
-    /// A transcript response: part of the chat's one selection, so a drag
-    /// across it selects its visible text and Copy reads that text.
-    fn selectable(
-        document: bezel_markdown::Doc,
-        interaction: TranscriptInteraction,
-        source_start: usize,
-    ) -> Self {
-        Self {
-            document: Rc::new(document),
-            selection: Some(MarkdownSelection {
-                interaction,
-                source_start,
-            }),
-            rendered: None,
-            hit: None,
-            file_links: None,
-        }
-    }
-
-    /// The transcript's selection painted into the document, and the drag
-    /// that extends it. The same anchor/head model as
-    /// `TranscriptSelectableText`, expressed in the entry's plain-text
-    /// offsets so a drag started on user prose and ended here is one range.
-    fn build_selectable(
-        &self,
-        selection: MarkdownSelection,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (AnyElement, DocHit) {
-        let parts = Rc::new(DocParts::of(&self.document));
-        let doc_selection = selection
-            .interaction
-            .chat
-            .read(cx)
-            .transcript_selection
-            .as_ref()
-            .map(TranscriptSelection::range)
-            .and_then(|range| parts.selection_for(range, selection.source_start));
-        let layouts = bezel_markdown::BlockLayouts::default();
-        // ponytail: bezel paints its editor caret at the selection's head
-        // too — a 1.5px line at the highlight's edge, only while a
-        // selection exists. Hiding it needs a renderer flag bezel has yet
-        // to offer.
-        let rendered = bezel_markdown::render_with_selection(
-            &self.document,
-            doc_selection,
-            Some(&layouts),
-            None,
-            bezel_markdown::Caption::Shown,
-            window,
-            cx,
-        );
-        let hit = DocHit {
-            parts,
-            layouts,
-            source_start: selection.source_start,
-        };
-        let interaction = selection.interaction;
-
-        let down_hit = hit.clone();
-        let down_interaction = interaction.clone();
-        let move_hit = hit.clone();
-        let move_interaction = interaction.clone();
-        let up_interaction = interaction.clone();
-        let file_up_hit = hit.clone();
-        let file_up_interaction = interaction;
-        let document = self.document.clone();
-        let element = div()
-            .w_full()
-            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                let offset = down_hit.offset_at(event.position);
-                // Where the press landed, for the release to compare with.
-                down_interaction
-                    .chat
-                    .update(cx, |chat, _| chat.transcript_press = offset);
-                let Some(offset) = offset else {
-                    return;
-                };
-                down_interaction.chat.update(cx, |chat, cx| {
-                    chat.transcript_selection = Some(TranscriptSelection {
-                        anchor: offset,
-                        head: offset,
-                    });
-                    chat.transcript_dragging = true;
-                    cx.notify();
-                });
-                window.focus(&down_interaction.focus, cx);
-                window.prevent_default();
-            })
-            .on_mouse_move(move |event, window, cx| {
-                if !event.dragging() || !move_interaction.chat.read(cx).transcript_dragging {
-                    return;
-                }
-                let Some(offset) = move_hit.offset_at(event.position) else {
-                    return;
-                };
-                move_interaction.extend_selection(offset, window, cx);
-            })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                up_interaction.chat.update(cx, |chat, cx| {
-                    chat.transcript_dragging = false;
-                    // A press that did not end on a file link is over.
-                    chat.transcript_press = None;
-                    cx.notify();
-                });
-            })
-            // A file link is Sirio's to open, so its release is taken before
-            // bezel's text can hand the `file://` URL to the system opener
-            // (which a drag ending inside the label would do as well). Any
-            // other link falls through to bezel untouched.
-            // Known gpui quirk: an intercepted release leaves bezel's
-            // `InteractiveText` holding its `mouse_down_index` (its own release
-            // handler never ran), so the next web-link click in the same
-            // paragraph can be swallowed once. It heals when the element
-            // leaves the frame.
-            .capture_any_mouse_up(move |event, window, cx| {
-                if event.button != MouseButton::Left {
-                    return;
-                }
-                let position = event.position;
-                let layouts = &file_up_hit.layouts;
-                let Some(target) = layouts
-                    .over_text(position)
-                    .then(|| layouts.hit(position))
-                    .flatten()
-                    .and_then(|cursor| markdown_link_at(&document, cursor))
-                    .and_then(|url| file_link_target(&url))
-                else {
-                    return;
-                };
-                let release = file_up_hit.offset_at(position);
-                file_up_interaction.chat.update(cx, |chat, cx| {
-                    let pressed = chat.transcript_press.take();
-                    chat.transcript_dragging = false;
-                    // The one stat of the click (never at paint): the path was
-                    // checked when the response was built, and a click opens it
-                    // if it is still a regular file or has vanished since, which
-                    // the tab it opens shows as missing.
-                    if release.is_some()
-                        && pressed == release
-                        && file_links::may_open_on_click(&target.path)
-                    {
-                        cx.emit(ChatEvent::OpenFileAt {
-                            path: target.path.clone(),
-                            line: target.line,
-                            column: target.column,
-                        });
-                    }
-                    cx.notify();
-                });
-                cx.stop_propagation();
-                window.prevent_default();
-            })
-            .child(rendered)
-            .into_any_element();
-        (element, hit)
-    }
-
-    fn build(&self, window: &mut Window, cx: &mut App) -> (AnyElement, Option<DocHit>) {
-        if let Some(selection) = self.selection.clone() {
-            let (element, hit) = self.build_selectable(selection, window, cx);
-            return (element, Some(hit));
-        }
-        if let Some((chat, key)) = self.file_links.clone() {
-            let layouts = bezel_markdown::BlockLayouts::default();
-            let rendered = bezel_markdown::render_with_selection(
-                &self.document,
-                None,
-                Some(&layouts),
-                None,
-                bezel_markdown::Caption::Shown,
-                window,
-                cx,
-            );
-            let document = self.document.clone();
-            let link_at = {
-                let layouts = layouts.clone();
-                move |position| {
-                    layouts
-                        .over_text(position)
-                        .then(|| layouts.hit(position))
-                        .flatten()
-                        .and_then(|cursor| markdown_link_at(&document, cursor))
-                }
-            };
-            let down_chat = chat.clone();
-            let down_link_at = link_at.clone();
-            let down_key = key.clone();
-            let out_chat = chat.clone();
-            let out_key = key.clone();
-            // Nothing here stops an event: bezel may arm on a file link, and
-            // its click is a no-op for a `file:` URL. The press record is
-            // this body's own, so another body's release cannot clear it.
-            let selector = key.clone();
-            let element = div()
-                .w_full()
-                .debug_selector(move || selector)
-                .capture_any_mouse_down(move |event, _, cx| {
-                    if event.button != MouseButton::Left {
-                        return;
-                    }
-                    let pressed = down_link_at(event.position)
-                        .filter(|url| file_link_target(url).is_some());
-                    down_chat.update(cx, |chat, _| match pressed {
-                        Some(url) => chat.card_link_press = Some((down_key.clone(), url)),
-                        None if owns_press(&chat.card_link_press, &down_key) => {
-                            chat.card_link_press = None;
-                        }
-                        None => {}
-                    });
-                })
-                .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-                    out_chat.update(cx, |chat, _| {
-                        if owns_press(&chat.card_link_press, &out_key) {
-                            chat.card_link_press = None;
-                        }
-                    });
-                })
-                .capture_any_mouse_up(move |event, _, cx| {
-                    if event.button != MouseButton::Left {
-                        return;
-                    }
-                    // A drop (from the OS or inside the app) is not a click.
-                    let dropped = cx.has_active_drag();
-                    let pressed = chat.update(cx, |chat, _| {
-                        if owns_press(&chat.card_link_press, &key) {
-                            chat.card_link_press.take().map(|(_, url)| url)
-                        } else {
-                            None
-                        }
-                    });
-                    if dropped {
-                        return;
-                    }
-                    let Some(target) = link_at(event.position)
-                        .filter(|url| pressed.as_ref() == Some(url))
-                        .and_then(|url| file_link_target(&url))
-                    else {
-                        return;
-                    };
-                    chat.update(cx, |_, cx| {
-                        if file_links::may_open_on_click(&target.path) {
-                            cx.emit(ChatEvent::OpenFileAt {
-                                path: target.path.clone(),
-                                line: target.line,
-                                column: target.column,
-                            });
-                        }
-                    });
-                })
-                .child(rendered)
-                .into_any_element();
-            return (element, None);
-        }
-        (
-            bezel_markdown::render(&self.document, bezel_markdown::Caption::Shown, window, cx),
-            None,
+/// A subagent card's text: not part of the transcript selection, but a file it names still
+/// opens in Sirio. `key` names this body among the others on screen, the same on every frame.
+fn card_body(document: &MarkdownBlocks, chat: Entity<Chat>, key: String) -> impl IntoElement {
+    let menu = remember_pressed_link(chat.clone());
+    div().w_full().debug_selector(move || key).child(
+        markdown_view(
+            document,
+            SelectionHost::None,
+            reply_links(chat),
+            ViewFlags {
+                web_pictures: true,
+                sections: None,
+            },
         )
-    }
+        .on_menu(menu),
+    )
 }
 
-/// Adds a row to `out` for every link the last paint of `document` drew, in
-/// window pixels: the `kind` (`file` for a file link, `web` otherwise), the
-/// `label` as written, the `target`, the point `x`, `y` a few pixels into the
-/// label at its vertical middle, and `w`, how wide the label painted (its
-/// first line, when it wraps).
-fn record_links(
-    document: &bezel_markdown::Doc,
-    layouts: &bezel_markdown::BlockLayouts,
-    out: &mut Vec<BTreeMap<String, String>>,
-) {
-    for (block_ix, block) in document.blocks.iter().enumerate() {
-        for part in block.parts() {
-            let Some(text) = block.text_at(part) else {
-                continue;
-            };
-            for span in &text.marks {
-                let bezel_markdown::Mark::Link(target) = &span.mark else {
-                    continue;
-                };
-                let at = |offset| bezel_markdown::Cursor::new(block_ix, part, offset);
-                let Some((start, line_height)) = layouts.position(at(span.range.start)) else {
-                    continue;
-                };
-                let label = text.text.get(span.range.clone()).unwrap_or_default();
-                let same_row = |point: gpui::Point<Pixels>| (point.y - start.y).abs() < line_height / 2.0;
-                let end = layouts
-                    .position(at(span.range.end))
-                    .map(|(point, _)| point)
-                    .filter(|point| same_row(*point));
-                let width = end.map(|point| point.x).unwrap_or_else(|| {
-                    // The label wraps: its first line ends at the last
-                    // character still on the starting row.
-                    label
-                        .char_indices()
-                        .skip(1)
-                        .filter_map(|(ix, _)| layouts.position(at(span.range.start + ix)))
-                        .map(|(point, _)| point)
-                        .take_while(|point| same_row(*point))
-                        .last()
-                        .map_or(start.x, |point| point.x)
-                }) - start.x;
-                let inset = px(4.0).min(width / 2.0);
-                let kind = if file_link_target(target).is_some() {
-                    "file"
-                } else {
-                    "web"
-                };
-                out.push(BTreeMap::from([
-                    ("kind".to_string(), kind.to_string()),
-                    ("label".to_string(), label.to_string()),
-                    ("target".to_string(), target.clone()),
-                    ("x".to_string(), format!("{:.1}", f32::from(start.x + inset))),
-                    (
-                        "y".to_string(),
-                        format!("{:.1}", f32::from(start.y + line_height / 2.0)),
-                    ),
-                    ("w".to_string(), format!("{:.1}", f32::from(width))),
-                ]));
-            }
-        }
-    }
-}
-
-impl Element for MarkdownBody {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        if self.rendered.is_none() {
-            let (element, hit) = self.build(window, cx);
-            self.rendered = Some(element);
-            self.hit = hit;
-        }
-        let rendered = self
-            .rendered
-            .as_mut()
-            .expect("markdown body was built during layout");
-        (rendered.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _state: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        self.rendered
-            .as_mut()
-            .expect("markdown body requested layout before prepaint")
-            .prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _state: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.rendered
-            .as_mut()
-            .expect("markdown body prepainted before paint")
-            .paint(window, cx);
-        // The layouts are filled by the paint above: position arithmetic
-        // only, no disk.
-        if let (Some(selection), Some(hit)) = (&self.selection, &self.hit) {
-            let links = selection.interaction.chat.read(cx).transcript_links.clone();
-            record_links(&self.document, &hit.layouts, &mut links.borrow_mut());
-        }
-    }
-}
-
-impl IntoElement for MarkdownBody {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
+/// Adds a row to `out` for every link the last paint of a body drew, in window pixels: the
+/// `kind` (`file` for a file link, `web` otherwise), the `label` as written, the `target`, the
+/// point `x`, `y` a few pixels into the label at its vertical middle, and `w`, how wide the
+/// label painted (its first line, when it wraps).
+fn record_links(layouts: &markdown::BodyLayouts, out: &mut Vec<BTreeMap<String, String>>) {
+    for link in layouts.links() {
+        let inset = px(4.0).min(link.width / 2.0);
+        let kind = if file_link_target(&link.url).is_some() {
+            "file"
+        } else {
+            "web"
+        };
+        out.push(BTreeMap::from([
+            ("kind".to_string(), kind.to_string()),
+            ("label".to_string(), link.label),
+            ("target".to_string(), link.url),
+            (
+                "x".to_string(),
+                format!("{:.1}", f32::from(link.start.x + inset)),
+            ),
+            (
+                "y".to_string(),
+                format!("{:.1}", f32::from(link.start.y + link.line_height / 2.0)),
+            ),
+            ("w".to_string(), format!("{:.1}", f32::from(link.width))),
+        ]));
     }
 }
 
@@ -699,14 +233,19 @@ pub(crate) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 /// renders a popover instead of a window-filling one.
 const MODEL_PICKER_LIST_MAX_H: f32 = 260.0;
 
-fn parse_chat_markdown(source: &str) -> bezel_markdown::Doc {
+/// A reply as the chat shows it, before the files it names are looked up: what a restored
+/// entry and a test hold until `parse_linked_markdown` has the worktree.
+fn parse_chat_markdown(source: &str) -> MarkdownBlocks {
     let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
-    bezel_markdown::parse(source)
-}
-
-/// Whether the card-body press record belongs to the body `key`.
-fn owns_press(press: &Option<(String, String)>, key: &str) -> bool {
-    press.as_ref().is_some_and(|(owner, _)| owner == key)
+    markdown::build(
+        source,
+        &mut Policy {
+            surface: Surface::Chat,
+            base: None,
+            diagrams: None,
+            file_links: None,
+        },
+    )
 }
 
 /// An assistant response's document with the files it names marked as links.
@@ -716,10 +255,22 @@ fn parse_linked_markdown(
     source: &str,
     cwd: &Path,
     memo: &mut file_links::FileLinkMemo,
-) -> bezel_markdown::Doc {
-    let mut document = parse_chat_markdown(source);
-    file_links::link_file_paths(&mut document, cwd, std::env::home_dir().as_deref(), memo);
-    document
+) -> MarkdownBlocks {
+    let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
+    let home = std::env::home_dir();
+    markdown::build(
+        source,
+        &mut Policy {
+            surface: Surface::Chat,
+            base: Some(cwd),
+            diagrams: None,
+            file_links: Some(FileLinkInputs {
+                worktree: cwd,
+                home: home.as_deref(),
+                memo,
+            }),
+        },
+    )
 }
 
 actions!(
@@ -875,7 +426,7 @@ enum SubagentPart {
     Text {
         agent: Option<String>,
         text: String,
-        document: bezel_markdown::Doc,
+        document: MarkdownBlocks,
     },
     /// What the subagent thought; `open` is the reader's say, folded at first.
     Thought {
@@ -899,7 +450,7 @@ enum Entry {
     /// rendering, so a redraw never reparses the entire reply.
     Assistant {
         text: String,
-        document: bezel_markdown::Doc,
+        document: MarkdownBlocks,
     },
     /// A streamed reasoning chunk, visually distinct from the reply.
     ///
@@ -1145,9 +696,9 @@ impl Entry {
             Self::User { text, .. } => text.clone(),
             Self::Thought { text, .. } => text.clone(),
             // The page's text, not the markdown source: it is what the
-            // reader sees, selects and copies (`MarkdownBody::selectable`).
+            // reader sees, selects and copies (`reply_body`).
             // The hover Copy control is the way to the source.
-            Self::Assistant { document, .. } => DocParts::of(document).text,
+            Self::Assistant { document, .. } => document.text.text.clone(),
             Self::ToolCall {
                 title,
                 status,
@@ -1539,7 +1090,17 @@ fn discard_edited_path(repo: &Path, reported_path: &Path) -> Result<(), String> 
     }
 }
 
+/// A stored entry as the transcript holds it, its reply parsed without the worktree.
+#[cfg(test)]
 fn restored_entry(entry: ChatEntry) -> Entry {
+    restored_entry_with(entry, parse_chat_markdown)
+}
+
+/// A stored entry as the transcript holds it; `parse` reads a reply's Markdown.
+fn restored_entry_with(
+    entry: ChatEntry,
+    parse: impl FnOnce(&str) -> MarkdownBlocks,
+) -> Entry {
     match entry {
         ChatEntry::UserMessage { text, at } => Entry::User {
             text,
@@ -1548,7 +1109,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
                 .map(|utc| utc.with_timezone(&chrono::Local)),
         },
         ChatEntry::AssistantMessage { text } => Entry::Assistant {
-            document: parse_chat_markdown(&text),
+            document: parse(&text),
             text,
         },
         ChatEntry::Thought { text, duration_ms } => Entry::Thought {
@@ -1847,15 +1408,23 @@ impl ComposerContextItem {
 enum TranscriptContextItem {
     Copy,
     SelectAll,
+    /// Over a link of a reply: opens it as a click would.
+    OpenLink,
+    /// Over a link of a reply: puts its address on the clipboard.
+    CopyLink,
 }
 
 impl TranscriptContextItem {
     const ALL: [Self; 2] = [Self::Copy, Self::SelectAll];
+    /// The rows a link adds below the others.
+    const LINK: [Self; 2] = [Self::OpenLink, Self::CopyLink];
 
     fn label(self) -> &'static str {
         match self {
             Self::Copy => "Copy",
             Self::SelectAll => "Select All",
+            Self::OpenLink => "Open link",
+            Self::CopyLink => "Copy link address",
         }
     }
 
@@ -1863,6 +1432,8 @@ impl TranscriptContextItem {
         match self {
             Self::Copy => "copy",
             Self::SelectAll => "select-all",
+            Self::OpenLink => "open-link",
+            Self::CopyLink => "copy-link",
         }
     }
 }
@@ -1991,7 +1562,10 @@ impl TranscriptInteraction {
         (!range.is_empty()).then_some(range)
     }
 
-    /// Starts a selection at `anchor..head` and takes focus into the transcript.
+    /// Starts a selection at `anchor..head`. The focus goes into the transcript only when the
+    /// press selected something (a double or triple click): a caret is not a selection, and a
+    /// plain click leaves the composer focused (`extend_selection` takes it when a drag
+    /// selects).
     pub(crate) fn begin_selection(
         &self,
         (anchor, head): (usize, usize),
@@ -2003,7 +1577,9 @@ impl TranscriptInteraction {
             chat.transcript_dragging = true;
             cx.notify();
         });
-        window.focus(&self.focus, cx);
+        if anchor != head {
+            window.focus(&self.focus, cx);
+        }
     }
 
     /// Whether a drag of the transcript's selection is in progress.
@@ -2221,8 +1797,6 @@ impl Element for TranscriptSelectableText {
                         head: position,
                     });
                     chat.transcript_dragging = true;
-                    // A press on plain text is not the press of a file link.
-                    chat.transcript_press = None;
                     cx.notify();
                 });
                 window.focus(&interaction.focus, cx);
@@ -2487,14 +2061,12 @@ pub struct Chat {
     transcript_bar: list_scroll::ListScrollbarState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
-    /// Where the left button last went down on a response's text, as a
-    /// transcript offset: a release at the same offset is a click, which is
-    /// what opens a file link (a release elsewhere ended a drag).
-    transcript_press: Option<usize>,
-    /// The body (its key) and link a subagent card's text was last pressed
-    /// on: a release on the same link of the same body is a click, and no
-    /// press (a dropped file) is none.
-    card_link_press: Option<(String, String)>,
+    /// Where the last right press fell on a reply's text, and the link it fell on: the body
+    /// hears the press first and leaves this for the transcript's own handler, which opens
+    /// the menu. A press elsewhere leaves it stale, which its position tells.
+    pressed_link: Option<(gpui::Point<Pixels>, Option<String>)>,
+    /// The link the open transcript menu was opened over.
+    transcript_menu_link: Option<String>,
     /// Which candidate paths exist, for the assistant entry being built: one
     /// disk lookup per distinct candidate, not one per streamed chunk. Reset
     /// whenever a new assistant entry starts.
@@ -2941,8 +2513,8 @@ impl Chat {
             transcript_bar: list_scroll::ListScrollbarState::new(crate::motion::Painter::of(cx)),
             transcript_selection: None,
             transcript_dragging: false,
-            transcript_press: None,
-            card_link_press: None,
+            pressed_link: None,
+            transcript_menu_link: None,
             file_link_memo: file_links::FileLinkMemo::default(),
             transcript_links: Rc::default(),
             folded_turns: BTreeSet::new(),
@@ -3740,6 +3312,7 @@ impl Chat {
                     *document =
                         parse_linked_markdown(existing, &self.agent_cwd, &mut self.file_link_memo);
                     self.remeasure_entry(index);
+                    self.clamp_transcript_selection();
                 } else {
                     // A new response: what the last one found is not this one's.
                     self.file_link_memo.clear();
@@ -4543,7 +4116,11 @@ impl Chat {
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                let length = entry.plain_text().len();
+                // A reply's length is read off its parsed text: no walk, no copy, per frame.
+                let length = match entry {
+                    Entry::Assistant { document, .. } => document.text.text.len(),
+                    _ => entry.plain_text().len(),
+                };
                 let range = offset..offset + length;
                 offset += length;
                 if index + 1 < self.entries.len() {
@@ -5092,17 +4669,12 @@ impl Chat {
     /// Markdown source is kept. (`restore_transcript` does not do this: its
     /// one flattened entry mixes user, thought and tool text, spec §2.)
     fn restore_entry(&mut self, entry: ChatEntry) -> Entry {
-        let mut entry = restored_entry(entry);
-        if let Entry::Assistant { document, .. } = &mut entry {
+        if matches!(entry, ChatEntry::AssistantMessage { .. }) {
             self.file_link_memo.clear();
-            file_links::link_file_paths(
-                document,
-                &self.agent_cwd,
-                std::env::home_dir().as_deref(),
-                &mut self.file_link_memo,
-            );
         }
-        entry
+        let cwd = &self.agent_cwd;
+        let memo = &mut self.file_link_memo;
+        restored_entry_with(entry, |text| parse_linked_markdown(text, cwd, memo))
     }
 
     fn restore_persisted_transcript(&mut self) {
@@ -5951,11 +5523,13 @@ impl Chat {
     fn open_transcript_context_menu(
         &mut self,
         position: gpui::Point<Pixels>,
+        link: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_composer_context_menu(cx);
         self.transcript_focus.focus(window, cx);
+        self.transcript_menu_link = link;
         self.transcript_context_menu.open(position);
         cx.notify();
     }
@@ -5993,6 +5567,52 @@ impl Chat {
         match item {
             TranscriptContextItem::Copy => self.copy_transcript(&CopyTranscript, window, cx),
             TranscriptContextItem::SelectAll => self.select_all_transcript(cx),
+            TranscriptContextItem::OpenLink => {
+                if let Some(link) = self.transcript_menu_link.take() {
+                    self.open_reply_link(&link, cx);
+                }
+            }
+            TranscriptContextItem::CopyLink => {
+                if let Some(link) = self.transcript_menu_link.take() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(link));
+                }
+            }
+        }
+    }
+
+    /// Opens a link of a reply, the one way a click and the menu's Open link both do: a file
+    /// the response named in Sirio's editor (if it is still a file, `may_open_on_click`), a
+    /// web address in the system's opener, anything else not at all.
+    fn open_reply_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        if let Some(target) = file_link_target(url) {
+            if file_links::may_open_on_click(&target.path) {
+                cx.emit(ChatEvent::OpenFileAt {
+                    path: target.path.clone(),
+                    line: target.line,
+                    column: target.column,
+                });
+            }
+        } else if file_links::is_web_target(url) {
+            cx.open_url(url);
+        }
+    }
+
+    /// Brings the transcript's selection back inside the transcript. A streamed reply can
+    /// get shorter between two chunks (a closed mark drops its glyphs), and a selection made
+    /// over the text as it was would end past the text as it is, or inside a glyph.
+    fn clamp_transcript_selection(&mut self) {
+        if self.transcript_selection.is_none() {
+            return;
+        }
+        let text = self.transcript_text();
+        let Some(selection) = self.transcript_selection.as_mut() else {
+            return;
+        };
+        for end in [&mut selection.anchor, &mut selection.head] {
+            *end = (*end).min(text.len());
+            while !text.is_char_boundary(*end) {
+                *end -= 1;
+            }
         }
     }
 
@@ -8302,7 +7922,13 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.open_transcript_context_menu(event.position, window, cx);
+                            // The reply under the pointer heard the press first.
+                            let link = this
+                                .pressed_link
+                                .take()
+                                .filter(|(at, _)| *at == event.position)
+                                .and_then(|(_, link)| link);
+                            this.open_transcript_context_menu(event.position, link, window, cx);
                         }),
                     )
                     .child(
@@ -9604,7 +9230,7 @@ mod tests {
         })
     }
 
-    fn focus_composer(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+    pub(super) fn focus_composer(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             let handle = chat.read(cx).composer_field.read(cx).focus_handle(cx);
             handle.focus(window, cx);
@@ -9616,7 +9242,7 @@ mod tests {
         cx.update(|window, cx| chat.read(cx).question_dock.focus.is_focused(window))
     }
 
-    fn composer_is_focused(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+    pub(super) fn composer_is_focused(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
         cx.update(|window, cx| {
             chat.read(cx)
                 .composer_field
@@ -11820,6 +11446,23 @@ two"
         assert!(opened.borrow().is_empty(), "a drop is not a click");
         let system_opener_used = cx.cx.opened_url().is_some();
         assert!(!system_opener_used, "the system opener is never handed a file");
+    }
+
+    // The menu is on every Markdown body (spec 5.6): a right press on a link in a card's text
+    // offers the link's two rows, and Open link opens as a click on it does.
+    #[gpui::test]
+    async fn a_right_press_on_a_card_link_offers_the_link_items(cx: &mut TestAppContext) {
+        let (_chat, cx, opened, dir) = card_with_two_texts(cx);
+        let on_link = text_part_point(cx, 2, 4.0);
+        right_click(cx, on_link);
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("transcript-context-open-link").is_some(),
+            "Open link over a link in a card"
+        );
+        assert!(cx.debug_bounds("transcript-context-copy-link").is_some());
+        choose_composer_context_item(cx, "transcript-context-open-link");
+        assert_eq!(opened.borrow().as_slice(), [dir.0.join("second.rs")]);
     }
 
     #[gpui::test]
@@ -20879,7 +20522,7 @@ two"
 
     /// The two events a real secondary click delivers, in order — gpui
     /// does not synthesize the up from the down.
-    fn right_click(cx: &mut VisualTestContext, position: gpui::Point<Pixels>) {
+    pub(super) fn right_click(cx: &mut VisualTestContext, position: gpui::Point<Pixels>) {
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
         cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
