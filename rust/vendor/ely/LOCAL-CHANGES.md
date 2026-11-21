@@ -814,7 +814,7 @@ Outcomes:
   rows while nothing is wide) has its proof (ran): `ely-documents` `document::tests::scroll::source_margins_scroll`.
 - Row 167: re-applied (`measured` is `pub(super)`). Proof: the closure build (`view.rs` calls it).
 
-## ely-documents host seams (Markdown on ely-documents, rows L1 to L6 and L8)
+## ely-documents host seams (Markdown on ely-documents, rows L1 to L6, L8 and L9)
 
 Spec `docs/superpowers/specs/2026-11-20-ely-markdown-documents-design.md` §5.2. Sirio parses once,
 rewrites the tree and owns selection, links and menus, so the vendored renderer gains opt-in seams.
@@ -854,6 +854,18 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
   row look themselves (head fill, top border). The grid has debug selector `markdown-table-<n>`. Unset,
   upstream's flex rows are unchanged. Proofs: `a_framed_table_keeps_its_natural_width_and_its_columns`,
   `framed_table_off_keeps_upstreams_wrapping`.
+- L9 `MarkdownRenderer::cull(Rc<dyn BlockCull>)`, with `BlockCull` and `BlockUse` (re-exported): with a cull set,
+  the body's top-level loop asks `skip(ix, node)` before each block. When it answers `Some((element, use))`
+  the loop pushes that element and advances its running counts (element keys, headings, tables) by `use`, so
+  every later element id, heading ordinal and table number is what a full draw gives; otherwise the block is
+  drawn, the counts it took are reported to `drawn(ix, use)`, and the block sits in a `flex_col` wrapper so the
+  wrapper's bounds hold the block's margins (a `Rule` is `my_2`). The body div gets `on_children_prepainted`
+  that hands every child's bounds to `placed`. Why: Sirio's chat stands in for the blocks of a long streamed
+  reply that sit far outside the window. With no cull the code path is `draw.nodes`, unchanged. Proofs:
+  `a_skipped_block_leaves_every_later_id_heading_table_and_push_as_a_full_draw_has_them` (ids of the code and
+  table hooks, `markdown-heading-N` and `markdown-cell-T-R-C` selectors and the host gather's pushes, with
+  each block skipped in turn),
+  `without_a_cull_the_tree_is_the_one_a_never_skipping_cull_lays_out`.
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
 

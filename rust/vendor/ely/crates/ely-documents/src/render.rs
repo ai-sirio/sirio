@@ -1,8 +1,8 @@
 use std::{ops::Range, path::Path, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, FontWeight, HighlightStyle, InteractiveText, IntoElement,
-    MouseButton, ParentElement, RenderOnce, Role, SharedString, Styled, StyledText, TextLayout,
+    AnyElement, App, Bounds, ElementId, Entity, FontWeight, HighlightStyle, InteractiveText, IntoElement,
+    MouseButton, ParentElement, Pixels, RenderOnce, Role, SharedString, Styled, StyledText, TextLayout,
     Window, div, prelude::*, relative,
 };
 
@@ -69,6 +69,32 @@ pub struct MarkdownRenderer {
     web: bool,
     diagrams: bool,
     frame: Option<TableFrame>,
+    cull: Option<Rc<dyn BlockCull>>,
+}
+
+/// What one top-level block took of a drawing's running counts: element keys, headings, tables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockUse {
+    /// Element keys.
+    pub keys: usize,
+    /// Headings.
+    pub headings: usize,
+    /// Tables.
+    pub tables: usize,
+}
+
+/// Lets an owner stand in for top-level blocks it knows are out of sight.
+///
+/// With a cull, every drawn top-level block sits in a flex column of its own, so its wrapper's
+/// bounds hold its margins; a stand-in takes its place in the body's column.
+pub trait BlockCull {
+    /// Before top-level block `ix`: an element to draw in its place, with what the block took
+    /// when it was last drawn, or `None` to draw it.
+    fn skip(&self, ix: usize, block: &Node) -> Option<(AnyElement, BlockUse)>;
+    /// Top-level block `ix` was drawn and took `used`.
+    fn drawn(&self, ix: usize, used: BlockUse);
+    /// Where each top-level block (or its stand-in) sat this frame, in window pixels.
+    fn placed(&self, bounds: Vec<Bounds<Pixels>>);
 }
 
 impl MarkdownRenderer {
@@ -89,7 +115,14 @@ impl MarkdownRenderer {
             web: false,
             diagrams: true,
             frame: None,
+            cull: None,
         }
+    }
+
+    /// Lets `cull` stand in for top-level blocks it knows are out of sight.
+    pub fn cull(mut self, cull: Rc<dyn BlockCull>) -> Self {
+        self.cull = Some(cull);
+        self
     }
 
     /// Blocks made elsewhere, such as a mail's HTML.
@@ -591,13 +624,40 @@ impl RenderOnce for MarkdownRenderer {
             table: std::cell::Cell::new(false),
             tables: std::cell::Cell::new(0),
         };
-        let body = div()
+        let children = match &self.cull {
+            None => draw.nodes(nodes, cx),
+            Some(cull) => (nodes.iter().enumerate())
+                .map(|(ix, node)| {
+                    if let Some((stand_in, used)) = cull.skip(ix, node) {
+                        draw.next.set(draw.next.get() + used.keys);
+                        draw.headings.set(draw.headings.get() + used.headings);
+                        draw.tables.set(draw.tables.get() + used.tables);
+                        return stand_in;
+                    }
+                    let before = (draw.next.get(), draw.headings.get(), draw.tables.get());
+                    let drawn = draw.node(node, cx);
+                    cull.drawn(
+                        ix,
+                        BlockUse {
+                            keys: draw.next.get() - before.0,
+                            headings: draw.headings.get() - before.1,
+                            tables: draw.tables.get() - before.2,
+                        },
+                    );
+                    div().flex().flex_col().child(drawn).into_any_element()
+                })
+                .collect(),
+        };
+        let mut body = div()
             .flex()
             .flex_col()
             .gap_3()
             .text_size(theme.text_size(self.size))
             .line_height(theme.text_size(self.size) * LINE)
-            .children(draw.nodes(nodes, cx));
+            .children(children);
+        if let Some(cull) = self.cull.clone() {
+            body = body.on_children_prepainted(move |bounds, _, _| cull.placed(bounds));
+        }
         match (gather, self.on_menu) {
             (Some(gather), Some(on_menu)) => {
                 let state = gather.finish(cx);

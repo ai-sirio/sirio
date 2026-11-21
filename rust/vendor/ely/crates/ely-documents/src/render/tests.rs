@@ -215,7 +215,11 @@ mod host {
     };
 
     use super::*;
-    use crate::{HeldPicture, MarkdownBlock, Pictures, render::TextGather};
+    use crate::{
+        HeldPicture, MarkdownBlock, Pictures,
+        render::{BlockCull, BlockUse, TextGather},
+    };
+    use gpui::AnyElement;
 
     #[derive(Clone, Debug, PartialEq)]
     enum Event {
@@ -541,5 +545,179 @@ mod host {
         let last = cx.debug_bounds("markdown-cell-0-0-8").expect("the cell drew");
         assert!(last.right() <= px(300.5), "wrapped to the column: {last:?}");
         assert!(cx.debug_bounds("markdown-table-0").is_none());
+    }
+
+    /// A cull that notes what each block took, and stands in for the block `skip` names, when
+    /// it knows that block's use (a full draw told it).
+    struct TestCull {
+        skip: Option<usize>,
+        uses: RefCell<Vec<BlockUse>>,
+        recorder: Rc<Recorder>,
+        /// The recorder's length before and after each drawn block.
+        spans: RefCell<Vec<(usize, usize)>>,
+        mark: std::cell::Cell<usize>,
+        known: Vec<BlockUse>,
+    }
+
+    impl BlockCull for TestCull {
+        fn skip(&self, ix: usize, _: &MarkdownBlock) -> Option<(AnyElement, BlockUse)> {
+            self.mark.set(self.recorder.0.borrow().len());
+            if self.skip != Some(ix) {
+                return None;
+            }
+            let used = self.known[ix];
+            Some((div().h(px(30.0)).into_any_element(), used))
+        }
+
+        fn drawn(&self, _: usize, used: BlockUse) {
+            self.uses.borrow_mut().push(used);
+            self.spans
+                .borrow_mut()
+                .push((self.mark.get(), self.recorder.0.borrow().len()));
+        }
+
+        fn placed(&self, _: Vec<gpui::Bounds<gpui::Pixels>>) {}
+    }
+
+    /// The blocks of `CULLED` and the debug selectors each one draws.
+    const CULLED: [(&str, &[&str]); 8] = [
+        ("intro with [a link](https://x.test/)", &[]),
+        ("# First", &["markdown-heading-0"]),
+        ("```rust\nfn a() {}\n```", &[]),
+        ("| a | b |\n|---|---|\n| c | d |", &["markdown-cell-0-0-0", "markdown-cell-0-1-1"]),
+        ("## Second", &["markdown-heading-1"]),
+        ("```\nlater\n```", &[]),
+        ("| e |\n|---|\n| f |", &["markdown-cell-1-0-0", "markdown-cell-1-1-0"]),
+        ("the end [link](https://y.test/)", &[]),
+    ];
+
+    /// What one frame's drawing of `CULLED` left: the host gather's events, the ids the code
+    /// and the table hooks were handed, which selectors drew, and what each drawn block took.
+    #[derive(Debug, PartialEq)]
+    struct Drawn {
+        events: Vec<Event>,
+        code: Vec<String>,
+        frames: Vec<String>,
+        selectors: Vec<&'static str>,
+        placed: Vec<gpui::Bounds<gpui::Pixels>>,
+        uses: Vec<BlockUse>,
+        spans: Vec<(usize, usize)>,
+    }
+
+    /// `CULLED` drawn, with `skip` stood in for when `cull` is set. The window may draw more
+    /// than once before it settles, so every record is cut to its first frame: the frames are
+    /// counted by the pushes of a block that was not skipped.
+    fn draw_culled(
+        cx: &mut TestAppContext,
+        skip: Option<usize>,
+        known: Vec<BlockUse>,
+        cull: bool,
+    ) -> Drawn {
+        cx.update(Theme::init);
+        let source: &'static str = Box::leak(
+            (CULLED.iter().map(|(text, _)| *text).collect::<Vec<_>>().join("\n\n")).into_boxed_str(),
+        );
+        let recorder = Rc::new(Recorder::default());
+        let test = Rc::new(TestCull {
+            skip,
+            uses: RefCell::default(),
+            recorder: recorder.clone(),
+            spans: RefCell::default(),
+            mark: Default::default(),
+            known,
+        });
+        let code = Rc::new(RefCell::new(Vec::<String>::new()));
+        let frames = Rc::new(RefCell::new(Vec::<String>::new()));
+        let (host, cull_host, seen_code, seen_frames) =
+            (recorder.clone(), test.clone(), code.clone(), frames.clone());
+        let (_, cx) = cx.add_window_view(move |_, cx| {
+            let (host, test, code, frames) =
+                (host.clone(), cull_host.clone(), seen_code.clone(), seen_frames.clone());
+            Body::new(source, 400.0, cx, move |body| {
+                let (code, frames) = (code.clone(), frames.clone());
+                let body = body
+                    .gather(host.clone())
+                    .code(move |id, _, _| {
+                        code.borrow_mut().push(format!("{id:?}"));
+                        div().h(px(20.0)).into_any_element()
+                    })
+                    .table_frame(move |id, table| {
+                        frames.borrow_mut().push(format!("{id:?}"));
+                        table
+                    });
+                if cull { body.cull(test.clone()) } else { body }
+            })
+        });
+        cx.run_until_parked();
+        let selectors = CULLED
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .filter(|name| cx.debug_bounds(name).is_some())
+            .collect::<Vec<&'static str>>();
+        let placed = selectors.iter().filter_map(|name| cx.debug_bounds(name)).collect();
+        let events = recorder.0.borrow().clone();
+        let pushes = |text: &str| events.iter().filter(|event| **event == Event::Text(text.into())).count();
+        let rounds = pushes("intro with a link").max(pushes("the end link")).max(1);
+        let first = |all: &[Event]| all[..all.len() / rounds].to_vec();
+        let first_of = |all: &[String]| all[..all.len() / rounds].to_vec();
+        let uses = test.uses.borrow().clone();
+        let spans = test.spans.borrow().clone();
+        Drawn {
+            events: first(&events),
+            code: first_of(&code.borrow()),
+            frames: first_of(&frames.borrow()),
+            selectors,
+            placed,
+            uses: uses[..uses.len() / rounds].to_vec(),
+            spans: spans[..spans.len() / rounds].to_vec(),
+        }
+    }
+
+    #[gpui::test]
+    fn a_skipped_block_leaves_every_later_id_heading_table_and_push_as_a_full_draw_has_them(
+        cx: &mut TestAppContext,
+    ) {
+        let full = draw_culled(cx, None, Vec::new(), true);
+        assert_eq!(full.uses.len(), CULLED.len(), "every block reported its use");
+        // The blocks that draw a code block or a table, in order.
+        let (code_blocks, frame_blocks) = ([2usize, 5], [3usize, 6]);
+        for skipped in 0..CULLED.len() {
+            let cut = draw_culled(cx, Some(skipped), full.uses.clone(), true);
+            // The gather: the full draw's pushes without the skipped block's.
+            let (from, to) = full.spans[skipped];
+            let mut events = full.events[..from].to_vec();
+            events.extend_from_slice(&full.events[to..]);
+            assert_eq!(cut.events, events, "skipping block {skipped}: the gather's pushes");
+            // The element ids the hooks were handed keep the numbers a full draw gives them.
+            let own = |blocks: &[usize]| blocks.iter().position(|block| *block == skipped);
+            for (cut, full, blocks, what) in [
+                (&cut.code, &full.code, code_blocks, "code"),
+                (&cut.frames, &full.frames, frame_blocks, "table"),
+            ] {
+                let mut expected = full.clone();
+                if let Some(at) = own(&blocks) {
+                    expected.remove(at);
+                }
+                assert_eq!(*cut, expected, "skipping block {skipped}: the {what} ids");
+            }
+            // Headings and tables: every other block drew under its own number.
+            let expected: Vec<&str> = (CULLED.iter().enumerate())
+                .filter(|(ix, _)| *ix != skipped)
+                .flat_map(|(_, (_, names))| names.iter().copied())
+                .collect();
+            assert_eq!(cut.selectors, expected, "skipping block {skipped}: headings and tables");
+        }
+    }
+
+    #[gpui::test]
+    fn without_a_cull_the_tree_is_the_one_a_never_skipping_cull_lays_out(cx: &mut TestAppContext) {
+        let plain = draw_culled(cx, None, Vec::new(), false);
+        let never = draw_culled(cx, None, Vec::new(), true);
+        assert_eq!(plain.selectors, never.selectors);
+        assert_eq!(plain.placed, never.placed, "the per-block wrapper moves nothing");
+        assert_eq!(plain.code, never.code);
+        assert_eq!(plain.frames, never.frames);
+        assert_eq!(plain.events, never.events);
+        assert!(plain.uses.is_empty(), "no cull, nobody is told");
     }
 }
