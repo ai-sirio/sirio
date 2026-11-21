@@ -416,12 +416,41 @@ is called pre-existing.
   copies the wrong text. Mitigated by the walk == pushes test over every node kind.
 - **Link click after a drag.** Ely draws links with gpui `InteractiveText`, whose click may fire when
   a drag starts and ends on one link; the `on_link` guard (§5.5) owns that case.
-- **Streaming cost.** Ely's reader is heavier than bezel's; a long reply re-parses per chunk. Measure
-  a 40 KiB reply streamed in 200 chunks before and after; more than 2× is a finding to report, not to
-  fix here (step 3 brings `StreamingMarkdown`).
+- **Streaming cost.** Ely's reader is heavier than bezel's; a long reply re-parses per chunk.
+  Deviation from the first plan, ruled by t2s on 2026-11-20: the branch must be at or below the bezel
+  build on the median and the p95 of parse + frame before the PR opens, not "report it for step 3".
+  - **Measured first:** Ely 1.9x bezel. The draw, not the parse, was the cost: taffy laid out the
+    whole reply on every frame (42%, half of it table grid sizing) and rebuilt every block (36%).
+  - **Fixed in this PR:**
+    - a highlight memo per (language, code);
+    - link rows built only when read;
+    - **block culling** in chat replies (L9). A top-level block the last frame saw more than
+      `max(viewport, 512 px)` outside the window is replaced by an empty block of its remembered height.
+      A jump scroll that uncovers one redraws it in the same frame.
+    - Blocks holding a picture or math are never culled, since their height settles late.
+  - **Result:** 40 KiB in 200 chunks, release, median of three alternating rounds on a loaded machine,
+    so the absolute times are inflated:
+
+    | reply | bezel median | bezel p95 | Ely median | Ely p95 |
+    |---|---|---|---|---|
+    | SHOWCASE | 29.45 ms | 44.17 ms | 8.66 ms | 17.00 ms |
+    | one open `rust` fence (40 KiB of real code) | 25.16 ms | 44.84 ms | 12.98 ms | 24.89 ms |
+
+  - **Known limit:** the parse alone (`handle_event`) is slower on Ely: 2.98 ms against 0.81 ms per
+    chunk, and O(n) in the reply. Step 3's `StreamingMarkdown` is where it goes.
+- **Culling's accepted behaviour changes** (t2s, 2026-11-21):
+  - **Control-socket link rows:** `transcriptLinks` lists only the links of drawn blocks (the window
+    plus the margin). Right after a jump scroll it lists only the links of visible blocks, until the
+    next frame draws the margin.
+  - **Drag selection:** a drag whose pointer goes past the margin clamps the selection head to the
+    nearest drawn text. The chat has no drag autoscroll.
+  - **Width change:** after a width change the item's height is right one frame later; nothing visible
+    is blank in between.
+  - **Highlight memo:** a fence still streaming that extends a closed fence of the same language makes
+    that closed fence recompute once per draw while the stream lasts.
 - **Untrusted math.** ratex on forge text: a parse failure draws Ely's error note; a panic would be a
   finding. The E2E fixture includes malformed TeX.
-- **Upstream sync cost.** L1–L8 must be re-applied on each sync; they are additive and listed.
+- **Upstream sync cost.** L1–L9 must be re-applied on each sync; they are additive and listed.
 
 ## 8. Left to the builder
 
