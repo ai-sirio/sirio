@@ -24,7 +24,8 @@ mod play;
 mod projects;
 mod search;
 mod status;
-mod stream;
+#[doc(hidden)]
+pub mod stream;
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
 mod voice;
@@ -39,7 +40,7 @@ pub use cite::{CitationBadge, Source, SourceCard, SourceList};
 pub use code::CodeBlock;
 pub use composer::{AttachmentButton, DragDropOverlay, InputHint, PromptInput, SendButton};
 pub use conversations::{Conversation, ConversationItem, ConversationList, new_chat_button};
-pub use list::{DateSeparator, MessageList, ScrollToBottomButton};
+pub use list::{DateSeparator, MessageList, ScrollToBottomButton, day_name};
 pub use media::{FileMessage, ImageGrid, ImageMessage, LinkPreviewCard};
 pub use message::{
     ChatContainer, MessageAvatar, MessageBubble, MessageFooter, MessageHeader, Role,

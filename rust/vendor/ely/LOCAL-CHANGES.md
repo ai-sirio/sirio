@@ -35,8 +35,10 @@ describes is a review by hand.
 - `crates/ely-chat/src/composer.rs`
 - `crates/ely-chat/src/expansion.rs`
 - `crates/ely-chat/src/lib.rs`
+- `crates/ely-chat/src/list.rs`
 - `crates/ely-chat/src/message.rs`
 - `crates/ely-chat/src/status.rs`
+- `crates/ely-chat/src/stream.rs`
 - `crates/ely-collab/Cargo.toml`
 - `crates/ely-core/Cargo.toml`
 - `crates/ely-core/icons/clipboard-list.svg`
@@ -559,8 +561,9 @@ unchanged default path are named: they ran green on this code (each alone, 1 tes
 ### Row 20 (stream)
 
 Re-decided: the old crate left `StreamingMarkdown` out. Upstream exports it from
-`ely-chat/src/stream.rs` and `lib.rs`; both are verbatim and it comes along, unused by Sirio.
-No proof needed (nothing changed).
+`ely-chat/src/stream.rs` and `lib.rs`; it comes along, unused by Sirio. `StreamingMarkdown` itself is
+verbatim, so no proof is needed for it. The two files also carry L11, which changes only their
+visibility (see `## ely-chat host seams (L11)`).
 
 - `crates/ely-chat/src/lib.rs`: `#[doc(hidden)] pub mod expansion;`
 - `crates/ely-chat/src/expansion.rs`, `crates/ely-chat/src/composer.rs`,
@@ -896,6 +899,26 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
   `the_renderer_reads_the_address_it_is_handed_under_a_verbatim_folder_whole`.
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
+
+## ely-chat host seams (L11)
+
+Sirio's chat draws its own incremental tree and needs Ely's reveal pace and day words, not a copy of
+them. So the pacing functions, their two constants and `day_name` are public. Visibility only: no body
+changed, and upstream's own callers see the same behaviour. Paths: `ely-chat` `src/stream.rs`,
+`src/list.rs` and `src/lib.rs`.
+
+- L11 `stream` is a public module, `#[doc(hidden)]` as `expansion` is. `advanced`, `next_shown` and
+  `grapheme_end` are `pub`; `PACE` and `CATCH_UP` are `pub const`; `list::day_name(day, today)` is `pub`
+  and re-exported at the root, so `ely_chat::day_name` takes two `jiff::civil::Date`s and returns a
+  `String`. Sirio reaches all of them through the facade's `chat` alias (`pub use ely_chat as chat`):
+  `ely_gpui_component::chat::stream::{advanced, next_shown, grapheme_end, PACE, CATCH_UP}` and
+  `ely_gpui_component::chat::day_name`. Why: Sirio's chat draws its own incremental tree and needs Ely's
+  pace, not a copy of it. Proof: no body changed, so the existing tests of these items still cover them:
+  `stream::tests::a_reveal_keeps_pace_and_catches_up`, `stream::tests::a_finished_stream_shows_whole`,
+  `stream::tests::a_count_of_graphemes_ends_on_a_boundary` and
+  `list::tests::days_read_as_today_yesterday_or_a_date`.
+- Facade: none. `ely-gpui-component` already re-exports `ely_chat` as `chat` (the facade is outside
+  `check-vendor.sh`).
 
 ## ely-documents reference labels (L13)
 

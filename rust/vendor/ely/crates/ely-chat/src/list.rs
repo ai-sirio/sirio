@@ -247,7 +247,7 @@ impl DateSeparator {
 }
 
 /// The words for `day` seen from `today`.
-pub(crate) fn day_name(day: Date, today: Date) -> String {
+pub fn day_name(day: Date, today: Date) -> String {
     if day == today {
         "Today".to_string()
     } else if today.yesterday().is_ok_and(|yesterday| yesterday == day) {
