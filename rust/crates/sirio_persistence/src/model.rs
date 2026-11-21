@@ -645,6 +645,9 @@ pub struct AppSettings {
     pub appearance: AppearanceMode,
     /// "appearance.uiFontSize" — default 13, clamped to 10...20.
     pub ui_font_size: i64,
+    /// "appearance.fontPair" — the font pair's id, default "atkinson". Stored as written;
+    /// the host maps an empty or unknown id to the default pair.
+    pub font_pair: String,
     /// "appearance.terminalFontSize" — default 13, clamped to 9...24.
     pub terminal_font_size: i64,
     /// "appearance.baseColor" — default: neutral.
@@ -761,6 +764,7 @@ impl Default for AppSettings {
         Self {
             appearance: AppearanceMode::System,
             ui_font_size: 13,
+            font_pair: "atkinson".to_string(),
             terminal_font_size: 13,
             base_color: BaseColor::Neutral,
             control_socket_enabled: true,
@@ -809,6 +813,7 @@ impl Default for AppSettings {
 pub mod settings_keys {
     pub const APPEARANCE_THEME: &str = "appearance.theme";
     pub const UI_FONT_SIZE: &str = "appearance.uiFontSize";
+    pub const FONT_PAIR: &str = "appearance.fontPair";
     pub const TERMINAL_FONT_SIZE: &str = "appearance.terminalFontSize";
     pub const BASE_COLOR: &str = "appearance.baseColor";
     pub const CONTROL_SOCKET_ENABLED: &str = "controlSocket.enabled";

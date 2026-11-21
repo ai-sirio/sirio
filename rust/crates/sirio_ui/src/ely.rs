@@ -50,6 +50,29 @@ pub fn init(cx: &mut App) {
     cx.defer(sync_theme_if_changed);
 }
 
+/// The families Ely's and bezel's themes draw in, for the debug read of the font pair (Sirio's
+/// own are in `Theme::typography`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontFamilies {
+    pub ely_ui: String,
+    pub ely_code: String,
+    pub bezel_sans: String,
+    pub bezel_mono: String,
+    pub bezel_sans_fallback: String,
+}
+
+pub fn font_families(cx: &App) -> FontFamilies {
+    let ely = cx.global::<ElyTheme>();
+    let bezel = bezel_theme::Theme::of(cx);
+    FontFamilies {
+        ely_ui: ely.font_family.to_string(),
+        ely_code: ely.mono_family.to_string(),
+        bezel_sans: bezel.font_sans.to_string(),
+        bezel_mono: bezel.font_mono.to_string(),
+        bezel_sans_fallback: bezel.font_sans_fallback.to_string(),
+    }
+}
+
 pub(crate) fn sync_theme_if_changed(cx: &mut App) {
     if !cx.has_global::<LastTheme>() {
         init(cx);

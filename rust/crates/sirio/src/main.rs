@@ -40,7 +40,7 @@ use sirio_terminal::{
     TerminalIdentity, TerminalLinkEvent, TerminalPaneCache, TerminalPromptAction,
     TerminalPromptEvent, TerminalShell, TerminalView, command_shell_invocation,
 };
-use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
+use sirio_theme::{AgentBrandColor, FontPair, Theme, ThemeMode};
 use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
@@ -633,6 +633,14 @@ fn bind_window_keys(cx: &mut App) {
                 "escape",
                 CloseSettingsSurface,
                 None,
+            )))
+            // The Font select's own Escape holds the global one back while its row has focus
+            // (the list closes first). Added after the global binding on purpose: at equal
+            // depth the later binding wins, and an unscoped one counts as the deepest.
+            .chain(std::iter::once(KeyBinding::new(
+                "escape",
+                gpui::NoAction,
+                Some(sirio_ui::settings::FONT_SELECT_CONTEXT),
             )))
             .chain(std::iter::once(KeyBinding::new(
                 "ctrl-,",
@@ -5284,6 +5292,7 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
             "translucency".to_string(),
             snapshot.translucency.to_string(),
         ),
+        ("fontPair".to_string(), snapshot.font_pair.id().to_string()),
         (
             "interfaceFontSize".to_string(),
             snapshot.interface_font_size.to_string(),
@@ -16687,8 +16696,69 @@ impl SirioWorkspace {
                 })
                 .to_string(),
             ));
+            read.push(("fonts".to_string(), self.fonts_read(window, cx).to_string()));
         }
         read
+    }
+
+    /// The font pair in use, for the debug attention read: the families Sirio's typography, Ely
+    /// and bezel draw in, and the text system's width of ten `m`, ten `a` and ten `0` at 20 px
+    /// per role and slot (`{"m": w, "a": w, "0": w}`), so a test can tell that the bundled face
+    /// of each weight and slant is the one drawn.
+    fn fonts_read(&self, window: &Window, cx: &App) -> serde_json::Value {
+        let typography = cx.global::<Theme>().typography;
+        let families = sirio_ui::ely::font_families(cx);
+        let samples = |family: &str, weight: f32, italic: bool| {
+            let width = |text: &str| {
+                let mut font = gpui::font(family.to_owned());
+                font.weight = FontWeight(weight);
+                if italic {
+                    font.style = gpui::FontStyle::Italic;
+                }
+                let run = gpui::TextRun {
+                    len: text.len(),
+                    font,
+                    color: gpui::Hsla::default(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let layout = window
+                    .text_system()
+                    .layout_line(text, px(20.0), &[run], None);
+                f32::from(layout.width)
+            };
+            serde_json::json!({
+                "m": width("mmmmmmmmmm"),
+                "a": width("aaaaaaaaaa"),
+                "0": width("0000000000"),
+            })
+        };
+        let ui = typography.ui_family;
+        let code = typography.code_family;
+        serde_json::json!({
+            "pair": self.settings.read(cx).snapshot().font_pair.id(),
+            "ui": ui,
+            "code": code,
+            "elyUi": families.ely_ui,
+            "elyCode": families.ely_code,
+            "bezelSans": families.bezel_sans,
+            "bezelMono": families.bezel_mono,
+            "bezelSansFallback": families.bezel_sans_fallback,
+            "widths": {
+                "ui": {
+                    "400": samples(ui, 400.0, false),
+                    "500": samples(ui, 500.0, false),
+                    "600": samples(ui, 600.0, false),
+                    "700": samples(ui, 700.0, false),
+                    "400i": samples(ui, 400.0, true),
+                },
+                "code": {
+                    "400": samples(code, 400.0, false),
+                    "700": samples(code, 700.0, false),
+                },
+            },
+        })
     }
 
     /// Opens the session with this persistence id: selects its worktree and
@@ -23590,6 +23660,28 @@ impl SirioWorkspace {
             "mode".to_string(),
             sirio_ui::changes::DiffViewMode::get(cx).name().to_string(),
         ));
+        // Debug builds only, like `shellRects`: the window rect `[x, y, w, h]`
+        // of the topmost drawn diff row's new-number cell, null while no diff
+        // row is drawn, for the E2E to look at the pixels left of it.
+        if cfg!(debug_assertions) {
+            let cell = view.read(cx).number_cell_bounds().map(|bounds| {
+                serde_json::json!([
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                ])
+            });
+            pairs.push((
+                "numberCell".to_string(),
+                cell.unwrap_or(serde_json::Value::Null).to_string(),
+            ));
+            // The px size the diff numbers are drawn at, for the same E2E.
+            pairs.push((
+                "numberFontSize".to_string(),
+                f32::from(cx.global::<Theme>().typography.scaled(12.0)).to_string(),
+            ));
+        }
         Ok(pairs)
     }
 
@@ -24363,9 +24455,17 @@ impl SirioWorkspace {
             } else {
                 (None, None)
             };
+            // The Appearance page's probed controls, drawn only while Settings is.
+            let settings_probe = if self.show_settings {
+                self.settings.read(cx).probe_bounds()
+            } else {
+                Default::default()
+            };
             layout.push((
                 "shellRects".into(),
                 serde_json::json!({
+                    "settingsFont": settings_probe.font.map(rect),
+                    "settingsFontSizeUp": settings_probe.font_size_up.map(rect),
                     "titlebar": rects.titlebar.get().map(rect),
                     "left": rects.left.get().map(rect),
                     "center": rects.center.get().map(rect),
@@ -32640,6 +32740,8 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
 
     SettingsSnapshot {
         theme: theme_mode(settings.appearance),
+        // An empty, unknown or garbage id reads as the default pair; it never blocks loading.
+        font_pair: FontPair::from_id(&settings.font_pair),
         interface_font_size: settings.ui_font_size.clamp(12, 18) as i32,
         terminal_font_size: settings.terminal_font_size.clamp(12, 18) as i32,
         base_color: theme_base_color(settings.base_color),
@@ -32676,6 +32778,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
 fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
     AppSettings {
         appearance: persisted_appearance(snapshot.theme),
+        font_pair: snapshot.font_pair.id().to_owned(),
         ui_font_size: i64::from(snapshot.interface_font_size.clamp(12, 18)),
         terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(12, 18)),
         base_color: persisted_base_color(snapshot.base_color),
@@ -33048,10 +33151,11 @@ fn app_icon() -> Arc<image::RgbaImage> {
 }
 
 /// Registers the bundled faces with the text system, on every platform:
-/// Sirio's Geist faces for the UI and code, and `sirio_theme`'s JetBrainsMono
-/// Nerd Font Mono for the terminal. Sirio used to carry its own Geist copy in
-/// `assets/fonts` and skip macOS, which kept SF Pro there; B3 makes one face
-/// the face everywhere, with static 500/600/700 weights. The terminal face
+/// the interface font pairs (Geist and the others, `sirio_theme::FontPair`)
+/// for the UI and code, and `sirio_theme`'s JetBrainsMono Nerd Font Mono for
+/// the terminal. Sirio used to carry its own Geist copy in `assets/fonts` and
+/// skip macOS, which kept SF Pro there; B3 makes one face the face
+/// everywhere, with static 500/600/700 weights. The terminal face
 /// came back into `assets/fonts` for
 /// the reason recorded at `sirio_theme::BUNDLED_TERMINAL_FAMILY`: on a stock
 /// Windows box no candidate in the terminal chain existed, and the generic
@@ -33071,9 +33175,9 @@ fn app_icon() -> Arc<image::RgbaImage> {
 /// terminal, as a Cascadia Mono or Consolas pane whose Powerline glyphs are
 /// tofu.
 fn register_fonts(cx: &App) {
-    if let Err(error) = sirio_theme::register_ui_fonts(cx) {
-        eprintln!("[fonts] failed to register Geist: {error}");
-    }
+    // A Geist failure is already logged by `register_ui_fonts`, which still registers the
+    // pairs; the error it returns only says the bundled default is missing.
+    let _ = sirio_theme::register_ui_fonts(cx);
     if let Err(error) = sirio_theme::register_bundled_terminal_font(cx) {
         eprintln!(
             "[fonts] failed to register {}: {error}",
@@ -34239,6 +34343,9 @@ fn main() {
             cx,
         );
         Theme::set_interface_font_size(saved_settings.ui_font_size as i32, cx);
+        // The saved font pair, before the first window: no frame draws in the default pair
+        // when another is saved.
+        Theme::set_font_pair(FontPair::from_id(&saved_settings.font_pair), cx);
         // The Markdown Preview's diagram cache and PlantUML server (design §6).
         sirio_ui::markdown_preview::DiagramSettings::apply(
             &saved_settings.markdown_plantuml_server,
@@ -47089,6 +47196,7 @@ done
     fn persisted_settings_round_trip_maps_every_field_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
+            font_pair: "plex".into(),
             ui_font_size: 17,
             terminal_font_size: 16,
             base_color: BaseColor::Neutral,
@@ -47136,6 +47244,7 @@ done
         assert!(snapshot.editor.ruler);
         assert_eq!(snapshot.editor.ruler_column, 120);
         assert_eq!(snapshot.editor.line_numbers, EditorLineNumbers::Relative);
+        assert_eq!(snapshot.font_pair, FontPair::Plex);
         assert_eq!(snapshot.interface_font_size, 17);
         assert_eq!(snapshot.terminal_font_size, 16);
         assert!(!snapshot.control_socket_enabled);
@@ -47162,6 +47271,7 @@ done
         let restored = app_settings_from_snapshot(snapshot);
         assert_eq!(restored.markdown_plantuml_server, persisted.markdown_plantuml_server);
         assert_eq!(restored.appearance, persisted.appearance);
+        assert_eq!(restored.font_pair, persisted.font_pair);
         assert_eq!(restored.ui_font_size, persisted.ui_font_size);
         assert_eq!(restored.terminal_font_size, persisted.terminal_font_size);
         assert_eq!(

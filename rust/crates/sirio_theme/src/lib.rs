@@ -47,11 +47,13 @@ use std::sync::OnceLock;
 /// *resolved* one) and because it keeps `sirio_persistence::AppearanceMode`
 /// unambiguous at the one place both are in scope, `sirio`'s `main.rs`.
 mod base_color;
+mod font_pair;
 mod presets;
 
 pub use ely_palette;
 
 pub use base_color::BaseColor;
+pub use font_pair::{Face, FaceRole, FontPair};
 
 pub use bezel_theme::appearance::AppearanceMode as ThemeMode;
 
@@ -784,15 +786,20 @@ pub struct Typography {
     /// Code font weight (waku's embedded JetBrains Mono renders NORMAL).
     pub code_weight: FontWeight,
     /// The monospace family code renders in — the one answer to "what is our
-    /// mono font", resolved once at runtime from the families actually
-    /// installed (see [`Theme::resolve_code_family`]) instead of five string
-    /// literals. `SFMono-Regular` does not exist on Linux; the fallback
-    /// chain picks what does.
+    /// mono font". A fresh typography carries the family resolved once at
+    /// startup from the families actually installed (see
+    /// [`Theme::resolve_code_family`]); [`Theme::set_font_pair`] then writes
+    /// the chosen pair's code family into the installed theme, and
+    /// [`Theme::set_interface_font_size`] keeps whatever is installed.
+    /// `SFMono-Regular` does not exist on Linux; the fallback chain picks
+    /// what does.
     pub code_family: &'static str,
     /// The sans-serif family the application UI renders in — the one answer
-    /// to "what is our UI font", resolved once at runtime from the families
-    /// actually installed (see [`Theme::resolve_ui_family`]). JetBrains Sans
-    /// leads off macOS, Apple's SF Pro leads on it.
+    /// to "what is our UI font". A fresh typography carries the family
+    /// resolved once at startup from the families actually installed (see
+    /// [`Theme::resolve_ui_family`]); [`Theme::set_font_pair`] then writes
+    /// the chosen pair's interface family into the installed theme, and
+    /// [`Theme::set_interface_font_size`] keeps whatever is installed.
     pub ui_family: &'static str,
     /// Display size (waku empty-state headline: 20px MEDIUM; Sirio
     /// renders 21px).
@@ -924,8 +931,11 @@ impl Default for Typography {
 // ── the font families ────────────────────────────────────────────────────
 //
 // Three families are resolved once, at runtime, from what is actually
-// installed — never hard-coded: the UI (sans) family, the code (mono)
-// family, and the terminal (Nerd Font mono) family. The old code-font
+// installed: the UI (sans) family, the code (mono) family, and the terminal
+// (Nerd Font mono) family. The chosen [`FontPair`] names its two families
+// itself (the pair table in `font_pair.rs`); the candidate lists below
+// resolve the startup families and are the fallback for a pair family the
+// text system does not list. The old code-font
 // comment tells the story that motivated the whole section: five call
 // sites used to ask for `SFMono-Regular` by name, a family that does not
 // exist on Linux, and GPUI fell back silently so every code span rendered
@@ -936,7 +946,8 @@ impl Default for Typography {
 //
 // One list per role, no platform split: Geist and Geist Mono (SIL OFL 1.1)
 // lead everywhere, registered by `register_ui_fonts` before the first
-// window opens, so they are always present. A theme that changes face per
+// window opens, so they are normally present; they resolve the startup
+// families, which a chosen pair then replaces role by role. A theme that changes face per
 // platform cannot be reviewed as one design, which is why the Apple faces sit
 // at the tail as a last resort rather than leading on macOS. The JetBrains
 // faces (JetBrains Mono — SIL OFL 1.1; JetBrains Sans — Apache 2.0 — both open
@@ -945,6 +956,10 @@ impl Default for Typography {
 // `fc-list : family` on the Linux build machine rather than assumed.
 
 /// The sans-serif families to prefer, in order, when resolving the UI font.
+///
+/// This resolves the family used at startup and the fallback for a
+/// [`FontPair`] whose families the text system does not list; the family in
+/// use after a pair is chosen is the pair's own.
 ///
 /// "Geist" leads on every platform, macOS included: `register_ui_fonts`
 /// registers it with real 500/600/700 statics, so it is always present here.
@@ -964,6 +979,9 @@ pub const UI_FAMILY_CANDIDATES: &[&str] = &[
 ];
 
 /// Monospace families to prefer, in order, when resolving the code font.
+///
+/// Like [`UI_FAMILY_CANDIDATES`], the startup answer and the fallback for a
+/// [`FontPair`] that is not installed.
 ///
 /// "Geist Mono" leads for the same reason "Geist" leads
 /// [`UI_FAMILY_CANDIDATES`]: `register_ui_fonts` registers it before the first
@@ -1023,32 +1041,46 @@ static TERMINAL_FONT_ITALIC: &[u8] =
 static TERMINAL_FONT_BOLD_ITALIC: &[u8] =
     include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-BoldItalic.ttf");
 
-static UI_FONT_GEIST: &[u8] = include_bytes!("../../../assets/fonts/Geist.ttf");
-static UI_FONT_GEIST_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/Geist-Medium.ttf");
-static UI_FONT_GEIST_SEMIBOLD: &[u8] =
-    include_bytes!("../../../assets/fonts/Geist-SemiBold.ttf");
-static UI_FONT_GEIST_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Geist-Bold.ttf");
-static UI_FONT_GEIST_MONO: &[u8] = include_bytes!("../../../assets/fonts/GeistMono.ttf");
-
-/// The UI faces: Geist, its static 500/600/700 weights, and Geist Mono.
-pub fn bundled_ui_fonts() -> Vec<Cow<'static, [u8]>> {
-    [
-        UI_FONT_GEIST,
-        UI_FONT_GEIST_MEDIUM,
-        UI_FONT_GEIST_SEMIBOLD,
-        UI_FONT_GEIST_BOLD,
-        UI_FONT_GEIST_MONO,
-    ]
-    .into_iter()
-    .map(Cow::Borrowed)
-    .collect()
+fn pair_fonts(pair: FontPair) -> Vec<Cow<'static, [u8]>> {
+    pair.faces().iter().map(|face| Cow::Borrowed(face.bytes)).collect()
 }
 
-/// Registers the UI faces. Must run before [`Theme::init`], like
-/// [`register_bundled_terminal_font`]: `Theme::install` resolves the UI and
-/// code families from `all_font_names()` once.
+/// Geist's faces: its 400 and its mono (variable files, read at their
+/// default instance) and the static 500/600/700. The other pairs' faces are
+/// [`FontPair::faces`].
+pub fn bundled_ui_fonts() -> Vec<Cow<'static, [u8]>> {
+    pair_fonts(FontPair::Geist)
+}
+
+/// Registers the UI faces: Geist in its own `add_fonts` call, then every
+/// other [`FontPair`] in one call each, so that a platform which aborts a
+/// whole batch on one bad face (macOS, Windows) loses that pair and not
+/// the others. Any batch that fails is logged and skipped, Geist's too: the
+/// pairs are registered regardless, and Geist's error is returned at the end
+/// for the caller to log. Logs how many faces were registered and how long it took. Must
+/// run before [`Theme::init`], like [`register_bundled_terminal_font`]:
+/// `Theme::install` lists the installed families once.
 pub fn register_ui_fonts(cx: &App) -> anyhow::Result<()> {
-    cx.text_system().add_fonts(bundled_ui_fonts())
+    let started = std::time::Instant::now();
+    let mut faces = 0;
+    let geist = match cx.text_system().add_fonts(bundled_ui_fonts()) {
+        Ok(()) => {
+            faces += FontPair::Geist.faces().len();
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("[fonts] failed to register {}: {error}", FontPair::Geist.title());
+            Err(error)
+        }
+    };
+    for pair in FontPair::ALL.into_iter().filter(|pair| *pair != FontPair::Geist) {
+        match cx.text_system().add_fonts(pair_fonts(pair)) {
+            Ok(()) => faces += pair.faces().len(),
+            Err(error) => eprintln!("[fonts] failed to register {}: {error}", pair.title()),
+        }
+    }
+    eprintln!("[fonts] registered {faces} interface faces in {:?}", started.elapsed());
+    geist
 }
 
 /// The bundled terminal faces, regular, bold, italic and bold italic, as
@@ -1127,13 +1159,19 @@ pub const TERMINAL_FAMILY_CANDIDATES: &[&str] = &[
     "Noto Sans Mono",
 ];
 
-/// The resolved UI family, remembered once. The first caller wins: in the
+/// The UI family resolved at startup, remembered once: the answer a fresh
+/// [`Typography`] carries and the fallback for a font pair that is not
+/// installed (the family in use is [`Typography::ui_family`]). The first
+/// caller wins: in the
 /// app that is [`Theme::resolve_ui_family`] with the real installed list;
 /// in tests it is whichever theme accessor runs first, which gets the
 /// system's generic sans-serif answer — a real family either way.
 static UI_FAMILY: OnceLock<String> = OnceLock::new();
 
-/// The resolved code family, remembered once. The first caller wins: in the
+/// The code family resolved at startup, remembered once: the answer a fresh
+/// [`Typography`] carries and the fallback for a font pair that is not
+/// installed (the family in use is [`Typography::code_family`]). The first
+/// caller wins: in the
 /// app that is [`Theme::resolve_code_family`] with the real installed list;
 /// in tests it is whichever theme accessor runs first, which gets the
 /// system's generic monospace answer — a real family either way.
@@ -1145,6 +1183,29 @@ static CODE_FAMILY: OnceLock<String> = OnceLock::new();
 /// which gets the system's generic monospace answer — a real family either
 /// way.
 static TERMINAL_FAMILY: OnceLock<String> = OnceLock::new();
+
+/// Which of the bundled [`FontPair`] families the text system lists, per family and not per
+/// pair, remembered once. The first caller wins and lists the fonts: in the app that is
+/// [`Theme::resolve_font_families`], called from [`Theme::install`] after
+/// [`register_ui_fonts`], so the answer includes every registered family; a caller that runs
+/// before registration (a test) fixes what was listed by then. [`Theme::set_font_pair`] reads
+/// it, and lists the fonts itself only if nothing has yet.
+static LISTED_PAIR_FAMILIES: OnceLock<HashSet<&'static str>> = OnceLock::new();
+
+fn listed_pair_families_in(installed: &HashSet<String>) -> HashSet<&'static str> {
+    FontPair::ALL
+        .into_iter()
+        .flat_map(|pair| [pair.ui_family(), pair.code_family()])
+        .filter(|family| installed.contains(*family))
+        .collect()
+}
+
+fn listed_pair_families(cx: &App) -> &'static HashSet<&'static str> {
+    LISTED_PAIR_FAMILIES.get_or_init(|| {
+        let installed: HashSet<String> = cx.text_system().all_font_names().into_iter().collect();
+        listed_pair_families_in(&installed)
+    })
+}
 
 /// Resolves the sans-serif family from a set of installed family names.
 ///
@@ -1212,13 +1273,15 @@ pub fn system_monospace_family() -> String {
     database.family_name(&fontdb::Family::Monospace).to_string()
 }
 
-/// The resolved UI font family, resolving the system's generic sans-serif
+/// The UI font family resolved at startup (not the chosen pair's: that is
+/// [`Typography::ui_family`]), resolving the system's generic sans-serif
 /// answer if nothing has been resolved yet.
 pub fn ui_family() -> &'static str {
     UI_FAMILY.get_or_init(system_sans_family).as_str()
 }
 
-/// The resolved code font family, resolving the system's generic monospace
+/// The code font family resolved at startup (not the chosen pair's: that is
+/// [`Typography::code_family`]), resolving the system's generic monospace
 /// answer if nothing has been resolved yet.
 pub fn code_family() -> &'static str {
     CODE_FAMILY.get_or_init(system_monospace_family).as_str()
@@ -1328,8 +1391,22 @@ impl Theme {
     /// The bezel theme built from `base_color.rs`'s ladders. Sirio's matching
     /// preset values are maintained separately in `presets.rs`; keep ladder
     /// edits aligned in both until sub-project 7.
+    ///
+    /// Its fonts follow this theme's typography: `font_sans` and `font_mono`
+    /// are the families the theme draws in, and `font_sans_fallback` (what
+    /// bezel markdown draws italic text in) is the interface family when the
+    /// pair that owns it bundles an italic. Otherwise it stays bezel's system
+    /// sans, as for Geist, whose bezel theme is therefore what it always was.
     pub fn to_bezel_theme(&self) -> bezel_theme::Theme {
-        bezel_theme_for(self.base_color, self.appearance)
+        let mut theme = bezel_theme_for(self.base_color, self.appearance);
+        theme.font_sans = self.typography.ui_family.into();
+        theme.font_mono = self.typography.code_family.into();
+        if FontPair::for_ui_family(self.typography.ui_family)
+            .is_some_and(FontPair::has_ui_italic)
+        {
+            theme.font_sans_fallback = self.typography.ui_family.into();
+        }
+        theme
     }
 
     /// Installs this theme's branded palette into bezel's registry and keeps
@@ -1362,8 +1439,9 @@ impl Theme {
         cx.set_global(theme);
     }
 
-    /// Resolves and remembers the UI, code and terminal families from the
-    /// families the runtime text system actually has installed. Idempotent
+    /// Resolves and remembers the UI, code and terminal families, and which
+    /// bundled font-pair families are listed, from the families the runtime
+    /// text system actually has installed. Idempotent
     /// — the first call wins — and called from [`Theme::install`] so the
     /// app has every answer before the first frame. The pure, testable
     /// forms are the free `resolve_ui_family`, `resolve_code_family` and
@@ -1379,6 +1457,7 @@ impl Theme {
         let _ = TERMINAL_FAMILY
             .get_or_init(|| resolve_terminal_family(&installed))
             .as_str();
+        LISTED_PAIR_FAMILIES.get_or_init(|| listed_pair_families_in(&installed));
     }
 
     /// Resolves and remembers the code family from the families the runtime
@@ -1522,9 +1601,34 @@ impl Theme {
     }
 
     /// Applies the persisted interface font size to the installed theme.
+    ///
+    /// The installed typography's families stay: a size step must not undo
+    /// the font pair [`Theme::set_font_pair`] chose.
     pub fn set_interface_font_size(value: i32, cx: &mut App) {
         let mut theme = *cx.global::<Self>();
+        let (ui_family, code_family) =
+            (theme.typography.ui_family, theme.typography.code_family);
         theme.typography = Typography::for_interface_size(value.clamp(12, 18) as f32);
+        theme.typography.ui_family = ui_family;
+        theme.typography.code_family = code_family;
+        cx.set_global(theme);
+    }
+
+    /// Applies a font pair to the installed theme. Each role takes the pair's
+    /// family when the text system listed it (once, after registration: see
+    /// `LISTED_PAIR_FAMILIES`; the first call lists the fonts if nothing has
+    /// yet), otherwise the family resolved at startup, so a pair with one
+    /// family missing keeps the other. Re-installs the theme into bezel,
+    /// whose fonts follow the typography, which refreshes every window
+    /// (bezel's `install_custom`), and sets the global.
+    pub fn set_font_pair(pair: FontPair, cx: &mut App) {
+        let listed = listed_pair_families(cx);
+        let mut theme = *cx.global::<Self>();
+        let ui = pair.ui_family();
+        let code = pair.code_family();
+        theme.typography.ui_family = if listed.contains(ui) { ui } else { ui_family() };
+        theme.typography.code_family = if listed.contains(code) { code } else { code_family() };
+        theme.install_into_bezel(cx);
         cx.set_global(theme);
     }
 
@@ -2812,45 +2916,94 @@ mod tests {
     }
 
     /// Linux rasterises a variable font at its default instance only, so the
-    /// static 500/600/700 faces are what let it paint medium, semibold and
-    /// bold. A wrong or missing file shows up nowhere but on screen.
+    /// static faces are what let it paint medium, semibold, bold and italic.
+    /// A wrong or missing file shows up nowhere but on screen, so every face
+    /// of every pair is read back: its family, weight, italic style (both
+    /// the OS/2 bit and the slant) and that it is static, and each pair has
+    /// exactly the slots it declares.
     #[test]
-    fn bundled_ui_faces_are_geist_in_their_weights() {
-        let faces: Vec<(String, u16)> = bundled_ui_fonts()
-            .iter()
-            .map(|bytes| {
-                let face = ttf_parser::Face::parse(bytes, 0).expect("a font file");
-                let names: Vec<(u16, String)> = face
-                    .names()
+    fn bundled_faces_name_their_pair_family_weight_and_style() {
+        fn family_of(face: &ttf_parser::Face<'_>) -> String {
+            let find = |wanted: u16| {
+                face.names()
                     .into_iter()
-                    .filter(|name| {
-                        (name.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY
-                            || name.name_id == ttf_parser::name_id::FAMILY)
-                            && name.is_unicode()
-                    })
-                    .filter_map(|name| name.to_string().map(|value| (name.name_id, value)))
-                    .collect();
-                let family = names
-                    .iter()
-                    .find(|(name_id, _)| *name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
-                    .or_else(|| {
-                        names
-                            .iter()
-                            .find(|(name_id, _)| *name_id == ttf_parser::name_id::FAMILY)
-                    })
-                    .map(|(_, family)| family.clone())
-                    .expect("a family name");
-                (family, face.weight().to_number())
-            })
-            .collect();
-        for weight in [500, 600, 700] {
-            assert!(
-                faces.iter().any(|(family, w)| family == "Geist" && *w == weight),
-                "no static Geist {weight} in {faces:?}"
-            );
+                    .filter(|name| name.name_id == wanted && name.is_unicode())
+                    .find_map(|name| name.to_string())
+            };
+            find(ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+                .or_else(|| find(ttf_parser::name_id::FAMILY))
+                .expect("a family name")
         }
-        assert!(faces.iter().any(|(family, _)| family == "Geist Mono"), "{faces:?}");
-        assert_eq!(faces.len(), 5, "{faces:?}");
+        let expected_slots = |pair: FontPair| -> (Vec<(u16, bool)>, Vec<(u16, bool)>) {
+            match pair {
+                FontPair::RedHat => (vec![(400, false), (632, false), (700, false)], mono()),
+                FontPair::Geist => (
+                    vec![(400, false), (500, false), (600, false), (700, false)],
+                    vec![(400, false)],
+                ),
+                _ => (
+                    vec![(400, false), (500, false), (600, false), (700, false), (400, true)],
+                    mono(),
+                ),
+            }
+        };
+        fn mono() -> Vec<(u16, bool)> {
+            vec![(400, false), (700, false)]
+        }
+        for pair in FontPair::ALL {
+            let mut ui = Vec::new();
+            let mut code = Vec::new();
+            for declared in pair.faces() {
+                let face = ttf_parser::Face::parse(declared.bytes, 0).expect("a font file");
+                let family = family_of(&face);
+                let wanted = match declared.role {
+                    FaceRole::Ui => pair.ui_family(),
+                    FaceRole::Code => pair.code_family(),
+                };
+                let slot = (declared.weight, declared.italic);
+                assert_eq!(family, wanted, "{} {slot:?}: wrong family", pair.id());
+                assert_eq!(
+                    face.weight().to_number(),
+                    declared.weight,
+                    "{} {family} {slot:?}: wrong weight",
+                    pair.id()
+                );
+                let fs_selection_italic = face
+                    .tables()
+                    .os2
+                    .map(|os2| os2.style() == ttf_parser::os2::Style::Italic)
+                    .expect("an OS/2 table");
+                assert_eq!(
+                    fs_selection_italic,
+                    declared.italic,
+                    "{} {family} {slot:?}: OS/2 italic bit",
+                    pair.id()
+                );
+                assert_eq!(
+                    face.is_italic(),
+                    declared.italic,
+                    "{} {family} {slot:?}: Face::is_italic",
+                    pair.id()
+                );
+                let variable_by_design = pair == FontPair::Geist
+                    && declared.weight == 400
+                    && !declared.italic;
+                assert_eq!(
+                    face.tables().fvar.is_some(),
+                    variable_by_design,
+                    "{} {family} {slot:?}: variable font where only Geist's \
+                     Geist.ttf and GeistMono.ttf may be",
+                    pair.id()
+                );
+                match declared.role {
+                    FaceRole::Ui => ui.push(slot),
+                    FaceRole::Code => code.push(slot),
+                }
+            }
+            let (want_ui, want_code) = expected_slots(pair);
+            assert_eq!(ui, want_ui, "{}: interface slots", pair.id());
+            assert_eq!(code, want_code, "{}: code slots", pair.id());
+        }
     }
 
     /// With nothing installed, the fallback is the system's generic

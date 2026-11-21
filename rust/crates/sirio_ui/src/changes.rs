@@ -40,9 +40,10 @@
 //! human surface is the honest one.
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight,
-    InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, MouseButton, Pixels,
-    HighlightStyle, Hsla, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
+    AnyElement, AnyView, App, AppContext, Bounds, ClipboardItem, Context, EventEmitter,
+    FocusHandle, FontWeight, InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior,
+    ListState, MouseButton, Pixels, HighlightStyle, Hsla, Render, SharedString, Task, Window,
+    canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -51,6 +52,7 @@ use sirio_git::{
     stage, stage_all, stats, status, unstage,
 };
 use sirio_theme::Theme;
+use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -104,8 +106,13 @@ pub(crate) const HUNK_ROW_HEIGHT: f32 = 24.0;
 /// Diff code lines: gallery 12px mono on an 18px line at 20px overall.
 pub(crate) const DIFF_LINE_HEIGHT: f32 = 20.0;
 const BAND_ROW_HEIGHT: f32 = 24.0;
-/// Five 12px Geist Mono digits need 36px; the extra room avoids clipping
-/// when the resolved monospace fallback is fractionally wider.
+/// The floor of a diff line-number column. The width actually used is
+/// measured per render by [`diff_number_width`]: five digits of the current
+/// code family at the size they are drawn (the interface-scaled 12px), which
+/// is 36px for Geist Mono at the default size and more for a wider family or
+/// a larger interface size. The cells never wrap: gpui breaks a word that does
+/// not fit at a character, which hid a number's last digit below its row; a
+/// number that does not fit now overflows to the left, where it shows.
 const DIFF_NUMBER_WIDTH: f32 = 40.0;
 /// Width of the gallery diff's `+` / `-` marker column.
 const DIFF_SIGN_WIDTH: f32 = 12.0;
@@ -119,7 +126,54 @@ const WORD_WASH: f32 = 0.25;
 fn clamped_x(x: Pixels, content: Pixels, viewport: Pixels) -> Pixels {
     x.clamp(-(content - viewport).max(px(0.0)), px(0.0))
 }
-const DIFF_HUNK_GUTTER_WIDTH: f32 = DIFF_NUMBER_WIDTH * 2.0 + DIFF_SIGN_WIDTH + 16.0;
+/// Where a probed diff number cell was last painted (window coordinates).
+type NumberProbe = Rc<Cell<Option<Bounds<Pixels>>>>;
+
+/// A child spanning its parent that records the parent's painted bounds into
+/// `probe` when they are higher up the window than what is recorded. The cell
+/// is cleared at the top of each body render, so what is left is the topmost
+/// probed cell of the rows the list drew.
+fn number_probe_canvas(probe: &NumberProbe) -> impl IntoElement {
+    let probe = probe.clone();
+    canvas(
+        move |bounds, _, _| match probe.get() {
+            Some(current) if current.origin.y <= bounds.origin.y => {}
+            _ => probe.set(Some(bounds)),
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// The hunk row's gutter: two number columns, the sign column and the gaps.
+fn diff_hunk_gutter_width(number_width: f32) -> f32 {
+    number_width * 2.0 + DIFF_SIGN_WIDTH + 16.0
+}
+
+/// The width of a diff line-number column: five digits in the theme's code
+/// family at the size the numbers are drawn (`typography.scaled(12.0)`),
+/// rounded up, plus 4px, never under [`DIFF_NUMBER_WIDTH`]. Measured with the
+/// text system, so it follows the font pair and the interface size.
+fn diff_number_width(window: &mut Window, theme: &Theme) -> f32 {
+    let width = window
+        .text_system()
+        .layout_line(
+            "00000",
+            theme.typography.scaled(12.0),
+            &[gpui::TextRun {
+                len: 5,
+                font: gpui::font(theme.typography.code_family),
+                color: theme.ely.fg,
+                ..Default::default()
+            }],
+            None,
+        )
+        .width;
+    (f32::from(width).ceil() + 4.0).max(DIFF_NUMBER_WIDTH)
+}
 /// A run of unchanged context lines this long collapses into one labelled
 /// band (orca's "18 hidden lines").
 const CONTEXT_BAND_MIN: usize = 4;
@@ -746,6 +800,13 @@ pub struct ChangesTab {
     unified_max_width: Pixels,
     unified_viewport: Pixels,
     unified_width_dirty: bool,
+    /// The code family and size the cached longest-line widths were measured
+    /// with; the widths are measured again when either differs.
+    unified_measured_with: Option<(&'static str, Pixels)>,
+    /// Where the new-number cell of the topmost diff row of the last render
+    /// was painted, for the debug read (`numberCell`). Cleared at the top of
+    /// every body render and refilled by the rows the list draws.
+    number_cell: NumberProbe,
     unified_bar_state: HorizontalBarState,
     split_left_x: Pixels,
     split_right_x: Pixels,
@@ -1014,6 +1075,8 @@ impl ChangesTab {
             unified_max_width: px(0.0),
             unified_viewport: px(0.0),
             unified_width_dirty: true,
+            unified_measured_with: None,
+            number_cell: NumberProbe::default(),
             unified_bar_state: HorizontalBarState::default(),
             split_left_x: px(0.0),
             split_right_x: px(0.0),
@@ -1068,6 +1131,13 @@ impl ChangesTab {
     /// expansion, cleared when that file's last expanded row is collapsed.
     pub fn focused_path(&self) -> Option<&Path> {
         self.last_focus.as_deref()
+    }
+
+    /// Where the new-number cell of the topmost diff row was painted in the
+    /// last render, in window coordinates; `None` while no diff row is drawn.
+    /// Debug-only reading (`surface changes read`).
+    pub fn number_cell_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.number_cell.get()
     }
 
     /// Returns the status and per-file counts currently held by this mounted
@@ -2188,6 +2258,8 @@ impl ChangesTab {
 
     fn render_change_row(
         row: ChangeRow,
+        number_width: f32,
+        number_probe: NumberProbe,
         unified_x: Pixels,
         split_left_x: Pixels,
         split_right_x: Pixels,
@@ -2259,7 +2331,7 @@ impl ChangesTab {
                 .line_height(px(18.0))
                 .child(
                     div()
-                        .w(px(DIFF_HUNK_GUTTER_WIDTH))
+                        .w(px(diff_hunk_gutter_width(number_width)))
                         .flex_none()
                         .text_color(theme.ely.fg_subtle)
                         .child("⋯"),
@@ -2287,7 +2359,18 @@ impl ChangesTab {
                 path,
                 line,
                 words,
-            } => Self::render_diff_line(section, path, line, words, unified_x, open_lines, entity, theme)
+            } => Self::render_diff_line(
+                section,
+                path,
+                line,
+                words,
+                number_width,
+                number_probe,
+                unified_x,
+                open_lines,
+                entity,
+                theme,
+            )
                 .into_any_element(),
             ChangeRow::SplitLine {
                 section,
@@ -2301,6 +2384,8 @@ impl ChangesTab {
                 key,
                 row,
                 words,
+                number_width,
+                number_probe,
                 split_left_x,
                 split_right_x,
                 open_lines,
@@ -2705,6 +2790,8 @@ impl ChangesTab {
         key: usize,
         row: DiffSideBySideRow,
         words: (Option<Range<usize>>, Option<Range<usize>>),
+        number_width: f32,
+        number_probe: NumberProbe,
         left_x: Pixels,
         right_x: Pixels,
         open_lines: Rc<CommentableByPath>,
@@ -2735,6 +2822,8 @@ impl ChangesTab {
                     row.left,
                     words.0,
                     true,
+                    number_width,
+                    number_probe.clone(),
                     left_x,
                     path.clone(),
                     AnnotationSide::Old,
@@ -2756,6 +2845,8 @@ impl ChangesTab {
                     row.right,
                     words.1,
                     false,
+                    number_width,
+                    number_probe,
                     right_x,
                     path,
                     AnnotationSide::New,
@@ -2773,6 +2864,8 @@ impl ChangesTab {
         path: PathBuf,
         line: DiffLine,
         words: Option<Range<usize>>,
+        number_width: f32,
+        number_probe: NumberProbe,
         unified_x: Pixels,
         open_lines: Rc<CommentableByPath>,
         entity: gpui::Entity<ChangesTab>,
@@ -2858,9 +2951,10 @@ impl ChangesTab {
             .child(
                 div()
                     .debug_selector(|| "changes-diff-old-number".into())
-                    .w(px(DIFF_NUMBER_WIDTH))
+                    .w(px(number_width))
                     .flex_none()
                     .text_align(gpui::TextAlign::Right)
+                    .whitespace_nowrap()
                     .text_color(theme.ely.fg_subtle)
                     .child(
                         line.old_line_number
@@ -2870,13 +2964,18 @@ impl ChangesTab {
             .child(
                 div()
                     .debug_selector(|| "changes-diff-new-number".into())
-                    .w(px(DIFF_NUMBER_WIDTH))
+                    .relative()
+                    .w(px(number_width))
                     .flex_none()
                     .text_align(gpui::TextAlign::Right)
+                    .whitespace_nowrap()
                     .text_color(theme.ely.fg_subtle)
                     .child(
                         line.new_line_number
                             .map_or(String::new(), |n| n.to_string()),
+                    )
+                    .children(
+                        cfg!(debug_assertions).then(|| number_probe_canvas(&number_probe)),
                     ),
             )
             .child(
@@ -3239,6 +3338,8 @@ fn split_cell(
     line: Option<DiffSideBySideLine>,
     words: Option<Range<usize>>,
     old: bool,
+    number_width: f32,
+    number_probe: NumberProbe,
     side_x: Pixels,
     path: PathBuf,
     side: AnnotationSide,
@@ -3332,11 +3433,16 @@ fn split_cell(
             .line_height(px(18.0))
             .child(
                 div()
-                    .w(px(DIFF_NUMBER_WIDTH))
+                    .relative()
+                    .w(px(number_width))
                     .flex_none()
                     .text_align(gpui::TextAlign::Right)
+                    .whitespace_nowrap()
                     .text_color(theme.ely.fg_subtle)
-                    .child(number.map_or(String::new(), |number| number.to_string())),
+                    .child(number.map_or(String::new(), |number| number.to_string()))
+                    .when(!old && cfg!(debug_assertions), |cell| {
+                        cell.child(number_probe_canvas(&number_probe))
+                    }),
             )
             .child(
                 div()
@@ -3498,7 +3604,14 @@ impl ChangesTab {
                 .child("No changes")
                 .into_any_element();
         }
+        // The longest-line widths were measured with one family at one size;
+        // a font pair or interface size change since makes them stale.
+        let measured_with = (theme.typography.code_family, theme.typography.scaled(12.0));
+        if self.unified_measured_with != Some(measured_with) {
+            self.unified_width_dirty = true;
+        }
         if self.unified_width_dirty {
+            self.unified_measured_with = Some(measured_with);
             self.unified_max_width = sections
                 .iter()
                 .flat_map(|section| section.rows.iter())
@@ -3598,6 +3711,9 @@ impl ChangesTab {
         let views = self.annotation_views.clone();
         let open_threads = self.open_threads.clone();
         let selected = self.selected_change.clone();
+        let number_width = diff_number_width(window, &theme);
+        self.number_cell.set(None);
+        let number_probe = self.number_cell.clone();
         let unified_x = self.unified_x;
         let split_left_x = self.split_left_x;
         let split_right_x = self.split_right_x;
@@ -3663,6 +3779,8 @@ impl ChangesTab {
                                 perf_baseline::draw_row_clone(row);
                                 row.clone()
                             },
+                            number_width,
+                            number_probe.clone(),
                             unified_x,
                             split_left_x,
                             split_right_x,
@@ -3712,7 +3830,7 @@ impl ChangesTab {
                 )
                 .absolute()
                 .left(px(
-                    DIFF_NUMBER_WIDTH * 2.0
+                    number_width * 2.0
                         + DIFF_SIGN_WIDTH
                         + 3.0 * DIFF_ROW_GAP
                         + 2.0 * DIFF_ROW_PADDING,
@@ -3730,7 +3848,7 @@ impl ChangesTab {
                 div()
                     .absolute()
                     .left(px(
-                        DIFF_NUMBER_WIDTH * 2.0
+                        number_width * 2.0
                             + DIFF_SIGN_WIDTH
                             + 3.0 * DIFF_ROW_GAP
                             + 2.0 * DIFF_ROW_PADDING,
@@ -3764,7 +3882,7 @@ impl ChangesTab {
                 let previous_viewport = self.split_viewport;
                 canvas(
                     move |bounds, window, cx| {
-                        let gutter = DIFF_NUMBER_WIDTH
+                        let gutter = number_width
                             + DIFF_SIGN_WIDTH
                             + 2.0 * DIFF_ROW_GAP
                             + 2.0 * DIFF_ROW_PADDING;
@@ -3803,7 +3921,7 @@ impl ChangesTab {
             .child(if mode == DiffViewMode::Split {
                 let side_viewport = self.split_viewport.max(px(0.0));
                 let gutter = px(
-                    DIFF_NUMBER_WIDTH
+                    number_width
                         + DIFF_SIGN_WIDTH
                         + 2.0 * DIFF_ROW_GAP
                         + 2.0 * DIFF_ROW_PADDING,
@@ -5322,6 +5440,8 @@ mod tests {
             unified_max_width: px(0.0),
             unified_viewport: px(0.0),
             unified_width_dirty: true,
+            unified_measured_with: None,
+            number_cell: NumberProbe::default(),
             unified_bar_state: HorizontalBarState::default(),
             split_left_x: px(0.0),
             split_right_x: px(0.0),
@@ -7272,6 +7392,8 @@ mod tests {
             unified_max_width: px(0.0),
             unified_viewport: px(0.0),
             unified_width_dirty: true,
+            unified_measured_with: None,
+            number_cell: NumberProbe::default(),
             unified_bar_state: HorizontalBarState::default(),
             split_left_x: px(0.0),
             split_right_x: px(0.0),
@@ -7369,6 +7491,8 @@ mod tests {
             unified_max_width: px(0.0),
             unified_viewport: px(0.0),
             unified_width_dirty: true,
+            unified_measured_with: None,
+            number_cell: NumberProbe::default(),
             unified_bar_state: HorizontalBarState::default(),
             split_left_x: px(0.0),
             split_right_x: px(0.0),
@@ -7660,6 +7784,8 @@ mod tests {
             unified_max_width: px(0.0),
             unified_viewport: px(0.0),
             unified_width_dirty: true,
+            unified_measured_with: None,
+            number_cell: NumberProbe::default(),
             unified_bar_state: HorizontalBarState::default(),
             split_left_x: px(0.0),
             split_right_x: px(0.0),
@@ -8138,6 +8264,8 @@ mod tests {
                 unified_max_width: px(0.0),
                 unified_viewport: px(0.0),
                 unified_width_dirty: true,
+                unified_measured_with: None,
+                number_cell: NumberProbe::default(),
                 unified_bar_state: HorizontalBarState::default(),
                 split_left_x: px(0.0),
                 split_right_x: px(0.0),
@@ -8610,6 +8738,8 @@ mod tests {
             unified_max_width: px(0.0),
             unified_viewport: px(0.0),
             unified_width_dirty: true,
+            unified_measured_with: None,
+            number_cell: NumberProbe::default(),
             unified_bar_state: HorizontalBarState::default(),
             split_left_x: px(0.0),
             split_right_x: px(0.0),

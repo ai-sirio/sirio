@@ -4290,6 +4290,7 @@ mod tests {
         let db_path = dir.db_path("settings");
         let settings = AppSettings {
             appearance: AppearanceMode::Dark,
+            font_pair: "plex".into(),
             ui_font_size: 17,
             // Inside `settings_ranges::TERMINAL_FONT_SIZE` (12..=18, narrowed
             // from 9..=24 on 2026-09-05 with the stepper fix) and not the
@@ -4366,6 +4367,7 @@ mod tests {
             vec![
                 ("appearance.baseColor".into(), "neutral".into()),
                 ("appearance.centerSplitRatio".into(), "610".into()),
+                ("appearance.fontPair".into(), "plex".into()),
                 ("appearance.rightPanelWidth".into(), "500".into()),
                 ("appearance.sidebarWidth".into(), "300".into()),
                 ("appearance.terminalFontSize".into(), "16".into()),

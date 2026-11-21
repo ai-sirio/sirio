@@ -1,0 +1,15 @@
+#!/bin/sh
+# The `claude` of test-font-setting-e2e.sh: the version probe answers at once (above
+# sirio_claude::MIN_CLAUDE_VERSION, so the chat is native), and any other call is the
+# stream-json fixture in its font_sheet mode, which answers every prompt with one fixed
+# markdown text: prose, emphasis, inline code, a list, a Rust block and a text block with
+# box drawing, arrows and a check. Every call is recorded in $SIRIO_STUB_LOG when the run
+# names one.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
+case "$1" in
+  --version|-V|version)
+    echo "9.9.9 (Claude Code)"
+    exit 0 ;;
+esac
+exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" font_sheet "$@"
