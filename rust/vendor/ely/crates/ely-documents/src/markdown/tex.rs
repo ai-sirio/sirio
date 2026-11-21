@@ -16,14 +16,26 @@ struct Pair {
 
 /// `text` as a syntax tree, each pair read as inline math.
 pub(super) fn parse(text: &str, frontmatter: bool) -> Node {
-    let plain = build::tree(text, frontmatter);
+    read(text, frontmatter, &mut |_| true).expect("nothing refuses the text")
+}
+
+/// [`parse`] without front matter, asking `accept` about the text of the first pass and of each
+/// round of the second, before it is parsed (see `read`). None when the first is refused.
+pub(super) fn parse_guarded(text: &str, accept: &mut dyn FnMut(&str) -> bool) -> Option<Node> {
+    read(text, false, accept)
+}
+
+/// [`parse`], handing `accept` each text before it is parsed: the first pass's, and each round of
+/// the second's, swapped. A refusal of the first is none; of a later one, the first pass's tree.
+fn read(text: &str, frontmatter: bool, accept: &mut dyn FnMut(&str) -> bool) -> Option<Node> {
+    let plain = build::tree_with(text, frontmatter, accept)?;
     if !text.contains("\\(") && !text.contains("\\[") {
-        return plain;
+        return Some(plain);
     }
     let mut free = STAND_INS.filter(|byte| !text.as_bytes().contains(byte));
     let (Some(stand_in), Some(pad)) = (free.next(), free.next()) else {
         log::warn!("markdown: \\( reads as text; the stand-in bytes are in use");
-        return plain;
+        return Some(plain);
     };
     let mut nodes = Vec::new();
     walk(&plain, &mut nodes);
@@ -40,11 +52,13 @@ pub(super) fn parse(text: &str, frontmatter: bool) -> Node {
     }
     loop {
         if pairs.is_empty() {
-            return plain;
+            return Some(plain);
         }
         let swapped = written(text, &pairs, &dollars, stand_in, pad);
         let swapped = String::from_utf8(swapped).expect("ASCII swaps keep UTF-8");
-        let mut root = build::tree(&swapped, frontmatter);
+        let Some(mut root) = build::tree_with(&swapped, frontmatter, accept) else {
+            return Some(plain);
+        };
         let mut maths = Vec::new();
         walk(&root, &mut maths);
         let opens: Vec<usize> = (maths.into_iter())
@@ -56,7 +70,7 @@ pub(super) fn parse(text: &str, frontmatter: bool) -> Node {
         pairs.retain(|pair| opens.binary_search(&pair.open.start).is_ok());
         if pairs.len() == count {
             mend(&mut root, &pairs, stand_in, pad);
-            return root;
+            return Some(root);
         }
         log::debug!(
             "markdown: {} of {count} \\( pairs read as math",

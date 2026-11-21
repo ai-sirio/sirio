@@ -18,6 +18,13 @@ pub(crate) fn tree(text: &str) -> mdast::Node {
     parsed(text, false)
 }
 
+/// `text` as a syntax tree, `accept` asked about each text pulldown-cmark is about to read: the
+/// first pass's and each round of the pass that reads `\(` and `\[` pairs as math. None when the
+/// first is refused; when a later one is, the tree is the first pass's.
+pub(crate) fn tree_guarded(text: &str, accept: &mut dyn FnMut(&str) -> bool) -> Option<mdast::Node> {
+    tex::parse_guarded(text, accept)
+}
+
 fn parsed(text: &str, frontmatter: bool) -> mdast::Node {
     tex::parse(text, frontmatter)
 }
@@ -28,6 +35,11 @@ pub(crate) fn math_inside(source: &str, whole: Range<usize>) -> Range<usize> {
         true => crate::tree::inside(source, whole, '$'),
         false => whole.start + 2..whole.end - 2,
     }
+}
+
+/// The options pulldown-cmark reads with.
+pub fn parser_options() -> pulldown_cmark::Options {
+    build::options()
 }
 
 /// A whole file as a syntax tree: front matter too.

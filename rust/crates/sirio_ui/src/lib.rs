@@ -42,8 +42,22 @@ mod horizontal_scroll;
 pub mod git_status_style;
 pub mod loading;
 pub mod mcp_widget;
+pub(crate) mod markdown;
 pub mod markdown_preview;
-mod selectable_markdown;
+
+/// A Markdown body as the Preview draws it, for the probes (`markdown_selection_probe`,
+/// `markdown_scroll_probe`), which cannot reach the private `markdown` module. Reports
+/// the sideways frames on stdout as `BLOCK doc <id> <n> <x> <y> <w> <h>`.
+#[doc(hidden)]
+pub fn markdown_probe_view(id: &'static str, source: &str) -> gpui::AnyElement {
+    markdown::probe_view(id, source, false)
+}
+
+/// [`markdown_probe_view`] with the whole body selected.
+#[doc(hidden)]
+pub fn markdown_probe_view_selected(id: &'static str, source: &str) -> gpui::AnyElement {
+    markdown::probe_view(id, source, true)
+}
 pub mod modal;
 pub mod motion;
 // The Linux XCB-to-Xlib parent fallback the browser and the widget webview share.

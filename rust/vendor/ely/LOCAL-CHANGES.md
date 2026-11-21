@@ -54,6 +54,7 @@ describes is a review by hand.
 - `crates/ely-core/src/menus/mod.rs`
 - `crates/ely-core/src/menus/panel.rs`
 - `crates/ely-core/src/navigation/tabs.rs`
+- `crates/ely-core/src/navigation/toc.rs`
 - `crates/ely-core/src/overlays/dialog_keys.rs`
 - `crates/ely-core/src/overlays/dialog.rs`
 - `crates/ely-core/src/overlays/dialogs.rs`
@@ -69,16 +70,25 @@ describes is a review by hand.
 - `crates/ely-core/src/typography/fit.rs`
 - `crates/ely-documents/Cargo.toml`
 - `crates/ely-documents/src/lib.rs`
+- `crates/ely-documents/src/markdown.rs`
+- `crates/ely-documents/src/markdown/build.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
-- `crates/ely-documents/src/markdown/tex/tests.rs`
+- `crates/ely-documents/src/markdown/tex.rs`
 - `crates/ely-documents/src/math.rs`
 - `crates/ely-documents/src/modes.rs`
+- `crates/ely-documents/src/picture.rs`
+- `crates/ely-documents/src/render/blocks.rs`
 - `crates/ely-documents/src/render/math_text.rs`
 - `crates/ely-documents/src/render.rs`
 - `crates/ely-documents/src/render/select.rs`
+- `crates/ely-documents/src/render/table.rs`
+- `crates/ely-documents/src/render/tests.rs`
+- `crates/ely-documents/src/tests.rs`
 - `crates/ely-documents/src/tree/emoji.rs`
 - `crates/ely-documents/src/tree/html_block.rs`
+- `crates/ely-documents/src/tree/mod.rs`
 - `crates/ely-documents/src/tree/sources.rs`
+- `crates/ely-documents/src/tree/tests.rs`
 - `crates/ely-documents/src/tree/tests/inline.rs`
 - `crates/ely-editor/Cargo.toml`
 - `crates/ely-editor/src/anchors.rs`
@@ -140,13 +150,23 @@ list is what the check accepts as different from upstream; anything else differi
 - `crates/ely-collab/Cargo.toml`
 - `crates/ely-charts/Cargo.toml`
 
-### Ignored tests
+### Upstream's patched pulldown-cmark (L7)
 
-Two `ely-documents` tests of upstream's `e71b644b` need upstream's patched pulldown-cmark. Each
-gains `#[ignore = "needs upstream's patched pulldown-cmark; step 2"]` and nothing else.
+Two `ely-documents` tests of upstream's `e71b644b` (`markdown::tex::tests::a_note_in_a_markdown_link_frees_the_math_after_it`
+and `tree::tests::inline::a_link_around_a_footnote_reference_stays_a_link`) need upstream's patched
+pulldown-cmark. They were `#[ignore]`d until this change; the `#[ignore]` lines are gone, so
+`markdown/tex/tests.rs` no longer differs from upstream. `tree/tests/inline.rs` still does, for the reasons in its other sections.
 
-- `crates/ely-documents/src/markdown/tex/tests.rs`
-- `crates/ely-documents/src/tree/tests/inline.rs`
+What: `rust/vendor/pulldown-cmark` is upstream's `vendor/pulldown-cmark` at `8d7723ec` (0.13.6, 47 files),
+taken verbatim, wired through `[patch.crates-io]` in `rust/Cargo.toml` (and listed in the workspace
+`exclude`). `Cargo.lock`'s `pulldown-cmark` entry becomes 0.13.6 with no registry `source`. Nothing in
+it differs from upstream, and `check-vendor.sh` also compares this directory with upstream's: any
+differing path (changed, or on one side only) fails, since this change is taken whole and has no
+differing-paths entry.
+
+Proof: `cd rust && cargo nextest run -p ely-documents --features test-support -E 'test(a_note_in_a_markdown_link_frees_the_math_after_it) | test(a_link_around_a_footnote_reference_stays_a_link)'`
+failed both tests with the `#[ignore]`s removed and registry 0.13.5, and passes both (2 run, 2 passed)
+with the vendored 0.13.6; `cargo nextest run -p sirio_markdown` runs 65 tests, all passing, before and after.
 
 ### The palette split (`ely-palette`), rows 58 to 60
 
@@ -797,6 +817,82 @@ Outcomes:
   rows while nothing is wide) has its proof (ran): `ely-documents` `document::tests::scroll::source_margins_scroll`.
 - Row 167: re-applied (`measured` is `pub(super)`). Proof: the closure build (`view.rs` calls it).
 
+## ely-documents host seams (Markdown on ely-documents, rows L1 to L6 and L8 to L10)
+
+Spec `docs/superpowers/specs/2026-11-20-ely-markdown-documents-design.md` §5.2. Sirio parses once,
+rewrites the tree and owns selection, links and menus, so the vendored renderer gains opt-in seams.
+Each is off unless a host asks; an upstream caller draws exactly as before. Paths: `ely-documents`
+`render.rs`, `render/select.rs`, `render/blocks.rs`, `render/table.rs`, `picture.rs`, `tree/mod.rs`,
+`lib.rs` and `ely-core` `navigation/toc.rs`. `Node::Image` gained `width`, so its in-crate literals
+in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests.rs` (`mod host`),
+`tree/tests.rs` and `toc.rs`.
+
+- L1 `TextGather` (trait, re-exported) and `MarkdownRenderer::gather(Rc<dyn TextGather>)`. Ely's private
+  `Gather` implements it by delegating to its inherent methods. With a host gather the body is not wrapped
+  by `select::selectable` (no `track_focus`, no mouse or key handler, `selectable` ignored), a picture's
+  right press is off, and a linked picture takes no `tab_index`, so a press on it moves no focus. Why: Sirio
+  owns selection (§5.3). Proofs: `a_host_gather_sees_every_drawn_text_in_order`,
+  `a_host_gather_body_takes_no_focus` (it also checks that an Ely selectable body and an unhosted linked
+  picture do take focus).
+- L2 `parse_markdown(source)` (today's crate-private `parse`) and `parse_markdown_with(source, html_block)`:
+  `Reader` carries the hook and `block` asks it for each HTML node, at any depth, replacing it when it
+  returns some. Why: Sirio rewrites HTML blocks into blocks (details, images) before drawing. Proof:
+  `parse_markdown_with_replaces_html_blocks_at_any_depth`.
+- L3 `Node::Image { width: Option<f32> }`; the reader sets `None`; `Picture` draws at `width` logical pixels
+  when some, `max_w_full` kept. Why: sized HTML images. Proof: `a_picture_with_a_width_draws_that_wide`.
+- L4 `MarkdownRenderer::web_pictures(bool)` (default off): on, `http(s)://` and `//` addresses load through
+  gpui's `ImageAssetLoader` with `Resource::Uri`; off, the "Not loaded from the web" note stays. The note is
+  wrapped in a block `div` with a debug selector `markdown-picture-web-note` for the test (layout unchanged).
+  Why: the web-image policy (§5.5) is the host's. Proof: `web_pictures_off_keeps_the_note_on_drops_it`.
+- L5 `MarkdownRenderer::diagrams(bool)` (default on): off, `mermaid` fences go to the `code` hook, else the
+  default code path. `ely-chat`'s `StreamingMarkdown` keeps drawing diagrams. Proof:
+  `diagrams_off_hands_mermaid_to_the_code_hook` (it also checks that on, the hook is not called).
+- L6 `Sections::reveal(&SharedString) -> bool`: the arithmetic of `TableOfContents`' click (the click itself
+  is untouched); false when no anchor of that name has drawn. Proofs:
+  `reveal_scrolls_a_known_section_to_the_top`, `reveal_of_an_unknown_section_is_false`.
+- L8 `MarkdownRenderer::table_frame(Fn(ElementId, AnyElement) -> AnyElement)`: when set, each table is a
+  `display: grid` with `grid_cols_max_content(columns)` (columns size to their widest cell and align across
+  rows; short rows are padded with empty cells), `flex_none`, drawn at natural width and passed to the frame
+  closure, which must place it in a flex row or scroll area (a block parent would stretch it). Cells wear the
+  row look themselves (head fill, top border). The grid has debug selector `markdown-table-<n>`. Unset,
+  upstream's flex rows are unchanged. Proofs: `a_framed_table_keeps_its_natural_width_and_its_columns`,
+  `framed_table_off_keeps_upstreams_wrapping`.
+- L9 `MarkdownRenderer::cull(Rc<dyn BlockCull>)`, with `BlockCull` and `BlockUse` (re-exported): with a cull set,
+  the body's top-level loop asks `skip(ix, node)` before each block. When it answers `Some((element, use))`
+  the loop pushes that element and advances its running counts (element keys, headings, tables) by `use`, so
+  every later element id, heading ordinal and table number is what a full draw gives; otherwise the block is
+  drawn, the counts it took are reported to `drawn(ix, use)`, and the block sits in a `flex_col` wrapper so the
+  wrapper's bounds hold the block's margins (a `Rule` is `my_2`). The body div gets `on_children_prepainted`
+  that hands every child's bounds to `placed`. Why: Sirio's chat stands in for the blocks of a long streamed
+  reply that sit far outside the window. With no cull the code path is `draw.nodes`, unchanged. Proofs:
+  `a_skipped_block_leaves_every_later_id_heading_table_and_push_as_a_full_draw_has_them` (ids of the code and
+  table hooks, `markdown-heading-N` and `markdown-cell-T-R-C` selectors and the host gather's pushes, with
+  each block skipped in turn),
+  `without_a_cull_the_tree_is_the_one_a_never_skipping_cull_lays_out`.
+- L10 what the parser and the renderer read, for a host that measures or checks a source before it hands it over
+  (`markdown.rs`, `markdown/build.rs`, `markdown/tex.rs`, `tree/mod.rs`, `picture.rs`, `lib.rs`):
+  `markdown_options()` is the options `build::options()` gives (it was `pub(super)`).
+  `parse_markdown_guarded(source, html_block, accept)` is `parse_markdown_with` that asks `accept` about each text
+  pulldown-cmark is about to read, before any event is built into a tree: the first pass's (the byte order mark
+  dropped, lone CRs as LF, `$$` fences as tildes, from the helpers `without_bom`, `crs` and `flow_of` that
+  `build::tree_with` and `read` use, in that order) and each round of the pass that reads `\(` and `\[` pairs as
+  math, swapped. It returns None when the first text is refused and keeps the first pass's tree when a swapped one
+  is (`tex::parse` is `read` with an always-yes callback; `parse_markdown_with` is the guarded parse with one).
+  One parse, no separate measuring pass. Why: a deep tree overflows the stack in the passes that recurse over it,
+  so Sirio refuses a source past a cap first, and a guard that reads the source as written misses a quote marker
+  behind a byte order mark, a line a lone CR ends, a block that a `$$` fence changes, and a closer that the second
+  pass hides inside math (`*a \(x*\) ` repeated, then `a* ` repeated, is flat in the first pass and deep in the
+  second). Ely's own text, not a copy of its rules, so the two cannot drift.
+  `markdown_picture_path(url)` is the path a local picture address reads as after `picture::origin` cuts it at its
+  first `?` or `#` (both now use `written_part`), so a host can check that an address it hands the renderer
+  arrives whole: a Windows verbatim path `\\?\C:\..` is cut to `\\`. No upstream caller changes. Proof: Sirio's
+  `markdown::tests::a_leading_byte_order_mark_does_not_hide_nesting`, `a_lone_cr_does_not_hide_nesting`,
+  `the_pass_that_reads_parenthesised_math_does_not_hide_nesting`,
+  `a_dollar_fence_that_takes_the_text_over_the_cap_is_measured_as_ely_reads_it` and
+  `the_renderer_reads_the_address_it_is_handed_under_a_verbatim_folder_whole`.
+- Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
+  (the facade is outside `check-vendor.sh`).
+
 ## Featureless test build
 
 `Scripts/ci.sh` runs `cargo nextest run --workspace` with no features. Upstream always tests with
@@ -834,9 +930,11 @@ follow-up if they must run in CI; it is not done here, because the task fixes th
 Outcome: local change, re-decided against the featureless build. Proof: `cd rust && cargo nextest run
 -p ely-git -p ely-documents --no-run` and `cargo nextest run -p ely-core -p ely-chat -p ely-agent
 -p ely-editor -p ely-collab -p ely-charts --no-run` both exit 0 with no error and no warning; the
-second needed no further gate. The featureless run is `ely-git` 21 tests and `ely-documents` 159, all
-passing, with the step-2 pair (see "Ignored tests") skipped. With `--features test-support`,
-`-p ely-palette -p ely-documents -p ely-core` runs 1193 tests, all passing, 2 skipped.
+second needed no further gate. The featureless run (`cargo nextest run -p ely-git -p ely-documents`, 2026-11-21) is 183 tests, all
+passing, none skipped. With `--features test-support`,
+`-p ely-palette -p ely-documents -p ely-core` ran 1207 tests on 2026-11-21, none skipped: 1206 passed on the
+first run, and the wall-clock budget test `html_block::tests::references_and_long_runs_read_as_a_browser_reads_them`
+went red (3.1 s) while another build loaded the machine and passed on its own.
 
 ## Timing tests off the featureless build
 
@@ -849,7 +947,7 @@ through `clock::spent` ("four times the input in at most eight times the time"; 
 moves a CPU-time ratio, through cache and frequency effects). Each such assertion takes
 `#[cfg(feature = "test-support")]`, so it compiles only with the crate's `test-support` feature, and
 the closure check, which runs with that feature, still runs them. This is not an `#[ignore]`: the
-spec's two ignores (see "Ignored tests" above) are untouched.
+spec's two ignores are gone (see L7).
 
 A test that carries behaviour assertions besides its timing keeps them in the featureless run: the gate
 is on the timing statements only, and nothing else in the test changes.

@@ -105,6 +105,18 @@ fn path(written: &str) -> Result<PathBuf, SharedString> {
         .map_err(|_| "the path is not UTF-8".into())
 }
 
+/// The part of a local address the renderer reads: what is before its first `?` or `#`.
+fn written_part(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or_default()
+}
+
+/// The path a local `url` names as the renderer reads it, `%XX` decoded, cut as `origin` cuts it
+/// (so a path with a `?` in it, as a Windows verbatim path has, is cut short). For a host that
+/// hands the renderer addresses and checks that they arrive whole.
+pub fn picture_path(url: &str) -> Option<PathBuf> {
+    path(written_part(url.trim())).ok()
+}
+
 /// Where `url` points, read from the folder `base`.
 pub(crate) fn origin(url: &str, base: Option<&Path>) -> Origin {
     let url = url.trim();
@@ -127,8 +139,7 @@ pub(crate) fn origin(url: &str, base: Option<&Path>) -> Origin {
     if scheme {
         return Origin::Bad(format!("{url} is no picture address").into());
     }
-    let written = url.split(['?', '#']).next().unwrap_or_default();
-    match path(written) {
+    match path(written_part(url)) {
         Ok(path) if path.is_absolute() => Origin::File(path),
         Ok(path) => base.map_or(Origin::Loose, |base| Origin::File(base.join(path))),
         Err(why) => Origin::Bad(why),
@@ -214,6 +225,10 @@ pub(crate) struct Picture {
     /// The folder relative addresses start from.
     pub base: Option<Arc<Path>>,
     pub held: Option<Result<HeldPicture, SharedString>>,
+    /// Drawn this many logical pixels wide, when set.
+    pub width: Option<f32>,
+    /// Loads `http(s)` addresses instead of noting them.
+    pub web: bool,
 }
 
 impl RenderOnce for Picture {
@@ -229,6 +244,8 @@ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
         url,
         base,
         held,
+        width,
+        web,
     } = shown;
     let (alt, url) = (alt.as_str(), url.as_str());
     let colors = cx.theme().colors.clone();
@@ -237,7 +254,7 @@ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
             let svg = held.format == ImageFormat::Svg;
             let image = |loaded: &Result<Arc<RenderImage>, _>| loaded.as_ref().ok().cloned();
             let loaded = hold::<Holder>(id, &held, image, window, cx);
-            return drawn(loaded, svg, alt, url, cx);
+            return drawn(loaded, svg, (alt, url, width), cx);
         }
         Some(Err(why)) => Origin::Bad(why),
         None => origin(url, base.as_deref()),
@@ -261,9 +278,21 @@ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
                 svg,
             )
         }
+        Origin::Web if web => {
+            let address = match url.trim().strip_prefix("//") {
+                Some(rest) => format!("https://{rest}"),
+                None => url.trim().to_string(),
+            };
+            let resource = Resource::Uri(address.into());
+            let image = |loaded: &Result<Arc<RenderImage>, _>| loaded.as_ref().ok().cloned();
+            let loaded = hold::<ImageAssetLoader>(id, &resource, image, window, cx)
+                .map(|loaded| loaded.map_err(|error| SharedString::from(error.to_string())));
+            let path = url.split(['?', '#']).next().unwrap_or_default();
+            (loaded, path.to_ascii_lowercase().ends_with(".svg"))
+        }
         Origin::Web => {
             let said = i18n::text(cx, "markdown.picture.web", &[]);
-            return note(alt, said, colors.fg_subtle, cx);
+            return web_note(alt, said, colors.fg_subtle, cx);
         }
         Origin::Loose => {
             let said = i18n::text(cx, "markdown.picture.folder", &[]);
@@ -271,15 +300,14 @@ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
         }
         Origin::Bad(why) => return note(alt, why, colors.danger, cx),
     };
-    drawn(loaded, svg, alt, url, cx)
+    drawn(loaded, svg, (alt, url, width), cx)
 }
 
-/// A loaded picture at its own width, or why not.
+/// A loaded picture at its own width, or `width` when set; or why not.
 fn drawn(
     loaded: Option<Result<Arc<RenderImage>, SharedString>>,
     svg: bool,
-    alt: &str,
-    url: &str,
+    (alt, url, width): (&str, &str, Option<f32>),
     cx: &App,
 ) -> AnyElement {
     let colors = cx.theme().colors.clone();
@@ -288,7 +316,7 @@ fn drawn(
             let natural = image.size(0);
             // The picture's own height follows its ratio.
             let smooth = if svg { SMOOTH_SVG_SCALE_FACTOR } else { 1.0 };
-            let width = i32::from(natural.width) as f32 / smooth;
+            let width = width.unwrap_or(i32::from(natural.width) as f32 / smooth);
             div()
                 .debug_selector(|| "markdown-picture".into())
                 .w(Pixels::from(width))
@@ -302,6 +330,14 @@ fn drawn(
         }
         None => note(alt, url.to_string().into(), colors.fg_subtle, cx),
     }
+}
+
+/// The note for a web picture left unloaded.
+fn web_note(alt: &str, said: SharedString, tone: Hsla, cx: &App) -> AnyElement {
+    div()
+        .debug_selector(|| "markdown-picture-web-note".into())
+        .child(note(alt, said, tone, cx))
+        .into_any_element()
 }
 
 /// A picture not drawn: its alt text and why.

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FontWeight, Hsla, IntoElement, Render, Task,
-    Window, div, prelude::*, px,
+    AnyElement, App, Context, ElementId, Entity, EventEmitter, FontWeight, Hsla, IntoElement, Render, Task,
+    WeakEntity, Window, div, prelude::*, px,
 };
 use sirio_forge::{
     Action, ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
@@ -21,6 +21,7 @@ use sirio_forge::{
 use sirio_theme::Theme;
 
 mod actions;
+mod body_menu;
 mod compose;
 mod composer;
 mod edit;
@@ -45,7 +46,10 @@ use crate::ely_ui::{self, ButtonState};
 use crate::changes::{ChangesTab, ChangesTabEvent, ForgeFiles};
 use crate::diff_annotations::AnnotationSide;
 use threads::{ConversationEntry, merge_threads};
-use crate::chat::{Chat, LinkClickOverride};
+use crate::markdown::{
+    LinkHandler, MarkdownBlocks, MarkdownView, Policy, SelectionHost, ViewFlags,
+    markdown_view,
+};
 use crate::forge_source::{self, Connection, RevisionError};
 use crate::text_selection::selectable_text;
 
@@ -252,11 +256,16 @@ pub struct ChangeRequestTab {
     /// dropped on its own (spec §8).
     pub(crate) unreachable: Option<String>,
     pub(crate) header: Slot<ChangeHeader>,
-    pub(crate) description: Option<bezel_markdown::Doc>,
+    pub(crate) description: Option<MarkdownBlocks>,
     /// The Markdown of each timeline entry that has a body, aligned with it.
-    bodies: Vec<Option<bezel_markdown::Doc>>,
+    bodies: Vec<Option<MarkdownBlocks>>,
     /// First published thread bodies for the Conversation, cached by forge id.
-    thread_bodies: HashMap<String, bezel_markdown::Doc>,
+    thread_bodies: HashMap<String, MarkdownBlocks>,
+    /// The right-click menu of a forge body, while it is open.
+    body_menu: Option<body_menu::BodyMenu>,
+    /// What the bodies drew last frame, which is how a test finds a link.
+    #[cfg(test)]
+    body_layouts: Rc<std::cell::RefCell<Vec<crate::markdown::BodyLayouts>>>,
     thread_ids: HashMap<u64, String>,
     pub(crate) commits: Slot<Listing<CommitSummary>>,
     pub(crate) checks: Slot<Listing<Check>>,
@@ -340,6 +349,9 @@ impl ChangeRequestTab {
             description: None,
             bodies: Vec::new(),
             thread_bodies: HashMap::new(),
+            body_menu: None,
+            #[cfg(test)]
+            body_layouts: Rc::default(),
             thread_ids: HashMap::new(),
             commits: Slot::Idle,
             checks: Slot::Idle,
@@ -555,15 +567,14 @@ impl ChangeRequestTab {
                 self.title = header.summary.title.clone();
                 cx.emit(ChangeRequestTabEvent::TitleChanged(self.title.clone()));
             }
-            let theme = *Theme::get(cx);
-            self.description = Some(markdown_doc(&header.body, &theme));
+            self.description = Some(markdown_doc(&header.body));
             self.bodies = header
                 .timeline
                 .iter()
                 .map(|item| {
                     body_of(item)
                         .filter(|body| !body.trim().is_empty())
-                        .map(|body| markdown_doc(body, &theme))
+                        .map(|body| markdown_doc(body))
                 })
                 .collect();
             self.schedule_refresh(refresh_wait(header), cx);
@@ -1288,47 +1299,73 @@ fn body_of(item: &TimelineItem) -> Option<&str> {
     }
 }
 
-/// A forge body through the Preview's Markdown path, `expand_html` subset
-/// included, with its images turned into text (see [`images_as_text`]).
-fn markdown_doc(body: &str, theme: &Theme) -> bezel_markdown::Doc {
-    let preview = crate::markdown_preview::build(
-        sirio_markdown::parse(body),
-        Path::new(""),
-        &crate::markdown_preview::Diagrams::default(),
-        &crate::markdown_preview::palette(theme),
-    );
-    let mut doc = preview.doc;
-    images_as_text(&mut doc);
-    doc
+/// A forge body as the tree Ely draws: parsed once, with the change-request policy, which
+/// turns every picture into its alt text (a link to it when it is on the web) and lets no
+/// address reach a file.
+fn markdown_doc(body: &str) -> MarkdownBlocks {
+    crate::markdown::build(
+        body,
+        &mut Policy { surface: crate::markdown::Surface::ChangeRequest, base: None, diagrams: None, file_links: None },
+    )
 }
 
-/// Sirio installs no HTTP client for GPUI, so a remote picture draws as an
-/// empty box (checked 2026-09-27), and a forge body's relative picture has
-/// no file behind it here. Each picture becomes its alt text (or "image"),
-/// a link when it is remote.
-pub(crate) fn images_as_text(doc: &mut bezel_markdown::Doc) {
-    for block in &mut doc.blocks {
-        let bezel_markdown::BlockKind::Image { url, alt, .. } = &block.kind else {
-            continue;
-        };
-        let label = if alt.text.trim().is_empty() {
-            "image".to_string()
-        } else {
-            alt.text.clone()
-        };
-        let mut text = bezel_markdown::Text::plain(label.clone());
-        if url.contains("://") {
-            text.marks.push(bezel_markdown::MarkSpan {
-                range: 0..label.len(),
-                mark: bezel_markdown::Mark::Link(url.clone()),
-            });
+/// Whether a forge link may be handed to the system: web pages and mail, nothing else. A
+/// `file:` address, an `#anchor` and a relative path name nothing the forge's text may open.
+fn opens_outside(url: &str) -> bool {
+    ["http://", "https://", "mailto:"].iter().any(|scheme| {
+        url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+    })
+}
+
+fn open_links() -> LinkHandler {
+    Rc::new(|url, _window, cx| {
+        if opens_outside(url) {
+            cx.open_url(url);
         }
-        block.kind = bezel_markdown::BlockKind::Paragraph(text);
-    }
+    })
 }
 
-fn open_links() -> LinkClickOverride {
-    Rc::new(|url, _window, cx| cx.open_url(url))
+/// One forge body, drawn and selected by Ely's renderer under `id`, with the tab's own menu.
+pub(crate) fn forge_body(
+    blocks: &MarkdownBlocks,
+    id: impl Into<ElementId>,
+    tab: WeakEntity<ChangeRequestTab>,
+) -> MarkdownView {
+    let links = open_links();
+    markdown_view(
+        blocks,
+        SelectionHost::Run { id: id.into() },
+        links.clone(),
+        ViewFlags { web_pictures: false, sections: None, cull: false },
+    )
+    .on_menu(body_menu::on_press(tab, links))
+}
+
+impl ChangeRequestTab {
+    fn show_body_menu(&mut self, menu: body_menu::BodyMenu, cx: &mut Context<Self>) {
+        self.body_menu = Some(menu);
+        cx.notify();
+    }
+
+    fn close_body_menu(&mut self, cx: &mut Context<Self>) {
+        if self.body_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A body of this tab's own: the view, noted for a test to find its links in.
+    fn body_view(&self, blocks: &MarkdownBlocks, id: impl Into<ElementId>, entity: &Entity<Self>) -> MarkdownView {
+        let view = forge_body(blocks, id, entity.downgrade());
+        #[cfg(test)]
+        self.body_layouts.borrow_mut().push(view.layouts());
+        view
+    }
+
+    /// Every link the bodies drew last frame, with its boxes.
+    #[cfg(test)]
+    fn body_links(&self) -> Vec<(gpui::Bounds<gpui::Pixels>, String)> {
+        self.body_layouts.borrow().iter().flat_map(crate::markdown::BodyLayouts::link_rects).collect()
+    }
 }
 
 fn error_panel(
@@ -1628,7 +1665,7 @@ impl ChangeRequestTab {
                 if let Some(doc) = self
                     .description
                     .clone()
-                    .filter(|doc| !doc.blocks.is_empty())
+                    .filter(|doc| !doc.nodes.is_empty())
                 {
                     column = column.child(
                         div()
@@ -1638,11 +1675,7 @@ impl ChangeRequestTab {
                             .border_1()
                             .border_color(theme.ely.border)
                             .bg(theme.ely.bg)
-                            .child(Chat::render_markdown_document_with_link_override(
-                                doc,
-                                theme,
-                                open_links(),
-                            )),
+                            .child(self.body_view(&doc, "change-request-description-body", entity)),
                     );
                 }
                 let mut rail = Timeline::new();
@@ -1702,10 +1735,10 @@ impl ChangeRequestTab {
                 .child(selectable_text(style::age(now, at)))
         };
         let body = self.bodies.get(index).cloned().flatten().map(|doc| {
-            div().id(("change-request-timeline-body", index)).child(Chat::render_markdown_document_with_link_override(
-                doc,
-                theme,
-                open_links(),
+            div().id(("change-request-timeline-body", index)).child(self.body_view(
+                &doc,
+                ("change-request-timeline-markdown", index),
+                entity,
             ))
         });
         let own = match item {
@@ -2362,6 +2395,8 @@ impl Render for ChangeRequestTab {
         // app's start-up closure; without this a Light user sees Ely's dark
         // palette (docs/testing/ely-forge-probe.md).
         crate::ely::sync_theme_if_changed(cx);
+        #[cfg(test)]
+        self.body_layouts.borrow_mut().clear();
         // A restored tab loads the first time it is drawn (spec §8).
         if !self.started {
             self.started = true;
@@ -2429,6 +2464,7 @@ impl Render for ChangeRequestTab {
             .children(self.render_merge_dialog(&theme, &entity))
             .children(self.render_review_dialog(&theme, &entity))
             .children(self.render_handoff_dialog(&theme, &entity))
+            .children(self.body_menu.as_ref().map(|menu| menu.render(&theme, &entity)))
     }
 }
 
@@ -2558,20 +2594,19 @@ mod tests {
 
     #[test]
     fn images_become_text_and_remote_ones_links() {
-        let mut doc = bezel_markdown::parse(
+        use crate::markdown::{Policy, build};
+        use ely_gpui_component::documents::MarkdownBlock as Node;
+        let built = build(
             "![after](https://ghe.test/a.png)\n\n![](https://ghe.test/b.png)\n\n![local](docs/c.png)\n",
+            &mut Policy { surface: crate::markdown::Surface::ChangeRequest, base: None, diagrams: None, file_links: None },
         );
-        images_as_text(&mut doc);
-        let paragraphs: Vec<(String, Option<String>)> = doc
-            .blocks
+        let paragraphs: Vec<(String, Option<String>)> = built
+            .nodes
             .iter()
-            .map(|block| match &block.kind {
-                bezel_markdown::BlockKind::Paragraph(text) => (
-                    text.text.clone(),
-                    text.marks.iter().find_map(|span| match &span.mark {
-                        bezel_markdown::Mark::Link(url) => Some(url.clone()),
-                        _ => None,
-                    }),
+            .map(|node| match node {
+                Node::Paragraph(inline) => (
+                    inline.text.to_string(),
+                    inline.links.first().map(|(_, url)| url.to_string()),
                 ),
                 other => panic!("an image survived as {other:?}"),
             })
@@ -2579,14 +2614,8 @@ mod tests {
         assert_eq!(
             paragraphs,
             vec![
-                (
-                    "after".to_string(),
-                    Some("https://ghe.test/a.png".to_string())
-                ),
-                (
-                    "image".to_string(),
-                    Some("https://ghe.test/b.png".to_string())
-                ),
+                ("after".to_string(), Some("https://ghe.test/a.png".to_string())),
+                ("image".to_string(), Some("https://ghe.test/b.png".to_string())),
                 ("local".to_string(), None),
             ]
         );
@@ -2811,6 +2840,155 @@ mod tests {
                 .as_deref(),
             Some("What\n\nFixes it.")
         );
+    }
+
+    /// A tab loaded from the fake forge, its description holding `body`, under the
+    /// shell-shaped root the selection tests use.
+    fn tab_with_description<'a>(
+        cx: &'a mut TestAppContext,
+        body: &str,
+    ) -> (Entity<ChangeRequestTab>, &'a mut gpui::VisualTestContext) {
+        let forge = Arc::new(CannedForge::default());
+        forge.answer("Viewer", testing::viewer());
+        forge.answer("ChangeRequestHeader", testing::header(101, "Fix the login redirect", body));
+        forge.answer("ChangeRequestCommits", testing::commits());
+        let source = FakeSource::ready(testing::github_client(forge), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let executor = cx.executor();
+        let (tab, _, cx) = crate::text_selection::testing::host(cx, |_, cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        tab.update(cx, |tab, cx| tab.on_selected(cx));
+        executor.allow_parking();
+        for _ in 0..600 {
+            if tab.read_with(cx, |tab, _| tab.header.value().is_some()) {
+                break;
+            }
+            executor.advance_clock(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        frames(cx, 3);
+        (tab, cx)
+    }
+
+    fn frames(cx: &mut gpui::VisualTestContext, n: usize) {
+        for _ in 0..n {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.simulate_next_frame(cx);
+            });
+        }
+        cx.run_until_parked();
+    }
+
+    fn link_center(
+        tab: &Entity<ChangeRequestTab>,
+        cx: &mut gpui::VisualTestContext,
+        url: &str,
+    ) -> gpui::Point<gpui::Pixels> {
+        let links = tab.read_with(&cx.cx, |tab, _| tab.body_links());
+        links
+            .iter()
+            .find(|(_, target)| target == url)
+            .map(|(bounds, _)| bounds.center())
+            .unwrap_or_else(|| panic!("no link to {url} is drawn: {links:?}"))
+    }
+
+    /// Forge text is not ours: a `file:` link, a `#x` link and a bare path must open nothing,
+    /// from a click and from the menu's Open link alike (the menu goes through the one
+    /// opener). The https links are the controls, so the silence above is not a dead click:
+    /// they are two addresses because the test platform remembers only the last one opened.
+    #[gpui::test]
+    fn forge_file_links_do_not_open(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton};
+        let body = "[hosts](file:///etc/hosts)\n\n[anchor](#x)\n\n[rel](docs/readme.md)\n\n\
+                    [mail](mailto:a@example.test)\n\n\
+                    [click](https://example.com/click)\n\n[menu](https://example.org/menu)\n";
+        let (tab, cx) = tab_with_description(cx, body);
+        for url in ["file:///etc/hosts", "#x", "docs/readme.md"] {
+            let at = link_center(&tab, cx, url);
+            cx.simulate_click(at, Modifiers::none());
+            frames(cx, 1);
+            assert_eq!(cx.cx.opened_url(), None, "a click on {url} reached the system opener");
+
+            cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+            frames(cx, 2);
+            let open = cx
+                .debug_bounds("change-request-menu-item-2")
+                .unwrap_or_else(|| panic!("no Open link row over {url}"));
+            cx.simulate_click(open.center(), Modifiers::none());
+            frames(cx, 2);
+            assert_eq!(cx.cx.opened_url(), None, "Open link on {url} reached the system opener");
+        }
+        let at = link_center(&tab, cx, "https://example.com/click");
+        cx.simulate_click(at, Modifiers::none());
+        frames(cx, 1);
+        assert_eq!(cx.cx.opened_url().as_deref(), Some("https://example.com/click"));
+
+        let at = link_center(&tab, cx, "https://example.org/menu");
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        frames(cx, 2);
+        let open = cx.debug_bounds("change-request-menu-item-2").expect("Open link row");
+        cx.simulate_click(open.center(), Modifiers::none());
+        frames(cx, 2);
+        assert_eq!(cx.cx.opened_url().as_deref(), Some("https://example.org/menu"));
+
+        let at = link_center(&tab, cx, "mailto:a@example.test");
+        cx.simulate_click(at, Modifiers::none());
+        frames(cx, 1);
+        assert_eq!(cx.cx.opened_url().as_deref(), Some("mailto:a@example.test"));
+    }
+
+    /// The menu of a forge body: Copy and Select all, and over a link its two more.
+    #[gpui::test]
+    fn the_menu_of_a_forge_body_acts_on_that_body(cx: &mut TestAppContext) {
+        use crate::text_selection::testing;
+        use gpui::{Modifiers, MouseButton};
+        let (tab, cx) = tab_with_description(cx, "Fixes [it](https://example.com/it) now.\n");
+        let at = link_center(&tab, cx, "https://example.com/it");
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        frames(cx, 2);
+        for row in ["change-request-menu-item-0", "change-request-menu-item-1",
+                    "change-request-menu-item-2", "change-request-menu-item-3"] {
+            assert!(cx.debug_bounds(row).is_some(), "{row}");
+        }
+        assert!(cx.debug_bounds("change-request-menu-item-4").is_none(), "only four rows");
+        let select_all = cx.debug_bounds("change-request-menu-item-1").expect("Select all");
+        cx.simulate_click(select_all.center(), Modifiers::none());
+        frames(cx, 2);
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        frames(cx, 2);
+        testing::reset_clipboard(cx);
+        let copy = cx.debug_bounds("change-request-menu-item-0").expect("Copy");
+        cx.simulate_click(copy.center(), Modifiers::none());
+        frames(cx, 2);
+        assert_eq!(testing::clipboard(cx).as_deref(), Some("Fixes it now."));
+
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        frames(cx, 2);
+        let address = cx.debug_bounds("change-request-menu-item-3").expect("Copy link address");
+        cx.simulate_click(address.center(), Modifiers::none());
+        frames(cx, 2);
+        assert_eq!(testing::clipboard(cx).as_deref(), Some("https://example.com/it"));
+        assert!(cx.debug_bounds("change-request-menu-item-0").is_none(), "the menu closed");
+    }
+
+    /// A table in a description is as wide as its cells need and scrolls sideways.
+    #[gpui::test]
+    fn a_forge_table_scrolls_sideways(cx: &mut TestAppContext) {
+        // Wider than any window the test platform opens.
+        let wide = "x".repeat(600);
+        let body = format!("| a | b | c |\n|---|---|---|\n| {wide} | 2 | 3 |\n");
+        let (_tab, cx) = tab_with_description(cx, &body);
+        // The bar is drawn from the geometry the frame before left.
+        frames(cx, 2);
+        let frame = cx.debug_bounds("markdown-frame-0").expect("the table is framed");
+        let thumb = cx.debug_bounds("markdown-bar-0").expect("a wide table has a thumb");
+        let description = cx.debug_bounds("change-request-description").expect("the description");
+        assert!(frame.size.width <= description.size.width, "the table is held to its body");
+        assert!(thumb.size.width < frame.size.width);
     }
 
     #[gpui::test]

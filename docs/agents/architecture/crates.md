@@ -37,8 +37,10 @@ sirio_term_session, sirio_chat_vocab, sirio_opencode_watch, sirio_ide
                                 (leaves — no local deps beyond sirio_perf and sirio_env;
                                  sirio_theme takes `bezel-theme` (pinned
                                  `=0.1.4`) and the vendored `ely-palette`;
-                                 sirio_ui takes `bezel-theme`, `bezel-markdown`
-                                 and `bezel-syntax`, and no bezel UI crate;
+                                 sirio_ui takes `bezel-theme` and
+                                 `bezel-syntax`, and no bezel UI crate; it
+                                 draws Markdown with the vendored
+                                 `ely-documents` (`sirio_ui::markdown`);
                                  sirio_syntax takes `bezel-syntax` plus the
                                  fifteen tree-sitter grammars bezel does not
                                  carry; sirio_claude is Claude Code's own
@@ -118,10 +120,10 @@ sirio            (the app: main.rs — the only crate that depends on everything
 `presets.rs` from what bezel's `Theme::branded` and Sirio's ladders produced
 (`docs/THEME-PROVENANCE.md`). `sirio_ui::ely` feeds Ely's theme and
 bezel-theme's registry from the `Theme` global; `Theme::to_bezel_theme` still
-derives bezel's own tokens, which bezel-markdown and the `sirio_ui` modules
+derives bezel's own tokens, which the `sirio_ui` modules
 that read a `bezel_theme::Theme` (the settings scaffold, the chat's controls
 and tool-call rows, the titlebar among them) draw with. A bezel bump
-therefore changes Markdown and those modules, not Sirio's tokens. `ThemeMode`
+therefore changes those modules, not Sirio's tokens. `ThemeMode`
 is bezel-theme's `AppearanceMode` re-exported; the only other appearance enum
 is `sirio_persistence::AppearanceMode`, which carries the serde contract, and
 `sirio`'s `main.rs` holds the single conversion between them.

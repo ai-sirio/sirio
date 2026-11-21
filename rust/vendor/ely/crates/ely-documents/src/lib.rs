@@ -59,15 +59,16 @@ pub use knowledge::{Backlink, Backlinks, Favorite, Favorites, TrashBin, Trashed}
 pub use link::LinkEditor;
 pub use markdown::file_tree as markdown_tree;
 pub use markdown::markdown_highlights;
+pub use markdown::parser_options as markdown_options;
 pub use markdown::mdast::{self, AlignKind};
 pub use math::{Latex, MathError, formula_svg};
 pub(crate) use math::{failed, typeset};
 pub use modes::{MarkdownEditor, MarkdownMode};
 pub use pages::{PageCover, PageIcon};
-pub use picture::{HeldPicture, Pictures};
+pub use picture::{HeldPicture, Pictures, picture_path as markdown_picture_path};
 pub use print::{Margins, Paper, PrintPreview, PrintSettings, sheet};
 pub use reading::{Footnote, Glossary, ReadingProgress, TooltipTerm, ZenMode};
-pub use render::{MarkdownRenderer, RightPress};
+pub use render::{BlockCull, BlockUse, MarkdownRenderer, RightPress, TextGather};
 pub use rich::RichTextEditor;
 pub use templates::{Template, TemplatePicker};
 pub use thumbs::PageThumbnailList;
@@ -75,7 +76,9 @@ pub use todo::{Checklist, TodoItem};
 pub use toolbar::FixedFormatToolbar;
 pub use tree::emoji::Shortcodes;
 pub use tree::{AlertKind, Inline, Node as MarkdownBlock, ShortcodeRun, Style};
-pub use tree::{Reader as MarkdownReader, alert, is_toc};
+pub use tree::{
+    Reader as MarkdownReader, alert, is_toc, parse_markdown, parse_markdown_guarded, parse_markdown_with,
+};
 pub use viewer::step as zoom_step;
 pub use viewer::{DocPage, DocumentViewer, PageHit, PageNote};
 

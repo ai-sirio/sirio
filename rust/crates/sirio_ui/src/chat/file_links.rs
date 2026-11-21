@@ -1,15 +1,19 @@
 //! Finds the file paths a chat response names and marks them as links.
 //!
-//! Works on the response's `bezel_markdown::Doc`, after parsing. A path becomes a
+//! Works on the response's tree (`Inline` text), after parsing. A path becomes a
 //! link only when it names an existing regular file (see
 //! `docs/superpowers/specs/2026-10-24-chat-file-links-design.md`), so every
 //! candidate costs one disk lookup, which [`FileLinkMemo`] answers once per
 //! entry instead of once per streamed chunk.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 
+use ely_gpui_component::documents::{Inline, Style};
 use sirio_project::{FileLinkTarget, resolve_file_link};
+
+use crate::markdown::FileLinkInputs;
 
 /// Candidate string -> what it resolved to, for one chat entry. Not keyed by
 /// working directory or home: an entry's memo lives and dies with its entry.
@@ -80,10 +84,15 @@ pub(crate) fn resolve_chat_path(
 /// lookup, and again before a click opens it.
 pub(crate) fn is_network_or_device_path(path: &Path) -> bool {
     let text = path.to_string_lossy();
-    if text.starts_with("//") || text.starts_with("\\\\") {
+    // Two separators in any mix: `//host`, `\\host`, `\\?\`, `\\.\`, and the odd `\/`.
+    let mut chars = text.chars();
+    if matches!(
+        (chars.next(), chars.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    ) {
         return true;
     }
-    #[cfg(windows)]
+    // On Windows a UNC, device or verbatim prefix; no other platform reads a prefix.
     if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
         use std::path::Prefix;
         return matches!(
@@ -154,65 +163,12 @@ fn is_number(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Marks every existing file a response names, in its prose, its inline code
-/// and its Markdown links. The text is never touched, only `marks` grows.
-///
-/// A new mark on prose is appended; one over an inline-code span goes just
-/// before the code mark, so the link stays the outer of the two, which is the
-/// order `Text::marks` documents (outermost first) and what the parser writes
-/// for ``[`x`](url)``.
-pub(crate) fn link_file_paths(
-    doc: &mut bezel_markdown::Doc,
-    cwd: &Path,
-    home: Option<&Path>,
-    memo: &mut FileLinkMemo,
-) {
-    for block in &mut doc.blocks {
-        // A block that would open, or load, something that is not on the web
-        // is shown as plain text instead. A bookmark card opens its URL when
-        // clicked. An image block is read as soon as it is painted: bezel
-        // hands a URL without `://` to gpui as a path, which `fs::read`s it
-        // against the process's cwd, so a device would never end, a FIFO would
-        // block and a share would open a connection. A local picture is kept
-        // only when it is an existing regular file, non-empty and at most
-        // `MAX_IMAGE_BYTES`, resolved like a file link (relative to the
-        // worktree, absolute, or under `~/`) and never a network or device
-        // path; it then names that file by its absolute path.
-        match &mut block.kind {
-            bezel_markdown::BlockKind::Bookmark { url, .. } if !is_web_target(url) => {
-                block.kind = bezel_markdown::BlockKind::Paragraph(bezel_markdown::Text::plain(url.clone()));
-            }
-            bezel_markdown::BlockKind::Image { url, alt, .. } if !is_web_target(url) => {
-                match local_image_path(url, cwd, home, memo) {
-                    Some(path) => *url = path,
-                    None => {
-                        let alt = bezel_markdown::Text::plain(alt.text.clone());
-                        block.kind = bezel_markdown::BlockKind::Paragraph(alt);
-                    }
-                }
-            }
-            _ => {}
-        }
-        if matches!(
-            block.kind,
-            bezel_markdown::BlockKind::Code { .. } | bezel_markdown::BlockKind::Image { .. }
-        ) {
-            continue;
-        }
-        for part in block.parts() {
-            if let Some(text) = block.text_at_mut(part) {
-                link_text(text, cwd, home, memo);
-            }
-        }
-    }
-}
-
 /// The absolute path of the regular file a non-web image URL names, if any.
 /// A URL that starts with whitespace or a control character is refused before
-/// anything else: the resolver would trim it, while bezel paints it as written
+/// anything else: the resolver would trim it, while the renderer takes it as written
 /// (and fetches it, if it holds `://`). A line suffix means nothing to a
 /// picture and is dropped.
-fn local_image_path(
+pub(crate) fn local_image_path(
     url: &str,
     cwd: &Path,
     home: Option<&Path>,
@@ -245,96 +201,123 @@ fn local_image_on_disk(
         return None;
     }
     let path = path.to_string_lossy().into_owned();
-    // bezel fetches anything with `://` in it as a URL.
+    // The renderer loads anything with `://` in it as a URL.
     (!path.contains("://") && Path::new(&path).is_absolute()).then_some(path)
 }
 
-fn link_text(text: &mut bezel_markdown::Text, cwd: &Path, home: Option<&Path>, memo: &mut FileLinkMemo) {
-    // The links an agent wrote are an allowlist: one survives only if it is a
-    // web link (http, https, mailto) or points at a file that was checked, and
-    // then it is retargeted to that file. Anything else (a path that is not
-    // there, a share, a drive path, `smb:`, `vscode:`, an anchor) would be
-    // handed to the system opener by a click, so it loses its mark and its
-    // text stays.
-    text.marks.retain_mut(|span| {
-        // A chip or an inline picture is clicked open like a link, so it gets
-        // the same rule, minus the retargeting: not web, no mark, text stays.
-        if let bezel_markdown::Mark::Mention { url, .. } | bezel_markdown::Mark::Image(url) = &span.mark {
-            return is_web_target(url);
-        }
-        let bezel_markdown::Mark::Link(target) = &span.mark else {
-            return true;
-        };
-        if is_web_target(target) {
-            return true;
-        }
-        match memo.resolve(target, cwd, home) {
-            Some(found) => {
-                span.mark = bezel_markdown::Mark::Link(file_link_url(&found));
-                true
-            }
-            None => false,
-        }
-    });
+/// The links an agent wrote are an allowlist: a web link stays as written, a path to a
+/// file that was checked becomes a link to that file, anything else (a path that is not
+/// there, a share, a drive path, `smb:`, `vscode:`, an anchor) would be handed to the
+/// system opener by a click, so it goes. Without a lookup only the web survives.
+fn allowed_target(
+    target: &str,
+    files: Option<(&Path, Option<&Path>, &mut FileLinkMemo)>,
+) -> Option<String> {
+    if is_web_target(target) {
+        return Some(target.to_owned());
+    }
+    let (cwd, home, memo) = files?;
+    let found = memo.resolve(target, cwd, home)?;
+    Some(file_link_url(&found))
+}
 
-    let mut before_code: Vec<(usize, bezel_markdown::MarkSpan)> = Vec::new();
-    let mut in_prose: Vec<bezel_markdown::MarkSpan> = Vec::new();
-    // Inline code: the trimmed span is the candidate. Code already inside a
-    // Markdown link keeps that link.
-    for (index, span) in text.marks.iter().enumerate() {
-        if span.mark != bezel_markdown::Mark::Code || inside_a_link(&text.marks, &span.range) {
-            continue;
-        }
-        let Some(slice) = text.text.get(span.range.clone()) else {
-            continue;
-        };
-        let trimmed = slice.trim();
-        if trimmed.is_empty() || trimmed.contains("://") {
-            continue;
-        }
-        let start = span.range.start + (slice.len() - slice.trim_start().len());
-        let range = start..start + trimmed.len();
-        if let Some(found) = memo.resolve(trimmed, cwd, home) {
-            before_code.push((
-                index,
-                bezel_markdown::MarkSpan {
-                    range,
-                    mark: bezel_markdown::Mark::Link(file_link_url(&found)),
-                },
-            ));
+/// [`allowed_target`] for a tree's links.
+pub(crate) fn allowed_link(
+    target: &str,
+    files: &mut Option<FileLinkInputs<'_>>,
+) -> Option<String> {
+    let files = files
+        .as_mut()
+        .map(|files| (files.worktree, files.home, &mut *files.memo));
+    allowed_target(target, files)
+}
+
+/// The part of inline code `range` that may name a file: its trimmed text, unless it is
+/// empty or an address with a scheme.
+fn code_candidate(text: &str, range: &Range<usize>) -> Option<Range<usize>> {
+    let slice = text.get(range.clone())?;
+    let trimmed = slice.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return None;
+    }
+    let start = range.start + (slice.len() - slice.trim_start().len());
+    Some(start..start + trimmed.len())
+}
+
+/// Whether a token of prose may name a file: it holds a `/` or a `.`, and no scheme.
+fn may_name_a_file_in_prose(candidate: &str) -> bool {
+    (candidate.contains('/') || candidate.contains('.')) && !candidate.contains("://")
+}
+
+/// [`link_text`] on a tree's text: the links an agent wrote are an allowlist
+/// ([`allowed_link`]), and the files it names in inline code and in prose become links.
+/// The text is never touched, only its styles and links grow; a link that goes takes its
+/// look with it.
+pub(crate) fn link_inline(inline: &mut Inline, files: &mut Option<FileLinkInputs<'_>>) {
+    let mut gone = Vec::new();
+    let mut kept = Vec::with_capacity(inline.links.len());
+    for (range, target) in std::mem::take(&mut inline.links) {
+        match allowed_link(&target, files) {
+            Some(url) => kept.push((range, url)),
+            None => gone.push(range),
         }
     }
-    // Prose: whitespace-delimited tokens outside code, links, mentions and images.
-    for segment in prose_segments(text) {
-        for (token_start, token) in tokens(&text.text, segment) {
+    inline.links = kept;
+    inline
+        .styles
+        .retain(|(range, style)| *style != Style::Link || !gone.contains(range));
+    let Some(files) = files.as_mut() else {
+        return;
+    };
+
+    let mut added: Vec<(Range<usize>, String)> = Vec::new();
+    // Inline code: the trimmed span is the candidate. Code already inside a link keeps it.
+    for (range, style) in &inline.styles {
+        let in_a_link = inline
+            .links
+            .iter()
+            .any(|(link, _)| link.start <= range.start && range.end <= link.end);
+        if *style != Style::Code || in_a_link {
+            continue;
+        }
+        let Some(candidate) = code_candidate(&inline.text, range) else {
+            continue;
+        };
+        let written = &inline.text[candidate.clone()];
+        if let Some(found) = files.memo.resolve(written, files.worktree, files.home) {
+            added.push((candidate, file_link_url(&found)));
+        }
+    }
+    // Prose: whitespace-delimited tokens outside code, links, formulas and notes.
+    let covered = (inline.styles.iter())
+        .filter(|(_, style)| {
+            matches!(
+                style,
+                Style::Code | Style::Link | Style::Math | Style::Footnote
+            )
+        })
+        .map(|(range, _)| range.clone())
+        .chain(inline.links.iter().map(|(range, _)| range.clone()))
+        .collect();
+    for segment in uncovered(inline.text.len(), covered) {
+        for (token_start, token) in tokens(&inline.text, segment) {
             let Some(range) = trim_token(token, token_start) else {
                 continue;
             };
-            let candidate = &text.text[range.clone()];
-            if !(candidate.contains('/') || candidate.contains('.')) || candidate.contains("://") {
+            let candidate = &inline.text[range.clone()];
+            if !may_name_a_file_in_prose(candidate) {
                 continue;
             }
-            if let Some(found) = memo.resolve(candidate, cwd, home) {
-                in_prose.push(bezel_markdown::MarkSpan {
-                    range,
-                    mark: bezel_markdown::Mark::Link(file_link_url(&found)),
-                });
+            if let Some(found) = files.memo.resolve(candidate, files.worktree, files.home) {
+                added.push((range, file_link_url(&found)));
             }
         }
     }
-    // Insert back to front so earlier indexes stay valid.
-    for (index, span) in before_code.into_iter().rev() {
-        text.marks.insert(index, span);
+    for (range, url) in added {
+        inline.styles.push((range.clone(), Style::Link));
+        inline.links.push((range, url));
     }
-    text.marks.extend(in_prose);
-}
-
-fn inside_a_link(marks: &[bezel_markdown::MarkSpan], range: &std::ops::Range<usize>) -> bool {
-    marks.iter().any(|span| {
-        matches!(span.mark, bezel_markdown::Mark::Link(_))
-            && span.range.start <= range.start
-            && range.end <= span.range.end
-    })
+    inline.links.sort_by_key(|(range, _)| range.start);
 }
 
 /// The scheme of a link target: the text before the first `:` when it starts
@@ -351,7 +334,7 @@ fn url_scheme(target: &str) -> Option<&str> {
 }
 
 /// A link a click may hand to the system: http, https or mailto, in any case.
-fn is_web_target(target: &str) -> bool {
+pub(crate) fn is_web_target(target: &str) -> bool {
     url_scheme(target).is_some_and(|scheme| {
         ["http", "https", "mailto"]
             .iter()
@@ -359,33 +342,19 @@ fn is_web_target(target: &str) -> bool {
     })
 }
 
-/// The byte ranges of `text` that no code, link, mention or image mark covers.
-fn prose_segments(text: &bezel_markdown::Text) -> Vec<std::ops::Range<usize>> {
-    let mut covered: Vec<std::ops::Range<usize>> = text
-        .marks
-        .iter()
-        .filter(|span| {
-            matches!(
-                span.mark,
-                bezel_markdown::Mark::Code
-                    | bezel_markdown::Mark::Link(_)
-                    | bezel_markdown::Mark::Mention { .. }
-                    | bezel_markdown::Mark::Image(_)
-            )
-        })
-        .map(|span| span.range.clone())
-        .collect();
+/// The byte ranges of a text `len` bytes long that `covered` leaves out.
+fn uncovered(len: usize, mut covered: Vec<Range<usize>>) -> Vec<Range<usize>> {
     covered.sort_by_key(|range| range.start);
     let mut segments = Vec::new();
     let mut cursor = 0;
     for range in covered {
         if range.start > cursor {
-            segments.push(cursor..range.start.min(text.text.len()));
+            segments.push(cursor..range.start.min(len));
         }
         cursor = cursor.max(range.end);
     }
-    if cursor < text.text.len() {
-        segments.push(cursor..text.text.len());
+    if cursor < len {
+        segments.push(cursor..len);
     }
     segments
 }
@@ -521,57 +490,65 @@ mod tests {
         }
     }
 
-    type Link = (String, PathBuf, Option<usize>, Option<usize>);
-
-    fn linked_with(fx: &Fixture, source: &str, home: Option<&Path>) -> bezel_markdown::Doc {
-        let mut doc = bezel_markdown::parse(source);
-        link_file_paths(&mut doc, &fx.wt, home, &mut FileLinkMemo::default());
-        doc
+    /// `source` as a chat reply is built, with the fixture's worktree and `home`.
+    fn built_with(
+        fx: &Fixture,
+        source: &str,
+        home: Option<&Path>,
+    ) -> crate::markdown::MarkdownBlocks {
+        let mut memo = FileLinkMemo::default();
+        crate::markdown::build(
+            source,
+            &mut crate::markdown::Policy {
+                surface: crate::markdown::Surface::Chat,
+                base: Some(&fx.wt),
+                diagrams: None,
+                file_links: Some(FileLinkInputs {
+                    worktree: &fx.wt,
+                    home,
+                    memo: &mut memo,
+                }),
+            },
+        )
     }
 
-    fn linked(fx: &Fixture, source: &str) -> bezel_markdown::Doc {
-        linked_with(fx, source, Some(&fx.home))
+    fn built(fx: &Fixture, source: &str) -> std::rc::Rc<[ely_gpui_component::documents::MarkdownBlock]> {
+        built_with(fx, source, Some(&fx.home)).nodes
     }
 
-    /// Every file link in the doc: the text it covers, and what it opens.
-    fn links(doc: &bezel_markdown::Doc) -> Vec<Link> {
-        let mut found = Vec::new();
-        for block in &doc.blocks {
-            for part in block.parts() {
-                let Some(text) = block.text_at(part) else {
-                    continue;
-                };
-                for span in &text.marks {
-                    if let bezel_markdown::Mark::Link(url) = &span.mark
-                        && let Some(target) = file_link_target(url)
-                    {
-                        found.push((
-                            text.text[span.range.clone()].to_string(),
-                            target.path,
-                            target.line,
-                            target.column,
-                        ));
-                    }
-                }
-            }
-        }
-        found
+    /// The paragraphs of a flat document.
+    fn paragraphs(
+        nodes: &[ely_gpui_component::documents::MarkdownBlock],
+    ) -> Vec<&ely_gpui_component::documents::Inline> {
+        nodes
+            .iter()
+            .filter_map(|node| match node {
+                ely_gpui_component::documents::MarkdownBlock::Paragraph(inline) => Some(inline),
+                _ => None,
+            })
+            .collect()
     }
 
-    fn link(text: &str, path: PathBuf, line: Option<usize>, column: Option<usize>) -> Link {
-        (text.to_string(), path, line, column)
+    /// Every link address of the paragraphs, whatever it points at.
+    fn link_marks(nodes: &[ely_gpui_component::documents::MarkdownBlock]) -> Vec<String> {
+        paragraphs(nodes)
+            .into_iter()
+            .flat_map(|inline| inline.links.iter().map(|(_, url)| url.clone()))
+            .collect()
     }
 
-    fn texts(doc: &bezel_markdown::Doc) -> Vec<String> {
-        let mut all = Vec::new();
-        for block in &doc.blocks {
-            for part in block.parts() {
-                if let Some(text) = block.text_at(part) {
-                    all.push(text.text.clone());
-                }
-            }
-        }
-        all
+    fn file_marks(nodes: &[ely_gpui_component::documents::MarkdownBlock]) -> Vec<String> {
+        link_marks(nodes)
+            .into_iter()
+            .filter(|url| url.starts_with("file://"))
+            .collect()
+    }
+
+    fn texts(nodes: &[ely_gpui_component::documents::MarkdownBlock]) -> Vec<String> {
+        paragraphs(nodes)
+            .into_iter()
+            .map(|inline| inline.text.clone())
+            .collect()
     }
 
     #[test]
@@ -580,20 +557,19 @@ mod tests {
             r"\\host\share\x.md",
             "//host/share/x.md",
             r"\\?\C:\x",
+            "//?/C:/x",
             r"\\?\UNC\host\share\x",
             r"\\.\pipe\x",
         ] {
             assert!(is_network_or_device_path(Path::new(shape)), "{shape}");
         }
     }
-
     #[test]
     fn ordinary_paths_are_not_refused() {
         for shape in ["/tmp/x", "docs/x.md", "C:/x", "./a//b", "/a//b"] {
             assert!(!is_network_or_device_path(Path::new(shape)), "{shape}");
         }
     }
-
     #[test]
     fn a_file_url_with_an_empty_host_and_a_network_path_is_refused() {
         let target = file_link_target("file:////host/share/x.md");
@@ -604,7 +580,6 @@ mod tests {
             "{target:?}"
         );
     }
-
     #[test]
     fn a_double_slash_path_is_never_looked_up_even_when_it_names_a_local_file() {
         // `//tmp/..` is a local file on unix, and exactly the shape that
@@ -619,28 +594,10 @@ mod tests {
         assert!(resolve_chat_path(&outside.display().to_string(), &fx.wt, None).is_some());
     }
 
-    fn file_marks(doc: &bezel_markdown::Doc) -> Vec<String> {
-        let mut found = Vec::new();
-        for block in &doc.blocks {
-            for part in block.parts() {
-                if let Some(text) = block.text_at(part) {
-                    for span in &text.marks {
-                        if let bezel_markdown::Mark::Link(url) = &span.mark
-                            && url.starts_with("file://")
-                        {
-                            found.push(url.clone());
-                        }
-                    }
-                }
-            }
-        }
-        found
-    }
-
     #[test]
     fn a_markdown_link_to_a_missing_file_url_is_unlinked_and_its_text_stays() {
         let fx = fixture();
-        let doc = linked(&fx, "see [x](file:///definitely/missing.md) now");
+        let doc = built(&fx, "see [x](file:///definitely/missing.md) now");
         assert_eq!(file_marks(&doc), Vec::<String>::new());
         assert_eq!(texts(&doc), vec!["see x now".to_string()]);
     }
@@ -648,10 +605,10 @@ mod tests {
     #[test]
     fn a_markdown_link_to_a_network_file_url_is_unlinked() {
         let fx = fixture();
-        let doc = linked(&fx, "see [x](file:////host/share/x.md) now");
+        let doc = built(&fx, "see [x](file:////host/share/x.md) now");
         assert_eq!(file_marks(&doc), Vec::<String>::new());
         let outside = fx.wt.parent().unwrap().join("outside.txt");
-        let doc = linked(&fx, &format!("see [x](file://{}) now", format!("/{}", outside.display())));
+        let doc = built(&fx, &format!("see [x](file://{}) now", format!("/{}", outside.display())));
         assert_eq!(file_marks(&doc), Vec::<String>::new());
     }
 
@@ -659,25 +616,8 @@ mod tests {
     fn a_markdown_link_to_an_existing_file_url_is_kept() {
         let fx = fixture();
         let readme = fx.wt.join("README.md");
-        let doc = linked(&fx, &format!("see [x](file://{}) now", readme.display()));
+        let doc = built(&fx, &format!("see [x](file://{}) now", readme.display()));
         assert_eq!(file_marks(&doc).len(), 1);
-    }
-
-    /// Every `Mark::Link` target in the doc, whatever it points at.
-    fn link_marks(doc: &bezel_markdown::Doc) -> Vec<String> {
-        let mut found = Vec::new();
-        for block in &doc.blocks {
-            for part in block.parts() {
-                if let Some(text) = block.text_at(part) {
-                    for span in &text.marks {
-                        if let bezel_markdown::Mark::Link(url) = &span.mark {
-                            found.push(url.clone());
-                        }
-                    }
-                }
-            }
-        }
-        found
     }
 
     #[test]
@@ -696,9 +636,10 @@ mod tests {
         ] {
             // angle brackets let a target hold backslashes and the like
             let source = format!("see [x](<{target}>) now");
-            // the parser does make a link of it, so the pass is what removes it
-            assert_eq!(link_marks(&bezel_markdown::parse(&source)).len(), 1, "{target}");
-            let doc = linked(&fx, &source);
+            // the reader does make a link of it, so the pass is what removes it
+            let read = ely_gpui_component::documents::parse_markdown_with(&source, &|_: &str| None);
+            assert_eq!(link_marks(&read).len(), 1, "{target}");
+            let doc = built(&fx, &source);
             assert_eq!(link_marks(&doc), Vec::<String>::new(), "{target}");
             assert_eq!(texts(&doc), vec!["see x now".to_string()], "{target}");
         }
@@ -708,7 +649,7 @@ mod tests {
     fn a_web_link_keeps_its_mark_in_any_case_of_its_scheme() {
         let fx = fixture();
         for target in ["HTTPS://example.com/a", "https://example.com/a", "mailto:a@b.c"] {
-            let doc = linked(&fx, &format!("see [x]({target}) now"));
+            let doc = built(&fx, &format!("see [x]({target}) now"));
             assert_eq!(link_marks(&doc), vec![target.to_string()], "{target}");
         }
     }
@@ -717,127 +658,60 @@ mod tests {
     fn a_file_url_in_capitals_resolves_like_the_lowercase_one() {
         let fx = fixture();
         let readme = fx.wt.join("README.md");
-        let doc = linked(&fx, &format!("see [x](FILE://{}) now", readme.display()));
-        assert_eq!(links(&doc).len(), 1, "{:?}", link_marks(&doc));
+        let doc = built(&fx, &format!("see [x](FILE://{}) now", readme.display()));
+        assert_eq!(file_marks(&doc).len(), 1, "{:?}", link_marks(&doc));
         assert!(file_link_target("File:///tmp/a.md").is_some());
     }
 
-    /// Every URL the doc could hand to the system when clicked: a link,
-    /// chip or image mark, and a bookmark or image block.
-    fn clickable(doc: &bezel_markdown::Doc) -> Vec<String> {
-        let mut found = Vec::new();
-        for block in &doc.blocks {
-            match &block.kind {
-                bezel_markdown::BlockKind::Bookmark { url, .. }
-                | bezel_markdown::BlockKind::Image { url, .. } => found.push(url.clone()),
-                _ => {}
-            }
-            for part in block.parts() {
-                if let Some(text) = block.text_at(part) {
-                    for span in &text.marks {
-                        match &span.mark {
-                            bezel_markdown::Mark::Link(url)
-                            | bezel_markdown::Mark::Image(url)
-                            | bezel_markdown::Mark::Mention { url, .. } => found.push(url.clone()),
-                            _ => {}
-                        }
-                    }
+    #[test]
+    fn linking_never_changes_the_text() {
+        let fx = fixture();
+        let sources = [
+            "l'ho messo in docs/NOME-FILE.md.",
+            "`/docs/NOME-FILE.md`",
+            "see src/main.rs:42:7 and src/main.rs#L42-L50",
+            "(see ./README.md), \"docs/NOME-FILE.md\" docs/NOME-FILE.md:",
+            "`dir with space/a b.txt` ~/notes.txt",
+            "[il file](docs/NOME-FILE.md) and **README.md** and `README.md`",
+            "[sito](https://example.com/docs/NOME-FILE.md) https://example.com/README.md",
+            "missing/nowhere.md, 1.2.3, 2026/10/24, 3/4 docs/sub/ ../outside.txt",
+            "```text\nsrc/main.rs\n```\n\n| a | b |\n|---|---|\n| README.md | `src/main.rs` |",
+        ];
+        for source in sources {
+            // The same reply with no worktree to look in: nothing becomes a file link.
+            let before = crate::markdown::build(
+                source,
+                &mut crate::markdown::Policy {
+                    surface: crate::markdown::Surface::Chat,
+                    base: None,
+                    diagrams: None,
+                    file_links: None,
+                },
+            );
+            let after = built_with(&fx, source, Some(&fx.home));
+            assert_eq!(before.text.text, after.text.text, "{source}");
+            for inline in paragraphs(&after.nodes) {
+                for (range, _) in &inline.links {
+                    assert!(
+                        range.end <= inline.text.len()
+                            && inline.text.is_char_boundary(range.start)
+                            && inline.text.is_char_boundary(range.end),
+                        "{source}: {range:?}"
+                    );
                 }
             }
         }
-        found
     }
 
     #[test]
-    fn a_non_web_chip_or_inline_image_loses_its_click() {
-        let fx = fixture();
-        for source in [
-            "see <smb://host/x> now",
-            "see <FILE:////host/x> now",
-            "<smb://host/x>",
-            r#"see [x](<C:\evil.exe> "chip") now"#,
-            r#"see [x](<\\host\share\x> "embed") now"#,
-            r"see ![x](<\\host\share\x.exe>) now",
-        ] {
-            // the parser does make a clickable of it, so the pass is what removes it
-            assert_eq!(clickable(&bezel_markdown::parse(source)).len(), 1, "{source}");
-            let doc = linked(&fx, source);
-            assert_eq!(clickable(&doc), Vec::<String>::new(), "{source}");
-            assert_eq!(doc.blocks.len(), 1, "{source}");
-            assert_eq!(texts(&doc), texts(&bezel_markdown::parse(source)), "{source}");
-        }
+    fn a_drive_letter_is_not_a_scheme() {
+        assert_eq!(url_scheme(r"C:\x"), None);
+        assert_eq!(url_scheme("C:/x"), None);
     }
 
-    #[test]
-    fn a_non_web_bookmark_or_image_block_becomes_a_paragraph() {
-        let fx = fixture();
-        // The parser only makes a bookmark of an http(s) URL, so a non-web one is
-        // built by hand: a document from elsewhere (or a parser that grows) is
-        // not trusted either.
-        let bookmark = |url: &str| bezel_markdown::Doc {
-            blocks: vec![bezel_markdown::Block::new(bezel_markdown::BlockKind::Bookmark {
-                url: url.to_string(),
-                form: bezel_markdown::Form::Chip,
-            })],
-        };
-        for (raw, shown) in [
-            (bookmark("smb://host/x"), "smb://host/x"),
-            (bookmark(r"\\host\share\x"), r"\\host\share\x"),
-            (bezel_markdown::parse("![alt words](//host/share/x.png)"), "alt words"),
-            (bezel_markdown::parse("![alt words](smb://host/x.png)"), "alt words"),
-        ] {
-            assert!(
-                matches!(
-                    raw.blocks[0].kind,
-                    bezel_markdown::BlockKind::Bookmark { .. } | bezel_markdown::BlockKind::Image { .. }
-                ),
-                "{shown}: {:?}",
-                raw.blocks[0].kind
-            );
-            let source = shown;
-            let mut doc = raw;
-            link_file_paths(&mut doc, &fx.wt, Some(&fx.home), &mut FileLinkMemo::default());
-            assert_eq!(clickable(&doc), Vec::<String>::new(), "{source}");
-            assert!(
-                matches!(&doc.blocks[0].kind, bezel_markdown::BlockKind::Paragraph(text) if text.text == shown),
-                "{source}: {:?}",
-                doc.blocks[0].kind
-            );
-        }
-    }
-
-    #[test]
-    fn web_chips_images_and_blocks_keep_their_click() {
-        let fx = fixture();
-        for (source, url) in [
-            ("see <https://example.com> now", "https://example.com"),
-            (r#"see [x](https://example.com "chip") now"#, "https://example.com"),
-            ("see ![x](https://example.com/a.png) now", "https://example.com/a.png"),
-            ("<https://example.com>", "https://example.com"),
-            ("![x](https://example.com/a.png)", "https://example.com/a.png"),
-        ] {
-            let before = bezel_markdown::parse(source);
-            assert_eq!(clickable(&before), vec![url.to_string()], "{source}");
-            assert_eq!(linked(&fx, source), before, "{source}");
-        }
-    }
-
-    /// The block's kind after linking, when it is an image: its url.
-    fn image_block_url(doc: &bezel_markdown::Doc) -> Option<String> {
-        match &doc.blocks.first()?.kind {
-            bezel_markdown::BlockKind::Image { url, .. } => Some(url.clone()),
-            _ => None,
-        }
-    }
-
-    fn image_block(url: &str) -> bezel_markdown::Doc {
-        bezel_markdown::Doc {
-            blocks: vec![bezel_markdown::Block::new(bezel_markdown::BlockKind::Image {
-                url: url.to_string(),
-                alt: bezel_markdown::Text::plain("alt words"),
-                width: None,
-            })],
-        }
+    /// `local_image_path` on a URL, with the fixture's worktree and `home`.
+    fn picture(fx: &Fixture, url: &str) -> Option<String> {
+        local_image_path(url, &fx.wt, Some(&fx.home), &mut FileLinkMemo::default())
     }
 
     #[test]
@@ -852,55 +726,47 @@ mod tests {
             .arg(&fifo)
             .status()
             .is_ok_and(|status| status.success());
-        let mut docs = vec![
-            ("/dev/zero".to_string(), bezel_markdown::parse("![alt words](/dev/zero)")),
-            ("/dev/random".to_string(), bezel_markdown::parse("![alt words](/dev/random)")),
-            ("missing".to_string(), bezel_markdown::parse("![alt words](docs/missing.png)")),
-            ("directory".to_string(), bezel_markdown::parse("![alt words](docs/sub)")),
-            ("../outside".to_string(), bezel_markdown::parse("![alt words](../outside.txt)")),
-            // a leading space or control character: render.rs would still see
+        let mut urls = vec![
+            ("/dev/zero", "/dev/zero"),
+            ("/dev/random", "/dev/random"),
+            ("missing", "docs/missing.png"),
+            ("directory", "docs/sub"),
+            ("../outside", "../outside.txt"),
+            // a leading space or control character: the renderer would still see
             // `://` and fetch it, and the resolver would trim it to a file
-            ("space web".to_string(), image_block(" http://example.com/a.png")),
-            ("control web".to_string(), image_block("\u{1}https://example.com/a.png")),
-            ("space file".to_string(), image_block(" docs/a.png")),
-            ("tab file".to_string(), image_block("\tdocs/a.png")),
+            ("space web", " http://example.com/a.png"),
+            ("control web", "\u{1}https://example.com/a.png"),
+            ("space file", " docs/a.png"),
+            ("tab file", "\tdocs/a.png"),
         ];
         if made_fifo {
-            docs.push(("fifo".to_string(), bezel_markdown::parse("![alt words](docs/pipe.png)")));
+            urls.push(("fifo", "docs/pipe.png"));
         } else {
             eprintln!("mkfifo unavailable: the FIFO case is skipped");
         }
-        for (case, raw) in docs {
-            assert!(image_block_url(&raw).is_some(), "{case}: {:?}", raw.blocks);
-            let mut doc = raw;
-            link_file_paths(&mut doc, &fx.wt, Some(&fx.home), &mut FileLinkMemo::default());
-            assert_eq!(clickable(&doc), Vec::<String>::new(), "{case}");
-            assert!(
-                matches!(&doc.blocks[0].kind, bezel_markdown::BlockKind::Paragraph(text) if text.text == "alt words"),
-                "{case}: {:?}",
-                doc.blocks[0].kind
-            );
+        for (case, url) in urls {
+            assert_eq!(picture(&fx, url), None, "{case}");
         }
     }
 
     #[test]
     fn a_local_image_block_that_is_a_file_reads_it_by_its_absolute_path() {
-        // bezel hands a non-URL to gpui as a path, which the process resolves
-        // against its own cwd: the block must name exactly the checked file.
+        // The renderer hands a non-URL to gpui as a path, which the process resolves
+        // against its own cwd: the picture must name exactly the checked file.
         let fx = fixture();
         std::fs::write(fx.wt.join("docs/a.png"), b"png").unwrap();
         std::fs::write(fx.home.join("pic.png"), b"png").unwrap();
         let in_wt = fx.wt.join("docs/a.png").display().to_string();
-        for (source, expected) in [
-            ("![x](docs/a.png)".to_string(), in_wt.clone()),
-            ("![x](/docs/a.png)".to_string(), in_wt.clone()),
-            (format!("![x]({in_wt})"), in_wt.clone()),
-            (format!("![x](file://{in_wt})"), in_wt.clone()),
-            ("![x](~/pic.png)".to_string(), fx.home.join("pic.png").display().to_string()),
+        for (url, expected) in [
+            ("docs/a.png".to_string(), in_wt.clone()),
+            ("/docs/a.png".to_string(), in_wt.clone()),
+            (in_wt.clone(), in_wt.clone()),
+            (format!("file://{in_wt}"), in_wt.clone()),
+            ("~/pic.png".to_string(), fx.home.join("pic.png").display().to_string()),
         ] {
-            let doc = linked(&fx, &source);
-            assert_eq!(image_block_url(&doc), Some(expected), "{source}");
-            assert!(Path::new(&image_block_url(&doc).unwrap()).is_absolute(), "{source}");
+            let found = picture(&fx, &url);
+            assert_eq!(found, Some(expected), "{url}");
+            assert!(Path::new(found.as_deref().unwrap()).is_absolute(), "{url}");
         }
     }
 
@@ -916,17 +782,11 @@ mod tests {
         };
         sized("big.png", super::super::MAX_IMAGE_BYTES + 1);
         sized("cap.png", super::super::MAX_IMAGE_BYTES);
-        for source in ["![alt words](docs/empty.png)", "![alt words](docs/big.png)"] {
-            let doc = linked(&fx, source);
-            assert!(
-                matches!(&doc.blocks[0].kind, bezel_markdown::BlockKind::Paragraph(text) if text.text == "alt words"),
-                "{source}: {:?}",
-                doc.blocks[0].kind
-            );
+        for url in ["docs/empty.png", "docs/big.png"] {
+            assert_eq!(picture(&fx, url), None, "{url}");
         }
-        let doc = linked(&fx, "![alt words](docs/cap.png)");
         assert_eq!(
-            image_block_url(&doc),
+            picture(&fx, "docs/cap.png"),
             Some(fx.wt.join("docs/cap.png").display().to_string())
         );
     }
@@ -941,51 +801,24 @@ mod tests {
             return;
         }
         let fx = fixture();
-        let doc = linked(&fx, "![alt words](/proc/self/pagemap)");
-        assert!(
-            matches!(&doc.blocks[0].kind, bezel_markdown::BlockKind::Paragraph(text) if text.text == "alt words"),
-            "{:?}",
-            doc.blocks[0].kind
-        );
-    }
-
-    #[test]
-    fn an_extensionless_file_named_with_a_line_is_a_link() {
-        let fx = fixture();
-        // a file without an extension followed only by a line and column is a file
-        // (in code or a link: a bare prose word is never a candidate)
-        std::fs::write(fx.wt.join("Makefile"), "x\n").unwrap();
-        for source in [
-            "see `Makefile:10` now",
-            "see `Makefile:10:2` now",
-            "see [m](Makefile:10-12) now",
-        ] {
-            assert_eq!(links(&linked(&fx, source)).len(), 1, "{source}");
-        }
-        // a file with an extension followed by a line is still a file and a line
-        std::fs::write(fx.wt.join("main.rs"), "x\n").unwrap();
-        assert_eq!(links(&linked(&fx, "see main.rs:42 now")).len(), 1);
-        // a drive letter is not a scheme
-        assert_eq!(url_scheme(r"C:\x"), None);
-        assert_eq!(url_scheme("C:/x"), None);
+        assert_eq!(picture(&fx, "/proc/self/pagemap"), None);
     }
 
     #[test]
     fn a_local_image_is_read_from_the_disk_once_per_entry() {
         let fx = fixture();
-        let picture = fx.wt.join("docs/a.png");
-        std::fs::write(&picture, b"png").unwrap();
+        let file = fx.wt.join("docs/a.png");
+        std::fs::write(&file, b"png").unwrap();
         let mut memo = FileLinkMemo::default();
-        let mut link = || {
-            let mut doc = bezel_markdown::parse("![alt words](docs/a.png)");
-            link_file_paths(&mut doc, &fx.wt, None, &mut memo);
-            doc
-        };
-        let first = link();
-        assert!(matches!(first.blocks[0].kind, bezel_markdown::BlockKind::Image { .. }));
+        let first = local_image_path("docs/a.png", &fx.wt, None, &mut memo);
+        assert_eq!(first, Some(file.display().to_string()));
         // a streamed chunk later, the entry is linked again with the same memo
-        std::fs::remove_file(&picture).unwrap();
-        assert_eq!(link(), first, "the second pass asked the disk again");
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            local_image_path("docs/a.png", &fx.wt, None, &mut memo),
+            first,
+            "the second pass asked the disk again"
+        );
     }
 
     #[test]
@@ -1008,248 +841,6 @@ mod tests {
             // a file inside something that is not a directory is not a vanished file
             assert!(!may_open_on_click(&file.join("inside")), "under a file");
         }
-    }
-
-    #[test]
-    fn a_relative_path_in_prose_is_linked() {
-        let fx = fixture();
-        let doc = linked(&fx, "l'ho messo in docs/NOME-FILE.md.");
-        assert_eq!(
-            links(&doc),
-            vec![link(
-                "docs/NOME-FILE.md",
-                fx.wt.join("docs/NOME-FILE.md"),
-                None,
-                None
-            )]
-        );
-    }
-
-    #[test]
-    fn a_leading_slash_falls_back_to_the_worktree() {
-        let fx = fixture();
-        let doc = linked(&fx, "`/docs/NOME-FILE.md`");
-        assert_eq!(
-            links(&doc),
-            vec![link(
-                "/docs/NOME-FILE.md",
-                fx.wt.join("docs/NOME-FILE.md"),
-                None,
-                None
-            )]
-        );
-    }
-
-    #[test]
-    fn an_absolute_path_that_exists_is_taken_as_written() {
-        let fx = fixture();
-        let written = format!("{}/src/main.rs", fx.wt.display());
-        let doc = linked(&fx, &format!("open {written} now"));
-        assert_eq!(
-            links(&doc),
-            vec![link(&written, fx.wt.join("src/main.rs"), None, None)]
-        );
-    }
-
-    #[test]
-    fn line_and_column_suffixes_are_kept() {
-        let fx = fixture();
-        let main = fx.wt.join("src/main.rs");
-        assert_eq!(
-            links(&linked(&fx, "see src/main.rs:42")),
-            vec![link("src/main.rs:42", main.clone(), Some(42), None)]
-        );
-        assert_eq!(
-            links(&linked(&fx, "see src/main.rs:42:7")),
-            vec![link("src/main.rs:42:7", main, Some(42), Some(7))]
-        );
-    }
-
-    #[test]
-    fn a_range_and_a_github_anchor_open_at_their_first_line() {
-        let fx = fixture();
-        let main = fx.wt.join("src/main.rs");
-        assert_eq!(
-            links(&linked(&fx, "see src/main.rs:42-50")),
-            vec![link("src/main.rs:42-50", main.clone(), Some(42), None)]
-        );
-        assert_eq!(
-            links(&linked(&fx, "see src/main.rs#L42")),
-            vec![link("src/main.rs#L42", main.clone(), Some(42), None)]
-        );
-        assert_eq!(
-            links(&linked(&fx, "see src/main.rs#L42-L50")),
-            vec![link("src/main.rs#L42-L50", main, Some(42), None)]
-        );
-    }
-
-    #[test]
-    fn surrounding_punctuation_is_not_part_of_the_path() {
-        let fx = fixture();
-        let covered = |source: &str| -> Vec<String> {
-            links(&linked(&fx, source))
-                .into_iter()
-                .map(|link| link.0)
-                .collect()
-        };
-        assert_eq!(covered("(see ./README.md),"), vec!["./README.md"]);
-        assert_eq!(covered("\"docs/NOME-FILE.md\""), vec!["docs/NOME-FILE.md"]);
-        assert_eq!(covered("docs/NOME-FILE.md:"), vec!["docs/NOME-FILE.md"]);
-    }
-
-    #[test]
-    fn a_bare_file_name_resolves_against_the_worktree() {
-        let fx = fixture();
-        assert_eq!(
-            links(&linked(&fx, "see README.md for details")),
-            vec![link("README.md", fx.wt.join("README.md"), None, None)]
-        );
-    }
-
-    #[test]
-    fn inline_code_may_hold_spaces_prose_may_not() {
-        let fx = fixture();
-        assert_eq!(
-            links(&linked(&fx, "`dir with space/a b.txt`")),
-            vec![link(
-                "dir with space/a b.txt",
-                fx.wt.join("dir with space/a b.txt"),
-                None,
-                None
-            )]
-        );
-        assert!(links(&linked(&fx, "dir with space/a b.txt")).is_empty());
-    }
-
-    #[test]
-    fn a_home_relative_path_expands_to_home() {
-        let fx = fixture();
-        assert_eq!(
-            links(&linked(&fx, "see ~/notes.txt")),
-            vec![link("~/notes.txt", fx.home.join("notes.txt"), None, None)]
-        );
-        assert!(links(&linked_with(&fx, "see ~/notes.txt", None)).is_empty());
-    }
-
-    #[test]
-    fn a_markdown_link_to_a_file_is_retargeted() {
-        let fx = fixture();
-        let doc = linked(&fx, "[il file](docs/NOME-FILE.md)");
-        let path = fx.wt.join("docs/NOME-FILE.md");
-        assert_eq!(
-            links(&doc),
-            vec![link("il file", path.clone(), None, None)]
-        );
-        let expected = file_link_url(&FileLinkTarget {
-            path,
-            line: None,
-            column: None,
-        });
-        let marks = &doc.blocks[0].text_at(bezel_markdown::Part::Body).unwrap().marks;
-        assert!(
-            marks
-                .iter()
-                .any(|span| span.mark == bezel_markdown::Mark::Link(expected.clone())),
-            "{marks:?}"
-        );
-    }
-
-    #[test]
-    fn web_links_and_urls_are_left_alone() {
-        let fx = fixture();
-        let doc = linked(
-            &fx,
-            "[sito](https://example.com/docs/NOME-FILE.md) and https://example.com/README.md",
-        );
-        assert!(links(&doc).is_empty());
-        let marks = &doc.blocks[0].text_at(bezel_markdown::Part::Body).unwrap().marks;
-        assert!(
-            marks.iter().any(|span| span.mark
-                == bezel_markdown::Mark::Link("https://example.com/docs/NOME-FILE.md".to_string())),
-            "{marks:?}"
-        );
-    }
-
-    #[test]
-    fn what_does_not_exist_is_never_linked() {
-        let fx = fixture();
-        let doc = linked(&fx, "missing/nowhere.md, 1.2.3, 2026/10/24, 3/4");
-        assert!(links(&doc).is_empty());
-    }
-
-    #[test]
-    fn a_directory_is_never_linked() {
-        let fx = fixture();
-        assert!(links(&linked(&fx, "docs/sub/")).is_empty());
-        assert!(links(&linked(&fx, "docs/sub")).is_empty());
-        assert!(links(&linked(&fx, "`docs/sub`")).is_empty());
-    }
-
-    #[test]
-    fn climbing_out_of_the_worktree_is_never_linked() {
-        let fx = fixture();
-        assert!(links(&linked(&fx, "../outside.txt")).is_empty());
-        assert!(links(&linked(&fx, "`../outside.txt`")).is_empty());
-    }
-
-    #[test]
-    fn fenced_code_is_never_linked() {
-        let fx = fixture();
-        let doc = linked(&fx, "```text\nsrc/main.rs\n```");
-        assert!(links(&doc).is_empty());
-    }
-
-    #[test]
-    fn linking_never_changes_the_text() {
-        let fx = fixture();
-        let sources = [
-            "l'ho messo in docs/NOME-FILE.md.",
-            "`/docs/NOME-FILE.md`",
-            "see src/main.rs:42:7 and src/main.rs#L42-L50",
-            "(see ./README.md), \"docs/NOME-FILE.md\" docs/NOME-FILE.md:",
-            "`dir with space/a b.txt` ~/notes.txt",
-            "[il file](docs/NOME-FILE.md) and **README.md** and `README.md`",
-            "[sito](https://example.com/docs/NOME-FILE.md) https://example.com/README.md",
-            "missing/nowhere.md, 1.2.3, 2026/10/24, 3/4 docs/sub/ ../outside.txt",
-            "```text\nsrc/main.rs\n```\n\n| a | b |\n|---|---|\n| README.md | `src/main.rs` |",
-        ];
-        for source in sources {
-            let before = bezel_markdown::parse(source);
-            let after = linked(&fx, source);
-            assert_eq!(texts(&before), texts(&after), "{source}");
-            for block in &after.blocks {
-                for part in block.parts() {
-                    let text = block.text_at(part).unwrap();
-                    for span in &text.marks {
-                        assert!(
-                            span.range.end <= text.text.len()
-                                && text.text.is_char_boundary(span.range.start)
-                                && text.text.is_char_boundary(span.range.end),
-                            "{source}: {span:?}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_memo_answers_without_the_disk_until_cleared() {
-        let fx = fixture();
-        let mut memo = FileLinkMemo::default();
-        let mut first = bezel_markdown::parse("see README.md");
-        link_file_paths(&mut first, &fx.wt, Some(&fx.home), &mut memo);
-        assert_eq!(links(&first).len(), 1);
-
-        std::fs::remove_file(fx.wt.join("README.md")).unwrap();
-        let mut second = bezel_markdown::parse("see README.md");
-        link_file_paths(&mut second, &fx.wt, Some(&fx.home), &mut memo);
-        assert_eq!(links(&second).len(), 1, "the memo still knows it");
-
-        memo.clear();
-        let mut third = bezel_markdown::parse("see README.md");
-        link_file_paths(&mut third, &fx.wt, Some(&fx.home), &mut memo);
-        assert!(links(&third).is_empty());
     }
 
     #[test]

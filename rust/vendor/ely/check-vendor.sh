@@ -7,7 +7,9 @@
 # a differing path that is not listed fails, and so does a listed path that no longer differs.
 # Mentioning a path elsewhere in the notes counts for nothing. This checks paths, not hunks: whether
 # each hunk is the one the notes describe is a review by hand. It does not look at `ely-palette`,
-# `ely-gpui-component` or anything outside `rust/vendor/ely/crates`. Prints VENDOR CHECK OK.
+# `ely-gpui-component` or anything outside `rust/vendor/ely/crates` and `rust/vendor/pulldown-cmark`
+# (L7), which is compared with upstream's `vendor/pulldown-cmark` as a whole: any differing path fails,
+# there is no list for it. Prints VENDOR CHECK OK.
 #
 #   ELY_UPSTREAM=/path/to/a/clone/of/Ely-GPUI-Components rust/vendor/ely/check-vendor.sh [out-dir]
 #
@@ -59,6 +61,20 @@ for dir in "$VENDOR"/crates/*/; do
     cat "$OUT/$crate.paths" >> "$OUT/differing.txt"
 done
 sort -u -o "$OUT/differing.txt" "$OUT/differing.txt"
+# L7: upstream's patched pulldown-cmark is taken verbatim, so it has no listed paths.
+git -C "$ELY_UPSTREAM" archive "$REV" vendor/pulldown-cmark | tar -x -C "$UP"
+# A missing directory makes `diff` exit 2 with nothing on stdout, which reads as "no difference".
+: > "$OUT/pulldown-cmark.diff"
+if [ ! -d "$VENDOR/../pulldown-cmark" ]; then
+    echo "PULLDOWN-CMARK MISSING: $VENDOR/../pulldown-cmark" >&2
+    fail=1
+else
+    diff -ru "$UP/vendor/pulldown-cmark" "$VENDOR/../pulldown-cmark" > "$OUT/pulldown-cmark.diff" || true
+fi
+if [ -s "$OUT/pulldown-cmark.diff" ]; then
+    while IFS= read -r l; do echo "PULLDOWN-CMARK DIFFERS FROM UPSTREAM: $l" >&2; done < <(grep -E '^(diff |Only in |Binary files )' "$OUT/pulldown-cmark.diff")
+    fail=1
+fi
 # The listed set: the bullets of the `## Differing paths` section, each one backticked path.
 awk '/^## /{in_section = ($0 == "## Differing paths"); next}
      in_section && /^- `[^`]+`$/ {print substr($0, 4, length($0) - 4)}' "$NOTES" | sort -u > "$OUT/listed.txt"

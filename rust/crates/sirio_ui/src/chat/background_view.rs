@@ -9,7 +9,7 @@
 use super::controls::popup_width;
 use super::*;
 use ely_gpui_component::menus::{Hang, layer, panel_surface};
-use gpui::{CursorStyle, StatefulInteractiveElement as _};
+use gpui::CursorStyle;
 
 /// The Stop control of a background task: `Stop`, or `Stopping…` once pressed,
 /// when it is disabled and takes no click (R7: one press sends one `stop_task`).

@@ -41,7 +41,8 @@ fn an_image_inside_an_image_is_the_outer_one() {
             alt: "outer ".into(),
             url: "outer.png".into(),
             link: None,
-            at: 0
+            at: 0,
+            width: None
         }]
     );
 }
@@ -56,7 +57,8 @@ fn an_image_splits_its_paragraph_and_references_resolve() {
             alt: "a".into(),
             url: "a.png".into(),
             link: None,
-            at: 7
+            at: 7,
+            width: None
         }
     );
     let Node::Paragraph(after) = &nodes[2] else {
@@ -119,7 +121,8 @@ fn definitions_nested_in_quotes_and_lists_resolve() {
                 alt: "pic".into(),
                 url: "a.png".into(),
                 link: None,
-                at: 7
+                at: 7,
+                width: None
             }
         );
     }
@@ -141,7 +144,8 @@ fn an_image_inside_styles_and_links_stays_an_image() {
             alt: "x".into(),
             url: "x.png".into(),
             link: None,
-            at: 3
+            at: 3,
+            width: None
         }
     );
     let Node::Paragraph(after) = &nodes[2] else {
@@ -157,7 +161,8 @@ fn an_image_inside_styles_and_links_stays_an_image() {
             alt: "y".into(),
             url: "y.png".into(),
             link: Some("https://ely.dev".into()),
-            at: 19
+            at: 19,
+            width: None
         }
     );
     assert_eq!(nodes.len(), 4, "{nodes:?}");
@@ -300,4 +305,46 @@ fn what_a_browser_hides_draws_nothing() {
         assert_eq!(read(&source), inline, "{source:?}");
         assert_eq!(read(&format!("<div>{source}</div>")), block, "{source:?}");
     }
+}
+
+/// The hook of the tests: any block of `<div>` becomes `X`; the raw blocks it saw are noted.
+fn replacing(seen: &std::cell::RefCell<Vec<String>>) -> impl Fn(&str) -> Option<Vec<Node>> + '_ {
+    |raw| {
+        seen.borrow_mut().push(raw.to_owned());
+        raw.contains("<div>").then(|| {
+            vec![Node::Paragraph(Inline {
+                text: "X".into(),
+                ..Inline::default()
+            })]
+        })
+    }
+}
+
+#[test]
+fn parse_markdown_with_replaces_html_blocks_at_any_depth() {
+    let source = "<div>x</div>\n\n> <div>x</div>\n\n- <div>x</div>\n";
+    let seen = std::cell::RefCell::new(Vec::new());
+    let hook = replacing(&seen);
+    let nodes = parse_markdown_with(source, &hook);
+    let x = || Node::Paragraph(Inline {
+        text: "X".into(),
+        ..Inline::default()
+    });
+    assert_eq!(
+        nodes,
+        [
+            x(),
+            Node::Quote(vec![x()]),
+            Node::List {
+                start: None,
+                items: vec![(None, vec![x()])]
+            }
+        ]
+    );
+    assert_eq!(seen.borrow().len(), 3, "{:?}", seen.borrow());
+    assert!(seen.borrow().iter().all(|raw| raw.contains("<div>x</div>")));
+    // A hook that declines leaves upstream's reading, which `parse_markdown` is.
+    let nodes = parse_markdown_with(source, &|_| None);
+    assert_eq!(nodes, parse_markdown(source));
+    assert_ne!(nodes[0], x());
 }

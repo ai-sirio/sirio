@@ -814,10 +814,10 @@ Scripts/Tests/test-change-request-handoff-e2e.sh   # -> prints "HANDOFF E2E OK"
 # dark and light (docs/testing/ely-forge-probe.md).
 Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
 
-# The selection bezel-markdown paints (a chat response, the Markdown Preview):
-# a selected document whose rows soft-wrap, break and wrap a code span, on a
-# private Xvfb; fails when any row's wash starts after its first glyph, the
-# defect the vendored bezel_markdown fixes (rust/vendor/README.md).
+# The selection painted under a Markdown body drawn by ely-documents through Sirio's host gather
+# (a chat response, the Markdown Preview, a change request): a selected document whose rows
+# soft-wrap, break and wrap a code span, on a private Xvfb; fails when any row's wash starts
+# after its first glyph (sirio_ui::markdown::gather).
 Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
 
 # The eight Settings pages (and Git Hosting with a hand-written forge source), a
@@ -844,8 +844,8 @@ Scripts/Tests/test-surfaces-probe.sh --xvfb   # -> prints "SURFACES PROBE OK (<n
 # SCROLL_DRAG_PROBE_SKEW=40 expects 40 px too much travel, and the run must fail.
 Scripts/Tests/test-scroll-drag-probe.sh --xvfb   # -> prints "SCROLL DRAG PROBE OK (3 bars)"
 
-# The horizontal bar bezel-markdown draws under a fence or a table wider than
-# its column (the vendored change of rust/vendor/README.md): a real xdotool
+# The horizontal bar sirio_ui::markdown draws under a fence or a table wider than
+# its column (markdown/sideways.rs, vendored changes L8 and L9): a real xdotool
 # drag of each thumb to the end, the fence's last glyph clear of the edge, a
 # second document left unscrolled, and the press kept from the host's own
 # handler (the chat starts a selection there); dark and light.
@@ -944,6 +944,35 @@ Scripts/Tests/test-ide-bridge-e2e.sh --xvfb --live   # -> prints "IDE BRIDGE LIV
 # draws nothing there). --mutate missing-image names an image the server lacks: the run must
 # FAIL, the proof it can go red. --xvfb | --display :N, --out-dir DIR.
 Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN REMOTE IMAGE E2E OK (block <n>x<n>, <n> GET, display <d>)"
+
+# One Markdown document (Scripts/Tests/fixtures/markdown-documents/showcase.md) drawn on the three
+# surfaces that render Markdown, for a build-against-build comparison (the baseline was drawn by the removed bezel-markdown): the file Preview, a native
+# chat reply (chat_fixture.py mode reply-file) and the description of change request #101 on the
+# fake forge. Isolated instances on a private Xvfb (:120-:139, started and stopped by the script),
+# a 1600x1000 window, the wheel turned in steps until a step changes nothing, PID-matched captures.
+# Writes preview-<k>.png, chat-<k>.png, cr-description-<k>.png and transcript.json to --out-dir.
+# --bin-dir holds sirio and sirio-host (sirioctl too, else rust/target/debug/sirioctl); the chat leg
+# needs rust/target/debug/examples/ely_chat_seed. --display :N, --only preview,chat,cr-description.
+Scripts/Tests/capture-markdown-surfaces.sh --bin-dir DIR --out-dir DIR   # -> prints "MARKDOWN SURFACES CAPTURED (<n> frames)"
+
+# Markdown on ely-documents in the real app (spec 2026-11-20-ely-markdown-documents-design.md §6.2): an
+# isolated debug Sirio on a private Xvfb (:120-:139, started and stopped by the script) opens the
+# showcase fixture plus a late section (the driver is Scripts/Tests/markdown_documents_e2e.py). Real X
+# input aimed by the Preview's debug state (`surface editor state`: preview_nodes, preview_scroll,
+# preview_texts, preview_links, preview_outline_at, preview_outline_toggle_at, preview_diagrams) and
+# the display's real clipboard (GTK, python3-gi): node counts; a `[[toc]]` entry, a `#slug` link and
+# an outline row each bring their heading to the top; the reading share grows; `<img width=120>` draws
+# 120 px wide (a capture scan); Mermaid is rendered into the cache directory, PlantUML too when
+# `plantuml` is on PATH, else `SKIP plantuml (not on PATH)`; a drag plus Ctrl+C and the right-click
+# menu's Copy put the expected text on the clipboard; Ctrl+C in the terminal still echoes ^C at the
+# PTY; a chat reply of at least 40 KiB, culled at the tail, is copied whole by the transcript menu's
+# Select All and Copy (equal to the transcript text), and a jump to its top draws no blank band; the
+# deepest nesting (MAX_NESTING levels) opens in a Preview and arrives as a chat reply, both drawn as quotes (a row of
+# exactly `deep-end`, which the plain-paragraph fallback does not make), and the app lives.
+# --mutate no-sections starts the app with SIRIO_DEBUG_MARKDOWN_NO_SECTIONS (a debug-build knob: the
+# Preview is drawn without `sections`): the run must FAIL at anchor-toc. --display :N, --out-dir DIR
+# (default artifacts/ely-md/e2e: transcript.json, frames/, the clipboards and expected texts).
+Scripts/Tests/test-markdown-documents-e2e.sh --display :122   # -> prints "MARKDOWN DOCUMENTS E2E OK (<n> checks, <n> skipped, display <d>)"
 
 # The environment of an opened link: the app starts through a fake AppImage mount's AppRun on a
 # private Xvfb with both WAYLAND_DISPLAY and a DISPLAY set (so it forces X11 for itself), a

@@ -409,6 +409,7 @@ impl Render for Held {
             url: "cid:logo@atrium".into(),
             link: None,
             at: 0,
+            width: None,
         }]
         .into();
         div()

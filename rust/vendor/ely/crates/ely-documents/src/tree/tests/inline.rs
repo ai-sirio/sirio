@@ -421,7 +421,6 @@ fn source_html_cannot_name_the_writer_s_controls() {
 }
 
 #[test]
-#[ignore = "needs upstream's patched pulldown-cmark; step 2"]
 fn a_link_around_a_footnote_reference_stays_a_link() {
     // The footnote's `a` ends the link, as on GitHub.
     let drawn = line("[a [^1] b](/x)\n\n[^1]: n");

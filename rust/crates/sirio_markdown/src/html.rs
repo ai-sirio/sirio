@@ -20,24 +20,33 @@ use crate::model::{Block, Document, Inline, ListItem, TableCell};
 /// Translates the raw HTML in `document`. Applied by the Preview only:
 /// [`crate::parse`] stays a faithful CommonMark model.
 pub fn expand_html(document: Document) -> Document {
+    expand_html_capped(document, usize::MAX)
+}
+
+/// [`expand_html`] that never builds the HTML deeper than `max_depth` levels. Past the cap
+/// an inline tag keeps its text and loses its meaning (no wrapper is made for it) and a
+/// `<blockquote>` opens no level, so a caller that recurses over the result, on text it
+/// does not trust, knows how deep that is. The cap is in the builders themselves, where
+/// the levels are made, so no separate count of tags can disagree with them.
+pub fn expand_html_capped(document: Document, max_depth: usize) -> Document {
     Document {
-        blocks: expand_blocks(document.blocks),
+        blocks: expand_blocks(document.blocks, max_depth),
     }
 }
 
-fn expand_blocks(blocks: Vec<Block>) -> Vec<Block> {
+fn expand_blocks(blocks: Vec<Block>, limit: usize) -> Vec<Block> {
     let mut out = Vec::with_capacity(blocks.len());
     for block in blocks {
         match block {
             Block::Paragraph { inline } => {
-                let inline = expand_inlines(inline);
+                let inline = expand_inlines(inline, limit);
                 if !is_blank(&inline) {
                     out.push(Block::Paragraph { inline });
                 }
             }
             Block::Heading { level, inline } => out.push(Block::Heading {
                 level,
-                inline: expand_inlines(inline),
+                inline: expand_inlines(inline, limit),
             }),
             Block::List { kind, items, tight } => out.push(Block::List {
                 kind,
@@ -45,13 +54,13 @@ fn expand_blocks(blocks: Vec<Block>) -> Vec<Block> {
                 items: items
                     .into_iter()
                     .map(|item| ListItem {
-                        blocks: expand_blocks(item.blocks),
+                        blocks: expand_blocks(item.blocks, limit),
                         checked: item.checked,
                     })
                     .collect(),
             }),
             Block::BlockQuote { blocks } => out.push(Block::BlockQuote {
-                blocks: expand_blocks(blocks),
+                blocks: expand_blocks(blocks, limit),
             }),
             Block::Table {
                 alignment,
@@ -59,10 +68,10 @@ fn expand_blocks(blocks: Vec<Block>) -> Vec<Block> {
                 rows,
             } => out.push(Block::Table {
                 alignment,
-                header: expand_cells(header),
-                rows: rows.into_iter().map(expand_cells).collect(),
+                header: expand_cells(header, limit),
+                rows: rows.into_iter().map(|row| expand_cells(row, limit)).collect(),
             }),
-            Block::Html { text } => out.extend(blocks_from_html(&text)),
+            Block::Html { text } => out.extend(blocks_from_html(&text, limit)),
             // Code blocks and rules carry no inline content.
             other => out.push(other),
         }
@@ -70,22 +79,22 @@ fn expand_blocks(blocks: Vec<Block>) -> Vec<Block> {
     out
 }
 
-fn expand_cells(cells: Vec<TableCell>) -> Vec<TableCell> {
+fn expand_cells(cells: Vec<TableCell>, limit: usize) -> Vec<TableCell> {
     cells
         .into_iter()
         .map(|cell| TableCell {
-            inline: expand_inlines(cell.inline),
+            inline: expand_inlines(cell.inline, limit),
         })
         .collect()
 }
 
 /// Folds an inline list's HTML tags into the inlines they stand for,
 /// recursing into the children of Markdown's own spans.
-fn expand_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
+fn expand_inlines(inlines: Vec<Inline>, limit: usize) -> Vec<Inline> {
     let has_embed_end = inlines.iter().any(|inline| {
         matches!(inline, Inline::Html(fragment) if fragment.to_ascii_lowercase().contains("</embed"))
     });
-    let mut fold = InlineFold::default();
+    let mut fold = InlineFold::with_limit(limit);
     for inline in inlines {
         match inline {
             Inline::Html(fragment) => {
@@ -93,8 +102,8 @@ fn expand_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
                     fold.piece(piece);
                 }
             }
-            Inline::Strong(children) => fold.push(Inline::Strong(expand_inlines(children))),
-            Inline::Emphasis(children) => fold.push(Inline::Emphasis(expand_inlines(children))),
+            Inline::Strong(children) => fold.push(Inline::Strong(expand_inlines(children, limit))),
+            Inline::Emphasis(children) => fold.push(Inline::Emphasis(expand_inlines(children, limit))),
             Inline::Link {
                 target,
                 title,
@@ -102,7 +111,7 @@ fn expand_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
             } => fold.push(Inline::Link {
                 target,
                 title,
-                children: expand_inlines(children),
+                children: expand_inlines(children, limit),
             }),
             other => fold.push(other),
         }
@@ -273,6 +282,8 @@ impl Wrap {
 struct Frame {
     name: String,
     wrap: Wrap,
+    /// Whether it counts against the fold's limit: it wraps what it holds.
+    wraps: bool,
     children: Vec<Inline>,
 }
 
@@ -280,15 +291,29 @@ struct Frame {
 /// an end tag that matches anything else (a crossed tag) or nothing (a
 /// stray one) is dropped, and a tag still open at the end unwraps. In every
 /// malformed case the tag is lost and the text is kept.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct InlineFold {
     root: Vec<Inline>,
     stack: Vec<Frame>,
+    /// Open frames that wrap what they hold, and how many may be: past it a tag is
+    /// transparent, so the result nests no deeper.
+    wrapping: usize,
+    limit: usize,
     /// Inside a removed-with-content element: its name and nesting depth.
     skipping: Option<(String, usize)>,
 }
 
 impl InlineFold {
+    fn with_limit(limit: usize) -> Self {
+        Self {
+            root: Vec::new(),
+            stack: Vec::new(),
+            wrapping: 0,
+            limit,
+            skipping: None,
+        }
+    }
+
     fn push(&mut self, inline: Inline) {
         if self.skipping.is_some() {
             return;
@@ -328,9 +353,19 @@ impl InlineFold {
             _ if is_void(&name) => return,
             _ => Wrap::Transparent,
         };
+        // Past the limit a tag keeps its text and wraps nothing; it still takes its frame, so
+        // its end tag closes it and no other.
+        let wrap = match wrap {
+            Wrap::Transparent => Wrap::Transparent,
+            _ if self.wrapping >= self.limit => Wrap::Transparent,
+            wrap => wrap,
+        };
+        let wraps = !matches!(wrap, Wrap::Transparent);
+        self.wrapping += usize::from(wraps);
         self.stack.push(Frame {
             name,
             wrap,
+            wraps,
             children: Vec::new(),
         });
     }
@@ -343,6 +378,7 @@ impl InlineFold {
             .stack
             .pop()
             .expect("the innermost frame was just checked");
+        self.wrapping -= usize::from(frame.wraps);
         for inline in frame.wrap.apply(merge_texts(frame.children)) {
             self.push(inline);
         }
@@ -350,6 +386,7 @@ impl InlineFold {
 
     fn finish(mut self) -> Vec<Inline> {
         self.skipping = None;
+        self.wrapping = 0;
         while let Some(frame) = self.stack.pop() {
             for inline in frame.children {
                 self.push(inline);
@@ -392,8 +429,8 @@ fn pixel_width(value: &str) -> Option<u32> {
 }
 
 /// Translates one `Block::Html` chunk into blocks.
-fn blocks_from_html(fragment: &str) -> Vec<Block> {
-    let mut builder = BlockBuilder::default();
+fn blocks_from_html(fragment: &str, limit: usize) -> Vec<Block> {
+    let mut builder = BlockBuilder::with_limit(limit);
     for piece in pieces(fragment, fragment.to_ascii_lowercase().contains("</embed")) {
         builder.piece(piece);
     }
@@ -421,17 +458,31 @@ struct BlockBuilder {
     pre: Option<String>,
     /// Inside a removed-with-content element (see [`skip`]).
     skipping: Option<(String, usize)>,
+    /// How deep the result may nest in all: one budget for the quotes, the paragraph (and a
+    /// summary's emphasis) and the inline wrappers, so no mix of them goes past it.
+    limit: usize,
+    /// `<blockquote>`s opened past the limit, which made no level: their end tags make none.
+    unopened: usize,
 }
 
-impl Default for BlockBuilder {
-    fn default() -> Self {
+impl BlockBuilder {
+    fn with_limit(limit: usize) -> Self {
         Self {
             levels: vec![Vec::new()],
-            fold: InlineFold::default(),
+            fold: InlineFold::with_limit(limit.saturating_sub(2)),
             run: Run::Paragraph,
             pre: None,
             skipping: None,
+            limit,
+            unopened: 0,
         }
+    }
+
+    /// An empty fold for the run that starts now: what the budget leaves after the quotes
+    /// open, the paragraph and a summary's emphasis (kept whatever the run turns out to be).
+    fn fresh_fold(&self) -> InlineFold {
+        let quotes = self.levels.len() - 1;
+        InlineFold::with_limit(self.limit.saturating_sub(quotes + 2))
     }
 }
 
@@ -485,7 +536,14 @@ impl BlockBuilder {
             }
             "blockquote" => {
                 self.end_run();
-                self.levels.push(Vec::new());
+                // `levels[0]` is the chunk's own: the quotes open are the others.
+                match self.levels.len() <= self.limit.saturating_sub(2) {
+                    true => {
+                        self.levels.push(Vec::new());
+                        self.fold = self.fresh_fold();
+                    }
+                    false => self.unopened += 1,
+                }
             }
             "pre" => {
                 self.end_run();
@@ -505,9 +563,12 @@ impl BlockBuilder {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "summary" => self.end_run(),
             "blockquote" => {
                 self.end_run();
-                if self.levels.len() > 1 {
+                if self.unopened > 0 {
+                    self.unopened -= 1;
+                } else if self.levels.len() > 1 {
                     let blocks = self.levels.pop().expect("more than one level");
                     self.emit(Block::BlockQuote { blocks });
+                    self.fold = self.fresh_fold();
                 }
             }
             _ if is_block_boundary(&name) => self.end_run(),
@@ -516,7 +577,9 @@ impl BlockBuilder {
     }
 
     fn end_run(&mut self) {
-        let inline = trim_run(std::mem::take(&mut self.fold).finish());
+        let fresh = self.fresh_fold();
+        let fold = std::mem::replace(&mut self.fold, fresh);
+        let inline = trim_run(fold.finish());
         let run = std::mem::replace(&mut self.run, Run::Paragraph);
         if is_blank(&inline) {
             return;
@@ -978,5 +1041,83 @@ mod tests {
                 tight: true,
             }]
         );
+    }
+
+    /// How deep a document's blocks and inlines nest.
+    fn depth(blocks: &[Block]) -> usize {
+        fn inline(inlines: &[Inline]) -> usize {
+            inlines
+                .iter()
+                .map(|inline_| match inline_ {
+                    Inline::Emphasis(c) | Inline::Strong(c) | Inline::Link { children: c, .. } => {
+                        1 + inline(c)
+                    }
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        blocks
+            .iter()
+            .map(|block| match block {
+                Block::BlockQuote { blocks } => 1 + depth(blocks),
+                Block::Paragraph { inline: i } | Block::Heading { inline: i, .. } => {
+                    1 + inline(i)
+                }
+                _ => 1,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_cap_bounds_what_expand_html_builds() {
+        use super::expand_html_capped;
+        use crate::model::Document;
+        const N: usize = 10_000;
+        // Crossed tags, and tags no end tag closes, that a count of open tags does not model:
+        // each opens N levels in the builders.
+        let inputs = [
+            format!("<div>{}", "<b><blockquote></b>".repeat(N)),
+            format!("<div>{}{}", "<b><i></b>".repeat(N), "</i></b>".repeat(N)),
+            format!("<div>{}", "<div><blockquote></div>".repeat(N)),
+            format!("{}x{}", "<blockquote>".repeat(N), "</blockquote>".repeat(N)),
+            format!("{}x{}", "<b>".repeat(N), "</b>".repeat(N)),
+            format!("<blockquote title=\"</blockquote>\">{}", "<i>x".repeat(N)),
+            // Quotes, then wrappers that do close: one budget, not one each.
+            format!("{}{}x{}", "<blockquote>".repeat(N), "<b>".repeat(N), "</b>".repeat(N)),
+            format!(
+                "{}<summary>{}x{}",
+                "<blockquote>".repeat(N),
+                "<b>".repeat(N),
+                "</b>".repeat(N)
+            ),
+            format!("<h1>{}x{}", "<i>".repeat(N), "</i>".repeat(N)),
+            format!("<div>{}{}x{}", "<b><blockquote></b>".repeat(N), "<b>".repeat(N), "</b>".repeat(N)),
+        ];
+        for (n, html) in inputs.into_iter().enumerate() {
+            // On a small stack: building, measuring and dropping the tree must not recurse deeply.
+            let found = std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let document = Document {
+                        blocks: vec![Block::Html { text: html }],
+                    };
+                    let expanded = expand_html_capped(document, 16);
+                    depth(&expanded.blocks)
+                })
+                .expect("spawn")
+                .join()
+                .expect("no stack overflow");
+            assert!(found <= 16, "input {n}: {found} levels under a cap of 16");
+        }
+        // Under the cap nothing changes: the nesting is built as written.
+        let document = Document {
+            blocks: vec![Block::Html {
+                text: "<blockquote><blockquote>x</blockquote></blockquote>".into(),
+            }],
+        };
+        assert_eq!(depth(&expand_html_capped(document.clone(), 16).blocks), 3);
+        assert_eq!(expand_html_capped(document.clone(), usize::MAX), expand_html(document));
     }
 }

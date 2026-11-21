@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # End-to-end test of text selection (rust/crates/sirio_ui/src/text_selection.rs
-# and selectable_markdown.rs): a real pointer drag across text a surface draws,
+# and markdown/view.rs): a real pointer drag across text a surface draws,
 # a real Ctrl+C, and the real clipboard, on the real views -- Settings, the
 # change request tab (title, meta line, Markdown description), the file view's
 # Markdown preview, the chat (a tool call's output, an error card), the diff in
@@ -49,7 +49,7 @@ command -v cargo-nextest >/dev/null 2>&1 || {
 
 # Every test that drives a drag and a copy. A name filter, not a list of
 # names, so a new surface's test joins by being named for what it proves.
-UI_FILTER='test(/^text_selection::/) | test(/^selectable_markdown::/) | test(/selected_and_copied/) | test(/can_be_copied/) | test(/selected_and_copied_in_unified_and_split_view/)'
+UI_FILTER='test(/^text_selection::/) | test(/^markdown::view::tests::/) | test(/^chat::markdown_tests::/) | test(/selected_and_copied/) | test(/can_be_copied/) | test(/selected_and_copied_in_unified_and_split_view/)'
 HOST_FILTER='test(/text_selected_in_/)'
 
 run() {

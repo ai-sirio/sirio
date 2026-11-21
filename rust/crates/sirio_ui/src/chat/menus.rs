@@ -67,20 +67,27 @@ impl Chat {
             return div().into_any_element();
         }
         let entity = cx.entity();
-        let menu = TranscriptContextItem::ALL
+        let link = self.transcript_menu_link.as_deref();
+        let items = TranscriptContextItem::ALL
             .into_iter()
-            .fold(Menu::new(), |menu, item| {
-                let entity = entity.clone();
-                menu.item(
-                    MenuItem::new(item.label())
-                        .selectors(format!("transcript-context-{}", item.selector()), None)
-                        .on_click(move |window, cx| {
-                            entity.update(cx, |chat, cx| {
-                                chat.transcript_context_action(item, window, cx)
-                            });
-                        }),
-                )
-            });
+            .chain(link.into_iter().flat_map(|_| TranscriptContextItem::LINK));
+        let menu = items.fold(Menu::new(), |menu, item| {
+            let entity = entity.clone();
+            let row = MenuItem::new(item.label())
+                .selectors(format!("transcript-context-{}", item.selector()), None)
+                .on_click(move |window, cx| {
+                    entity.update(cx, |chat, cx| {
+                        chat.transcript_context_action(item, window, cx)
+                    });
+                });
+            // A link the click would not open (an anchor of a table of contents) is not offered
+            // as one that opens.
+            let inert = item == TranscriptContextItem::OpenLink
+                && !link.is_some_and(|link| {
+                    file_link_target(link).is_some() || file_links::is_web_target(link)
+                });
+            menu.item(row.disabled(inert))
+        });
         layer(
             "transcript-context-menu-layer",
             Hang::At(position),

@@ -679,15 +679,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "bezel-markdown"
-version = "0.1.4"
-dependencies = [
- "bezel-theme",
- "gpui-pre",
- "pulldown-cmark",
-]
-
-[[package]]
 name = "bezel-syntax"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2124,6 +2115,7 @@ dependencies = [
  "ely-agent",
  "ely-chat",
  "ely-core",
+ "ely-documents",
  "ely-editor",
  "ely-git",
  "gpui-pre",
@@ -6220,9 +6212,7 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+version = "0.13.6"
 dependencies = [
  "bitflags 2.13.1",
  "getopts",
@@ -7519,7 +7509,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sirio"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7587,7 +7577,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_acp"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7620,7 +7610,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_apply"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "sirio_release",
  "sirio_update",
@@ -7629,7 +7619,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_chat"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -7648,7 +7638,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_chat_child"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "async-io",
  "async-process",
@@ -7659,7 +7649,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_chat_vocab"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "async-channel",
  "serde_json",
@@ -7667,7 +7657,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_claude"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -7675,7 +7665,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_control"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -7692,7 +7682,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_diagram"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "flate2",
  "libc",
@@ -7708,7 +7698,7 @@ version = "0.1.0"
 
 [[package]]
 name = "sirio_forge"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "chrono",
  "serde",
@@ -7731,7 +7721,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_host"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "libc",
  "serde",
@@ -7743,7 +7733,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_host_client"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "libc",
  "libghostty-vt",
@@ -7758,7 +7748,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_host_protocol"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -7767,11 +7757,11 @@ dependencies = [
 
 [[package]]
 name = "sirio_icons"
-version = "0.46.2"
+version = "0.47.0"
 
 [[package]]
 name = "sirio_ide"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -7783,7 +7773,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_ipc"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -7817,7 +7807,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_mcp_apps"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "base64 0.23.1",
  "serde_json",
@@ -7825,7 +7815,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_opencode_watch"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -7858,7 +7848,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_project"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "libc",
  "serde",
@@ -7868,7 +7858,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_registry"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -7884,7 +7874,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_release"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -7899,7 +7889,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_syntax"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "bezel-syntax",
  "bezel-theme",
@@ -7922,7 +7912,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_term_session"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "image",
  "libc",
@@ -7934,7 +7924,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_terminal"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "bezel-theme",
@@ -7958,7 +7948,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_theme"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -7971,11 +7961,10 @@ dependencies = [
 
 [[package]]
 name = "sirio_ui"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "bezel-markdown",
  "bezel-syntax",
  "bezel-theme",
  "chrono",
@@ -7990,6 +7979,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pulldown-cmark",
  "raw-window-handle",
  "regex",
  "serde",
@@ -8023,7 +8013,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_update"
-version = "0.46.2"
+version = "0.47.0"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",

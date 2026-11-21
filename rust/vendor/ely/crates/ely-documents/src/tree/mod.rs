@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap, ops::Range};
 
 use crate::markdown::mdast::{self, AlignKind};
 
-use super::markdown::{span, tree, walk};
+use super::markdown::{span, tree, tree_guarded, walk};
 
 mod blocks;
 mod dom;
@@ -106,6 +106,8 @@ pub enum Node {
         link: Option<String>,
         /// Its source start.
         at: usize,
+        /// Its width in logical pixels, when the owner sets it; else natural.
+        width: Option<f32>,
     },
     /// A footnote definition.
     Footnote {
@@ -142,7 +144,12 @@ pub struct Reader<'a> {
     pub headings: Vec<DocumentHeading>,
     /// Soft breaks as lines, as the screen draws them.
     lines: bool,
+    /// Takes each HTML block's raw text, and its blocks in its place.
+    html_block: Option<&'a HtmlBlock<'a>>,
 }
+
+/// Blocks to draw in place of an HTML block, from its raw HTML.
+pub type HtmlBlock<'a> = dyn Fn(&str) -> Option<Vec<Node>> + 'a;
 
 /// `markdown` as blocks.
 pub(crate) fn parse(markdown: &str) -> Vec<Node> {
@@ -152,6 +159,36 @@ pub(crate) fn parse(markdown: &str) -> Vec<Node> {
         reader.top(node, &mut out);
     }
     out
+}
+
+/// `markdown` as blocks, as the renderer reads it.
+pub fn parse_markdown(markdown: &str) -> Vec<Node> {
+    parse(markdown)
+}
+
+/// `markdown` as blocks; `html_block` sees the raw HTML of each HTML block, at any depth, and its
+/// blocks replace it when it returns some.
+pub fn parse_markdown_with<'a>(markdown: &'a str, html_block: &'a HtmlBlock<'a>) -> Vec<Node> {
+    parse_markdown_guarded(markdown, html_block, &mut |_| true).expect("nothing refuses the text")
+}
+
+/// [`parse_markdown_with`], asking `accept` about each text the parser is about to read, before
+/// anything is built from it: the first pass's, and each round of the pass that reads `\(` and `\[`
+/// pairs as math (which can nest deeper than the text it started from). None when the first is
+/// refused; the first pass's blocks when a later one is.
+pub fn parse_markdown_guarded<'a>(
+    markdown: &'a str,
+    html_block: &'a HtmlBlock<'a>,
+    accept: &mut dyn FnMut(&str) -> bool,
+) -> Option<Vec<Node>> {
+    let root = tree_guarded(markdown, accept)?;
+    let mut reader = Reader::new(markdown, &root);
+    reader.html_block = Some(html_block);
+    let mut out = Vec::new();
+    for node in root.children().expect("the root holds the blocks") {
+        reader.top(node, &mut out);
+    }
+    Some(out)
 }
 
 impl<'a> Reader<'a> {
@@ -189,6 +226,7 @@ impl<'a> Reader<'a> {
             notes,
             headings: Vec::new(),
             lines: false,
+            html_block: None,
         };
         reader.headings = headings
             .into_iter()
@@ -293,9 +331,10 @@ impl<'a> Reader<'a> {
                 label: self.label(note),
                 body: self.nested(&note.children),
             }),
-            mdast::Node::Html(html) => {
-                text_block(html_block_text(&html.value, self.source, span(node)), out)
-            }
+            mdast::Node::Html(html) => match self.html_block.and_then(|hook| hook(&html.value)) {
+                Some(blocks) => out.extend(blocks),
+                None => text_block(html_block_text(&html.value, self.source, span(node)), out),
+            },
             mdast::Node::Yaml(mdast::Literal { value, .. })
             | mdast::Node::Toml(mdast::Literal { value, .. }) => out.push(Node::FrontMatter {
                 text: value.clone(),
@@ -474,7 +513,13 @@ fn image(images: &[Picture], index: usize, link: Option<String>) -> Option<Node>
         return None;
     };
     let Picture { alt, url, at } = picture.clone();
-    Some(Node::Image { alt, url, link, at })
+    Some(Node::Image {
+        alt,
+        url,
+        link,
+        at,
+        width: None,
+    })
 }
 
 /// `text` inside a `name` element with `attributes`.

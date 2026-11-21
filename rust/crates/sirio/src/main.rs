@@ -24664,6 +24664,127 @@ impl SirioWorkspace {
             ("format_buttons".to_string(), format_buttons.to_string()),
             ("conflict".to_string(), conflict.to_string()),
             ("mode".to_string(), mode.to_string()),
+            // What the Markdown Preview holds, empty outside it: the node counts of its tree,
+            // the headings, whether the outline column is drawn, how far the page is read.
+            (
+                "preview_nodes".to_string(),
+                view.preview_state()
+                    .map(|p| {
+                        format!(
+                            "math={} alerts={} footnotes={} images={} tables={} code={} toc={}",
+                            p.math, p.alerts, p.footnotes, p.images, p.tables, p.code, p.toc
+                        )
+                    })
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_headings".to_string(),
+                view.preview_state().map(|p| p.headings.to_string()).unwrap_or_default(),
+            ),
+            (
+                "preview_outline".to_string(),
+                view.preview_state()
+                    .map(|p| if p.outline_open { "open" } else { "closed" }.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_progress".to_string(),
+                view.preview_state()
+                    .and_then(|p| p.progress)
+                    .map(|share| format!("{share:.2}"))
+                    .unwrap_or_default(),
+            ),
+            // What the Preview laid out last frame, in window pixels, for a driver that aims
+            // real input at it (empty outside the Preview): the scroll, the drawn texts and
+            // links, the outline's rows as one block, the diagrams' renders.
+            (
+                "preview_scroll".to_string(),
+                view.preview_debug()
+                    .map(|d| {
+                        format!(
+                            "y={:.1};max={:.1};top={:.1};height={:.1}",
+                            d.scroll_y, d.max_y, d.view_top, d.view_height
+                        )
+                    })
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_texts".to_string(),
+                view.preview_debug()
+                    .map(|d| {
+                        sirio_control::protocol::rows::encode(
+                            &d.texts
+                                .iter()
+                                .map(|([x, y, w, h], text)| {
+                                    BTreeMap::from([
+                                        ("x".to_string(), format!("{x:.1}")),
+                                        ("y".to_string(), format!("{y:.1}")),
+                                        ("w".to_string(), format!("{w:.1}")),
+                                        ("h".to_string(), format!("{h:.1}")),
+                                        ("text".to_string(), text.chars().take(80).collect()),
+                                    ])
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_links".to_string(),
+                view.preview_debug()
+                    .map(|d| {
+                        sirio_control::protocol::rows::encode(
+                            &d.links
+                                .iter()
+                                .map(|link| {
+                                    BTreeMap::from([
+                                        ("label".to_string(), link.label.clone()),
+                                        ("url".to_string(), link.url.clone()),
+                                        ("x".to_string(), format!("{:.1}", link.x)),
+                                        ("y".to_string(), format!("{:.1}", link.y)),
+                                        ("w".to_string(), format!("{:.1}", link.width)),
+                                        ("h".to_string(), format!("{:.1}", link.height)),
+                                    ])
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_outline_at".to_string(),
+                view.preview_debug()
+                    .and_then(|d| d.outline)
+                    .map(|[x, y, w, h]| format!("{x:.1},{y:.1},{w:.1},{h:.1}"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_outline_toggle_at".to_string(),
+                view.preview_debug()
+                    .and_then(|d| d.outline_toggle)
+                    .map(|[x, y, w, h]| format!("{x:.1},{y:.1},{w:.1},{h:.1}"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "preview_diagrams".to_string(),
+                view.preview_debug()
+                    .map(|d| {
+                        format!(
+                            "ready={};failed={};pending={};paths={}",
+                            d.diagrams.0,
+                            d.diagrams.1,
+                            d.diagrams.2,
+                            Self::escaped_field(
+                                &d.diagram_paths
+                                    .iter()
+                                    .map(|path| path.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("|")
+                            )
+                        )
+                    })
+                    .unwrap_or_default(),
+            ),
             ("hover".to_string(), hover),
             ("message".to_string(), message),
             ("diagnostics".to_string(), diagnostics.to_string()),
@@ -25613,7 +25734,8 @@ impl SirioWorkspace {
         surface_id: &str,
         snapshot: ChatControlSnapshot,
     ) -> Vec<(String, String)> {
-        vec![
+        #[allow(unused_mut)]
+        let mut fields = vec![
             ("surfaceId".to_string(), surface_id.to_string()),
             ("status".to_string(), snapshot.status),
             ("composerText".to_string(), snapshot.composer_text),
@@ -25684,7 +25806,17 @@ impl SirioWorkspace {
                 "taskOutputRetired".to_string(),
                 snapshot.task_output_retired.to_string(),
             ),
-        ]
+        ];
+        // The whole transcript as the selection's offset space reads it, which Select All plus
+        // Copy must put on the clipboard. Debug builds only: it copies the transcript.
+        #[cfg(debug_assertions)]
+        fields.push(("transcriptText".to_string(), snapshot.transcript_text));
+        #[cfg(debug_assertions)]
+        fields.push((
+            "transcriptTextRows".to_string(),
+            sirio_control::protocol::rows::encode(&snapshot.transcript_text_rows),
+        ));
+        fields
     }
 
     fn control_chat_read(

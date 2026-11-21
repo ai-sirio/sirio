@@ -17,7 +17,7 @@ use super::{
 };
 
 /// GitHub's flavor, and math between dollars.
-pub(super) fn options() -> Options {
+pub(crate) fn options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -25,29 +25,56 @@ pub(super) fn options() -> Options {
         | Options::ENABLE_MATH
 }
 
-/// `source` as a syntax tree; front matter too for a whole file.
-pub(super) fn tree(source: &str, frontmatter: bool) -> Node {
-    // pulldown-cmark reads a byte order mark as text.
-    let Some(rest) = source.strip_prefix('\u{FEFF}') else {
-        return read(source, frontmatter);
-    };
-    let mut root = read(rest, frontmatter);
-    shift(&mut root, '\u{FEFF}'.len_utf8());
-    *root.position_mut() = 0..source.len();
-    root
+/// `source` without one leading byte order mark: pulldown-cmark reads it as text.
+fn without_bom(source: &str) -> Option<&str> {
+    source.strip_prefix('\u{FEFF}')
 }
 
-fn read(source: &str, frontmatter: bool) -> Node {
+/// `text` with each lone CR as LF: pulldown-cmark ends no line at one, and reads it byte for byte.
+fn crs(text: &str) -> Cow<'_, str> {
+    match text.contains('\r') {
+        true => Cow::Owned(lone_crs(text)),
+        false => Cow::Borrowed(text),
+    }
+}
+
+/// `text`, lone CRs as LF, with its `$$` fences as tildes: what pulldown-cmark reads.
+fn flow_of(text: &str) -> Flow {
+    flow::rewrite(&crs(text), options())
+}
+
+/// `source` as a syntax tree; front matter too for a whole file.
+#[cfg(test)]
+pub(super) fn tree(source: &str, frontmatter: bool) -> Node {
+    tree_with(source, frontmatter, &mut |_| true).expect("nothing refuses the text")
+}
+
+/// [`tree`], asking `accept` about the text pulldown-cmark is about to read (before any event is
+/// built into a tree); none when it answers no.
+pub(super) fn tree_with(
+    source: &str,
+    frontmatter: bool,
+    accept: &mut dyn FnMut(&str) -> bool,
+) -> Option<Node> {
+    // pulldown-cmark reads a byte order mark as text.
+    let Some(rest) = without_bom(source) else {
+        return read(source, frontmatter, accept);
+    };
+    let mut root = read(rest, frontmatter, accept)?;
+    shift(&mut root, '\u{FEFF}'.len_utf8());
+    *root.position_mut() = 0..source.len();
+    Some(root)
+}
+
+fn read(source: &str, frontmatter: bool, accept: &mut dyn FnMut(&str) -> bool) -> Option<Node> {
     let front = frontmatter.then(|| front::split(source)).flatten();
     let text = front
         .as_ref()
         .map_or(source, |(_, blanked)| blanked.as_str());
-    // pulldown-cmark ends no line at a lone CR: it reads as LF, byte for byte.
-    let parsed = match text.contains('\r') {
-        true => Cow::Owned(lone_crs(text)),
-        false => Cow::Borrowed(text),
-    };
-    let flow = flow::rewrite(&parsed, options());
+    let flow = flow_of(text);
+    if !accept(&flow.text) {
+        return None;
+    }
     let parser = Parser::new_ext(&flow.text, options()).into_offset_iter();
     let definitions: Vec<Node> = (parser.reference_definitions().iter())
         .map(|(label, definition)| {
@@ -74,7 +101,7 @@ fn read(source: &str, frontmatter: bool) -> Node {
     if let (Some((node, _)), Some(children)) = (front, root.children_mut()) {
         children.insert(0, node);
     }
-    root
+    Some(root)
 }
 
 enum Kind {

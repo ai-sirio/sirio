@@ -139,7 +139,6 @@ fn a_pair_stays_in_one_block() {
 }
 
 #[test]
-#[ignore = "needs upstream's patched pulldown-cmark; step 2"]
 fn a_note_in_a_markdown_link_frees_the_math_after_it() {
     // The vendored parser keeps the link; the note ends it.
     for source in [

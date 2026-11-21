@@ -1,6 +1,6 @@
-//! Native probe for the horizontal scroll bezel-markdown gives a wide fenced
-//! block and a wide table under a rendered document — the painter a chat
-//! response and the file view's Preview share.
+//! Native probe for the horizontal scroll a wide fenced block and a wide table get under a
+//! Markdown body drawn through Ely's renderer — the body the file view's Preview, change
+//! requests and the chat share.
 //!
 //! Two documents sit in a column, each under an element id of its own the way
 //! chat entries do. Document A is a `json` fence of one very long line, then a
@@ -16,17 +16,16 @@
 //! output, so both are a contract: a 560×560 window with 24 px of padding, so
 //! each block is 512 px wide from x 24; a 16 px gap between the documents; and
 //! one `BLOCK <doc a|b> <ix> <x> <y> <w> <h>` line on stdout (window
-//! coordinates, rounded) whenever the set of block bounds changes. Document A
-//! has blocks 0 (the fence) and 1 (the table), document B block 0.
+//! coordinates, rounded) whenever the set of block bounds changes; `markdown_probe_view`
+//! prints them from the sideways frames it draws. Document A has blocks 0 (the fence) and
+//! 1 (the table), document B block 0.
 //!
 //! Env: `MD_PROBE_APPEARANCE` (`light`, otherwise dark).
-use std::cell::RefCell;
 use std::io::Write;
-use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, Context, MouseButton, Window, WindowBounds, WindowOptions, canvas, div,
-    prelude::*, px, size,
+    App, Bounds, Context, MouseButton, Window, WindowBounds, WindowOptions, div, prelude::*, px,
+    size,
 };
 
 const JSON: &str = "```json\n{\"content\":{\"informazioniAggiuntive\":{\"codiceCliente\":\"0000123456\",\
@@ -35,88 +34,22 @@ const JSON: &str = "```json\n{\"content\":{\"informazioniAggiuntive\":{\"codiceC
 \"tratte\":[{\"da\":\"Milano\",\"a\":\"Torino\",\"km\":143},{\"da\":\"Torino\",\"a\":\"Genova\",\"km\":170}],\
 \"ultimaRiga\":\"fine\"}}\n```";
 
-const TABLE: &str = "| Alpha | Bravo | Charlie | Delta | Echo | Foxtrot | Golf | Hotel |\n\
+// Eight columns, each as wide as its longest word: Ely draws a table at its natural
+// width, so what makes it scroll is the width of its cells, not a floor per column (bezel
+// gave each column 96 px). Roughly 125 px a column is 1000 px, past the 512 px body.
+const TABLE: &str = "| Alpha-column | Bravo-column | Charlie-column | Delta-column | Echo-column | Foxtrot-column | Golf-column | Hotel-column |\n\
 |---|---|---|---|---|---|---|---|\n\
-| a1 | b1 | c1 | d1 | e1 | f1 | g1 | h1 |\n\
-| a2 | b2 | c2 | d2 | e2 | f2 | g2 | h2 |";
-
-type Bounds4 = (i64, i64, i64, i64);
+| a1-cell-text | b1-cell-text | c1-cell-text | d1-cell-text | e1-cell-text | f1-cell-text | g1-cell-text | h1-cell-text |\n\
+| a2-cell-text | b2-cell-text | c2-cell-text | d2-cell-text | e2-cell-text | f2-cell-text | g2-cell-text | h2-cell-text |";
 
 struct Probe {
-    doc_a: bezel_markdown::Doc,
-    doc_b: bezel_markdown::Doc,
-    layouts_a: bezel_markdown::BlockLayouts,
-    layouts_b: bezel_markdown::BlockLayouts,
-    printed: Rc<RefCell<Vec<(char, usize, Bounds4)>>>,
-}
-
-fn rounded(bounds: Bounds<gpui::Pixels>) -> Bounds4 {
-    let r = |v: gpui::Pixels| f32::from(v).round() as i64;
-    (
-        r(bounds.origin.x),
-        r(bounds.origin.y),
-        r(bounds.size.width),
-        r(bounds.size.height),
-    )
+    doc_a: String,
+    doc_b: String,
 }
 
 impl Render for Probe {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *sirio_theme::Theme::get(cx);
-        let render = |doc: &bezel_markdown::Doc,
-                      layouts: &bezel_markdown::BlockLayouts,
-                      window: &mut Window,
-                      cx: &mut Context<Self>| {
-            bezel_markdown::render_with_selection(
-                doc,
-                None,
-                Some(layouts),
-                None,
-                bezel_markdown::Caption::Shown,
-                window,
-                cx,
-            )
-        };
-        let a = render(&self.doc_a, &self.layouts_a, window, cx);
-        let b = render(&self.doc_b, &self.layouts_b, window, cx);
-
-        // Last child, so its paint runs after every block recorded its box.
-        let report = {
-            let printed = self.printed.clone();
-            let layouts = [
-                ('a', self.layouts_a.clone(), self.doc_a.blocks.len()),
-                ('b', self.layouts_b.clone(), self.doc_b.blocks.len()),
-            ];
-            canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    let mut now = Vec::new();
-                    let mut missing = false;
-                    for (name, layouts, blocks) in &layouts {
-                        for ix in 0..*blocks {
-                            match layouts.block_bounds(ix) {
-                                Some(bounds) => now.push((*name, ix, rounded(bounds))),
-                                None => missing = true,
-                            }
-                        }
-                    }
-                    if *printed.borrow() != now {
-                        let mut out = std::io::stdout().lock();
-                        for (name, ix, (x, y, w, h)) in &now {
-                            let _ = writeln!(out, "BLOCK doc {name} {ix} {x} {y} {w} {h}");
-                        }
-                        let _ = out.flush();
-                        *printed.borrow_mut() = now;
-                    }
-                    if missing {
-                        window.request_animation_frame();
-                    }
-                },
-            )
-            .absolute()
-            .size(px(0.0))
-        };
-
         div()
             .size_full()
             .p(px(24.0))
@@ -138,10 +71,13 @@ impl Render for Probe {
                         );
                         let _ = out.flush();
                     })
-                    .child(a),
+                    .child(sirio_ui::markdown_probe_view("a", &self.doc_a)),
             )
-            .child(div().id("doc-b").child(b))
-            .child(report)
+            .child(
+                div()
+                    .id("doc-b")
+                    .child(sirio_ui::markdown_probe_view("b", &self.doc_b)),
+            )
     }
 }
 
@@ -168,11 +104,8 @@ fn main() {
                 |window, cx| {
                     window.set_window_title("Markdown Scroll Probe");
                     cx.new(|_| Probe {
-                        doc_a: bezel_markdown::parse(&format!("{JSON}\n\n{TABLE}")),
-                        doc_b: bezel_markdown::parse(JSON),
-                        layouts_a: bezel_markdown::BlockLayouts::default(),
-                        layouts_b: bezel_markdown::BlockLayouts::default(),
-                        printed: Rc::new(RefCell::new(Vec::new())),
+                        doc_a: format!("{JSON}\n\n{TABLE}"),
+                        doc_b: JSON.to_string(),
                     })
                 },
             )

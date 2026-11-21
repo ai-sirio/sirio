@@ -1,9 +1,9 @@
 use std::{ops::Range, path::Path, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, FontWeight, HighlightStyle, InteractiveText, IntoElement,
-    MouseButton, ParentElement, RenderOnce, Role, SharedString, Styled, StyledText, TextLayout,
-    Window, div, prelude::*, relative,
+    AnyElement, App, Bounds, ElementId, Entity, FontWeight, HighlightStyle, InteractiveText,
+    IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, Role, SharedString, Styled,
+    StyledText, TextLayout, Window, div, prelude::*, relative,
 };
 
 use super::{
@@ -30,6 +30,7 @@ mod table;
 
 pub(crate) use point::{OnPoint, Place, Pointed, point_lines};
 pub use select::RightPress;
+pub use select::TextGather;
 use select::{Gather, OnMenu, Selection};
 use style::highlight;
 pub(crate) use table::{CellAt, OpenCell};
@@ -41,6 +42,7 @@ pub(crate) type OnLink = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 /// Reveals the heading whose source starts at a byte.
 pub(crate) type OnHeading = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 type DrawCode = Rc<dyn Fn(ElementId, Option<SharedString>, SharedString) -> AnyElement>;
+type TableFrame = Rc<dyn Fn(ElementId, AnyElement) -> AnyElement>;
 
 /// Markdown drawn as a document; links go to the host.
 ///
@@ -62,6 +64,37 @@ pub struct MarkdownRenderer {
     blocks: Option<Rc<[Node]>>,
     pictures: Option<Rc<Pictures>>,
     on_menu: Option<OnMenu>,
+    /// The owner's gather; it replaces Ely's selection.
+    host: Option<Rc<dyn TextGather>>,
+    web: bool,
+    diagrams: bool,
+    frame: Option<TableFrame>,
+    cull: Option<Rc<dyn BlockCull>>,
+}
+
+/// What one top-level block took of a drawing's running counts: element keys, headings, tables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockUse {
+    /// Element keys.
+    pub keys: usize,
+    /// Headings.
+    pub headings: usize,
+    /// Tables.
+    pub tables: usize,
+}
+
+/// Lets an owner stand in for top-level blocks it knows are out of sight.
+///
+/// With a cull, every drawn top-level block sits in a flex column of its own, so its wrapper's
+/// bounds hold its margins; a stand-in takes its place in the body's column.
+pub trait BlockCull {
+    /// Before top-level block `ix`: an element to draw in its place, with what the block took
+    /// when it was last drawn, or `None` to draw it.
+    fn skip(&self, ix: usize, block: &Node) -> Option<(AnyElement, BlockUse)>;
+    /// Top-level block `ix` was drawn and took `used`.
+    fn drawn(&self, ix: usize, used: BlockUse);
+    /// Where each top-level block (or its stand-in) sat this frame, in window pixels.
+    fn placed(&self, bounds: Vec<Bounds<Pixels>>);
 }
 
 impl MarkdownRenderer {
@@ -78,7 +111,18 @@ impl MarkdownRenderer {
             blocks: None,
             pictures: None,
             on_menu: None,
+            host: None,
+            web: false,
+            diagrams: true,
+            frame: None,
+            cull: None,
         }
+    }
+
+    /// Lets `cull` stand in for top-level blocks it knows are out of sight.
+    pub fn cull(mut self, cull: Rc<dyn BlockCull>) -> Self {
+        self.cull = Some(cull);
+        self
     }
 
     /// Blocks made elsewhere, such as a mail's HTML.
@@ -136,6 +180,35 @@ impl MarkdownRenderer {
         on_menu: impl Fn(RightPress, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_menu = Some(Rc::new(on_menu));
+        self
+    }
+
+    /// Hands every drawn text to the owner, who selects and copies it; the body then takes no focus
+    /// or presses of its own, and `selectable` does nothing.
+    pub fn gather(mut self, gather: Rc<dyn TextGather>) -> Self {
+        self.host = Some(gather);
+        self
+    }
+
+    /// Loads `http(s)` and `//` pictures from the web; off, they are noted, not loaded.
+    pub fn web_pictures(mut self, on: bool) -> Self {
+        self.web = on;
+        self
+    }
+
+    /// Draws `mermaid` fences as diagrams; off, they go to `code` or draw as code.
+    pub fn diagrams(mut self, on: bool) -> Self {
+        self.diagrams = on;
+        self
+    }
+
+    /// Lays each table at its natural width, columns aligned, and hands it to `frame` with an id;
+    /// `frame` places it in a flex row, such as a scroll area.
+    pub fn table_frame(
+        mut self,
+        frame: impl Fn(ElementId, AnyElement) -> AnyElement + 'static,
+    ) -> Self {
+        self.frame = Some(Rc::new(frame));
         self
     }
 
@@ -223,6 +296,14 @@ struct Draw<'a> {
     lists: std::cell::Cell<usize>,
     /// The selection drawing reads and feeds.
     select: Option<&'a Gather>,
+    /// The owner's gather, in place of the selection.
+    host: Option<&'a dyn TextGather>,
+    /// Loads web pictures.
+    web: bool,
+    /// Draws mermaid fences as diagrams.
+    diagrams: bool,
+    /// Places each table.
+    frame: &'a Option<TableFrame>,
     /// Drawing a table's cells.
     table: std::cell::Cell<bool>,
     /// Tables drawn so far.
@@ -230,6 +311,11 @@ struct Draw<'a> {
 }
 
 impl Draw<'_> {
+    /// Who is told of the texts drawn: the owner, else the selection.
+    fn gather(&self) -> Option<&dyn TextGather> {
+        self.host.or(self.select.map(|select| select as &dyn TextGather))
+    }
+
     fn key(&self, what: &str) -> ElementId {
         let at = self.next.get();
         self.next.set(at + 1);
@@ -240,10 +326,10 @@ impl Draw<'_> {
         let links = (!inline.links.is_empty()).then(|| self.key("links"));
         if !inline.styles.iter().any(|(_, style)| *style == Style::Math) {
             let over = self
-                .select
+                .gather()
                 .map_or_else(Vec::new, |select| select.over(&inline.text, cx));
             let (drawn, layout) = drawn_text(inline, (&[], over), links, self.hooks.on_link, cx);
-            if let Some(select) = self.select {
+            if let Some(select) = self.gather() {
                 select.push(&inline.text, layout.clone(), &inline.links);
             }
             let at = move |position| {
@@ -318,7 +404,7 @@ impl Draw<'_> {
                 text,
                 from,
             } => {
-                if language.as_deref() == Some("mermaid") {
+                if self.diagrams && language.as_deref() == Some("mermaid") {
                     let diagram = Diagram::new(self.key("diagram"), text.clone());
                     return self.point_code(diagram.into_any_element(), None, text, *from);
                 }
@@ -336,12 +422,12 @@ impl Draw<'_> {
                     None => code_colors(text, cx),
                 };
                 let over = self
-                    .select
+                    .gather()
                     .map_or_else(Vec::new, |select| select.over(text, cx));
                 let styles = crate::editor::stack(styles.into_iter().chain(over).collect());
                 let code = StyledText::new(text.clone()).with_highlights(styles);
                 let layout = code.layout().clone();
-                if let Some(select) = self.select {
+                if let Some(select) = self.gather() {
                     select.push(text, layout.clone(), &[]);
                 }
                 let block = div()
@@ -381,7 +467,13 @@ impl Draw<'_> {
                     Err(error) => failed(&error, tex, cx),
                 })
                 .into_any_element(),
-            Node::Image { alt, url, link, at } => {
+            Node::Image {
+                alt,
+                url,
+                link,
+                at,
+                width,
+            } => {
                 let mut picture = div().id(self.key("image")).child(Picture {
                     id: self.key("picture"),
                     alt: alt.clone(),
@@ -392,6 +484,8 @@ impl Draw<'_> {
                         .pictures
                         .as_ref()
                         .and_then(|held| held.get(url).cloned()),
+                    width: *width,
+                    web: self.web,
                 });
                 if let Some(select) = self.select {
                     let (state, on_menu) = (select.state.clone(), select.on_menu.clone());
@@ -413,10 +507,12 @@ impl Draw<'_> {
                     None => picture.into_any_element(),
                     Some(address) => {
                         let on_link = self.hooks.on_link.clone();
+                        let host = self.host.is_some();
                         picture
                             .role(Role::Link)
                             .aria_label(alt.clone())
-                            .tab_index(0)
+                            // A host's body is no tab stop: a press moves no focus.
+                            .when(!host, |picture| picture.tab_index(0))
                             .focus_ring(cx)
                             .cursor_pointer()
                             .on_click(move |_, window, cx| {
@@ -478,6 +574,10 @@ pub(crate) fn draw_nodes(
         scale,
         lists: std::cell::Cell::new(0),
         select: None,
+        host: None,
+        web: false,
+        diagrams: true,
+        frame: &None,
         table: std::cell::Cell::new(false),
         tables: std::cell::Cell::new(0),
     };
@@ -486,7 +586,7 @@ pub(crate) fn draw_nodes(
 
 impl RenderOnce for MarkdownRenderer {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let gather = self.on_menu.clone().map(|on_menu| {
+        let gather = (self.host.is_none()).then(|| self.on_menu.clone()).flatten().map(|on_menu| {
             let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| Selection::new(cx));
             Gather::new(state, on_menu, cx)
         });
@@ -517,16 +617,47 @@ impl RenderOnce for MarkdownRenderer {
             scale: 1.0,
             lists: std::cell::Cell::new(0),
             select: gather.as_ref(),
+            host: self.host.as_deref(),
+            web: self.web,
+            diagrams: self.diagrams,
+            frame: &self.frame,
             table: std::cell::Cell::new(false),
             tables: std::cell::Cell::new(0),
         };
-        let body = div()
+        let children = match &self.cull {
+            None => draw.nodes(nodes, cx),
+            Some(cull) => (nodes.iter().enumerate())
+                .map(|(ix, node)| {
+                    if let Some((stand_in, used)) = cull.skip(ix, node) {
+                        draw.next.set(draw.next.get() + used.keys);
+                        draw.headings.set(draw.headings.get() + used.headings);
+                        draw.tables.set(draw.tables.get() + used.tables);
+                        return stand_in;
+                    }
+                    let before = (draw.next.get(), draw.headings.get(), draw.tables.get());
+                    let drawn = draw.node(node, cx);
+                    cull.drawn(
+                        ix,
+                        BlockUse {
+                            keys: draw.next.get() - before.0,
+                            headings: draw.headings.get() - before.1,
+                            tables: draw.tables.get() - before.2,
+                        },
+                    );
+                    div().flex().flex_col().child(drawn).into_any_element()
+                })
+                .collect(),
+        };
+        let mut body = div()
             .flex()
             .flex_col()
             .gap_3()
             .text_size(theme.text_size(self.size))
             .line_height(theme.text_size(self.size) * LINE)
-            .children(draw.nodes(nodes, cx));
+            .children(children);
+        if let Some(cull) = self.cull.clone() {
+            body = body.on_children_prepainted(move |bounds, _, _| cull.placed(bounds));
+        }
         match (gather, self.on_menu) {
             (Some(gather), Some(on_menu)) => {
                 let state = gather.finish(cx);

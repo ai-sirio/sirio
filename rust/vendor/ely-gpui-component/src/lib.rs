@@ -14,6 +14,7 @@ pub use ely_core::{
 
 pub use ely_agent as agent;
 pub use ely_chat as chat;
+pub use ely_documents as documents;
 pub use ely_editor as editor;
 
 /// `ely-git`, with the file status its badges take.

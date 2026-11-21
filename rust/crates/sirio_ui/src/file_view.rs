@@ -29,7 +29,7 @@ use gpui::{
 };
 use sirio_diagram::{DiagramError, DiagramKind, Palette};
 use sirio_git::FileDiff;
-use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
+use sirio_markdown::{FileSystemEvent, FileSystemEventMonitor};
 use sirio_project::resolve_file_link;
 use sirio_theme::Theme;
 use std::cell::{Cell, RefCell};
@@ -39,13 +39,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use ely_gpui_component::editor::{CodeEditor, ReadOnlyBanner, SingleCursor};
+use ely_gpui_component::documents::ReadingProgress;
 use ely_gpui_component::forms::TextInput;
+use ely_gpui_component::navigation::{Sections, TableOfContents};
 // `sirio` has no Ely dependency; `open_find` takes these, and the socket verbs build them.
 pub use ely_gpui_component::editor::{FindOptions, LspState};
 pub use status_actions::StatusItem;
 pub use status_row::StatusFacts;
 pub(crate) use code_surface::standalone_highlighter;
-use crate::chat::{Chat, LinkClickOverride};
 use crate::drawer::WorktreeDrawer;
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
@@ -53,6 +54,10 @@ use crate::editor::{
 use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
 use crate::horizontal_scroll::HorizontalBarState;
 use crate::loading;
+use crate::markdown::{
+    BodyActions, Heading, LinkHandler, MarkdownBlocks, MarkdownMenuItem, MenuPress, SelectionHost,
+    ViewFlags, markdown_view,
+};
 use crate::markdown_preview::{
     self, DiagramRequest, DiagramSettings, DiagramState, Diagrams, PlantUmlQueue,
 };
@@ -75,6 +80,10 @@ use sync::minimal_edit;
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
 /// transcript (P32 moved it from an unrecorded 800).
 pub(crate) const MARKDOWN_COLUMN_WIDTH: f32 = 720.0;
+
+/// The outline column's width and padding.
+const OUTLINE_WIDTH: f32 = 220.0;
+const OUTLINE_PADDING: f32 = 12.0;
 
 #[derive(Debug)]
 enum ViewState {
@@ -365,6 +374,17 @@ pub struct FileView {
     /// Bumped whenever the settings change. A render scheduled under older
     /// settings lands stale and is discarded, never stored.
     diagram_generation: u64,
+    /// The Preview's tree, read once per change of what it is made from.
+    preview: Option<PreviewCache>,
+    /// How many times the tree was built, for the tests that count them.
+    #[cfg(test)]
+    preview_builds: usize,
+    /// Where the Preview's headings are: shared by the anchors in the page and the outline.
+    sections: Entity<Sections>,
+    /// Whether the outline column is drawn beside the Preview (the session's choice).
+    outline_open: bool,
+    /// What the last right press on the Preview's body offered, while the menu is open.
+    preview_menu: Option<PreviewMenu>,
     /// `Some` when the file is a saved prompt (`file_view/prompt.rs`): a title
     /// field, Code only, and a save of its own after each pause in typing.
     prompt: Option<prompt::PromptMode>,
@@ -379,6 +399,11 @@ pub struct FileView {
 struct SurfaceScroll {
     preview: ScrollHandle,
     preview_horizontal_bar: HorizontalBarState,
+    /// What the Preview's body drew last frame (its texts and links), kept for the tests
+    /// that need to find a link on screen.
+    layouts: Rc<RefCell<Option<crate::markdown::BodyLayouts>>>,
+    /// Where the outline's rows were laid out last frame (debug readout only).
+    outline: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
 }
 
 impl SurfaceScroll {
@@ -386,15 +411,199 @@ impl SurfaceScroll {
         Self {
             preview: ScrollHandle::new(),
             preview_horizontal_bar: HorizontalBarState::default(),
+            layouts: Rc::default(),
+            outline: Rc::default(),
         }
     }
 }
 
-/// What the Preview draws this frame: the document, and the directory its
-/// diagrams live in. A click on one of those is not a link.
+/// What the Preview's tree was made from, and the tree.
+struct PreviewCache {
+    /// A hash of the file's path and text.
+    source_rev: u64,
+    /// A hash of everything else the tree depends on: the theme's palette, the diagram
+    /// settings, and the diagrams' states.
+    policy_key: u64,
+    blocks: MarkdownBlocks,
+}
+
+/// What a right press on the Preview's body offered, kept while the menu is open.
+#[derive(Clone)]
+struct PreviewMenu {
+    /// Where the press fell: the menu is this press's while it is open here.
+    at: Point<Pixels>,
+    items: Vec<MarkdownMenuItem>,
+    /// The text selected when the press fell: a press elsewhere (a row of the menu) ends the
+    /// selection before the row acts.
+    selected: Option<String>,
+    actions: BodyActions,
+    links: LinkHandler,
+}
+
+impl PreviewMenu {
+    /// Does what the row says to the body the menu was opened on.
+    fn perform(&self, item: &MarkdownMenuItem, window: &mut Window, cx: &mut App) {
+        match item {
+            // The selection was read at the press: the row's own click ends it first.
+            MarkdownMenuItem::Copy { enabled } => {
+                if let (true, Some(text)) = (*enabled, &self.selected) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                }
+            }
+            other => crate::markdown::perform(other, &self.actions, &self.links, window, cx),
+        }
+    }
+}
+
+/// What the Preview holds, as the debug state reports it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewState {
+    pub math: usize,
+    pub alerts: usize,
+    pub footnotes: usize,
+    pub images: usize,
+    pub tables: usize,
+    pub code: usize,
+    /// Tables of contents drawn as links.
+    pub toc: usize,
+    pub headings: usize,
+    /// Whether the outline column is drawn.
+    pub outline_open: bool,
+    /// How far down the page has been read, when it scrolls.
+    pub progress: Option<f32>,
+}
+
+/// A box in window pixels: left, top, width, height.
+fn rect(bounds: gpui::Bounds<Pixels>) -> [f32; 4] {
+    [
+        f32::from(bounds.left()),
+        f32::from(bounds.top()),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+    ]
+}
+
+/// A link the Preview drew, where its first line starts (window pixels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewLink {
+    pub label: String,
+    pub url: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// What the Preview laid out last frame, as the debug state reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewDebug {
+    /// How far the page is scrolled down, in pixels, and how far it can be.
+    pub scroll_y: f32,
+    pub max_y: f32,
+    /// The scrolled area's top and height in window pixels.
+    pub view_top: f32,
+    pub view_height: f32,
+    /// Every drawn text, `[left, top, width, height]` and its words.
+    pub texts: Vec<([f32; 4], String)>,
+    pub links: Vec<PreviewLink>,
+    /// The outline's rows as a block, when it is drawn.
+    pub outline: Option<[f32; 4]>,
+    /// The outline toggle in the header.
+    pub outline_toggle: Option<[f32; 4]>,
+    /// Diagrams ready, failed and pending, and the files the ready ones were rendered to.
+    pub diagrams: (usize, usize, usize),
+    pub diagram_paths: Vec<PathBuf>,
+}
+
+/// What the Preview draws this frame: the tree, the directory its diagrams live in (a
+/// click on one is not a link), and where its headings are.
 struct PreviewFrame {
-    doc: bezel_markdown::Doc,
+    blocks: MarkdownBlocks,
     diagram_dir: Option<PathBuf>,
+    sections: Entity<Sections>,
+    outline_open: bool,
+}
+
+/// What a click on a link in the Preview does.
+#[derive(Debug, PartialEq, Eq)]
+enum LinkAction {
+    /// Scrolls the heading with this ordinal to the top.
+    Reveal(usize),
+    OpenFile(PathBuf),
+    OpenUrl,
+    Nothing,
+}
+
+/// The scheme of `target`, when it names one. `main.rs:12` is a path and a line, not a
+/// scheme; `C:` is a drive.
+fn link_scheme(target: &str) -> Option<&str> {
+    let (scheme, rest) = target.split_once(':')?;
+    let valid = scheme.len() >= 2
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    let location = !rest.is_empty()
+        && rest.split(':').count() <= 2
+        && rest.split(':').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    (valid && !location).then_some(scheme)
+}
+
+/// What the Preview does with a clicked `target`, in order: an anchor jumps; a diagram's
+/// picture is not a link; a web or mail address goes to the system; a path or `file:` link
+/// opens in a tab; anything else (another scheme, a path out of the folder) does nothing.
+fn link_action(
+    target: &str,
+    base: &Path,
+    diagram_dir: Option<&Path>,
+    headings: &[Heading],
+) -> LinkAction {
+    let target = target.trim();
+    if let Some(fragment) = target.strip_prefix('#') {
+        let wanted = markdown_preview::percent_decode(fragment).to_lowercase();
+        return headings
+            .iter()
+            .find(|heading| *heading.slug == *wanted)
+            .map_or(LinkAction::Nothing, |heading| LinkAction::Reveal(heading.ordinal));
+    }
+    if markdown_preview::is_diagram_target(target, diagram_dir) {
+        return LinkAction::Nothing;
+    }
+    let opens_file = || {
+        resolve_file_link(target, base).map_or(LinkAction::Nothing, |resolved| {
+            LinkAction::OpenFile(resolved.path)
+        })
+    };
+    match link_scheme(target).map(str::to_ascii_lowercase).as_deref() {
+        Some("http" | "https" | "mailto") => LinkAction::OpenUrl,
+        Some("file") | None => opens_file(),
+        Some(_) => LinkAction::Nothing,
+    }
+}
+
+/// The Preview's one opener: the click on a link, and the menu's Open link.
+fn preview_links(
+    entity: Entity<FileView>,
+    base: PathBuf,
+    diagram_dir: Option<PathBuf>,
+    headings: Rc<[Heading]>,
+    sections: Entity<Sections>,
+) -> LinkHandler {
+    Rc::new(move |target, window, cx| {
+        match link_action(target, &base, diagram_dir.as_deref(), &headings) {
+            LinkAction::Reveal(ordinal) => {
+                let anchor = SharedString::from(format!("heading-{ordinal}"));
+                if sections.read(cx).reveal(&anchor) {
+                    window.refresh();
+                }
+            }
+            LinkAction::OpenFile(path) => {
+                entity.update(cx, |_, cx| cx.emit(FileViewEvent::OpenFile(path)));
+            }
+            LinkAction::OpenUrl => cx.open_url(target.trim()),
+            LinkAction::Nothing => {}
+        }
+    })
 }
 
 /// Emitted so the shell can act on a gesture that started inside this tab
@@ -632,6 +841,8 @@ impl FileView {
     /// did yet. `new` adds the disk read and the monitor; a snapshot adds
     /// neither.
     fn blank(path: PathBuf, state: ViewState, cx: &mut Context<Self>) -> Self {
+        let scroll = SurfaceScroll::new();
+        let sections = cx.new(|_| Sections::new(scroll.preview.clone()));
         Self {
             path,
             state,
@@ -650,7 +861,7 @@ impl FileView {
             highlight_drawn: Rc::default(),
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
-            scroll: SurfaceScroll::new(),
+            scroll,
             context_menu: None,
             definition_gesture: None,
             shell_facts: FileContextFacts::default(),
@@ -687,6 +898,12 @@ impl FileView {
             diagrams: Diagrams::default(),
             diagram_settings: None,
             diagram_generation: 0,
+            preview: None,
+            #[cfg(test)]
+            preview_builds: 0,
+            sections,
+            outline_open: false,
+            preview_menu: None,
             prompt: None,
         }
     }
@@ -1164,11 +1381,16 @@ impl FileView {
     ) {
         self.dismiss_hover(cx);
         self.focus_target(cx).focus(window, cx);
+        // Rows of an earlier press are not this one's.
+        if self.preview_menu.as_ref().is_some_and(|menu| menu.at != at) {
+            self.preview_menu = None;
+        }
         self.context_menu = Some(at);
         cx.notify();
     }
 
     fn dismiss_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.preview_menu = None;
         if self.context_menu.take().is_some() {
             cx.notify();
         }
@@ -1554,15 +1776,20 @@ impl FileView {
         }
     }
 
-    /// The Preview's document for this frame, scheduling every diagram it
-    /// names that has no state yet. `None` outside Markdown Preview.
-    pub(crate) fn preview_document(&mut self, cx: &mut Context<Self>) -> Option<bezel_markdown::Doc> {
+    /// The Preview's tree for this frame: read again only when the file's text, the theme's
+    /// palette, the diagram settings or a diagram's state changed. Every diagram the tree
+    /// names that nobody has scheduled yet is scheduled after a read. `None` outside
+    /// Markdown Preview.
+    pub(crate) fn preview_blocks(&mut self, cx: &mut Context<Self>) -> Option<MarkdownBlocks> {
+        use std::hash::{Hash, Hasher};
+
         if self.effective_mode() != MarkdownMode::Preview {
             return None;
         }
-        let editor = self.editor()?;
-        let path = editor.path().to_path_buf();
-        let document = markdown_document(&path, editor.buffer())?;
+        let path = self.editor()?.path().to_path_buf();
+        if Language::from_path(&path) != Language::Markdown {
+            return None;
+        }
         let settings = DiagramSettings::get(cx).cloned();
         if settings != self.diagram_settings {
             self.diagrams.forget_failures();
@@ -1570,17 +1797,190 @@ impl FileView {
             self.diagram_generation += 1;
         }
         let palette = markdown_preview::palette(Theme::get(cx));
+        let editor = self.editor()?;
+        let source_rev = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut hasher);
+            editor.buffer().hash(&mut hasher);
+            hasher.finish()
+        };
+        let policy_key = |diagrams: &Diagrams| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!("{palette:?}").hash(&mut hasher);
+            (settings.as_ref())
+                .map(|settings| (&settings.cache_dir, &settings.plantuml_server))
+                .hash(&mut hasher);
+            diagrams.version().hash(&mut hasher);
+            hasher.finish()
+        };
+        let key = policy_key(&self.diagrams);
+        if let Some(cache) = &self.preview
+            && cache.source_rev == source_rev
+            && cache.policy_key == key
+        {
+            return Some(cache.blocks.clone());
+        }
         let base = path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/"));
-        let preview = markdown_preview::build(document, &base, &self.diagrams, &palette);
-        if let Some(settings) = settings {
-            for request in preview.missing {
-                self.render_diagram(request, &settings, &palette, &path, cx);
+        let blocks = markdown_preview::preview_blocks(
+            editor.buffer(),
+            &base,
+            &self.diagrams,
+            &palette,
+            settings.as_ref().map(|settings| settings.cache_dir.as_path()),
+        );
+        #[cfg(test)]
+        {
+            self.preview_builds += 1;
+        }
+        if let Some(settings) = &settings {
+            for request in blocks.missing_diagrams.clone() {
+                self.render_diagram(request, settings, &palette, &path, cx);
             }
         }
-        Some(preview.doc)
+        // A fence waiting its render is drawn as the fence either way, so scheduling it
+        // (which moves the diagrams' version) does not make the tree stale.
+        self.preview = Some(PreviewCache {
+            source_rev,
+            policy_key: policy_key(&self.diagrams),
+            blocks: blocks.clone(),
+        });
+        Some(blocks)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preview_builds(&self) -> usize {
+        self.preview_builds
+    }
+
+    /// Whether the outline column is asked for. It is drawn only while the document has
+    /// headings (`outline_available`).
+    pub fn outline_open(&self) -> bool {
+        self.outline_open
+    }
+
+    /// The headings the Preview has, as the outline lists them.
+    fn preview_headings(&self) -> &[Heading] {
+        self.preview
+            .as_ref()
+            .map_or(&[], |preview| &preview.blocks.headings)
+    }
+
+    fn toggle_outline(&mut self, cx: &mut Context<Self>) {
+        if self.preview_headings().is_empty() {
+            return;
+        }
+        self.outline_open = !self.outline_open;
+        cx.notify();
+    }
+
+    /// How far down the Preview has been read, from 0 to 1; `None` while the whole page
+    /// fits and there is nothing to read down.
+    pub fn reading_progress(&self) -> Option<f32> {
+        let handle = &self.scroll.preview;
+        let room = f32::from(handle.max_offset().y);
+        (room > 0.0).then(|| (-f32::from(handle.offset().y) / room).clamp(0.0, 1.0))
+    }
+
+    /// The links the Preview drew last frame and the boxes they occupy.
+    #[cfg(test)]
+    pub(crate) fn preview_links(&self) -> Vec<(gpui::Bounds<Pixels>, String)> {
+        (self.scroll.layouts.borrow().as_ref())
+            .map(crate::markdown::BodyLayouts::link_rects)
+            .unwrap_or_default()
+    }
+
+    /// What the right press on the Preview's body offers: the menu opens at the press with
+    /// the Markdown rows above the file's. The window's right-press handler opens the same
+    /// menu at the same point; whichever hears the press first, the rows are this press's.
+    fn preview_pressed(
+        &mut self,
+        press: MenuPress,
+        links: LinkHandler,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.preview_menu = Some(PreviewMenu {
+            at: press.position,
+            items: press.items(),
+            selected: press.selected,
+            actions: press.actions,
+            links,
+        });
+        self.open_context_menu(press.position, window, cx);
+    }
+
+    /// The menu's rows: the Preview body's when the press fell on it, a separator, and the
+    /// file's own, unchanged.
+    pub(crate) fn context_menu_rows(&self, cx: &App) -> Vec<file_context_menu::MenuRow> {
+        let markdown = (self.effective_mode() == MarkdownMode::Preview)
+            .then_some(self.preview_menu.as_ref())
+            .flatten()
+            .map_or(&[][..], |menu| menu.items.as_slice());
+        file_context_menu::merged(markdown, self.context_menu_items(cx))
+    }
+
+    /// Closes the menu and hands back what a Markdown row acts on. The row acts outside
+    /// this view's update: Open link goes through the opener, which updates this view.
+    fn take_preview_menu(&mut self, cx: &mut Context<Self>) -> Option<PreviewMenu> {
+        let menu = self.preview_menu.clone();
+        self.dismiss_context_menu(cx);
+        menu
+    }
+
+    /// What the Preview shows of itself, for the debug state: how many of each kind of node
+    /// the tree holds, and the outline's and the progress bar's state.
+    pub fn preview_state(&self) -> Option<PreviewState> {
+        let preview = self.preview.as_ref()?;
+        let kinds = preview.blocks.kinds;
+        Some(PreviewState {
+            math: kinds.math,
+            alerts: kinds.alerts,
+            footnotes: kinds.footnotes,
+            images: kinds.images,
+            tables: kinds.tables,
+            code: kinds.code,
+            toc: kinds.toc,
+            headings: preview.blocks.headings.len(),
+            outline_open: self.outline_open && !preview.blocks.headings.is_empty(),
+            progress: self.reading_progress(),
+        })
+    }
+
+    /// What the Preview laid out last frame, for the debug readout a driver aims real input
+    /// with: the page's scroll, every drawn text and link with its window pixels, where the
+    /// outline's rows sit, and where the diagrams were rendered.
+    pub fn preview_debug(&self) -> Option<PreviewDebug> {
+        let layouts = self.scroll.layouts.borrow();
+        let layouts = layouts.as_ref()?;
+        self.preview.as_ref()?;
+        let handle = &self.scroll.preview;
+        let (ready, failed, pending, paths) = self.diagrams.summary();
+        Some(PreviewDebug {
+            scroll_y: -f32::from(handle.offset().y),
+            max_y: f32::from(handle.max_offset().y),
+            view_top: f32::from(handle.bounds().top()),
+            view_height: f32::from(handle.bounds().size.height),
+            texts: (layouts.text_rows().into_iter())
+                .map(|(bounds, text)| (rect(bounds), text))
+                .collect(),
+            links: (layouts.links().into_iter())
+                .map(|link| PreviewLink {
+                    label: link.label,
+                    url: link.url,
+                    x: f32::from(link.start.x),
+                    y: f32::from(link.start.y),
+                    width: f32::from(link.width),
+                    height: f32::from(link.line_height),
+                })
+                .collect(),
+            outline: self.scroll.outline.get().map(rect),
+            outline_toggle: toggle_bounds().map(rect),
+            diagrams: (ready, failed, pending),
+            diagram_paths: paths,
+        })
     }
 
     /// Renders one diagram off the UI thread: the disk cache first, then the
@@ -1751,6 +2151,11 @@ impl FileView {
                     let mode = self.effective_mode();
                     let offers_preview = self.offers_preview();
                     let formatting_shown = self.formatting_controls_shown();
+                    // The outline's toggle is offered in Preview: open or not, and whether
+                    // there is anything to list.
+                    let outline = preview.as_ref().map(|frame| {
+                        (frame.outline_open, !frame.blocks.headings.is_empty())
+                    });
                     let editor_entity = entity.clone();
                     let editor_focus = self.editor_focus.clone();
                     // The press bubbles up from the code editor after it has
@@ -1806,6 +2211,7 @@ impl FileView {
                             this.child(render_markdown_bar(
                                 mode,
                                 formatting_shown,
+                                outline,
                                 theme,
                                 entity.clone(),
                             ))
@@ -1893,9 +2299,13 @@ impl Render for FileView {
             theme.install_into_bezel(cx);
         }
         let entity = cx.entity();
-        let preview = self.preview_document(cx).map(|doc| PreviewFrame {
-            doc,
+        let sections = self.sections.clone();
+        let outline_open = self.outline_open;
+        let preview = self.preview_blocks(cx).map(|blocks| PreviewFrame {
+            blocks,
             diagram_dir: DiagramSettings::get(cx).map(|settings| settings.cache_dir.clone()),
+            sections,
+            outline_open,
         });
         // The code editor is made the first frame the file is loaded, then
         // kept to the app's editor settings and handed the keyboard whenever
@@ -1942,9 +2352,55 @@ impl Render for FileView {
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
-            let items = self.context_menu_items(cx);
+            let rows = self.context_menu_rows(cx);
             let mut previous_group = None;
-            for (index, item) in items.iter().enumerate() {
+            let mut markdown_index = 0;
+            let mut index = 0;
+            for row in rows {
+                let item = match row {
+                    file_context_menu::MenuRow::Markdown(item) => {
+                        let selector = format!("file-markdown-menu-item-{markdown_index}");
+                        markdown_index += 1;
+                        let debug_selector = selector.clone();
+                        let enabled = item.enabled();
+                        let item_entity = entity.clone();
+                        let label = item.label();
+                        menu = menu.child(
+                            div()
+                                .id(selector)
+                                .debug_selector(move || debug_selector.clone())
+                                .w_full()
+                                .min_h(px(29.0))
+                                .px(px(10.0))
+                                .py(px(5.0))
+                                .rounded(theme.radii.control)
+                                .flex()
+                                .items_center()
+                                .text_size(theme.typography.footnote)
+                                .when(!enabled, |this| {
+                                    this.text_color(theme.ely.fg_subtle).cursor_not_allowed()
+                                })
+                                .when(enabled, |this| {
+                                    this.text_color(theme.ely.fg)
+                                        .hover(|style| style.bg(theme.ely.hover))
+                                        .on_click(move |_, window, cx| {
+                                            let menu = item_entity
+                                                .update(cx, |view, cx| view.take_preview_menu(cx));
+                                            if let Some(menu) = menu {
+                                                menu.perform(&item, window, cx);
+                                            }
+                                        })
+                                })
+                                .child(label),
+                        );
+                        continue;
+                    }
+                    file_context_menu::MenuRow::Separator => {
+                        menu = menu.child(div().w_full().h(px(1.0)).my(px(4.0)).bg(theme.ely.border));
+                        continue;
+                    }
+                    file_context_menu::MenuRow::File(item) => item,
+                };
                 if previous_group.is_some_and(|group| group != item.group) {
                     menu = menu.child(div().w_full().h(px(1.0)).my(px(4.0)).bg(theme.ely.border));
                 }
@@ -1952,6 +2408,7 @@ impl Render for FileView {
 
                 let item_entity = entity.clone();
                 let selector = format!("file-context-item-{index}");
+                index += 1;
                 let debug_selector = selector.clone();
                 let state = item.state.clone();
                 let is_disabled = matches!(state, ItemState::Unavailable(_));
@@ -2330,6 +2787,7 @@ fn formatting_controls_drawn(mode: MarkdownMode, editable: bool) -> bool {
 fn render_markdown_bar(
     mode: MarkdownMode,
     formatting_shown: bool,
+    outline: Option<(bool, bool)>,
     theme: Theme,
     file_view: gpui::Entity<FileView>,
 ) -> impl IntoElement {
@@ -2389,7 +2847,54 @@ fn render_markdown_bar(
         // than beside the last formatting control — and it is why the row
         // reads the same in Preview, where there is nothing to its left.
         .child(div().flex_1())
+        .when_some(outline, |this, (open, available)| {
+            this.child(render_outline_toggle(open, available, theme, file_view.clone()))
+        })
         .child(render_mode_switch(mode, theme, file_view))
+}
+
+/// The Preview's outline toggle, beside the Code/Preview pair. With no headings there is
+/// nothing to list: it is drawn dimmed and does nothing.
+fn render_outline_toggle(
+    open: bool,
+    available: bool,
+    theme: Theme,
+    entity: gpui::Entity<FileView>,
+) -> impl IntoElement {
+    let shown = open && available;
+    div()
+        .id("file-preview-outline")
+        .debug_selector(|| "file-preview-outline".into())
+        .relative()
+        .px(px(6.0))
+        .py(px(3.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme.radii.chip)
+        .text_color(if shown {
+            theme.ely.fg
+        } else if available {
+            theme.ely.fg_subtle
+        } else {
+            theme.ely.fg_subtle.opacity(0.5)
+        })
+        .when(shown, |this| this.bg(theme.ely.active))
+        .when(!available, |this| this.cursor_not_allowed())
+        .when(available, |this| {
+            this.hover(|style| style.bg(theme.ely.hover))
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |view, cx| view.toggle_outline(cx));
+                })
+        })
+        .tooltip(crate::controls::tooltip(if available {
+            "Outline"
+        } else {
+            "Outline (no headings)"
+        }))
+        .child(IconElement::new(Icon::TextSnippet, IconSize::Small))
+        .child(toggle_marker())
 }
 
 fn render_format_button(
@@ -2417,6 +2922,89 @@ fn render_format_button(
         .child(label)
 }
 
+/// The thin bar along the top of the Preview that fills as the page is read, drawn only
+/// while the page scrolls. While it fits, a canvas asks for a frame when it stops fitting,
+/// as the scroll bars do: the handle learns its overflow one layout late.
+fn reading_progress_bar(scroll: &ScrollHandle) -> AnyElement {
+    if scroll.max_offset().y > px(0.0) {
+        return div()
+            .debug_selector(|| "file-preview-progress".into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .child(ReadingProgress::new(scroll))
+            .into_any_element();
+    }
+    let watched = scroll.clone();
+    canvas(
+        move |_, window, _| {
+            if watched.max_offset().y > px(0.0) {
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
+}
+
+/// The Preview's `sections`, which the heading anchors register in and the links and the
+/// outline reveal through. A debug build started with `SIRIO_DEBUG_MARKDOWN_NO_SECTIONS` draws
+/// the Preview without them, so an E2E can prove its anchor checks fail when jumps do not
+/// work (`Scripts/Tests/test-markdown-documents-e2e.sh --mutate no-sections`). A release build
+/// has no such knob.
+fn debug_sections(sections: &Entity<Sections>) -> Option<Entity<Sections>> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SIRIO_DEBUG_MARKDOWN_NO_SECTIONS").is_some() {
+        return None;
+    }
+    Some(sections.clone())
+}
+
+// The debug readout's bounds recorders exist in debug builds only: a release build draws no
+// canvas for them.
+#[cfg(debug_assertions)]
+thread_local! {
+    /// Where the outline toggle was laid out last frame, for the debug readout only. The
+    /// toggle belongs to the file view drawn last, which is the one a driver means.
+    static OUTLINE_TOGGLE: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>> = Rc::default();
+}
+
+#[cfg(debug_assertions)]
+fn toggle_marker() -> AnyElement {
+    OUTLINE_TOGGLE.with(|cell| record_bounds(cell.clone()))
+}
+
+#[cfg(not(debug_assertions))]
+fn toggle_marker() -> AnyElement {
+    gpui::Empty.into_any_element()
+}
+
+fn toggle_bounds() -> Option<gpui::Bounds<Pixels>> {
+    #[cfg(debug_assertions)]
+    return OUTLINE_TOGGLE.with(|cell| cell.get());
+    #[cfg(not(debug_assertions))]
+    None
+}
+
+/// A canvas over its parent that writes the parent's bounds to `into` on every frame: the
+/// debug readout's way to learn where something Ely draws sits.
+#[cfg(debug_assertions)]
+fn record_bounds(into: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>) -> AnyElement {
+    canvas(move |bounds, _, _| into.set(Some(bounds)), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+}
+
+#[cfg(not(debug_assertions))]
+fn record_bounds(_: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>) -> AnyElement {
+    gpui::Empty.into_any_element()
+}
 /// `offers_preview` is `FileView::offers_preview`: a large Markdown file in Code
 /// offers its preview only when the file has one to offer.
 fn render_content(
@@ -2430,38 +3018,93 @@ fn render_content(
     scroll: &SurfaceScroll,
     preview: Option<PreviewFrame>,
 ) -> AnyElement {
+    // The debug readout's recorded boxes belong to a Preview that is drawn: leaving it clears them.
+    #[cfg(debug_assertions)]
+    if preview.is_none() {
+        scroll.outline.set(None);
+        OUTLINE_TOGGLE.with(|cell| cell.set(None));
+    }
     // Preview renders the parsed document; a locked preview (large file,
     // F-EDIT-03) or Code mode renders the source. The two modes are
     // behaviour — each shows the *right* content — while the rendering
     // inside them is appearance.
-    if let Some(PreviewFrame { doc, diagram_dir }) = preview {
-        // F-CORE-FILE-04: Preview is the file view's *default* mode, so its
-        // rendered links must resolve against the open file's directory the
-        // same way the Code-mode + platform-click path does — not fall
-        // through to Chat::render_markdown_document's plain cx.open_url,
-        // which never routes back to FileViewEvent::OpenFile at all.
+    if let Some(PreviewFrame {
+        blocks,
+        diagram_dir,
+        sections,
+        outline_open,
+    }) = preview
+    {
+        // F-CORE-FILE-04: Preview is the file view's *default* mode, so its rendered links
+        // resolve against the open file's directory (Markdown's own convention) and open in a
+        // tab through `FileViewEvent::OpenFile`; the rest of the opener is `link_action`.
         let base = editor
             .path()
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/"));
-        let link_entity = entity.clone();
-        let link_click: LinkClickOverride =
-            Rc::new(
-                move |target, _window, cx| {
-                    if markdown_preview::is_diagram_target(target, diagram_dir.as_deref()) {
-                        return;
-                    }
-                    match resolve_file_link(target, &base) {
-                        Some(resolved) => {
-                            link_entity.update(cx, |_, cx| {
-                                cx.emit(FileViewEvent::OpenFile(resolved.path));
-                            });
-                        }
-                        None => cx.open_url(target),
-                    }
+        let links = preview_links(
+            entity.clone(),
+            base,
+            diagram_dir,
+            blocks.headings.clone(),
+            sections.clone(),
+        );
+        let press_entity = entity.clone();
+        let press_links = links.clone();
+        let body = markdown_view(
+            &blocks,
+            SelectionHost::Run {
+                id: "file-preview-body".into(),
+            },
+            links,
+            ViewFlags {
+                web_pictures: true,
+                sections: debug_sections(&sections),
+                cull: false,
+            },
+        )
+        .on_menu(Rc::new(move |press, window, cx| {
+            let links = press_links.clone();
+            press_entity.update(cx, |view, cx| view.preview_pressed(press, links, window, cx));
+        }));
+        *scroll.layouts.borrow_mut() = Some(body.layouts());
+        #[cfg(debug_assertions)]
+        if !(outline_open && !blocks.headings.is_empty()) {
+            scroll.outline.set(None);
+        }
+        // The outline lists what the page has: with no headings there is nothing to list (the
+        // table of contents refuses an empty list), whatever was asked.
+        let outline = (outline_open && !blocks.headings.is_empty()).then(|| {
+            let toc = (blocks.headings.iter()).fold(
+                TableOfContents::new("file-preview-outline-toc", &sections),
+                |toc, heading| {
+                    toc.entry(
+                        format!("heading-{}", heading.ordinal),
+                        heading.title.clone(),
+                        heading.depth.saturating_sub(1),
+                    )
                 },
             );
+            div()
+                .id("file-preview-outline-panel")
+                .debug_selector(|| "file-preview-outline-panel".into())
+                .flex_none()
+                .w(px(OUTLINE_WIDTH))
+                .h_full()
+                .overflow_y_scroll()
+                .p(px(OUTLINE_PADDING))
+                .border_l_1()
+                .border_color(theme.ely.border)
+                .bg(theme.ely.surface)
+                .child(
+                    div()
+                        .debug_selector(|| "file-preview-outline-toc".into())
+                        .relative()
+                        .child(toc)
+                        .child(record_bounds(scroll.outline.clone())),
+                )
+        });
         // The column is a fixed width, not a cap: a pane narrower than it
         // scrolls the page sideways rather than rewrapping the prose into a
         // strip, the way Code mode never wraps a source line.
@@ -2469,39 +3112,46 @@ fn render_content(
         // The surface takes what the Markdown bar above it leaves, as the
         // code editor's `flex_1().min_h(0)` container does: at `size_full` it was
         // the whole pane tall, so the bar's height of document — and both
-        // scrollbars' bottom edge — hung below the pane, out of reach.
+        // scrollbars' bottom edge — hung below the pane, out of reach. The outline, when
+        // asked for, is a column beside the page, never over it.
         return div()
             .w_full()
             .flex_1()
             .min_h(px(0.0))
-            .relative()
+            .flex()
+            .flex_row()
             .child(
                 div()
-                    .id("file-markdown-scroll")
-                    .debug_selector(|| "file-markdown-scroll".into())
-                    .size_full()
-                    .overflow_scroll()
-                    .track_scroll(&scroll.preview)
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .relative()
                     .child(
                         div()
-                            .debug_selector(|| "file-markdown-column".into())
-                            .w(px(MARKDOWN_COLUMN_WIDTH))
-                            .mx_auto()
-                            .p(px(24.0))
-                            .child(Chat::render_markdown_document_with_link_override(
-                                doc,
-                                &theme,
-                                link_click,
-                            )),
-                    ),
+                            .id("file-markdown-scroll")
+                            .debug_selector(|| "file-markdown-scroll".into())
+                            .size_full()
+                            .overflow_scroll()
+                            .track_scroll(&scroll.preview)
+                            .child(
+                                div()
+                                    .debug_selector(|| "file-markdown-column".into())
+                                    .w(px(MARKDOWN_COLUMN_WIDTH))
+                                    .mx_auto()
+                                    .p(px(24.0))
+                                    .child(body),
+                            ),
+                    )
+                    .child(crate::scroll::bar("file-markdown-bar", &scroll.preview))
+                    .child(crate::scroll::horizontal_bar(
+                        "file-markdown-horizontal-bar",
+                        &scroll.preview,
+                        &scroll.preview_horizontal_bar,
+                        entity,
+                    ))
+                    .child(reading_progress_bar(&scroll.preview)),
             )
-            .child(crate::scroll::bar("file-markdown-bar", &scroll.preview))
-            .child(crate::scroll::horizontal_bar(
-                "file-markdown-horizontal-bar",
-                &scroll.preview,
-                &scroll.preview_horizontal_bar,
-                entity,
-            ))
+            .when_some(outline, |this, panel| this.child(panel))
             .into_any_element();
     }
 
@@ -2738,17 +3388,6 @@ fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
         .text_color(theme.ely.fg_muted)
         .child(selectable_text(message))
         .into_any_element()
-}
-
-/// Renders `text` as a Markdown document when the path is Markdown, for the
-/// preview half of the surface (F-EDIT-01's Code/Preview split is display-
-/// bound; the parse is not).
-fn markdown_document(path: &Path, text: &str) -> Option<Document> {
-    if Language::from_path(path) == Language::Markdown {
-        Some(parse(text))
-    } else {
-        None
-    }
 }
 
 /// Every styled run one source line hands to the code editor: the grammar's
@@ -5423,9 +6062,10 @@ mod tests {
         );
     }
 
+    use crate::markdown::MarkdownBlocks;
     use crate::markdown_preview::{DiagramSettings, PlantUmlQueue};
     use base64::Engine as _;
-    use bezel_markdown::BlockKind;
+    use ely_gpui_component::documents::MarkdownBlock as Node;
 
     fn diagram_cache(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -5437,20 +6077,20 @@ mod tests {
     }
 
     /// Drives frames and the background executor until no diagram fence is
-    /// left in the Preview, and returns the last document built.
-    fn settle_preview(cx: &mut VisualTestContext, view: &gpui::Entity<FileView>) -> bezel_markdown::Doc {
+    /// left in the Preview, and returns the last tree built.
+    fn settle_preview(cx: &mut VisualTestContext, view: &gpui::Entity<FileView>) -> MarkdownBlocks {
         let mut last = None;
         for _ in 0..200 {
             cx.run_until_parked();
             cx.update(|window, cx| window.simulate_next_frame(cx));
-            let doc = cx
-                .update(|_, cx| view.update(cx, |view, cx| view.preview_document(cx)))
+            let blocks = cx
+                .update(|_, cx| view.update(cx, |view, cx| view.preview_blocks(cx)))
                 .expect("a Markdown file in Preview");
-            let fenced = doc.blocks.iter().any(|block| {
-                matches!(&block.kind, BlockKind::Code { language: Some(language), .. }
+            let fenced = blocks.nodes.iter().any(|node| {
+                matches!(node, Node::Code { language: Some(language), .. }
                     if sirio_diagram::DiagramKind::from_fence(language).is_some())
             });
-            last = Some(doc);
+            last = Some(blocks);
             if !fenced {
                 break;
             }
@@ -5473,18 +6113,18 @@ mod tests {
             "# D\n\n```mermaid\nflowchart TD\n  A --> B\n```\n",
         );
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-        let doc = settle_preview(&mut cx, &view);
-        let image = doc
-            .blocks
+        let blocks = settle_preview(&mut cx, &view);
+        let image = blocks
+            .nodes
             .iter()
-            .find_map(|block| match &block.kind {
-                BlockKind::Image { url, width, .. } => Some((url.clone(), *width)),
+            .find_map(|node| match node {
+                Node::Image { url, width, .. } => Some((url.clone(), *width)),
                 _ => None,
             })
             .expect("the fence became an image");
         assert!(Path::new(&image.0).starts_with(&cache), "drawn from the diagram cache");
         assert!(Path::new(&image.0).exists());
-        assert!(image.1.is_some_and(|width| width > 0));
+        assert!(image.1.is_some_and(|width| width > 0.0));
         let _ = std::fs::remove_dir_all(&cache);
     }
 
@@ -5502,11 +6142,11 @@ mod tests {
         let fence = "```mermaid\nflowchart TD\n  A --> B\n```\n";
         let file = TempFile::with_extension("md", &format!("{fence}\n{fence}"));
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-        let doc = settle_preview(&mut cx, &view);
-        let images = doc
-            .blocks
+        let blocks = settle_preview(&mut cx, &view);
+        let images = blocks
+            .nodes
             .iter()
-            .filter(|block| matches!(block.kind, BlockKind::Image { .. }))
+            .filter(|node| matches!(node, Node::Image { .. }))
             .count();
         assert_eq!(images, 2);
         let files = std::fs::read_dir(&cache)
@@ -5576,10 +6216,11 @@ mod tests {
         let file = TempFile::with_extension("md", "```mermaid\nflowchart TD\n  A --> B\n```\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         cx.run_until_parked();
-        let doc = cx
-            .update(|_, cx| view.update(cx, |view, cx| view.preview_document(cx)))
+        let blocks = cx
+            .update(|_, cx| view.update(cx, |view, cx| view.preview_blocks(cx)))
             .expect("Preview");
-        assert!(matches!(&doc.blocks[0].kind, BlockKind::Code { .. }));
+        assert!(matches!(&blocks.nodes[0], Node::Code { .. }));
+        assert!(blocks.missing_diagrams.is_empty(), "no settings, nothing to ask for");
     }
 
     /// Design §8: a drawn frame with a local image.
@@ -5604,10 +6245,10 @@ mod tests {
         let name = picture.file_name().expect("name").to_string_lossy().into_owned();
         let file = TempFile::with_extension("md", &format!("![Logo]({name})\n"));
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-        let doc = settle_preview(&mut cx, &view);
+        let blocks = settle_preview(&mut cx, &view);
         let is_picture = matches!(
-            &doc.blocks[0].kind,
-            BlockKind::Image { url, .. } if Path::new(url) == picture
+            &blocks.nodes[0],
+            Node::Image { url, .. } if Path::new(url) == picture
         );
         let drawn = cx.debug_bounds("file-markdown-scroll").is_some();
         let _ = std::fs::remove_file(&picture);
@@ -5911,5 +6552,542 @@ mod tests {
             &[FileViewEvent::RetrySnapshot],
             "and a click on it asks for the read again"
         );
+    }
+
+    // ── The Markdown Preview on Ely (design 2026-11-20-ely-markdown-documents) ──────────
+
+    /// Draws `n` frames, letting the background executor and the anchors' measuring settle.
+    fn preview_frames(cx: &mut VisualTestContext, n: usize) {
+        for _ in 0..n {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.simulate_next_frame(cx);
+            });
+        }
+        cx.run_until_parked();
+    }
+
+    fn filler(paragraphs: usize) -> String {
+        (0..paragraphs)
+            .map(|i| format!("Filler line {i} of the section.\n\n"))
+            .collect()
+    }
+
+    const HEADING_SELECTORS: [&str; 4] = [
+        "markdown-heading-0",
+        "markdown-heading-1",
+        "markdown-heading-2",
+        "markdown-heading-3",
+    ];
+
+    /// How far heading `n` sits below the top of the Preview's viewport.
+    fn heading_below_top(cx: &mut VisualTestContext, n: usize) -> Pixels {
+        let heading = cx
+            .debug_bounds(HEADING_SELECTORS[n])
+            .expect("the heading was drawn");
+        let viewport = cx
+            .debug_bounds("file-markdown-scroll")
+            .expect("the Preview was drawn");
+        heading.top() - viewport.top()
+    }
+
+    fn link_center(
+        view: &gpui::Entity<FileView>,
+        cx: &mut VisualTestContext,
+        url: &str,
+    ) -> Point<Pixels> {
+        let links = view.read_with(&cx.cx, |view, _| view.preview_links());
+        links
+            .iter()
+            .find(|(_, target)| target == url)
+            .map(|(bounds, _)| bounds.center())
+            .unwrap_or_else(|| panic!("no link to {url} is drawn: {links:?}"))
+    }
+
+    /// Mounts a file view under the shell-shaped root, as the selection tests need.
+    fn hosted_file_view(
+        cx: &mut gpui::TestAppContext,
+        path: PathBuf,
+    ) -> (gpui::Entity<FileView>, &mut VisualTestContext) {
+        cx.update(crate::ely::init);
+        let (view, _, cx) = crate::text_selection::testing::host(cx, move |_, cx| {
+            FileView::new(path, cx)
+        });
+        cx.cx.executor().allow_parking();
+        for _ in 0..600 {
+            if view.read_with(&cx.cx, |view, _| view.editor().is_some()) {
+                break;
+            }
+            cx.cx
+                .executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
+        preview_frames(cx, 2);
+        (view, cx)
+    }
+
+    #[gpui::test]
+    async fn the_preview_parses_once_per_change(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("md", "# Title\n\nHello **world**.\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        preview_frames(&mut cx, 5);
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.preview_builds()),
+            1,
+            "five frames of an unchanged file read the source once"
+        );
+        std::fs::write(file.path(), "# Title\n\nHello again, **world**.\n").unwrap();
+        cx.update(|_, cx| view.update(cx, |view, cx| view.reload(cx)))
+            .expect("the file reloads");
+        preview_frames(&mut cx, 5);
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.preview_builds()),
+            2,
+            "an edit reads it once more"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_slug_link_reveals_its_heading(cx: &mut gpui::TestAppContext) {
+        let source = format!(
+            "[jump](#second-section)\n\n# First Section\n\n{}## Second Section\n\n{}",
+            filler(40),
+            filler(60)
+        );
+        let file = TempFile::with_extension("md", &source);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        preview_frames(&mut cx, 3);
+        let before = heading_below_top(&mut cx, 1);
+        assert!(before > px(200.0), "the heading starts well below the top: {before:?}");
+        let at = link_center(&view, &mut cx, "#second-section");
+        cx.simulate_click(at, Modifiers::none());
+        preview_frames(&mut cx, 4);
+        let after = heading_below_top(&mut cx, 1);
+        assert!(
+            after.abs() <= px(1.0),
+            "the heading sits at the viewport's top, {after:?} below it"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_toc_entry_reveals_its_heading(cx: &mut gpui::TestAppContext) {
+        let source = format!(
+            "[[toc]]\n\n# Alpha\n\n{}# Beta\n\n{}",
+            filler(40),
+            filler(60)
+        );
+        let file = TempFile::with_extension("md", &source);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        preview_frames(&mut cx, 3);
+        assert!(heading_below_top(&mut cx, 1) > px(200.0));
+        let at = link_center(&view, &mut cx, "#beta");
+        cx.simulate_click(at, Modifiers::none());
+        preview_frames(&mut cx, 4);
+        let after = heading_below_top(&mut cx, 1);
+        assert!(after.abs() <= px(1.0), "the entry's heading is at the top: {after:?}");
+    }
+
+    /// Where the outline's `k`-th row is: the rows are stacked under the panel's padding,
+    /// each a small control tall with a gap of two pixels.
+    fn outline_row_height(cx: &mut VisualTestContext) -> Pixels {
+        use ely_gpui_component::theme::{ActiveTheme as _, ControlSize};
+        cx.update(|window, cx| {
+            cx.theme().control_height(ControlSize::Sm).to_pixels(window.rem_size())
+        })
+    }
+
+    fn outline_row_center(cx: &mut VisualTestContext, k: usize) -> Point<Pixels> {
+        let panel = cx
+            .debug_bounds("file-preview-outline-panel")
+            .expect("the outline is drawn");
+        let row = outline_row_height(cx);
+        point(
+            panel.left() + px(40.0),
+            panel.top() + px(OUTLINE_PADDING) + (row + px(2.0)) * k as f32 + row / 2.0,
+        )
+    }
+
+    #[gpui::test]
+    async fn the_outline_lists_headings_and_jumps(cx: &mut gpui::TestAppContext) {
+        let source = format!(
+            "# Alpha\n\n{}## Beta\n\n{}## Gamma\n\n{}",
+            filler(40),
+            filler(40),
+            filler(60)
+        );
+        let file = TempFile::with_extension("md", &source);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        preview_frames(&mut cx, 3);
+        assert!(
+            cx.debug_bounds("file-preview-outline-panel").is_none(),
+            "the outline starts hidden"
+        );
+        let toggle = cx
+            .debug_bounds("file-preview-outline")
+            .expect("the toggle is beside Code and Preview");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        preview_frames(&mut cx, 3);
+        assert!(cx.debug_bounds("file-preview-outline-panel").is_some());
+        // What the panel draws: three rows (its height is three rows and two gaps), and
+        // row k brings heading k to the top, in the document's order.
+        let toc = cx.debug_bounds("file-preview-outline-toc").expect("the rows are drawn");
+        let row = outline_row_height(&mut cx);
+        assert!(
+            (toc.size.height - (row * 3.0 + px(4.0))).abs() <= px(1.0),
+            "three rows drawn, not {:?} tall",
+            toc.size.height
+        );
+        for k in [1, 2, 0] {
+            let at = outline_row_center(&mut cx, k);
+            cx.simulate_click(at, Modifiers::none());
+            preview_frames(&mut cx, 4);
+            let after = heading_below_top(&mut cx, k);
+            assert!(after.abs() <= px(1.0), "row {k} brings heading {k} to the top: {after:?}");
+        }
+        let headings = view
+            .update(&mut cx.cx, |view, cx| view.preview_blocks(cx))
+            .expect("a Preview")
+            .headings;
+        assert_eq!(
+            headings.iter().map(|heading| heading.title.to_string()).collect::<Vec<_>>(),
+            ["Alpha", "Beta", "Gamma"]
+        );
+    }
+
+    #[gpui::test]
+    async fn the_outline_is_off_for_a_document_without_headings(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("md", "Just a paragraph.\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        preview_frames(&mut cx, 3);
+        let toggle = cx
+            .debug_bounds("file-preview-outline")
+            .expect("the toggle is drawn, disabled");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        preview_frames(&mut cx, 3);
+        assert!(!view.read_with(&cx.cx, |view, _| view.outline_open()));
+        assert!(cx.debug_bounds("file-preview-outline-panel").is_none());
+    }
+
+    /// `TableOfContents` panics on an empty list: a file edited down to no headings with the
+    /// outline open must close it rather than draw it.
+    #[gpui::test]
+    async fn an_open_outline_survives_the_headings_going_away(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("md", "# Alpha\n\nText.\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let toggle = cx.debug_bounds("file-preview-outline").expect("toggle");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        preview_frames(&mut cx, 3);
+        assert!(cx.debug_bounds("file-preview-outline-panel").is_some());
+        std::fs::write(file.path(), "Text only now.\n").unwrap();
+        cx.update(|_, cx| view.update(cx, |view, cx| view.reload(cx)))
+            .expect("the file reloads");
+        preview_frames(&mut cx, 3);
+        assert!(cx.debug_bounds("file-preview-outline-panel").is_none());
+    }
+
+    #[gpui::test]
+    async fn reading_progress_grows_with_scrolling(cx: &mut gpui::TestAppContext) {
+        let short = TempFile::with_extension("md", "# Title\n\nOne line.\n");
+        let (mut short_cx, short_view) = mounted_file_view(cx, short.path().to_path_buf());
+        preview_frames(&mut short_cx, 3);
+        assert!(short_cx.debug_bounds("file-preview-progress").is_none());
+        assert_eq!(short_view.read_with(&short_cx.cx, |view, _| view.reading_progress()), None);
+
+        let long = TempFile::with_extension("md", &format!("# Title\n\n{}", filler(150)));
+        let (mut cx, view) = mounted_file_view(&mut short_cx.cx, long.path().to_path_buf());
+        preview_frames(&mut cx, 3);
+        assert!(cx.debug_bounds("file-preview-progress").is_some(), "a page that scrolls has the bar");
+        assert_eq!(view.read_with(&cx.cx, |view, _| view.reading_progress()), Some(0.0));
+        view.read_with(&cx.cx, |view, _| {
+            let scroll = &view.scroll.preview;
+            scroll.set_offset(point(px(0.0), -scroll.max_offset().y / 2.0));
+        });
+        preview_frames(&mut cx, 2);
+        let middle = view
+            .read_with(&cx.cx, |view, _| view.reading_progress())
+            .expect("still scrolling");
+        assert!((middle - 0.5).abs() < 0.02, "halfway down reads {middle}");
+    }
+
+    fn menu_labels(view: &gpui::Entity<FileView>, cx: &VisualTestContext) -> Vec<String> {
+        view.read_with(&cx.cx, |view, cx| {
+            view.context_menu_rows(cx)
+                .iter()
+                .map(|row| match row {
+                    file_context_menu::MenuRow::Markdown(item) => item.label().to_owned(),
+                    file_context_menu::MenuRow::Separator => "---".to_owned(),
+                    file_context_menu::MenuRow::File(item) => item.label.to_owned(),
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn the_preview_menu_puts_markdown_items_above_file_items(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("md", "[docs](https://x.test) and more text\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        preview_frames(&mut cx, 3);
+        let at = link_center(&view, &mut cx, "https://x.test");
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        preview_frames(&mut cx, 2);
+        let labels = menu_labels(&view, &cx);
+        let file_labels: Vec<String> = view
+            .read_with(&cx.cx, |view, cx| view.context_menu_items(cx))
+            .iter()
+            .map(|item| item.label.to_owned())
+            .collect();
+        let mut expected = vec!["Copy", "Select all", "Open link", "Copy link address", "---"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        expected.extend(file_labels.clone());
+        assert_eq!(labels, expected);
+        assert!(!file_labels.is_empty());
+        // Drawn, in that order: the Markdown rows first, the file rows' numbering untouched.
+        let first = cx.debug_bounds("file-markdown-menu-item-0").expect("Copy is drawn");
+        let last = cx.debug_bounds("file-markdown-menu-item-3").expect("Copy link address is drawn");
+        let file_first = cx.debug_bounds("file-context-item-0").expect("the file rows are drawn");
+        assert!(first.top() < last.top() && last.bottom() <= file_first.top());
+
+        // A press outside the body offers the file's rows alone, and no row of the last press.
+        let bar = cx.debug_bounds("file-markdown-row").expect("the Markdown row");
+        cx.simulate_mouse_down(bar.center(), MouseButton::Right, Modifiers::none());
+        preview_frames(&mut cx, 2);
+        assert_eq!(menu_labels(&view, &cx), file_labels);
+    }
+
+    #[gpui::test]
+    async fn the_preview_menus_rows_act_on_the_preview(cx: &mut gpui::TestAppContext) {
+        use crate::text_selection::testing;
+        let dir = std::env::temp_dir().join(format!("sirio-preview-menu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let note = dir.join("note.md");
+        std::fs::write(&note, "[setup](setup.md) then words\n").unwrap();
+        std::fs::write(dir.join("setup.md"), "# setup\n").unwrap();
+        let (view, cx) = hosted_file_view(cx, note.clone());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        // Select the whole body with the menu's own row, then copy it with the next.
+        let at = link_center(&view, cx, "setup.md");
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        preview_frames(cx, 2);
+        let select_all = cx.debug_bounds("file-markdown-menu-item-1").expect("Select all");
+        cx.simulate_click(select_all.center(), Modifiers::none());
+        preview_frames(cx, 2);
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        preview_frames(cx, 2);
+        testing::reset_clipboard(cx);
+        let copy = cx.debug_bounds("file-markdown-menu-item-0").expect("Copy");
+        cx.simulate_click(copy.center(), Modifiers::none());
+        preview_frames(cx, 2);
+        assert_eq!(testing::clipboard(cx).as_deref(), Some("setup then words"));
+
+        // Open link goes the one way a click on the link goes.
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        preview_frames(cx, 2);
+        let open = cx.debug_bounds("file-markdown-menu-item-2").expect("Open link");
+        cx.simulate_click(open.center(), Modifiers::none());
+        preview_frames(cx, 2);
+        assert_eq!(events.borrow().as_slice(), [FileViewEvent::OpenFile(dir.join("setup.md"))]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ways the Preview's opener could fail: a scheme `resolve_file_link` reads as a
+    /// relative path (`vscode:x`, `smb:host` have no `//`) opens a file tab; `smb://` reaches
+    /// the system opener; a path out of the folder resolves. None of them opens anything.
+    #[gpui::test]
+    async fn a_link_to_another_scheme_or_nowhere_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let source = "[a](smb://host/share/file)\n\n[b](vscode:open?file=x)\n\n[c](smb:host)\n\n\
+                      [d](../outside.md)\n\n[e](#no-such-heading)\n\n[ok](https://x.test/yes)\n";
+        let file = TempFile::with_extension("md", source);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        preview_frames(&mut cx, 3);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        for url in [
+            "smb://host/share/file",
+            "vscode:open?file=x",
+            "smb:host",
+            "../outside.md",
+            "#no-such-heading",
+        ] {
+            let at = link_center(&view, &mut cx, url);
+            cx.simulate_click(at, Modifiers::none());
+            preview_frames(&mut cx, 1);
+            assert_eq!(cx.cx.opened_url(), None, "{url} reached the system opener");
+            assert!(events.borrow().is_empty(), "{url} opened a file: {:?}", events.borrow());
+        }
+        // The control: a web link does open, so the clicks above reach their links.
+        let at = link_center(&view, &mut cx, "https://x.test/yes");
+        cx.simulate_click(at, Modifiers::none());
+        preview_frames(&mut cx, 1);
+        assert_eq!(cx.cx.opened_url().as_deref(), Some("https://x.test/yes"));
+    }
+
+    const MERMAID: &str = "```mermaid\nflowchart TD\n  A --> B\n```\n";
+
+    #[gpui::test]
+    async fn a_theme_switch_rebuilds_diagrams_with_the_new_palette(cx: &mut gpui::TestAppContext) {
+        let cache = diagram_cache("theme");
+        cx.update(|cx| {
+            DiagramSettings::set(
+                DiagramSettings { cache_dir: cache.clone(), plantuml_server: None },
+                cx,
+            );
+        });
+        let file = TempFile::with_extension("md", &format!("# D\n\n{MERMAID}"));
+        let (mut cx, view) = mounted_file_view_with(cx, file.path().to_path_buf(), |_, _, cx| {
+            cx.set_global(Theme::light());
+        });
+        let light = settle_preview(&mut cx, &view);
+        assert!(light.nodes.iter().any(|node| matches!(node, Node::Image { .. })));
+        let key = |theme: Theme| {
+            sirio_diagram::cache_key(
+                DiagramKind::Mermaid,
+                "flowchart TD\n  A --> B",
+                &markdown_preview::palette(&theme),
+            )
+        };
+        let (light_key, dark_key) = (key(Theme::light()), key(Theme::dark()));
+        assert_ne!(light_key, dark_key, "the palette is part of the diagram's key");
+        assert!(view.read_with(&cx.cx, |view, _| view.diagrams.get(&dark_key).is_none()));
+
+        cx.update(|_, cx| cx.set_global(Theme::dark()));
+        let dark = settle_preview(&mut cx, &view);
+        assert!(
+            view.read_with(&cx.cx, |view, _| view.diagrams.get(&dark_key).is_some()),
+            "the dark diagram was requested"
+        );
+        let Some(Node::Image { url, .. }) = dark.nodes.iter().find(|node| matches!(node, Node::Image { .. }))
+        else {
+            panic!("the dark diagram drew: {:?}", dark.nodes);
+        };
+        assert!(url.contains(&dark_key), "the picture is the dark one: {url}");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// Today's behaviour (`preview_document` before this task): a settings change forgets
+    /// every failure, so a newly installed `plantuml` or a new server is tried at once.
+    #[gpui::test]
+    async fn a_settings_change_requests_failed_diagrams_again(cx: &mut gpui::TestAppContext) {
+        let cache = diagram_cache("settings");
+        cx.update(|cx| {
+            DiagramSettings::set(
+                DiagramSettings { cache_dir: cache.clone(), plantuml_server: None },
+                cx,
+            );
+        });
+        let file = TempFile::with_extension("md", "```plantuml\nAlice -> Bob: test\n```\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let key = cx.update(|_, cx| {
+            sirio_diagram::cache_key(
+                DiagramKind::PlantUml,
+                "Alice -> Bob: test",
+                &markdown_preview::palette(Theme::get(cx)),
+            )
+        });
+        // Let the first request run its course, then plant a failure of our own.
+        for _ in 0..50 {
+            preview_frames(&mut cx, 1);
+            if view.read_with(&cx.cx, |view, _| {
+                matches!(view.diagrams.get(&key), Some(DiagramState::Failed(_) | DiagramState::Ready { .. }))
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        view.update(&mut cx.cx, |view, _| {
+            view.diagrams.insert(key.clone(), DiagramState::Failed("planted".into()));
+        });
+        preview_frames(&mut cx, 3);
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.diagrams.get(&key).cloned()),
+            Some(DiagramState::Failed("planted".into())),
+            "a failure stays while nothing changed"
+        );
+
+        let other = diagram_cache("settings-new");
+        cx.update(|_, cx| {
+            DiagramSettings::set(
+                DiagramSettings { cache_dir: other.clone(), plantuml_server: None },
+                cx,
+            );
+        });
+        for _ in 0..50 {
+            preview_frames(&mut cx, 1);
+            if view.read_with(&cx.cx, |view, _| {
+                view.diagrams.get(&key) != Some(&DiagramState::Failed("planted".into()))
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let state = view.read_with(&cx.cx, |view, _| view.diagrams.get(&key).cloned());
+        assert!(
+            state.is_some() && state != Some(DiagramState::Failed("planted".into())),
+            "the fence was requested again under the new settings: {state:?}"
+        );
+        let _ = std::fs::remove_dir_all(&cache);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[gpui::test]
+    async fn a_selection_survives_the_file_changing_under_it(cx: &mut gpui::TestAppContext) {
+        use crate::text_selection::testing;
+        let dir = std::env::temp_dir().join(format!("sirio-preview-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let note = dir.join("note.md");
+        std::fs::write(&note, "# Notes\n\nSelect this long paragraph of words.\n").unwrap();
+        let (view, cx) = hosted_file_view(cx, note.clone());
+        let scroll = cx.debug_bounds("file-markdown-scroll").expect("the Preview");
+        let column_left =
+            scroll.origin.x + ((scroll.size.width - px(MARKDOWN_COLUMN_WIDTH)) / 2.0).max(px(0.0));
+        testing::drag(
+            cx,
+            point(column_left + px(25.0), scroll.origin.y + px(30.0)),
+            point(scroll.right() - px(1.0), scroll.bottom() - px(1.0)),
+        );
+        // Something is selected before the change, and Ctrl+C says what.
+        testing::reset_clipboard(cx);
+        cx.simulate_keystrokes("ctrl-c");
+        let old = testing::clipboard(cx).expect("a clipboard");
+        assert!(
+            old != testing::SENTINEL && old.contains("Select this long paragraph"),
+            "the drag selected the old text: {old:?}"
+        );
+        // Shorter, and multi-byte where the selection ended; the next frames draw it.
+        std::fs::write(&note, "# é\n\nçà\n").unwrap();
+        cx.update(|_, cx| view.update(cx, |view, cx| view.reload(cx)))
+            .expect("the file reloads");
+        preview_frames(cx, 3);
+        testing::reset_clipboard(cx);
+        cx.simulate_keystrokes("ctrl-c");
+        // The outcome the code has: `text_selection::Active.text` keeps the text the
+        // selection began on, so Ctrl+C copies exactly what the reader selected (it was on
+        // screen); the new text is not highlighted. A slice of the new text cut at the old
+        // offsets is the failure.
+        assert_eq!(
+            testing::clipboard(cx).as_deref(),
+            Some(old.as_str()),
+            "Ctrl+C after the file changed copies the selection as it was"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use super::{
     Chat, DIFF_PREVIEW_MAX_LINES, DiffPreviewContext, DiffPreviewSelection, EditSummaryState,
-    Entry, MarkdownBody, SubagentPart, TranscriptInteraction, diff_preview_lines,
+    Entry, SubagentPart, TranscriptInteraction, diff_preview_lines,
     project_tool_content, tool_call_plain_text,
 };
 use sirio_chat::{ToolCallContentInfo, ToolCallLocationInfo};
@@ -664,8 +664,8 @@ impl Chat {
                         .px(px(12.0))
                         .py(px(6.0))
                         .text_size(theme.typography.callout)
-                        .child(MarkdownBody::with_file_links(
-                            document,
+                        .child(super::card_body(
+                            &document,
                             entity.clone(),
                             format!("subagent-text-{task_index}-{child_index}"),
                         ))
