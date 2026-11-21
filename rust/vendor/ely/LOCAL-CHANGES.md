@@ -869,19 +869,24 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
   table hooks, `markdown-heading-N` and `markdown-cell-T-R-C` selectors and the host gather's pushes, with
   each block skipped in turn),
   `without_a_cull_the_tree_is_the_one_a_never_skipping_cull_lays_out`.
-- L10 two readers of what the parser reads, for a host that measures a source before it parses it:
-  `markdown_parsed_text(source) -> Cow<str>` (`markdown.rs` `parsed_text`, `markdown/build.rs` `normalised`) is the
-  text of the first pass, one leading U+FEFF dropped and each lone CR as LF (it calls the same `lone_crs` `read`
-  does); `markdown_accepts_swapped_texts(source, accept) -> bool` (`markdown.rs`, `markdown/tex.rs`
-  `accepts_swapped`) hands `accept` the text of each round of the pass that reads `\(` and `\[` pairs as math,
-  before it is parsed, and stops at the first refusal (`tex::parse` is now `read` with an always-yes callback;
-  nothing else in it moves). Both re-exported from `lib.rs`. Why: a deep tree overflows the stack in the passes
-  that recurse over it, so Sirio refuses a source past a cap first, and a guard that reads the source as
-  written misses a quote marker behind a byte order mark, a line a lone CR ends, and a closer that the second
-  pass hides inside math (`*a \(x*\) ` repeated, then `a* ` repeated, is flat in the first pass and deep in the
-  second). Calling Ely's own functions leaves one implementation, so the two cannot drift. No upstream caller
-  changes. Proof: Sirio's `markdown::tests::a_leading_byte_order_mark_does_not_hide_nesting`,
-  `a_lone_cr_does_not_hide_nesting` and `the_pass_that_reads_parenthesised_math_does_not_hide_nesting`.
+- L10 what the parser reads, for a host that measures a source before it parses it (`markdown.rs`, `markdown/build.rs`,
+  `markdown/tex.rs`, `tree/mod.rs`, `lib.rs`):
+  `markdown_parsed_text(source) -> String` is exactly the text pulldown-cmark reads when `source` is parsed
+  without front matter: one leading U+FEFF dropped, each lone CR as LF, `$$` fences as tildes, from the same
+  helpers (`without_bom`, `crs`, `flow::rewrite`) `build::tree` and `read` use, in the same order.
+  `markdown_options()` is the options `build::options()` gives (it was `pub(super)`).
+  `parse_markdown_guarded(source, html_block, accept)` is `parse_markdown_with` that asks `accept` about the text
+  of each round of the pass that reads `\(` and `\[` pairs as math, before that round is parsed, and keeps the
+  first pass's tree on a refusal (`tex::parse` is `read` with an always-yes callback; `parse_markdown_with` is
+  the guarded parse with one). One parse, no separate measuring pass. Why: a deep tree overflows the stack in
+  the passes that recurse over it, so Sirio refuses a source past a cap first, and a guard that reads the
+  source as written misses a quote marker behind a byte order mark, a line a lone CR ends, a block that a `$$`
+  fence changes, and a closer that the second pass hides inside math (`*a \(x*\) ` repeated, then `a* `
+  repeated, is flat in the first pass and deep in the second). Calling Ely's own functions leaves one
+  implementation, so the two cannot drift. No upstream caller changes. Proof: Sirio's
+  `markdown::tests::a_leading_byte_order_mark_does_not_hide_nesting`, `a_lone_cr_does_not_hide_nesting`,
+  `the_pass_that_reads_parenthesised_math_does_not_hide_nesting` and
+  `the_guard_measures_the_text_after_the_dollar_fences_are_read`.
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
 

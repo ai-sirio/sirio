@@ -4,16 +4,16 @@
 //! through (pictures, links, diagrams, block HTML), and keeps beside it what selection,
 //! copy and the anchors need: the plain text, the headings and their slugs.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
 use ely_gpui_component::documents::{
-    MarkdownBlock, Style, markdown_accepts_swapped_texts, markdown_parsed_text,
-    parse_markdown_with,
+    MarkdownBlock, Style, markdown_options, parse_markdown_guarded,
 };
 use gpui::SharedString;
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Parser};
 
 use crate::chat::file_links::FileLinkMemo;
 use crate::markdown_preview::{DiagramRequest, Diagrams};
@@ -124,21 +124,12 @@ impl std::fmt::Debug for MarkdownBlocks {
     }
 }
 
-/// The options Ely's reader parses with.
-fn reader_options() -> Options {
-    Options::ENABLE_TABLES
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_MATH
-}
-
-/// How deep `source` nests, or one past the cap when it nests deeper. Ely's reader and its
-/// drawing recurse once per level, and chat and forge text is not ours: this walks the
-/// event stream, which takes no stack, before any tree exists.
+/// How deep `source`, the text Ely's parser reads, nests, or one past the cap when it nests
+/// deeper. Ely's reader and its drawing recurse once per level, and chat and forge text is not
+/// ours: this walks the event stream, which takes no stack, before any tree exists.
 fn markdown_depth(source: &str) -> usize {
     let (mut depth, mut deepest) = (0usize, 0usize);
-    for event in Parser::new_ext(source, reader_options()) {
+    for event in Parser::new_ext(source, markdown_options()) {
         match event {
             Event::Start(_) => {
                 depth += 1;
@@ -172,24 +163,28 @@ fn tree_depth(nodes: &[MarkdownBlock]) -> usize {
 pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     let mut missing = Vec::new();
     let mut nodes = vec![rewrite::plain_paragraph(source)];
-    // Ely reads another text than the one written: it drops a leading byte order mark, reads a
-    // lone CR as a line end, and reads `\(` pairs as math in a second pass over swapped text.
-    // The guard measures what Ely reads (its own functions, so the two cannot drift); the
-    // source itself is what Ely is handed, so it normalises once.
-    let mut depth = markdown_depth(&markdown_parsed_text(source));
-    if depth <= MAX_NESTING {
-        let mut deepest = depth;
-        markdown_accepts_swapped_texts(source, &mut |swapped| {
-            let read = markdown_depth(&markdown_parsed_text(swapped));
-            deepest = deepest.max(read);
-            read <= MAX_NESTING
-        });
-        depth = deepest;
-    }
-    if depth <= MAX_NESTING {
-        // What depth the Markdown leaves is all block HTML may nest to, wherever it stands.
-        let room = (MAX_NESTING - depth).min(MAX_HTML_NESTING);
-        let parsed = parse_markdown_with(source, &|raw: &str| rewrite::html_block(raw, room));
+    // Ely reads another text than the one written (a byte order mark dropped, lone CRs as line
+    // ends, `$$` fences as tildes), and reads `\(` pairs as math in a second pass over swapped
+    // text. It asks the guard about each text it is about to parse, so the guard measures what
+    // Ely reads, in one parse: a refused first text leaves the plain paragraph, a refused
+    // second one keeps the first pass's tree. What depth the Markdown leaves is all block HTML
+    // may nest to, wherever it stands; HTML is read after every text was measured.
+    let deepest = Cell::new(0usize);
+    let parsed = parse_markdown_guarded(
+        source,
+        &|raw: &str| {
+            let room = MAX_NESTING.saturating_sub(deepest.get()).min(MAX_HTML_NESTING);
+            rewrite::html_block(raw, room)
+        },
+        &mut |read| {
+            let depth = markdown_depth(read);
+            if depth <= MAX_NESTING {
+                deepest.set(deepest.get().max(depth));
+            }
+            depth <= MAX_NESTING
+        },
+    );
+    if let Some(parsed) = parsed {
         // Block HTML nests on top of the Markdown around it: each is under the cap, their
         // sum may not be, and every walk after this one recurses over the tree.
         // A failed diagram's note is a quote one level below its fence: room for it too.

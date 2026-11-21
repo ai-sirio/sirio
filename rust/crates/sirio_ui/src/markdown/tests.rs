@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ely_gpui_component::documents::{AlertKind, Inline, MarkdownBlock as Node, Style};
+use ely_gpui_component::documents::{
+    AlertKind, Inline, MarkdownBlock as Node, Style, markdown_parsed_text,
+};
 use sirio_diagram::{DiagramKind, Palette};
 use sirio_project::FileLinkTarget;
 
@@ -294,10 +296,25 @@ fn a_lone_cr_does_not_hide_nesting() {
 
 #[test]
 fn the_pass_that_reads_parenthesised_math_does_not_hide_nesting() {
-    // Each `\(x*\)` closes its opener while the pair is still text; once the pair is math, its
-    // `*` is hidden and the closers at the end close every opener at once.
+    // Each `\\(x*\\)` closes its opener while the pair is still text; once the pair is math, its
+    // `*` is hidden and the closers at the end close every opener at once. The guard refuses
+    // that text, and the tree is the first pass's: flat, with the math as text.
     let n = 5_000;
-    falls_back(format!("{}{}", "*a \\(x*\\) ".repeat(n), "a* ".repeat(n)));
+    let source = format!("{}{}", "*a \\(x*\\) ".repeat(n), "a* ".repeat(n));
+    let nodes = on_stack(256 * 1024, move || {
+        build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
+    });
+    assert!(depth(&nodes) <= MAX_NESTING, "{}", depth(&nodes));
+    assert!(texts(&nodes).concat().contains("(x)"), "the pair stays text");
+}
+
+/// What Ely parses is not what was written: its `$$` fences become tildes, which changes where
+/// a block ends. The guard measures that text.
+#[test]
+fn the_guard_measures_the_text_after_the_dollar_fences_are_read() {
+    let source = "\n\n$$\n$$\n* ";
+    assert_eq!(markdown_depth(source), 1, "as written");
+    assert_eq!(markdown_depth(&markdown_parsed_text(source)), 2, "as Ely reads it");
 }
 
 /// How deep `nodes` nest, a leaf counting one.

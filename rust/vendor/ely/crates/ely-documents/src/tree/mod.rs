@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap, ops::Range};
 
 use crate::markdown::mdast::{self, AlignKind};
 
-use super::markdown::{span, tree, walk};
+use super::markdown::{span, tree, tree_guarded, walk};
 
 mod blocks;
 mod dom;
@@ -169,14 +169,26 @@ pub fn parse_markdown(markdown: &str) -> Vec<Node> {
 /// `markdown` as blocks; `html_block` sees the raw HTML of each HTML block, at any depth, and its
 /// blocks replace it when it returns some.
 pub fn parse_markdown_with<'a>(markdown: &'a str, html_block: &'a HtmlBlock<'a>) -> Vec<Node> {
-    let root = tree(markdown);
+    parse_markdown_guarded(markdown, html_block, &mut |_| true).expect("nothing refuses the text")
+}
+
+/// [`parse_markdown_with`], asking `accept` about each text the parser is about to read, before
+/// anything is built from it: the first pass's, and each round of the pass that reads `\(` and `\[`
+/// pairs as math (which can nest deeper than the text it started from). None when the first is
+/// refused; the first pass's blocks when a later one is.
+pub fn parse_markdown_guarded<'a>(
+    markdown: &'a str,
+    html_block: &'a HtmlBlock<'a>,
+    accept: &mut dyn FnMut(&str) -> bool,
+) -> Option<Vec<Node>> {
+    let root = tree_guarded(markdown, accept)?;
     let mut reader = Reader::new(markdown, &root);
     reader.html_block = Some(html_block);
     let mut out = Vec::new();
     for node in root.children().expect("the root holds the blocks") {
         reader.top(node, &mut out);
     }
-    out
+    Some(out)
 }
 
 impl<'a> Reader<'a> {

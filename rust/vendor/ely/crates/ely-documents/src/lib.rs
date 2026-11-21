@@ -60,7 +60,7 @@ pub use link::LinkEditor;
 pub use markdown::file_tree as markdown_tree;
 pub use markdown::markdown_highlights;
 pub use markdown::parsed_text as markdown_parsed_text;
-pub use markdown::accepts_swapped_texts as markdown_accepts_swapped_texts;
+pub use markdown::parser_options as markdown_options;
 pub use markdown::mdast::{self, AlignKind};
 pub use math::{Latex, MathError, formula_svg};
 pub(crate) use math::{failed, typeset};
@@ -77,7 +77,9 @@ pub use todo::{Checklist, TodoItem};
 pub use toolbar::FixedFormatToolbar;
 pub use tree::emoji::Shortcodes;
 pub use tree::{AlertKind, Inline, Node as MarkdownBlock, ShortcodeRun, Style};
-pub use tree::{Reader as MarkdownReader, alert, is_toc, parse_markdown, parse_markdown_with};
+pub use tree::{
+    Reader as MarkdownReader, alert, is_toc, parse_markdown, parse_markdown_guarded, parse_markdown_with,
+};
 pub use viewer::step as zoom_step;
 pub use viewer::{DocPage, DocumentViewer, PageHit, PageNote};
 

@@ -18,6 +18,13 @@ pub(crate) fn tree(text: &str) -> mdast::Node {
     parsed(text, false)
 }
 
+/// `text` as a syntax tree, `accept` asked about each text pulldown-cmark is about to read: the
+/// first pass's and each round of the pass that reads `\(` and `\[` pairs as math. None when the
+/// first is refused; when a later one is, the tree is the first pass's.
+pub(crate) fn tree_guarded(text: &str, accept: &mut dyn FnMut(&str) -> bool) -> Option<mdast::Node> {
+    tex::parse_guarded(text, accept)
+}
+
 fn parsed(text: &str, frontmatter: bool) -> mdast::Node {
     tex::parse(text, frontmatter)
 }
@@ -30,18 +37,15 @@ pub(crate) fn math_inside(source: &str, whole: Range<usize>) -> Range<usize> {
     }
 }
 
-/// The text `source` is parsed as, before any `$$` fence is read: a leading byte order mark
-/// dropped and each lone CR as LF. A host that measures the source measures this.
-pub fn parsed_text(source: &str) -> std::borrow::Cow<'_, str> {
-    build::normalised(source)
+/// The text pulldown-cmark reads when `source` is parsed: the byte order mark dropped, lone CRs
+/// as LF, `$$` fences as tildes. A host that measures the source measures this.
+pub fn parsed_text(source: &str) -> String {
+    build::parsed(source)
 }
 
-/// Whether `accept` takes each text the parser reads after the first, in the pass that reads
-/// `\(` and `\[` pairs as math (one per round, the delimiters swapped), each before it is
-/// parsed. A refusal ends the work. A host that measures the source measures these too: a text
-/// with pairs is read twice, and the second reading can nest deeper than the first.
-pub fn accepts_swapped_texts(source: &str, accept: &mut dyn FnMut(&str) -> bool) -> bool {
-    tex::accepts_swapped(source, accept)
+/// The options pulldown-cmark reads with.
+pub fn parser_options() -> pulldown_cmark::Options {
+    build::options()
 }
 
 /// A whole file as a syntax tree: front matter too.
