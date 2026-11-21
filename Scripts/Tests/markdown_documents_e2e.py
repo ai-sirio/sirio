@@ -32,6 +32,9 @@ class Fail(Exception):
     pass
 
 
+MAX_NESTING = 0  # read from the source by deepest_nesting_source
+
+
 def log(message):
     print(message, flush=True)
 
@@ -318,6 +321,15 @@ def top_of_page(name, before, after, jump):
 # ---------------------------------------------------------------- leg 1
 
 
+def deepest_nesting_source():
+    """The deepest document the app draws as written: `MAX_NESTING - 1` quotes around one line."""
+    global MAX_NESTING
+    found = re.search(r"const MAX_NESTING: usize = (\d+);", (Path(__file__).resolve().parents[2] / "rust/crates/sirio_ui/src/markdown/mod.rs").read_text())
+    need(found, "preview-deep", "MAX_NESTING is not found in markdown/mod.rs")
+    MAX_NESTING = int(found.group(1))
+    return "> " * (MAX_NESTING - 1) + "deep-end\n"
+
+
 def preview():
     window = E["WIN"]
     mutate = E.get("MUTATE", "")
@@ -558,6 +570,19 @@ def preview():
     shoot(window, "terminal-after-ctrl-c")
     (OUT / "terminal-screen.txt").write_text(shown)
     record("terminal-ctrl-c", "Ctrl+C in the terminal pane after a Markdown selection echoed ^C at the PTY and left the clipboard alone (the click that focused the terminal had cleared the Markdown selection, which the check asserts)")
+
+    # preview-deep: the deepest nesting the app draws, opened in a Preview, draws and the app lives.
+    deep = deepest_nesting_source()
+    path = Path(E["WT"]) / "deep.md"
+    path.write_text(deep)
+    ctl("surface", "editor", "open", f"--path={path}")
+    try:
+        s = until("the deep document to draw in the Preview",
+                  lambda: (lambda v: v if any("deep-end" in r["text"] for r in drawn_texts(v)) else None)(state()), timeout=30)
+    except Fail:
+        raise Fail("preview-deep: the deepest nesting never drew in the Preview")
+    os.kill(int(E["APP_PID"]), 0)  # raises if the process is gone
+    record("preview-deep", f"{MAX_NESTING - 1} nested quotes opened in the Preview, drew its last line, and the process lives")
 
 
 # What the two drags must put on the clipboard. The paragraph holding emoji and inline math is a
@@ -803,6 +828,16 @@ def chat():
         time.sleep(1.5)
         end = jump_view("back-at-tail", "4", "5")
         record("chat-jump", f"after a jump to the top link-1 is drawn and end-link is not; at the top, after a short wheel and at the tail no stretch over {MAX_GAP} px of the viewport lacks drawn text, the window holds the same texts once redrawn by a scroll away and back, and no capture band is blank")
+        # chat-deep: the deepest nesting as a reply: the turn completes, the body draws, the app lives.
+        (scenario.agent_dir / "reply.md").write_text(deepest_nesting_source())
+        chat_app.send("show the deep reply")
+        chat_app.until("the deep reply to draw",
+                       lambda st: st["status"] == "completed" and any("deep-end" in t for t in chatui.texts(st, "assistant")),
+                       timeout=90)
+        time.sleep(2)
+        need(chat_app.process.poll() is None, "chat-deep", "the app exited on the deepest nesting")
+        need(chat_app.call("surface.chat.read", surfaceId=chat_app.surface)["result"], "chat-deep", "the chat no longer answers")
+        record("chat-deep", f"{MAX_NESTING - 1} nested quotes as a chat reply: the turn completed, its last line is in the transcript, and the process lives")
         scenario.finish()
     except BaseException as error:
         failed = error

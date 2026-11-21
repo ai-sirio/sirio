@@ -15,7 +15,7 @@ use gpui::{
 
 use super::*;
 use crate::markdown::menu::MarkdownMenuItem;
-use crate::markdown::{PartKind, Policy, Surface, build};
+use crate::markdown::{MAX_NESTING, PartKind, Policy, Surface, build};
 use crate::text_selection::testing::{self, SENTINEL};
 
 /// A 24 px square PNG: a picture with a size the pointer can hit.
@@ -597,4 +597,62 @@ async fn a_wide_table_and_fence_scroll_sideways(cx: &mut TestAppContext) {
     let frame = cx.debug_bounds("markdown-frame-0").unwrap();
     mouse(cx, frame.center(), MouseButton::Left, 1);
     assert_eq!(probes.host_presses.get(), before + 1);
+}
+
+// ---- the deepest nesting, drawn where the stack is smallest --------------------------------
+
+/// `source` built and laid out through the Preview's path on a `stack`-byte thread; an
+/// overflow aborts the process, which is the red.
+fn drawn_on(stack: usize, source: String, at_least: usize) {
+    std::thread::Builder::new()
+        .stack_size(stack)
+        .spawn(move || {
+            // The deep tree is kept, not the plain paragraph the guard falls back to.
+            let kept = crate::markdown::tree_depth(&blocks(&source).nodes);
+            assert!(kept >= at_least, "kept {kept} levels, want {at_least}");
+            let mut cx = TestAppContext::single();
+            let (_, vcx) = open(&mut cx, &source, None);
+            // `debug_selector` is compiled out of a release build.
+            #[cfg(debug_assertions)]
+            assert!(vcx.debug_bounds("page").is_some(), "the page is laid out");
+            #[cfg(not(debug_assertions))]
+            let _ = vcx;
+        })
+        .expect("spawn")
+        .join()
+        .expect("no stack overflow, no panic");
+}
+
+/// The deepest nesting `build` keeps, as each kind of block draws it: quotes, lists and alerts.
+fn deepest_sources() -> [(String, usize); 3] {
+    // Every quote and the paragraph in it open one tag each: the deepest is `MAX - 1` quotes.
+    let quotes = format!("{}x", "> ".repeat(MAX_NESTING - 1));
+    // A list and its item open two: the paragraph takes the last.
+    let lists = format!("{}x", "- ".repeat((MAX_NESTING - 1) / 2));
+    // An alert is a quote that starts with its marker.
+    let alerts: String = (1..MAX_NESTING)
+        .map(|level| format!("{}[!NOTE]\n", "> ".repeat(level)))
+        .collect();
+    let alerts = format!("{alerts}{}x", "> ".repeat(MAX_NESTING - 1));
+    [(quotes, MAX_NESTING - 1), (lists, MAX_NESTING / 2 - 1), (alerts, MAX_NESTING / 2)]
+}
+
+/// On the main thread of Linux and macOS, which dev builds and the E2Es run on, in a debug
+/// build, where a frame is largest.
+#[test]
+fn the_deepest_allowed_nesting_is_drawn_on_an_eight_mebibyte_stack() {
+    for (source, at_least) in deepest_sources() {
+        drawn_on(8 * 1024 * 1024, source, at_least);
+    }
+}
+
+/// On the main thread of Windows (1 MiB) in a release build, the one the app ships: run by hand,
+/// `cargo nextest run -p sirio_ui --cargo-profile release --run-ignored only
+/// the_deepest_allowed_nesting_is_drawn_on_a_release_one_mebibyte_stack`.
+#[test]
+#[ignore = "release only: a debug build needs more than 1 MiB"]
+fn the_deepest_allowed_nesting_is_drawn_on_a_release_one_mebibyte_stack() {
+    for (source, at_least) in deepest_sources() {
+        drawn_on(1024 * 1024, source, at_least);
+    }
 }

@@ -225,19 +225,18 @@ fn deep_nesting_falls_back_to_plain_text() {
     falls_back(format!("{}x{}", "*a _a ".repeat(N / 2), " a_ a*".repeat(N / 2)));
 
     // Markdown and HTML depth add up in the tree: each is under the cap, the sum is not
-    // (30 quotes, 100 nested tags). The HTML is built to what the Markdown leaves.
+    // (20 quotes, 100 nested tags). The HTML is built to what the Markdown leaves.
     let html = format!("{}x{}", "<blockquote>".repeat(100), "</blockquote>".repeat(100));
-    let source = format!("{} {html}", ">".repeat(30));
+    let source = format!("{} {html}", ">".repeat(20));
     let nodes = on_stack(256 * 1024, move || {
         build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
     });
     assert!(depth(&nodes) <= MAX_NESTING, "{}", depth(&nodes));
-    assert!(depth(&nodes) > 30, "the quotes around it are kept");
+    assert!(depth(&nodes) > 20, "the quotes around it are kept");
 
-    // The same under about 90 Markdown quotes: the room left is small, and nothing recurses.
+    // The same under about 28 Markdown quotes: the room left is small, and nothing recurses.
     let html = format!("{}<b>{}x{}", "<blockquote>".repeat(N), "<b>".repeat(N), "</b>".repeat(N));
-    let source = format!("{} {html}", ">".repeat(90));
-    // (Ely's own reading of 90 nested quotes does not fit 256 KiB in a debug build.)
+    let source = format!("{} {html}", ">".repeat(28));
     let nodes = on_stack(4 * 1024 * 1024, move || {
         build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
     });
@@ -296,7 +295,7 @@ fn a_lone_cr_does_not_hide_nesting() {
 
 #[test]
 fn the_pass_that_reads_parenthesised_math_does_not_hide_nesting() {
-    // Each `\\(x*\\)` closes its opener while the pair is still text; once the pair is math, its
+    // Each `\(x*\)` closes its opener while the pair is still text; once the pair is math, its
     // `*` is hidden and the closers at the end close every opener at once. The guard refuses
     // that text, and the tree is the first pass's: flat, with the math as text.
     let n = 5_000;
@@ -594,7 +593,7 @@ fn a_written_verbatim_address_is_refused_in_every_spelling() {
         r"\x.png",
         "%5C%5C%3F%5CUNC%5Chost%5Cs%5Cx.png",
     ] {
-        assert!(rewrite::names_a_network_path(refused), "{refused}");
+        assert!(rewrite::names_a_network_path(written), "{written}");
     }
 }
 
@@ -1178,4 +1177,3 @@ fn file_paths_in_chat_become_file_links() {
     let third = build("see README.md", &mut chat(&fx, &mut memo));
     assert!(file_links_of(&third.nodes).is_empty());
 }
-

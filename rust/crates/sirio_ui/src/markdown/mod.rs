@@ -42,9 +42,15 @@ pub(crate) use view::{
     markdown_view, probe_view,
 };
 
-/// The deepest nesting drawn as written; past it the source is one plain paragraph. The
-/// cap `sirio_markdown` keeps for the same reason.
-pub(crate) const MAX_NESTING: usize = 128;
+/// The deepest nesting drawn as written; past it the source is one plain paragraph. Ely's
+/// reader, its element builder and gpui's layout recurse once per level, a level costs about
+/// 115 KiB of stack in a debug build, and the cap must fit the smallest main thread: measured
+/// by drawing quotes, lists and alerts, the deepest that draws is 71 levels in a release
+/// build on 1 MiB (Windows) and 75 in a debug build on 8 MiB (Linux and macOS). The cap is
+/// half the smaller of the two, rounded down to a multiple of 8, so the chat's extra wrappers
+/// have room too. Real Markdown rarely nests past ten.
+/// `the_deepest_allowed_nesting_is_drawn_on_a_release_one_mebibyte_stack` measures it again.
+pub(crate) const MAX_NESTING: usize = 32;
 
 /// The deepest block HTML is built: a reader sees nothing in more levels, and what is built
 /// is walked, dropped and drawn by recursion on whatever stack the caller has.

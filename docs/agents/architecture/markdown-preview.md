@@ -4,8 +4,9 @@ Every surface that draws Markdown (the chat transcript, the file view's Preview,
 requests, a subagent's card) draws it with the vendored `ely-documents` renderer through
 `sirio_ui/src/markdown/`; `bezel-markdown` is gone. `MarkdownBlocks` parses a text once per
 change (`parse_markdown_with`, vendored change L2) and rewrites the tree per surface by a
-`Policy` (HTML blocks, diagrams, images, file links, `[[toc]]`); an over-nested text (above 128
-levels) is drawn as one plain paragraph. `view.rs` draws it, `gather.rs` is Sirio's `TextGather`
+`Policy` (HTML blocks, diagrams, images, file links, `[[toc]]`); an over-nested text (above 32
+levels, measured against a 1 MiB release and an 8 MiB debug main thread: see `MAX_NESTING`) is drawn as one
+plain paragraph. `view.rs` draws it, `gather.rs` is Sirio's `TextGather`
 (selection and link rectangles; `SelectionHost` is `Run`, `Transcript` or `None`, see
 `text-selection.md`), `text.rs` the plain text in push order, `code.rs` the code hook (tree-sitter
 colours through `bezel_syntax`, memoized, copy button), `sideways.rs` and `cull.rs` the
