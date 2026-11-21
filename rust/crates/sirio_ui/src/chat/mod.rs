@@ -147,6 +147,7 @@ fn reply_body(
         ViewFlags {
             web_pictures: true,
             sections: None,
+            cull: true,
         },
     )
     .on_menu(remember_pressed_link(chat.clone()));
@@ -177,6 +178,7 @@ fn card_body(document: &MarkdownBlocks, chat: Entity<Chat>, key: String) -> impl
             ViewFlags {
                 web_pictures: true,
                 sections: None,
+                cull: false,
             },
         )
         .on_menu(menu),

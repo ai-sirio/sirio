@@ -2919,6 +2919,7 @@ fn render_content(
             ViewFlags {
                 web_pictures: true,
                 sections: Some(sections.clone()),
+                cull: false,
             },
         )
         .on_menu(Rc::new(move |press, window, cx| {

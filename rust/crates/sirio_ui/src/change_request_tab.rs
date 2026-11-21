@@ -1336,7 +1336,7 @@ pub(crate) fn forge_body(
         blocks,
         SelectionHost::Run { id: id.into() },
         links.clone(),
-        ViewFlags { web_pictures: false, sections: None },
+        ViewFlags { web_pictures: false, sections: None, cull: false },
     )
     .on_menu(body_menu::on_press(tab, links))
 }

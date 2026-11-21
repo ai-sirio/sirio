@@ -138,6 +138,19 @@ impl KindsMemo {
             };
             self.evict(&language, &code);
         }
+        // A text that extends one held is that one grown (a fence still streaming): the
+        // shorter will not be drawn again, so it does not keep its place.
+        let shorter: Vec<Rc<str>> = (self.by_language.get(language).into_iter())
+            .flat_map(|codes| codes.keys())
+            .filter(|held| code.len() > held.len() && code.starts_with(&***held))
+            .cloned()
+            .collect();
+        for held in shorter {
+            if let Some(held_tick) = self.by_language[language].get(&held).map(|held| held.tick) {
+                self.order.remove(&held_tick);
+            }
+            self.evict(language, &held);
+        }
         let (language, code): (Rc<str>, Rc<str>) = (language.into(), code.into());
         self.by_language
             .entry(language.clone())
@@ -224,7 +237,7 @@ pub(crate) fn code_hook(
     gather: Rc<SirioGather>,
 ) -> impl Fn(ElementId, Option<SharedString>, SharedString) -> AnyElement {
     move |id, language, code| {
-        let ordinal = gather.next_frame();
+        let (ordinal, held) = gather.next_frame(&id);
         let syntax = syntax_highlights(&style, language.as_deref(), &code);
         let selected = gather.highlight(&code, style.selection);
         let styles: Vec<_> = combine_highlights(syntax, selected).collect();
@@ -258,7 +271,8 @@ pub(crate) fn code_hook(
                         .child(styled),
                 ),
             ordinal,
-        );
+        )
+        .held(held);
         // The whole block, band included, is what a reader sees as one thing.
         let outline = canvas(move |bounds, _, _| report(ordinal, bounds), |_, _, _, _| {})
             .absolute()
@@ -305,7 +319,7 @@ pub(crate) fn table_frame(
     gather: Rc<SirioGather>,
 ) -> impl Fn(ElementId, AnyElement) -> AnyElement {
     move |id, table| {
-        let ordinal = gather.next_frame();
+        let (ordinal, held) = gather.next_frame(&id);
         let layouts = gather.layouts().clone();
         let report: Rc<dyn Fn(usize, gpui::Bounds<Pixels>)> =
             Rc::new(move |ordinal, bounds| layouts.record_frame(ordinal, bounds));
@@ -318,6 +332,7 @@ pub(crate) fn table_frame(
             ordinal,
         )
         .on_bounds(report)
+        .held(held)
         .into_any_element()
     }
 }
@@ -479,7 +494,9 @@ mod tests {
         let (got, ran) = ask(&mut memo, "rust", "let ab", new.clone());
         assert!(ran, "a grown fence is a different key");
         assert_eq!(got, new);
-        let (got, _) = ask(&mut memo, "rust", "let a", kinds(&[]));
+        // The longer text replaced the shorter in the memo (a growing fence), but the shorter
+        // is never answered with the longer's spans.
+        let (got, _) = ask(&mut memo, "rust", "let a", old.clone());
         assert_eq!(got, old, "the first block is still its own");
     }
 
@@ -527,5 +544,38 @@ mod tests {
         assert_eq!(again, direct(&light));
         assert_ne!(again, first, "a theme change must repaint");
         assert!(syntax_highlights(&light, None, code).is_empty());
+    }
+
+    fn entries(memo: &KindsMemo) -> usize {
+        memo.by_language.values().map(|codes| codes.len()).sum()
+    }
+
+    /// A fence that grows chunk by chunk is a new text each time: each prefix is drawn twice
+    /// (the chunk's own frame and the next), so only an entry that the next prefix replaces is
+    /// kept: 200 prefixes leave at most the latest one, not 200 entries that push the closed
+    /// blocks of the reply out of the memo.
+    #[test]
+    fn a_fence_still_growing_leaves_at_most_its_latest_prefix_in_the_memo() {
+        let mut memo = KindsMemo::new(KINDS_MEMO_BYTES);
+        let code: String = (0..200).map(|n| format!("let value_{n} = {n};\n")).collect();
+        let mut at = 0;
+        for _ in 0..200 {
+            at += code[at..].find('\n').map_or(code.len() - at, |end| end + 1);
+            for _ in 0..2 {
+                ask(&mut memo, "rust", &code[..at], kinds(&[]));
+            }
+            assert!(entries(&memo) <= 1, "{} entries at {at} bytes", entries(&memo));
+        }
+    }
+
+    #[test]
+    fn a_closed_fence_is_still_served_from_the_memo_on_its_second_draw() {
+        let mut memo = KindsMemo::new(KINDS_MEMO_BYTES);
+        let code = "fn a() {}\n";
+        assert!(ask(&mut memo, "rust", code, kinds(&[])).1, "the first draw computes");
+        assert!(!ask(&mut memo, "rust", code, kinds(&[])).1, "the second is served");
+        // Another block does not push it out.
+        ask(&mut memo, "rust", "fn b() {}\n", kinds(&[]));
+        assert!(!ask(&mut memo, "rust", code, kinds(&[])).1);
     }
 }

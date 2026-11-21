@@ -11,21 +11,22 @@
 //! press, which Ely's `InteractiveText` would take for a click, never opens anything.
 //! Sirio's own release handler opens nothing: no link opens twice.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::panic::Location;
 use std::rc::Rc;
 
-use ely_gpui_component::documents::{MarkdownBlock, MarkdownRenderer, TextGather};
+use ely_gpui_component::documents::{BlockCull, MarkdownBlock, MarkdownRenderer, TextGather};
 use ely_gpui_component::navigation::Sections;
 use gpui::{
     AnyElement, App, Bounds, DispatchPhase, Element, ElementId, Entity, EntityId, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window, canvas, div, prelude::*,
-    px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size, Window, canvas, div,
+    prelude::*, px,
 };
 
 use super::code::{CodeStyle, code_hook, table_frame};
+use super::cull::{Culler, Force, Memory, Plan, redrew};
 use super::gather::{BodyLayouts, SirioGather};
 use super::menu::{self, MarkdownMenuItem};
 use super::{MarkdownBlocks, PlainText};
@@ -50,6 +51,9 @@ pub(crate) struct ViewFlags {
     pub web_pictures: bool,
     /// The headings' anchors, for a table of contents that scrolls to them.
     pub sections: Option<Entity<Sections>>,
+    /// Stands in for top-level blocks that sit far outside the window (a chat reply, which
+    /// grows without end): see `cull`.
+    pub cull: bool,
 }
 
 /// Who owns the body's selection.
@@ -192,6 +196,8 @@ pub(crate) fn markdown_view(
         preselect: false,
         run: None,
         rendered: None,
+        memory: None,
+        culler: None,
     }
 }
 
@@ -210,6 +216,9 @@ pub(crate) struct MarkdownView {
     preselect: bool,
     run: Option<RunKey>,
     rendered: Option<AnyElement>,
+    /// What a culling body remembers between frames, and this frame's pass over it.
+    memory: Option<Rc<RefCell<Memory>>>,
+    culler: Option<Rc<Culler>>,
 }
 
 impl MarkdownView {
@@ -251,6 +260,72 @@ impl MarkdownView {
             },
             _ => Mode::None,
         }
+    }
+
+    /// The body drawn once: a fresh gather, and a culler over the body's memory when it has
+    /// one. Blocks in `force` are drawn whatever the memory says.
+    fn draw(&mut self, force: Force, cx: &App) -> MarkdownRenderer {
+        let held = self.memory.as_ref().map(|memory| memory.borrow().held());
+        let gather = Rc::new(SirioGather::new(
+            self.plain.clone(),
+            self.selection(cx),
+            self.layouts.clone(),
+            held,
+        ));
+        let (gate, links) = (self.gate.clone(), self.links.clone());
+        let mut renderer = MarkdownRenderer::blocks("body", self.nodes.clone())
+            .gather(gather.clone() as Rc<dyn TextGather>)
+            .diagrams(false)
+            .web_pictures(self.flags.web_pictures)
+            .code(code_hook(CodeStyle::read(cx), gather.clone()))
+            .table_frame(table_frame(gather.clone()))
+            .on_link(move |url, window, cx| {
+                if gate.take() {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    links(url, window, cx);
+                }
+            });
+        if let Some(sections) = &self.flags.sections {
+            renderer = renderer.sections(sections);
+        }
+        if let Some(memory) = &self.memory {
+            let culler = Rc::new(Culler::new(memory.clone(), gather, force));
+            renderer = renderer.cull(culler.clone() as Rc<dyn BlockCull>);
+            self.culler = Some(culler);
+        }
+        renderer
+    }
+
+    /// Fixes a pass that stood in for what the window shows: the body is drawn again, in the
+    /// same frame, with the blocks it needs, laid out at the width it was given and put where
+    /// the first drawing would have been (the way gpui's list does with its items). Whether it
+    /// did, in which case the new drawing is prepainted already.
+    fn settle(
+        &mut self,
+        culler: &Culler,
+        bounds: Bounds<Pixels>,
+        mask: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let Plan::Redraw { force, again } = culler.plan(bounds, mask, window) else {
+            return false;
+        };
+        redrew(matches!(force, Force::All));
+        let body = self.draw(force, cx);
+        let mut rendered = div().w(bounds.size.width).child(body).into_any_element();
+        let space = Size {
+            width: gpui::AvailableSpace::Definite(bounds.size.width),
+            height: gpui::AvailableSpace::MaxContent,
+        };
+        rendered.layout_as_root(space, window, cx);
+        rendered.prepaint_at(bounds.origin, window, cx);
+        self.rendered = Some(rendered);
+        if again {
+            window.request_animation_frame();
+        }
+        true
     }
 
     fn listen(&self, hitbox: Hitbox, window: &mut Window) {
@@ -478,30 +553,17 @@ impl Element for MarkdownView {
         });
         self.gate.open.set(false);
 
-        let gather = Rc::new(SirioGather::new(
-            self.plain.clone(),
-            self.selection(cx),
-            self.layouts.clone(),
-        ));
-        let (gate, links) = (self.gate.clone(), self.links.clone());
-        let mut renderer = MarkdownRenderer::blocks("body", self.nodes.clone())
-            .gather(gather.clone() as Rc<dyn TextGather>)
-            .diagrams(false)
-            .web_pictures(self.flags.web_pictures)
-            .code(code_hook(CodeStyle::read(cx), gather.clone()))
-            .table_frame(table_frame(gather))
-            .on_link(move |url, window, cx| {
-                if gate.take() {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                    links(url, window, cx);
-                }
-            });
-        if let Some(sections) = &self.flags.sections {
-            renderer = renderer.sections(sections);
+        self.memory = (self.flags.cull && super::cull::enabled()).then(|| {
+            window.with_optional_element_state::<Rc<RefCell<Memory>>, _>(id, |state, _| {
+                let memory = state.flatten().unwrap_or_default();
+                (memory.clone(), Some(memory))
+            })
+        });
+        if let Some(memory) = &self.memory {
+            memory.borrow_mut().sync(&self.nodes, window, cx);
         }
         // Drawing runs inside this call: the gather has every text when it returns.
-        let mut rendered = renderer.into_any_element();
+        let mut rendered = self.draw(Force::Nothing, cx).into_any_element();
         let layout = rendered.request_layout(window, cx);
         self.rendered = Some(rendered);
         (layout, ())
@@ -516,10 +578,20 @@ impl Element for MarkdownView {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        self.rendered
-            .as_mut()
-            .expect("markdown requested layout before prepaint")
-            .prepaint(window, cx);
+        let mask = window.content_mask().bounds;
+        let redrawn = match self.culler.clone() {
+            Some(culler) => self.settle(&culler, bounds, mask, window, cx),
+            None => false,
+        };
+        if !redrawn {
+            self.rendered
+                .as_mut()
+                .expect("markdown requested layout before prepaint")
+                .prepaint(window, cx);
+        }
+        if let Some(culler) = self.culler.take() {
+            culler.remember(bounds, mask);
+        }
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 

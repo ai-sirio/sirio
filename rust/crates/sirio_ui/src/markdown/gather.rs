@@ -13,8 +13,10 @@ use std::rc::Rc;
 
 use ely_gpui_component::documents::TextGather;
 use ely_gpui_component::theme::ActiveTheme as _;
-use gpui::{App, Bounds, HighlightStyle, Hsla, Pixels, Point, TextLayout, point, px};
+use gpui::{App, Bounds, ElementId, HighlightStyle, Hsla, Pixels, Point, TextLayout, point, px};
 
+use super::cull::HeldStore;
+use super::sideways::Held;
 use super::{PartKind, PlainText};
 use crate::text_selection::{caret_index, hit_index};
 
@@ -31,6 +33,19 @@ pub(crate) struct Drawn {
     pub start: usize,
     pub layout: TextLayout,
     pub links: Vec<(Range<usize>, String)>,
+    /// The bytes of the text the selection highlighted (what the tests compare).
+    #[cfg(test)]
+    pub selected: Vec<Range<usize>>,
+}
+
+/// What the tests read of one drawn text.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DrawnPart {
+    pub part: Option<usize>,
+    pub start: usize,
+    pub bounds: Bounds<Pixels>,
+    pub selected: Vec<Range<usize>>,
 }
 
 /// A link the last frame drew.
@@ -224,6 +239,21 @@ impl BodyLayouts {
         found
     }
 
+    /// Every text of the last frame: its part, where it starts, where it was laid out and
+    /// which of its bytes the selection highlighted.
+    #[cfg(test)]
+    pub(crate) fn drawn_parts(&self) -> Vec<DrawnPart> {
+        let frame = self.0.borrow();
+        (frame.texts.iter())
+            .map(|drawn| DrawnPart {
+                part: drawn.part,
+                start: drawn.start,
+                bounds: drawn.layout.bounds(),
+                selected: drawn.selected.clone(),
+            })
+            .collect()
+    }
+
     /// Every text pushed to the last frame's gather: the marker written before it and the
     /// text, in push order.
     #[cfg(test)]
@@ -270,10 +300,15 @@ pub(crate) struct SirioGather {
     /// Pushes so far.
     pushed: Cell<usize>,
     lead: RefCell<String>,
-    /// Sideways frames handed out so far.
-    frames: Cell<usize>,
+    /// The ids of the sideways frames handed out so far, stood-in ones included.
+    frames: RefCell<Vec<ElementId>>,
+    /// Where a body that stands in for blocks keeps its sideways frames' state.
+    held: Option<Rc<HeldStore>>,
     /// Whether a push that did not fit the walk has been reported.
     reported: Cell<bool>,
+    /// The highlight the last text was given, for the push that follows it.
+    #[cfg(test)]
+    last_selected: RefCell<Vec<Range<usize>>>,
 }
 
 impl SirioGather {
@@ -282,6 +317,7 @@ impl SirioGather {
         plain: Rc<PlainText>,
         selection: Option<Range<usize>>,
         layouts: BodyLayouts,
+        held: Option<Rc<HeldStore>>,
     ) -> Self {
         layouts.clear();
         let drawn = (plain.parts.iter().enumerate())
@@ -295,8 +331,11 @@ impl SirioGather {
             layouts,
             pushed: Cell::new(0),
             lead: RefCell::default(),
-            frames: Cell::new(0),
+            frames: RefCell::default(),
+            held,
             reported: Cell::new(false),
+            #[cfg(test)]
+            last_selected: RefCell::default(),
         }
     }
 
@@ -304,11 +343,35 @@ impl SirioGather {
         &self.layouts
     }
 
-    /// The next sideways frame's place among the body's.
-    pub(crate) fn next_frame(&self) -> usize {
-        let ordinal = self.frames.get();
-        self.frames.set(ordinal + 1);
-        ordinal
+    /// The next sideways frame's place among the body's, and its state when the body owns it;
+    /// `id` is the id Ely gave the frame.
+    pub(crate) fn next_frame(&self, id: &ElementId) -> (usize, Option<Held>) {
+        let mut frames = self.frames.borrow_mut();
+        frames.push(id.clone());
+        let held = self.held.as_ref().map(|store| store.take(id));
+        (frames.len() - 1, held)
+    }
+
+    /// Pushes and sideways frames so far.
+    pub(super) fn counts(&self) -> (usize, usize) {
+        (self.pushed.get(), self.frames.borrow().len())
+    }
+
+    /// The ids of the frames handed out from the `from`-th on.
+    pub(super) fn frames_from(&self, from: usize) -> Vec<ElementId> {
+        self.frames.borrow()[from..].to_vec()
+    }
+
+    /// Steps over a block that a stand-in draws: its pushes and its frames, whose state is
+    /// kept for when the block is drawn again.
+    pub(super) fn skip(&self, pushes: usize, frames: &[ElementId]) {
+        self.pushed.set(self.pushed.get() + pushes);
+        self.frames.borrow_mut().extend_from_slice(frames);
+        if let Some(store) = &self.held {
+            for id in frames {
+                store.keep(id);
+            }
+        }
     }
 
     /// The part the next push is, if `text` is it.
@@ -328,6 +391,14 @@ impl SirioGather {
 
     /// The selection's highlight on `text`, the next drawn, in `color`.
     pub(crate) fn highlight(&self, text: &str, color: Hsla) -> Vec<(Range<usize>, HighlightStyle)> {
+        let found = self.highlighted(text, color);
+        #[cfg(test)]
+        self.last_selected
+            .replace(found.iter().map(|(range, _)| range.clone()).collect());
+        found
+    }
+
+    fn highlighted(&self, text: &str, color: Hsla) -> Vec<(Range<usize>, HighlightStyle)> {
         let Some(selection) = &self.selection else {
             return Vec::new();
         };
@@ -369,6 +440,8 @@ impl SirioGather {
             start,
             layout,
             links: links.to_vec(),
+            #[cfg(test)]
+            selected: self.last_selected.take(),
         });
     }
 }

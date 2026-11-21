@@ -54,6 +54,8 @@ fn click(cx: &mut VisualTestContext, at: Point<Pixels>) {
     refresh_frame(cx);
 }
 
+mod cull;
+
 /// The cuts of a streamed reply: every char boundary of the first 512 bytes, then about
 /// every 97 bytes (rounded up to a char boundary), then the end.
 fn cuts(source: &str) -> Vec<usize> {

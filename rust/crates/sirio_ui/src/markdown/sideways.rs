@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, Div, DragMoveEvent, ElementId, EmptyView, EntityId, Hsla,
+    AnyElement, App, Bounds, Div, DragMoveEvent, ElementId, EmptyView, Hsla,
     IntoElement, MouseButton, Pixels, RenderOnce, ScrollHandle, Stateful, Window, canvas, div,
     point, prelude::*, px,
 };
@@ -34,7 +34,7 @@ pub(super) fn bar_ink() -> [Hsla; 3] {
 /// pointer's place is taken at the press, not at the first move: a drag is only recognised
 /// after the pointer has already travelled.
 struct BarDrag {
-    owner: EntityId,
+    owner: u64,
     start: Pixels,
     anchor: Rc<Cell<Option<Pixels>>>,
 }
@@ -57,6 +57,24 @@ fn bar_geometry(handle: &ScrollHandle) -> Option<(Pixels, Pixels, Pixels, Pixels
     Some((length, travel, reach, start))
 }
 
+/// What a sideways frame keeps between frames: the scroll position and the bar's grab. A body
+/// that stands in for far blocks owns these, so a frame that is not drawn for a while does not
+/// lose its place (gpui drops the element state a frame did not touch).
+#[derive(Clone)]
+pub(super) struct Held {
+    pub(super) handle: ScrollHandle,
+    pub(super) grab: Rc<Cell<Option<Pixels>>>,
+}
+
+impl Held {
+    pub(super) fn new() -> Self {
+        Self {
+            handle: ScrollHandle::new(),
+            grab: Rc::new(Cell::new(None)),
+        }
+    }
+}
+
 /// A horizontally scrolling block with a bar. `scroller` is the scrolling container; it is
 /// tracked here, and the bar is an overlay beside it, not inside it, because a child would
 /// scroll away with the content.
@@ -73,6 +91,9 @@ pub(super) struct Sideways {
     /// where the frame sits.
     ordinal: usize,
     on_bounds: Option<Rc<dyn Fn(usize, Bounds<Pixels>)>>,
+    /// The body's own state for this frame; without it the state is gpui's, keyed under the
+    /// element ids above the frame.
+    held: Option<Held>,
 }
 
 impl Sideways {
@@ -83,7 +104,14 @@ impl Sideways {
             ink: bar_ink(),
             ordinal,
             on_bounds: None,
+            held: None,
         }
+    }
+
+    /// Keeps the frame's state in `held`, which the body owns.
+    pub(super) fn held(mut self, held: Option<Held>) -> Self {
+        self.held = held;
+        self
     }
 
     /// Told where the frame sits each frame, in window pixels.
@@ -97,15 +125,25 @@ impl RenderOnce for Sideways {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let ordinal = self.ordinal;
         let key = |what: &str| ElementId::from((self.id.clone(), what.to_owned()));
-        let state = window.use_keyed_state(key("scroll"), cx, |_, _| ScrollHandle::new());
-        let owner = state.entity_id();
-        let handle = state.read(cx).clone();
-        // Outside the frame's elements: the press and the drag it starts can be built by
-        // different frames, and each would hold its own cell.
-        let grab = window
-            .use_keyed_state(key("grab"), cx, |_, _| Rc::new(Cell::new(None)))
-            .read(cx)
-            .clone();
+        let (handle, grab, owner) = match self.held.clone() {
+            Some(Held { handle, grab }) => {
+                // Which bar a drag belongs to: this frame's, however many frames drew it.
+                let owner = Rc::as_ptr(&grab) as usize as u64;
+                (handle, grab, owner)
+            }
+            None => {
+                let state = window.use_keyed_state(key("scroll"), cx, |_, _| ScrollHandle::new());
+                let owner = state.entity_id().as_u64();
+                let handle = state.read(cx).clone();
+                // Outside the frame's elements: the press and the drag it starts can be built
+                // by different frames, and each would hold its own cell.
+                let grab = window
+                    .use_keyed_state(key("grab"), cx, |_, _| Rc::new(Cell::new(None)))
+                    .read(cx)
+                    .clone();
+                (handle, grab, owner)
+            }
+        };
         let bar = sideways_bar(key("thumb"), ordinal, &handle, owner, grab, self.ink);
         let report = self.on_bounds.clone().map(|report| {
             canvas(move |bounds, _, _| report(ordinal, bounds), |_, _, _, _| {})
@@ -133,7 +171,7 @@ fn sideways_bar(
     id: ElementId,
     ordinal: usize,
     handle: &ScrollHandle,
-    owner: EntityId,
+    owner: u64,
     grab: Rc<Cell<Option<Pixels>>>,
     ink: [Hsla; 3],
 ) -> AnyElement {

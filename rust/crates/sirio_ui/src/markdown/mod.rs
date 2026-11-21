@@ -16,6 +16,7 @@ use crate::chat::file_links::FileLinkMemo;
 use crate::markdown_preview::{DiagramRequest, Diagrams};
 
 mod code;
+pub(crate) mod cull;
 mod gather;
 mod menu;
 mod rewrite;
@@ -30,6 +31,8 @@ mod tests;
 // Consumers arrive with Tasks 5-7 (the Preview, change requests, the chat).
 #[allow(unused_imports)]
 pub(crate) use gather::BodyLayouts;
+#[cfg(test)]
+pub(crate) use gather::DrawnPart;
 #[allow(unused_imports)]
 pub(crate) use menu::{MarkdownMenuItem, perform};
 pub(crate) use slug::slug;
