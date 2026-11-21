@@ -955,6 +955,23 @@ Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN R
 # needs rust/target/debug/examples/ely_chat_seed. --display :N, --only preview,chat,cr-description.
 Scripts/Tests/capture-markdown-surfaces.sh --bin-dir DIR --out-dir DIR   # -> prints "MARKDOWN SURFACES CAPTURED (<n> frames)"
 
+# Markdown on ely-documents in the real app (spec 2026-11-20-ely-markdown-documents-design.md §6.2): an
+# isolated debug Sirio on a private Xvfb (:120-:139, started and stopped by the script) opens the
+# showcase fixture plus a late section (the driver is Scripts/Tests/markdown_documents_e2e.py). Real X
+# input aimed by the Preview's debug state (`surface editor state`: preview_nodes, preview_scroll,
+# preview_texts, preview_links, preview_outline_at, preview_outline_toggle_at, preview_diagrams) and
+# the display's real clipboard (GTK, python3-gi): node counts; a `[[toc]]` entry, a `#slug` link and
+# an outline row each bring their heading to the top; the reading share grows; `<img width=120>` draws
+# 120 px wide (a capture scan); Mermaid is rendered into the cache directory, PlantUML too when
+# `plantuml` is on PATH, else `SKIP plantuml (not on PATH)`; a drag plus Ctrl+C and the right-click
+# menu's Copy put the expected text on the clipboard; Ctrl+C in the terminal still echoes ^C at the
+# PTY; a chat reply of at least 40 KiB, culled at the tail, is copied whole by the transcript menu's
+# Select All and Copy (equal to the transcript text), and a jump to its top draws no blank band.
+# --mutate no-sections starts the app with SIRIO_DEBUG_MARKDOWN_NO_SECTIONS (a debug-build knob: the
+# Preview is drawn without `sections`): the run must FAIL at anchor-toc. --display :N, --out-dir DIR
+# (default artifacts/ely-md/e2e: transcript.json, frames/, the clipboards and expected texts).
+Scripts/Tests/test-markdown-documents-e2e.sh --display :122   # -> prints "MARKDOWN DOCUMENTS E2E OK (<n> checks, <n> skipped, display <d>)"
+
 # The environment of an opened link: the app starts through a fake AppImage mount's AppRun on a
 # private Xvfb with both WAYLAND_DISPLAY and a DISPLAY set (so it forces X11 for itself), a
 # Claude chat on the file-links stub draws a web link, and a real click on it reaches an
