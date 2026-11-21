@@ -1290,11 +1290,6 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
         .unwrap_or_else(|| project_root.to_string_lossy().into_owned());
     let project_path = project_root.to_string_lossy().into_owned();
     let worktree_path = layout.working_directory.to_string_lossy().into_owned();
-    let branch = if layout.branch.is_empty() {
-        "main".to_string()
-    } else {
-        layout.branch.clone()
-    };
 
     let mut project = db
         .projects()?
@@ -1307,18 +1302,30 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
     // A layout flush runs on every debounced save, worktree switch and
     // quit: rebuilding the row from scratch would reset the hidden flag,
     // comment, primary flag and order the catalog writer maintains.
+    //
+    // Nor does the layout decide whether the worktree is a repository: its
+    // branch is a label, "main" for a plain folder (`head_branch_label`).
+    // The catalog writer stores a plain folder's row with no branch, and
+    // `restore_catalog` reads "no branch" as "not a repository" when the
+    // folder is gone, so the label only replaces a branch the row already
+    // has: whether the row is a repository is the catalog writer's to say
+    // (a `git init` made outside Sirio reaches the row with its next
+    // catalog write). A new row is only ever a plain folder (an unresolved
+    // git worktree was dropped above): it gets no branch either.
     let record = db
         .worktrees()?
         .into_iter()
         .find(|worktree| worktree.id == worktree_id)
         .map(|mut existing| {
             existing.project_id = project_id.clone();
-            existing.branch = branch.clone();
+            if !existing.branch.is_empty() && !layout.branch.is_empty() {
+                existing.branch = layout.branch.clone();
+            }
             existing.path = worktree_path.clone();
             existing
         })
         .unwrap_or_else(|| {
-            WorktreeRecord::new(&worktree_id, &project_id, &branch, &worktree_path)
+            WorktreeRecord::new(&worktree_id, &project_id, "", &worktree_path)
         });
     db.save_worktree(&record)?;
 

@@ -119,7 +119,7 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
                         icon: pill.icon,
                         brand: pill.brand,
                         project: project.clone(),
-                        branch: row.title.clone(),
+                        branch: Sidebar::branch_text(row),
                         status: pill.status,
                         at: pill.last_event_at,
                         selected: pill.selected,
@@ -153,7 +153,7 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
                     .map_or(Icon::MessageSquare, |agent| agent.icon),
                 brand: session.agent.map(|agent| agent.brand),
                 project,
-                branch: rows[index].title.clone(),
+                branch: Sidebar::branch_text(&rows[index]),
                 status: None,
                 at: Some(session.closed_at),
                 selected: false,
@@ -280,6 +280,7 @@ mod tests {
             tab_kind: None,
             agent_icon: None,
             agent_brand: None,
+            missing: false,
             comment: None,
             pills: Vec::new(),
             unread_count: 0,
@@ -889,8 +890,8 @@ impl Sidebar {
             )
     }
 
-    /// A session card's height: the worktree card's two-line rhythm at the
-    /// persisted interface size.
+    /// A session card's height: the two-line rhythm (Zed's two-line thread
+    /// row) at the persisted interface size.
     pub(super) fn row_drawn_height_for_card(typography: &Typography) -> f32 {
         CARD_TWO_LINE_HEIGHT + f32::from(Self::title_line_height(typography))
             - ROW_TITLE_LINE_HEIGHT

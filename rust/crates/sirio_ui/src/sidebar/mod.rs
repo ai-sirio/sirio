@@ -203,12 +203,28 @@ const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
 pub(crate) const ROW_HEIGHT: f32 = 34.0;
 /// Horizontal padding of a sidebar row and of a section header (Zed's 6px).
 pub(crate) const ROW_PAD_X: f32 = 6.0;
+/// A project row's left padding: the folder's centre (13 + 8) is the New Chat
+/// icon's centre (8 + 6 + 14 / 2), so the two icons line up in one column.
+pub(crate) const PROJECT_PAD_LEFT: f32 = 13.0;
+/// The project row's folder icon (Ely's Md icon size).
+pub(crate) const FOLDER_ICON: f32 = 16.0;
+/// Folder to project name: the name starts at 36, where "New Chat" starts.
+pub(crate) const PROJECT_NAME_GAP: f32 = 7.0;
+/// A worktree card: one 31 px line, the project row's own height, so the list
+/// keeps one rhythm. The 20 px pills fit with 5.5 px to spare.
+pub(crate) const WORKTREE_CARD_HEIGHT: f32 = 31.0;
 /// How far a worktree card's content sits in from its box, so it lines up
-/// with the project name above it.
-const CARD_CONTENT_INDENT: f32 = 24.0;
+/// with the project name above it (at 36, 15 px clear of the guide line).
+const CARD_CONTENT_INDENT: f32 = PROJECT_PAD_LEFT + FOLDER_ICON + PROJECT_NAME_GAP - ROW_PAD_X;
+/// The guide line's pixel column, next to the folder's centre (21).
+const GUIDE_X: f32 = 20.0;
+/// What a card's name keeps before it ellipsises: the pills give way first.
+const NAME_MIN_WIDTH: f32 = 40.0;
+/// The gap between a card's name and its "(missing)" label.
+const MISSING_GAP: f32 = 4.0;
 /// The width of a card's trailing seat: the star, 6 px, the cross.
 const TRAILING_SLOT_WIDTH: f32 = 38.0;
-/// Vertical padding of a sidebar row: 8 + 18 + 8 = 34, and 8 + 18 + 4 + 15 + 8 = 53.
+/// Vertical padding of a Sessions card: 8 + 18 + 8 = 34, and 8 + 18 + 4 + 15 + 8 = 53.
 pub(crate) const ROW_PAD_Y: f32 = 8.0;
 /// Row title line height: the 13px title's line (the row adds `ROW_PAD_Y` above and below).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
@@ -236,6 +252,7 @@ fn closes_project(rows: &[SidebarRow], index: usize) -> bool {
         && rows.get(index + 1).is_none_or(|next| next.kind == RowKind::Project)
 }
 /// Two-line card height: 8 + 18 + 4 + 15 + 8 — Zed's two-line thread row.
+/// The Sessions cards use it; a worktree card is one line (`WORKTREE_CARD_HEIGHT`).
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 53.0;
 /// A visible row in the flattened sidebar tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -301,6 +318,9 @@ pub struct SidebarRow {
     /// from `SidebarWorktree::comment`. Only meaningful for
     /// `RowKind::Worktree`.
     pub comment: Option<String>,
+    /// The worktree's checkout is gone from disk; drawn as "(missing)" after
+    /// the name. Only meaningful for `RowKind::Worktree`.
+    pub missing: bool,
     /// F-CORE-ACT-18: one brand mark per *distinct agent currently running*
     /// in this worktree, already de-duplicated and in `AgentCatalog` order
     /// by `AgentActivityModel::running_agent_ids`. Only meaningful for
@@ -342,6 +362,9 @@ pub struct SidebarWorktree {
     /// bar — the worktree row itself never rendered it. `None` when no
     /// comment has ever been set for this path.
     pub comment: Option<String>,
+    /// The checkout is gone from disk. Drawn as "(missing)" after the name,
+    /// so the branch text stays the branch (and an empty one stays empty).
+    pub missing: bool,
 }
 
 /// Stable target carried by a sidebar context action. Paths and catalog ids
@@ -681,6 +704,10 @@ struct ProbeRects {
     /// main checkout): the card whose cross `card_remove` records.
     first_removable: std::cell::Cell<Option<usize>>,
     section: ProbeCell,
+    /// The first project row's folder icon.
+    section_folder: ProbeCell,
+    /// The first card's guide-line segment.
+    guide: ProbeCell,
     /// The first project row's `+` and three dots.
     section_add: ProbeCell,
     section_menu: ProbeCell,
@@ -723,6 +750,11 @@ fn probe_canvas(cell: &ProbeCell) -> impl IntoElement {
 pub struct SidebarProbe {
     /// The first project row (31 px), not the section header.
     pub section: Option<Bounds<Pixels>>,
+    /// The first project row's folder icon.
+    pub section_folder: Option<Bounds<Pixels>>,
+    /// The first worktree card's guide segment: 1 px wide, from 2 px above
+    /// the card to its bottom.
+    pub guide: Option<Bounds<Pixels>>,
     /// The first project row's `+` and three dots (hover-only, so drawn or
     /// not they are always located).
     pub section_add: Option<Bounds<Pixels>>,
@@ -753,6 +785,22 @@ pub struct SidebarShellState {
     pub hover_card_worktree: Option<PathBuf>,
     /// The bell's dot: "error", "needs-input" or "unread".
     pub bell: Option<&'static str>,
+    /// The card facts (worktree, name, fallback, missing, pill count) for the debug read, one per
+    /// worktree row `visible_rows` yields. It reads the rows, not the paint, so a card hidden by
+    /// the Sessions view or a folded list is still listed.
+    pub cards: Vec<CardFacts>,
+}
+
+/// What one worktree card says, for the debug attention read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardFacts {
+    pub worktree: PathBuf,
+    /// The name the card draws (the folder's name when the branch is empty).
+    pub name: String,
+    /// The name is the folder's: the worktree has no branch name.
+    pub fallback: bool,
+    pub missing: bool,
+    pub pills: usize,
 }
 
 impl ProbeRects {
@@ -776,11 +824,13 @@ impl ProbeRects {
     fn follow(&self, section: Option<usize>, card: Option<usize>, removable: Option<usize>) {
         if self.first_section.replace(section) != section {
             self.section.set(None);
+            self.section_folder.set(None);
             self.section_add.set(None);
             self.section_menu.set(None);
         }
         if self.first_card.replace(card) != card {
             self.card.set(None);
+            self.guide.set(None);
             self.card_star.set(None);
         }
         if self.first_removable.replace(removable) != removable {
@@ -956,6 +1006,8 @@ impl Sidebar {
         let probe = &self.probe;
         SidebarProbe {
             section: probe.section.get(),
+            section_folder: probe.section_folder.get(),
+            guide: probe.guide.get(),
             section_add: probe.section_add.get(),
             section_menu: probe.section_menu.get(),
             card: probe.card.get(),
@@ -983,6 +1035,21 @@ impl Sidebar {
             .filter(|_| self.hover_card.shown)
             .and_then(|id| self.rows.iter().find(|row| row.id == id))
             .and_then(|row| row.path.clone());
+        let cards = self
+            .visible_rows()
+            .iter()
+            .filter(|row| row.kind == RowKind::Worktree)
+            .filter_map(|row| {
+                let (name, fallback) = Self::card_name(row);
+                Some(CardFacts {
+                    worktree: row.path.clone()?,
+                    name,
+                    fallback,
+                    missing: row.missing,
+                    pills: row.pills.len(),
+                })
+            })
+            .collect();
         SidebarShellState {
             list_focused: self.tree_focus.is_focused(window),
             filter_shown: self.filter_shown,
@@ -992,6 +1059,7 @@ impl Sidebar {
                 sessions::BellReason::NeedsInput => "needs-input",
                 sessions::BellReason::Unread => "unread",
             }),
+            cards,
         }
     }
 
@@ -1197,6 +1265,7 @@ impl Sidebar {
                 tab_kind: None,
                 agent_icon: None,
                 agent_brand: None,
+                missing: false,
                 comment: None,
                 pills: Vec::new(),
                 unread_count: 0,
@@ -1345,6 +1414,7 @@ impl Sidebar {
                 tab_kind: None,
                 agent_icon: None,
                 agent_brand: None,
+                missing: false,
                 comment: None,
                 pills: Vec::new(),
                 unread_count: 0,
@@ -1369,6 +1439,7 @@ impl Sidebar {
                     agent_icon: None,
                     agent_brand: None,
                     comment: worktree.comment,
+                    missing: worktree.missing,
                     pills: Vec::new(),
                     unread_count: 0,
                 });
@@ -1452,7 +1523,7 @@ impl Sidebar {
             }
             let height = match row.kind {
                 RowKind::Project => section::SECTION_HEIGHT,
-                _ => CARD_TWO_LINE_HEIGHT,
+                _ => WORKTREE_CARD_HEIGHT,
             };
             offset += height + ROW_V_GAP;
             if closes_project(rows, index) {
@@ -3282,6 +3353,7 @@ impl Sidebar {
                 tab_kind: None,
                 agent_icon: None,
                 agent_brand: None,
+                missing: false,
                 comment: None,
                 pills: Vec::new(),
                 unread_count: 0,
@@ -3308,7 +3380,7 @@ impl Sidebar {
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
             .filter(|_| !self.is_main_checkout(row_id))
-            .map(|row| row.title.clone())
+            .map(Self::removal_branch)
         else {
             // #372: neither the primary nor git's main checkout is removable —
             // the hover-x is not drawn for them, so reaching here means a
@@ -3386,7 +3458,7 @@ impl Sidebar {
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
             .filter(|_| !self.is_main_checkout(row_id))
-            .and_then(|row| row.path.clone().map(|path| (row.title.clone(), path)))
+            .and_then(|row| row.path.clone().map(|path| (Self::removal_branch(row), path)))
         else {
             return;
         };
@@ -3443,7 +3515,7 @@ impl Sidebar {
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree)
-            .map(|row| row.title.clone())
+            .map(Self::removal_branch)
         else {
             return;
         };
@@ -3465,6 +3537,21 @@ impl Sidebar {
                 .ok();
         })
         .detach();
+    }
+
+    /// The branch name the worktree removal flow asks about, looks up and hands git. A
+    /// missing worktree's row used to carry "<branch> (missing)" as its title, so removing it
+    /// asked about that name, found no upstream for it, and `git branch -D` refused it:
+    /// removing a missing row has always kept its branch. The title is the plain branch now
+    /// (the card draws the state itself), and this keeps that behaviour exactly; whether
+    /// removing a missing row should delete its branch is a decision of its own, not a side
+    /// effect of the one-line card.
+    fn removal_branch(row: &SidebarRow) -> String {
+        if row.missing {
+            format!("{} (missing)", row.title)
+        } else {
+            row.title.clone()
+        }
     }
 
     /// Removes a worktree on the background executor and drops its rows.
@@ -3493,7 +3580,7 @@ impl Sidebar {
             .and_then(|row| {
                 row.path
                     .clone()
-                    .map(|path| (path, row.title.clone(), row.is_primary))
+                    .map(|path| (path, Self::removal_branch(row), row.is_primary))
             })
         else {
             return;
@@ -3615,7 +3702,7 @@ impl Sidebar {
             return true;
         }
         let matches = |text: &str| text.to_lowercase().contains(query);
-        matches(&row.title)
+        matches(&Self::branch_text(row))
             || row.comment.as_deref().is_some_and(matches)
             || row
                 .pills
@@ -4855,6 +4942,7 @@ impl Render for Sidebar {
         let first_card_probe = self.probe.first_card.get();
         let section_probes = section::SectionProbes {
             row: self.probe.section.clone(),
+            folder: self.probe.section_folder.clone(),
             add: self.probe.section_add.clone(),
             menu: self.probe.section_menu.clone(),
         };
@@ -5505,6 +5593,9 @@ impl Render for Sidebar {
                                 .left_0()
                                 .right_0()
                                 .h(px(section::SECTION_HEIGHT))
+                                // The project row has no band of its own now,
+                                // so this is what hides the cards scrolling under it.
+                                .bg(theme.ely.bg)
                                 .child(section::render_section(
                                     row,
                                     sticky_worktree_count,
@@ -5801,12 +5892,14 @@ pub(super) mod tests_support {
                         branch: "main".to_string(),
                         path: PathBuf::from("/tmp/sirio"),
                         is_primary: true,
+                        missing: false,
                         comment: None,
                     },
                     SidebarWorktree {
                         branch: "feat/x".to_string(),
                         path: PathBuf::from("/tmp/sirio-feat-x"),
                         is_primary: false,
+                        missing: false,
                         comment: Some("redesign".to_string()),
                     },
                 ],
@@ -6189,12 +6282,14 @@ mod tests {
                         branch: "main".to_string(),
                         path: PathBuf::from("/tmp/first-main"),
                         is_primary: true,
+                        missing: false,
                         comment: None,
                     },
                     SidebarWorktree {
                         branch: "feature".to_string(),
                         path: PathBuf::from("/tmp/first-feature"),
                         is_primary: false,
+                        missing: false,
                         comment: None,
                     },
                 ],
@@ -6208,6 +6303,7 @@ mod tests {
                     branch: "main".to_string(),
                     path: PathBuf::from("/tmp/second-main"),
                     is_primary: true,
+                    missing: false,
                     comment: None,
                 }],
             },
@@ -6256,6 +6352,7 @@ mod tests {
                 branch: format!("worktree-{index}"),
                 path: project_root.join(format!("worktree-{index}")),
                 is_primary: index == 0,
+                missing: false,
                 comment: None,
             })
             .collect();
@@ -6337,6 +6434,7 @@ mod tests {
                         branch: "worktree/green-meadow-592b".into(),
                         path: project_root.join("green-meadow"),
                         is_primary: false,
+                        missing: false,
                         comment: None,
                     }],
                 }],
@@ -6926,6 +7024,7 @@ mod tests {
                         branch: "main".into(),
                         path: repo.clone(),
                         is_primary: true,
+                        missing: false,
                         comment: None,
                     }],
                 }],
@@ -7348,6 +7447,7 @@ mod tests {
                         branch: "main".into(),
                         path: repo.clone(),
                         is_primary: true,
+                        missing: false,
                         comment: None,
                     }],
                 }],
@@ -7423,12 +7523,14 @@ mod tests {
                             branch: "main".into(),
                             path: project_root.clone(),
                             is_primary: true,
+                            missing: false,
                             comment: None,
                         },
                         SidebarWorktree {
                             branch: "feat/closing".into(),
                             path: project_root.join("closing"),
                             is_primary: false,
+                            missing: false,
                             comment: None,
                         },
                     ],
@@ -7789,12 +7891,14 @@ mod tests {
                                 branch: "main".to_string(),
                                 path: repo.clone(),
                                 is_primary: true,
+                                missing: false,
                                 comment: None,
                             },
                             SidebarWorktree {
                                 branch: "doomed".to_string(),
                                 path: undeletable.clone(),
                                 is_primary: false,
+                                missing: false,
                                 comment: None,
                             },
                         ],
@@ -8091,6 +8195,7 @@ mod tests {
                     branch: "main".into(),
                     path: PathBuf::from("/repo/first"),
                     is_primary: true,
+                    missing: false,
                     comment: None,
                 }],
             },
@@ -8103,6 +8208,7 @@ mod tests {
                     branch: "main".into(),
                     path: PathBuf::from("/repo/second"),
                     is_primary: true,
+                    missing: false,
                     comment: None,
                 }],
             },
@@ -8269,12 +8375,14 @@ mod tests {
                             branch: "main".into(),
                             path: project_root.join("main"),
                             is_primary: true,
+                            missing: false,
                             comment: None,
                         },
                         SidebarWorktree {
                             branch: "feature".into(),
                             path: project_root.join("feature"),
                             is_primary: false,
+                            missing: false,
                             comment: None,
                         },
                     ],
@@ -8486,6 +8594,7 @@ mod tests {
                     branch: format!("branch-{index}"),
                     path: PathBuf::from(format!("/repo/project-{index}")),
                     is_primary: index == 0,
+                    missing: false,
                     comment: None,
                 })
                 .collect(),
@@ -8586,6 +8695,7 @@ mod tests {
                     branch: format!("branch-{index}"),
                     path: PathBuf::from(format!("/repo/project-{index}")),
                     is_primary: index == 0,
+                    missing: false,
                     comment: None,
                 })
                 .collect(),
@@ -9004,12 +9114,14 @@ mod tests {
                     branch: "main".to_string(),
                     path: PathBuf::from(format!("/tmp/{id}")),
                     is_primary: true,
+                    missing: false,
                     comment: None,
                 },
                 SidebarWorktree {
                     branch: "feat/x".to_string(),
                     path: PathBuf::from(format!("/tmp/{id}-feat-x")),
                     is_primary: false,
+                    missing: false,
                     comment: None,
                 },
             ],
@@ -9190,6 +9302,7 @@ mod tests {
                 branch: format!("worktree-{index}"),
                 path: project_root.join(format!("worktree-{index}")),
                 is_primary: index == 0,
+                missing: false,
                 comment: None,
             })
             .collect();
@@ -9983,18 +10096,21 @@ mod tests {
                                 branch: "main".into(),
                                 path: root.clone(),
                                 is_primary: false,
+                                missing: false,
                                 comment: None,
                             },
                             SidebarWorktree {
                                 branch: "feature".into(),
                                 path: root.join("feature"),
                                 is_primary: true,
+                                missing: false,
                                 comment: None,
                             },
                             SidebarWorktree {
                                 branch: "plain".into(),
                                 path: root.join("plain"),
                                 is_primary: false,
+                                missing: false,
                                 comment: None,
                             },
                         ],

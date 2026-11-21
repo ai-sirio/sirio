@@ -11,36 +11,58 @@ set -eEuo pipefail
 # in order:
 #    1  one repo with two worktrees, added and selected: the title, bell, search,
 #       New Chat row and section header are drawn; the project row is 31 px, the
-#       card 53, the section header 28, the New Chat row 31
-#    2  a click on the project row folds it (its cards leave the list), another
-#       unfolds it; the row and the section header are captured with the pointer on
-#       them and off, and the crops of their right ends are asserted to change.
+#       one-line card 31, the section header 28, the New Chat row 31
+#    2  the redesign of the project row and the guide (spec
+#       docs/superpowers/specs/2026-11-20-sidebar-codex-rows-design.md): the folder
+#       icon's centre is the New Chat icon's centre (its row pads 6, its icon is 14),
+#       the guide is 1 px wide, starts at the project row's bottom and is centred
+#       under the folder. The project row draws no band: a crop of it, from 140 px
+#       in to 50 px before its right end and its full height (its top and bottom
+#       pixel rows included), is one colour, and it is the colour of the section
+#       header between its title and its +. On the frame where the first card is
+#       selected (its wash is under the line) the guide's column, from its top to
+#       the second card's bottom, differs pixel by pixel from the column 3 px to its
+#       left, and the 4 rows under that bottom do not (the line stops)
+#    3  a click on the project row folds it (its cards and its guide leave the
+#       list), another unfolds it; the row and the section header are captured
+#       with the pointer on them and off, and the crops of their right ends are
+#       asserted to change.
 #       The hover-only controls are also judged by pixels, each cropped at its
 #       own rect (the app reports them: sidebarSectionAdd, sidebarSectionMenu,
 #       sidebarHeaderExpandAll, sidebarHeaderCollapseAll): more than one
 #       colour under the pointer, exactly one (uniform) at rest. frames/ keep
 #       the by-eye record
-#    3  the title menu switches to Sessions (the Projects rows are not drawn) and
+#    4  the title menu switches to Sessions (the Projects rows are not drawn) and
 #       back, by real clicks on the menu's rows
-#    4  the pointer on a card: after 500 ms the hover card is open beside the
+#    5  the pointer on a card: after 500 ms the hover card is open beside the
 #       sidebar (its left edge at least left.x + left.w + 4: 4 px past the sidebar's
 #       visible right edge, border included), the hover card and the open state
 #       agree, the star's rect lies inside the card. The main worktree is the
-#       Primary (the served `primary` flag is read): a hover shows its filled star
-#       only, a plain card its outline star and its cross (judged by eye in
-#       frames/; the star's and the cross's own rects, sidebarCardStar and
-#       sidebarCardRemove, hold more than one colour under the pointer and one at
-#       rest). A click on the Primary's star unsets it (the flag goes true then
-#       false, and the same card's star crop differs); a second click restores it
-#    5  one session made unread (a codex stub reports running then done while the
+#       Primary (the served `primary` flag is read): its filled star is in its seat
+#       at rest too (its rect holds more than one colour under the pointer and at
+#       rest), a plain card shows its outline star and its cross under the pointer
+#       (judged by eye in frames/; the cross's own rect, sidebarCardRemove, holds
+#       more than one colour under the pointer and one at rest). A click on the
+#       Primary's star unsets it (the flag goes true then false, and the same
+#       card's star crop differs); a second click restores it
+#    6  one session made unread (a codex stub reports running then done while the
 #       other worktree is selected): the bell reads "unread"; a click on the bell
 #       opens its menu; a click on the entry selects the session's tab and the bell
 #       reads nothing
-#    6  a click on Search shows the filter field (filterShown), Esc hides it
-#    7  a click on the centre pane (listFocused false), then on a card
+#    7  a click on Search shows the filter field (filterShown), Esc hides it
+#    8  a click on the centre pane (listFocused false), then on a card
 #       (listFocused true), then on the centre pane again (false); the list draws
 #       no focus ring, so its left edge is the same focused and unfocused
-#    8  a second project with 22 worktrees: the list is captured at rest, after a
+#    9  a plain folder (no .git) added as a project: its card is named after the
+#       folder (the debug read's cards: name, fallback true, missing false, the
+#       worktree being the folder's real path). The folder is selected, the app
+#       quits, the folder is moved away and the app relaunched: the same card still
+#       reads the folder's name (never "main"), and reads missing
+#   10  a worktree with many tabs: 8 terminal tabs opened in the selected worktree
+#       through the control socket; its card lists 9 pills or more,
+#       is still 31 px high and its star's rect lies inside the card (the pill
+#       strip is clipped, the seat is not pushed out)
+#   11  a third project with 40 worktrees: the list is captured at rest, after a
 #       wheel turn with the pointer off the list (idle frame, bar up) and 2.2 s
 #       later (bar faded). The list body is the same in the last two and the bar's
 #       strip differs, so the check fails when no bar is drawn; the body differs
@@ -217,7 +239,7 @@ printf '# app\n\nThe file the sidebar E2E opens.\n' >"$WT/README.md"
 git -C "$WT" add -A
 git -C "$WT" commit -q -m first
 git -C "$WT" worktree add -q -b other "$OTHER"
-# The second project of step 8: a repository with 22 worktrees, so the list overflows.
+# The second project of step 11: a repository with 40 worktrees, so the list overflows.
 BIG="$RUN_DIR/big"
 mkdir -p "$BIG"
 git -C "$BIG" init -q -b main
@@ -226,7 +248,7 @@ git -C "$BIG" config user.name Tester
 printf '# big\n' >"$BIG/README.md"
 git -C "$BIG" add -A
 git -C "$BIG" commit -q -m first
-for n in $(seq 1 22); do
+for n in $(seq 1 40); do
   git -C "$BIG" worktree add -q -b "feature-$n" "$RUN_DIR/big-wt-$n"
 done
 
@@ -685,6 +707,63 @@ expect_hover_only() { # case key hover_frame rest_frame
   fi
 }
 
+# The pixel checks of the redesign. A crop is "WxH+X+Y" in window pixels.
+crop_colour() { # frame crop: "<number of colours> <hex of the first pixel>"
+  "$IM" "$OUT_DIR/frames/$1-$TAG.png" -crop "$2" +repage -format '%k %[hex:p{0,0}]' info: \
+    || fail "could not read the colour of $2 in $1"
+}
+# A crop that holds exactly one colour in a frame, and that colour is the one of another crop
+# (of the same or of another frame): "no band" is a row that is the ground's own colour.
+expect_one_colour_equal() { # case key frameA cropA frameB cropB
+  local a b
+  a=$(crop_colour "$3" "$4")
+  b=$(crop_colour "$5" "$6")
+  if [ "${a%% *}" = 1 ] && [ "${b%% *}" = 1 ] && [ "${a#* }" = "${b#* }" ]; then
+    tsv_row "$1" "$2" "one colour in $3 $4, equal to $5 $6" "#${a#* } and #${b#* }" ok
+  else
+    tsv_row "$1" "$2" "one colour in $3 $4, equal to $5 $6" "${a%% *} colours (#${a#* }) and ${b%% *} colours (#${b#* })" FAIL
+    fail "$2: $3 $4 is ${a%% *} colours (#${a#* }), $5 $6 is ${b%% *} colours (#${b#* })"
+  fi
+}
+# The fraction of the pixels of a 1-px-wide column (x, y, h) of a frame that differ from the
+# column 3 px to its left, over any channel: 1 when every pixel differs, 0 when none does.
+column_diff() { # frame x y h
+  "$IM" "$OUT_DIR/frames/$1-$TAG.png" -crop "1x$4+$2+$3" +repage \
+    \( "$OUT_DIR/frames/$1-$TAG.png" -crop "1x$4+$(( $2 - 3 ))+$3" +repage \) \
+    -compose difference -composite -separate -evaluate-sequence max -threshold 0 -format '%[fx:mean]' info: \
+    || fail "could not compare the column at $2 of $1 with the one 3 px to its left"
+}
+expect_column() { # case key frame x y h all|none
+  local frac want=0
+  [ "$7" = all ] && want=1
+  frac=$(column_diff "$3" "$4" "$5" "$6")
+  if [ "$frac" = "$want" ]; then
+    tsv_row "$1" "$2" "$7 of the pixels differ from the column 3 px to the left, column ${6}px at $4,$5 of $3" "$frac" ok
+  else
+    tsv_row "$1" "$2" "$7 of the pixels differ from the column 3 px to the left, column ${6}px at $4,$5 of $3" "$frac" FAIL
+    fail "$2: the fraction of differing pixels in the column at $4,$5 (${6}px) of $3 is $frac, not $want"
+  fi
+}
+# A control drawn in two frames: more than one colour in its own rect in both (a glyph over
+# the ground), as the Primary's star is at rest and under the pointer.
+expect_drawn_in_both() { # case key frameA frameB
+  local a b
+  a=$(colours_in "$3" "$2")
+  b=$(colours_in "$4" "$2")
+  if [ "$a" -gt 1 ] && [ "$b" -gt 1 ]; then
+    tsv_row "$1" "$2 is drawn in both frames" "> 1 in $3, > 1 in $4" "$a in $3, $b in $4" ok
+  else
+    tsv_row "$1" "$2 is drawn in both frames" "> 1 in $3, > 1 in $4" "$a in $3, $b in $4" FAIL
+    fail "$2 is not drawn in both frames: $a colours in $3, $b in $4"
+  fi
+}
+# The python expression (over S) that holds when the sidebar lists a card with these facts.
+card_expr() { # worktree-path name fallback(True|False) missing(True|False)
+  echo "any(c['worktree'] == '$1' and c['name'] == '$2' and c['fallback'] is $3 and c['missing'] is $4 for c in S['cards'])"
+}
+# The first card's star lies inside the card (the seat never leaves it).
+STAR_IN_CARD="R['sidebarCardStar'] is not None and R['sidebarCardStar'].x >= R['sidebarCard'].x and R['sidebarCardStar'].x + R['sidebarCardStar'].w <= R['sidebarCard'].x + R['sidebarCard'].w and R['sidebarCardStar'].y >= R['sidebarCard'].y and R['sidebarCardStar'].y + R['sidebarCardStar'].h <= R['sidebarCard'].y + R['sidebarCard'].h"
+
 # ---- the codex stub's go-files ---------------------------------------------
 stub_go() { # pane what
   touch "$STUB_DIR/go.$1.$2"
@@ -722,7 +801,7 @@ if [ "$STATE_ONLY" -eq 1 ]; then
   SB wait state-only 30 "the attention read reports the sidebar's state" \
     'S["bell"] is None and S["filterShown"] is False and S["hoverCardRow"] is None and S["listFocused"] in (True, False)' \
     || fail "the sidebar's state is not reported"
-  echo "SKIP: steps 2-8 need a window to paint and click"
+  echo "SKIP: steps 2-11 need a window to paint and click"
   quit_app
   echo "SIDEBAR SHELL E2E OK (state only)"
   exit 0
@@ -739,7 +818,7 @@ measure 1 \
   "section header height|R['sidebarSectionHeader'].h|==|28" \
   "New Chat row height|R['sidebarNewChat'].h|==|31" \
   "project row height|R['sidebarSection'].h|==|31" \
-  "card height|R['sidebarCard'].h|==|53" \
+  "card height|R['sidebarCard'].h|==|31" \
   "closed parts read null: hover card|R['sidebarHoverCard'] is None|==|True" \
   "closed parts read null: filter|R['sidebarFilter'] is None|==|True" \
   "closed parts read null: bell menu|R['sidebarBellMenu'] is None|==|True" \
@@ -749,7 +828,36 @@ park_pointer
 capture shell
 
 # ---- step 2 ----------------------------------------------------------------
-step 2 "the project row folds and unfolds; the row and the header change under the pointer"
+step 2 "the project row draws no band, its folder is under the New Chat icon, the guide line runs down the cards"
+measure 2 \
+  "folder is drawn|R['sidebarSectionFolder'] is not None|==|True" \
+  "guide is drawn|R['sidebarGuide'] is not None|==|True" \
+  "guide is 1 px wide|R['sidebarGuide'].w|==|1" \
+  "guide is as tall as its card and the 2 px seam above it|R['sidebarGuide'].h|==|R['sidebarCard'].h + 2" \
+  "folder centre is the New Chat icon's centre (its row pads 6, its icon is 14)|abs(R['sidebarSectionFolder'].x + R['sidebarSectionFolder'].w / 2 - (R['sidebarNewChat'].x + 6 + 7))|<=|0.5" \
+  "guide starts at the project row's bottom|R['sidebarGuide'].y|==|R['sidebarSection'].y + R['sidebarSection'].h" \
+  "guide is centred under the folder|abs(R['sidebarGuide'].x + 0.5 - (R['sidebarSectionFolder'].x + R['sidebarSectionFolder'].w / 2))|<=|1"
+# No band: the project row, from 140 px in to 50 px before its right end and its full height (its
+# top and bottom pixel rows included), is one colour, and it is the colour of the section header
+# between its title and its + (the sidebar's own ground).
+BAND_CROP=$(python3 -c 'import sys
+x, y, w, h = (float(v) for v in sys.argv[1:5])
+print("%dx%d+%d+%d" % (round(w) - 190, round(h), round(x) + 140, round(y)))' $(rect_of sidebarSection))
+GROUND_CROP=$(python3 -c 'import sys
+x, y, w, h = (float(v) for v in sys.argv[1:5])
+print("%dx%d+%d+%d" % (round(w) - 180, round(h) - 8, round(x) + 90, round(y) + 4))' $(rect_of sidebarSectionHeader))
+expect_one_colour_equal 2 "the project row is the sidebar's ground, with no band or hairline (its full height)" shell "$BAND_CROP" shell "$GROUND_CROP"
+# The guide's pixels, on the frame where the first card is selected (its wash is drawn under the
+# line): from the line's top to the second card's bottom every pixel differs from the column 3 px
+# to its left; the 4 rows under that bottom do not (the line stops at the last card).
+GUIDE_X=$(get "round(R['sidebarGuide'].x)")
+GUIDE_Y=$(get "round(R['sidebarGuide'].y)")
+GUIDE_BOTTOM=$(get "round(R['sidebarCard'].y + 2 * R['sidebarCard'].h + 2)")
+expect_column 2 "the guide is drawn from the project row to the last card's bottom" shell "$GUIDE_X" "$GUIDE_Y" "$((GUIDE_BOTTOM - GUIDE_Y))" all
+expect_column 2 "the guide stops at the last card's bottom" shell "$GUIDE_X" "$GUIDE_BOTTOM" 4 none
+
+# ---- step 3 ----------------------------------------------------------------
+step 3 "the project row folds and unfolds; the row and the header change under the pointer"
 move_rect sidebarSection
 sleep 0.5
 capture project-row-hover
@@ -767,25 +875,25 @@ capture section-header-idle
 # (expect_hover_only), and by eye in frames/ project-row-hover-* and section-header-hover-*.
 ROW=$(rect_of sidebarSection)
 HEAD=$(rect_of sidebarSectionHeader)
-expect_frames_differ 2 "the project row changes under the pointer (its + and dots: see expect_hover_only below)" project-row-hover project-row-idle \
+expect_frames_differ 3 "the project row changes under the pointer (its + and dots: see expect_hover_only below)" project-row-hover project-row-idle \
   "$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (64, round(h), round(x + w - 64), round(y)))' $ROW)"
-expect_frames_differ 2 "the section header changes under the pointer (its expand all / collapse all: see expect_hover_only below)" section-header-hover section-header-idle \
+expect_frames_differ 3 "the section header changes under the pointer (its expand all / collapse all: see expect_hover_only below)" section-header-hover section-header-idle \
   "$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (90, round(h), round(x + w - 90), round(y)))' $HEAD)"
-expect_hover_only 2 sidebarSectionAdd project-row-hover project-row-idle
-expect_hover_only 2 sidebarSectionMenu project-row-hover project-row-idle
-expect_hover_only 2 sidebarHeaderExpandAll section-header-hover section-header-idle
-expect_hover_only 2 sidebarHeaderCollapseAll section-header-hover section-header-idle
+expect_hover_only 3 sidebarSectionAdd project-row-hover project-row-idle
+expect_hover_only 3 sidebarSectionMenu project-row-hover project-row-idle
+expect_hover_only 3 sidebarHeaderExpandAll section-header-hover section-header-idle
+expect_hover_only 3 sidebarHeaderCollapseAll section-header-hover section-header-idle
 click_rect sidebarSection
-wait_for 2 "the click folded the project" "P[0]['expanded'] is False and R['sidebarCard'] is None"
+wait_for 3 "the click folded the project: its cards and its guide leave" "P[0]['expanded'] is False and R['sidebarCard'] is None and R['sidebarGuide'] is None"
 park_pointer
 capture project-folded
 click_rect sidebarSection
-wait_for 2 "the second click unfolded it" "P[0]['expanded'] is True and R['sidebarCard'] is not None"
+wait_for 3 "the second click unfolded it" "P[0]['expanded'] is True and R['sidebarCard'] is not None"
 park_pointer
 capture project-unfolded
 
-# ---- step 3 ----------------------------------------------------------------
-step 3 "the title menu switches to Sessions and back"
+# ---- step 4 ----------------------------------------------------------------
+step 4 "the title menu switches to Sessions and back"
 # The menu hangs 6 px under the title, inside a 4 px padding; a row is TITLE_ROW_H tall.
 TITLE_ROW_H=${TITLE_ROW_H:-30}
 TITLE=$(rect_of sidebarTitle)
@@ -796,24 +904,24 @@ capture title-menu
 echo "  title menu row offsets: Projects at +$((6 + 4 + TITLE_ROW_H / 2)), Sessions at +$((6 + 4 + TITLE_ROW_H + TITLE_ROW_H / 2)) under the title"
 TITLE_X=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print(round(x + 60))' $TITLE)
 click_window "$TITLE_X $((TITLE_BOTTOM + 6 + 4 + TITLE_ROW_H + TITLE_ROW_H / 2))"
-wait_for 3 "the Sessions view does not draw the Projects rows" "R['sidebarSection'] is None and R['sidebarCard'] is None and R['sidebarSectionHeader'] is not None"
+wait_for 4 "the Sessions view does not draw the Projects rows" "R['sidebarSection'] is None and R['sidebarCard'] is None and R['sidebarSectionHeader'] is not None"
 park_pointer
 capture sessions-view
 click_rect sidebarTitle
 sleep 0.6
 click_window "$TITLE_X $((TITLE_BOTTOM + 6 + 4 + TITLE_ROW_H / 2))"
-wait_for 3 "choosing Projects draws the project row and the card again" "R['sidebarSection'] is not None and R['sidebarCard'] is not None"
+wait_for 4 "choosing Projects draws the project row and the card again" "R['sidebarSection'] is not None and R['sidebarCard'] is not None"
 park_pointer
 
-# ---- step 4 ----------------------------------------------------------------
-step 4 "the hover card opens beside the sidebar; a Primary shows a filled star, a plain card its star and cross"
+# ---- step 5 ----------------------------------------------------------------
+step 5 "the hover card opens beside the sidebar; a Primary shows a filled star, a plain card its star and cross"
 move_rect sidebarCard 0 0
 sleep 0.8
-wait_for 4 "the hover card is open and the state names its row, both agreeing" \
+wait_for 5 "the hover card is open and the state names its row, both agreeing" \
   "S['hoverCardRow'] is not None and R['sidebarHoverCard'] is not None"
-measure 4 \
+measure 5 \
   "hover card is beside the sidebar: 4 px past its visible right edge|R['sidebarHoverCard'].x|>=|R['left'].x + R['left'].w + 4" \
-  "the star's rect lies inside the card (that it is drawn is judged by eye in frames/)|R['sidebarCardStar'] is not None and R['sidebarCardStar'].x >= R['sidebarCard'].x and R['sidebarCardStar'].x + R['sidebarCardStar'].w <= R['sidebarCard'].x + R['sidebarCard'].w and R['sidebarCardStar'].y >= R['sidebarCard'].y and R['sidebarCardStar'].y + R['sidebarCardStar'].h <= R['sidebarCard'].y + R['sidebarCard'].h|==|True" \
+  "the star's rect lies inside the card (that it is drawn is judged by eye in frames/)|$STAR_IN_CARD|==|True" \
   "the hover card stays inside the window|R['sidebarHoverCard'].y + R['sidebarHoverCard'].h|<=|$WINDOW_H"
 # The first card is the repository's main worktree, which Sirio makes the Primary: its star is
 # the filled one and it has no cross. The card under it ("other") is a plain worktree.
@@ -828,50 +936,51 @@ print("%dx%d+%d+%d" % (24, 24, round(x + w / 2) - 12, round(y + h / 2) - 12))' $
 move_window "$(python3 -c 'import sys; print(round(float(sys.argv[1]) + 40), round(float(sys.argv[2]) + float(sys.argv[4]) + 26))' $CARD)"
 sleep 0.8
 capture card-hover-star-cross
-# The card's star (the main worktree's, the Primary's filled one) and the cross of the card under
-# it, by their own rects: drawn under the pointer, uniform at rest (project-row-idle: no pointer).
-expect_hover_only 4 sidebarCardStar card-hover-primary-star project-row-idle
-expect_hover_only 4 sidebarCardRemove card-hover-star-cross project-row-idle
+# The card's star (the main worktree's, the Primary's filled one) is drawn at rest too, in its seat
+# (project-row-idle: no pointer); the cross of the card under it is drawn under the pointer and
+# uniform at rest.
+expect_drawn_in_both 5 sidebarCardStar card-hover-primary-star project-row-idle
+expect_hover_only 5 sidebarCardRemove card-hover-star-cross project-row-idle
 # A click on the Primary's star unsets it (the same action as the menu's Unset Primary): the served
 # flag goes true then false, and the same card under the same pointer shows the outline star.
-wait_for 4 "the main worktree is the Primary" "PRIM['repo'] is True and PRIM['other'] is False"
+wait_for 5 "the main worktree is the Primary" "PRIM['repo'] is True and PRIM['other'] is False"
 park_pointer
 move_rect sidebarCardStar
 click_rect sidebarCardStar
-wait_for 4 "the click on the Primary's star unset it" "PRIM['repo'] is False and PRIM['other'] is False"
+wait_for 5 "the click on the Primary's star unset it" "PRIM['repo'] is False and PRIM['other'] is False"
 park_pointer
 move_rect sidebarCard 0 0
 sleep 0.8
 capture card-hover-unset-primary-star
-expect_frames_differ 4 "the Primary's filled star is not the outline star of the same card once unset" \
+expect_frames_differ 5 "the Primary's filled star is not the outline star of the same card once unset" \
   card-hover-primary-star card-hover-unset-primary-star "$STAR_CROP"
 # The run leaves the Primary as it found it.
 click_rect sidebarCardStar
-wait_for 4 "a second click on the star made it the Primary again" "PRIM['repo'] is True and PRIM['other'] is False"
+wait_for 5 "a second click on the star made it the Primary again" "PRIM['repo'] is True and PRIM['other'] is False"
 park_pointer
-wait_for 4 "the hover card closes when the pointer leaves" "S['hoverCardRow'] is None and R['sidebarHoverCard'] is None"
+wait_for 5 "the hover card closes when the pointer leaves" "S['hoverCardRow'] is None and R['sidebarHoverCard'] is None"
 
-# ---- step 5 ----------------------------------------------------------------
-step 5 "a session left unread lights the bell; the bell's menu selects it"
+# ---- step 6 ----------------------------------------------------------------
+step 6 "a session left unread lights the bell; the bell's menu selects it"
 rm -f "$STUB_DIR/codex.pane"
 pane=$(reply surface terminal open --agent codex | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["pane"])') \
   || fail "the codex terminal did not open"
 wait_file "$STUB_DIR/codex.pane" 30 || fail "the codex stub never started in $pane"
 echo "OK: the codex stub runs in $pane (its tab is titled Codex)"
 ctl select-workspace --workspace "$OTHER" >/dev/null
-wait_for 5 "the other worktree is shown: the stub's tab is off screen" "S['bell'] is None"
+wait_for 6 "the other worktree is shown: the stub's tab is off screen" "S['bell'] is None"
 stub_status "$pane" running
 stub_status "$pane" done
-wait_for 5 "the bell reads unread" "S['bell'] == 'unread'" 30
+wait_for 6 "the bell reads unread" "S['bell'] == 'unread'" 30
 SB attn-save "$OUT_DIR/attention-unread.json" || fail "could not save the attention read"
 park_pointer
 capture bell-unread
 click_rect sidebarBell
-wait_for 5 "the bell's menu is open" "R['sidebarBellMenu'] is not None"
+wait_for 6 "the bell's menu is open" "R['sidebarBellMenu'] is not None"
 capture bell-menu
 BELL=$(rect_of sidebarBellMenu)
 click_window "$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.argv[3]) / 2), round(float(sys.argv[2]) + 24))' $BELL)"
-wait_for 5 "the bell's menu closed and the bell is quiet" "R['sidebarBellMenu'] is None and S['bell'] is None"
+wait_for 6 "the bell's menu closed and the bell is quiet" "R['sidebarBellMenu'] is None and S['bell'] is None"
 tabs_now=""
 for _ in $(seq 1 25); do
   tabs_now=$(SB tabs)
@@ -883,25 +992,25 @@ echo "OK: the session's tab is the active tab ($tabs_now)"
 park_pointer
 capture bell-chosen
 
-# ---- step 6 ----------------------------------------------------------------
-step 6 "Search shows the filter field; Esc hides it"
+# ---- step 7 ----------------------------------------------------------------
+step 7 "Search shows the filter field; Esc hides it"
 click_rect sidebarSearch
-wait_for 6 "the filter is shown and drawn" "S['filterShown'] is True and R['sidebarFilter'] is not None"
+wait_for 7 "the filter is shown and drawn" "S['filterShown'] is True and R['sidebarFilter'] is not None"
 capture filter-shown
 press_key Escape
-wait_for 6 "Esc hid the filter" "S['filterShown'] is False and R['sidebarFilter'] is None"
+wait_for 7 "Esc hid the filter" "S['filterShown'] is False and R['sidebarFilter'] is None"
 capture filter-hidden
 
-# ---- step 7 ----------------------------------------------------------------
-step 7 "a click on a card focuses the list; a click on the centre pane takes the focus away"
+# ---- step 8 ----------------------------------------------------------------
+step 8 "a click on a card focuses the list; a click on the centre pane takes the focus away"
 CENTER_CLICK=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.argv[3]) / 2), round(float(sys.argv[2]) + float(sys.argv[4]) / 2))' $(rect_of center))
 # The precondition: the centre pane holds the focus, so the card click below is what moves it.
 click_window "$CENTER_CLICK"
-wait_for 7 "the centre pane holds the focus before the card is clicked" "S['listFocused'] is False"
+wait_for 8 "the centre pane holds the focus before the card is clicked" "S['listFocused'] is False"
 move_rect sidebarSection
 capture list-focus-off
 click_rect sidebarCard 0 0
-wait_for 7 "the card click gave the list the keyboard focus" "S['listFocused'] is True"
+wait_for 8 "the card click gave the list the keyboard focus" "S['listFocused'] is True"
 move_rect sidebarSection
 capture list-focus-on
 # The list's left edge in the empty lower part of the list (one project, two cards, a 1000 px
@@ -909,19 +1018,57 @@ capture list-focus-on
 EDGE=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (24, round(h * 0.3), round(x), round(y + h * 0.55)))' $(rect_of left))
 edge_diff=$(frame_diff list-focus-off list-focus-on "$EDGE")
 if [ "$edge_diff" -eq 0 ]; then
-  tsv_row 7 "the list's left edge is the same focused and unfocused (no focus ring) in $EDGE" "0" "$edge_diff" ok
+  tsv_row 8 "the list's left edge is the same focused and unfocused (no focus ring) in $EDGE" "0" "$edge_diff" ok
 else
-  tsv_row 7 "the list's left edge is the same focused and unfocused (no focus ring) in $EDGE" "0" "$edge_diff" FAIL
+  tsv_row 8 "the list's left edge is the same focused and unfocused (no focus ring) in $EDGE" "0" "$edge_diff" FAIL
   fail "focusing the list changed its left edge by $edge_diff in $EDGE: a focus ring is drawn"
 fi
 click_window "$CENTER_CLICK"
-wait_for 7 "a click on the centre pane took the focus away again" "S['listFocused'] is False"
+wait_for 8 "a click on the centre pane took the focus away again" "S['listFocused'] is False"
 
-# ---- step 8 ----------------------------------------------------------------
-step 8 "the list's scrollbar is up after the list moves and faded once it idles"
+# ---- step 9 ----------------------------------------------------------------
+step 9 "a plain folder project's card is named after its folder; moved away and relaunched it reads missing"
+PLAIN="$RUN_DIR/plain-folder"
+mkdir -p "$PLAIN"
+PLAIN_REAL=$(realpath "$PLAIN")
+ctl project add "$PLAIN" >/dev/null
+wait_for 9 "the plain folder's card is named after its folder (fallback, not missing)" \
+  "$(card_expr "$PLAIN_REAL" plain-folder True False)" 30
+# Selecting it flushes its layout, as on a real machine, so the relaunch restores what was saved.
+ctl select-workspace --workspace "$PLAIN" >/dev/null
+park_pointer
+capture plain-folder
+quit_app
+mv "$PLAIN_REAL" "$RUN_DIR/plain-folder-away"
+launch_app
+wait_for 9 "after the relaunch the moved folder's card still reads its folder name, and missing" \
+  "$(card_expr "$PLAIN_REAL" plain-folder True True)" 90
+park_pointer
+capture plain-folder-missing
+
+# ---- step 10 ---------------------------------------------------------------
+step 10 "a worktree with many tabs keeps its star inside the one-line card"
+WT_REAL=$(realpath "$WT")
+ctl select-workspace --workspace "$WT" >/dev/null
+wait_for 10 "the repository's card is listed" "any(c['worktree'] == '$WT_REAL' for c in S['cards'])" 30
+for _ in $(seq 1 8); do
+  ctl surface terminal open --cmd "sleep 600" >/dev/null || fail "a terminal tab did not open"
+done
+wait_for 10 "the repository's card lists 9 pills or more" "any(c['worktree'] == '$WT_REAL' and c['pills'] >= 9 for c in S['cards'])" 30
+move_rect sidebarCard 0 0
+sleep 0.8
+wait_for 10 "the hover card is open" "S['hoverCardRow'] is not None and R['sidebarHoverCard'] is not None"
+measure 10 \
+  "the card is 31 px high with the pills on its line|R['sidebarCard'].h|==|31" \
+  "the star's rect lies inside the card (its seat is not pushed out by the pills)|$STAR_IN_CARD|==|True"
+capture many-tabs-hover
+park_pointer
+
+# ---- step 11 ----------------------------------------------------------------
+step 11 "the list's scrollbar is up after the list moves and faded once it idles"
 ctl project add "$BIG" >/dev/null
-wait_for 8 "the second project is listed" "len(P) == 2" 30
-# 25 cards of 53 px do not fit in a 1000 px window. The scrollbar is judged on idle frames only,
+wait_for 11 "the third project is listed (after the repo and the plain folder)" "len(P) == 3" 30
+# 44 cards of 31 px do not fit in a 1000 px window. The scrollbar is judged on idle frames only,
 # with the pointer off the list (no hover wash in the crops): one taken right after the wheel
 # stopped, one 2.2 s later (the bar holds 900 ms, then fades over 300 ms). The list body must be
 # the same in both (it had stopped moving), so the strip's difference is the bar and nothing else;
@@ -933,13 +1080,43 @@ CENTER_XY=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + float(sys.a
 park_pointer
 capture scroll-rest
 bar_seen=0
+# The wheel turns over the list itself, 100 px in and 4 px above the panel's bottom. It used to
+# turn over the first card, which the first turn scrolls out of the window: a retry then sent its
+# turns off-screen and nothing moved. Over the middle of the list, the card under the pointer kept
+# its hover wash in the first frame under load (the pointer had left, the repaint had not come):
+# 4 px from the bottom, whatever card is under the pointer lies below the BODY and STRIP crops,
+# which end 36 px above it (a card is 31 at the default interface font). A retry turns down
+# again: a turn up would bring the list back toward the frame taken before the wheel, and the
+# list still has room below after two turns.
+LIST_XY=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print(round(x + 100), round(y + h - 4))' $LEFT)
 for attempt in 1 2 3; do
-  move_rect sidebarCard 0 40
-  for _ in 1 2 3 4 5; do
+  move_window "$LIST_XY"
+  for _ in 1 2 3; do
     DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool click 5 || fail "xdotool could not turn the wheel"
   done
+  # A burst of bare captures right after the wheel, with no work between them: under load the
+  # first can still be mid-move, and judging (or counting colours) between captures pushed the
+  # settled frame past the bar's hold. The visible frame is the first one the next one matches
+  # in the list body: the list had stopped, inside the bar's 900 ms hold (scroll::BAR_IDLE,
+  # counted from the last frame that moved). Three notches a turn: less for a loaded debug build
+  # to catch up on, and three turns never reach the list's end.
+  window=$(app_window)
+  for i in 1 2 3 4; do
+    timeout -k 5 20 import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/scrollbar-burst-$i-$TAG.png" \
+      || fail "the capture of the scrollbar burst failed"
+  done
   move_window "$CENTER_XY"
-  capture_now scrollbar-visible
+  visible=4
+  for i in 1 2 3; do
+    # Assigned first: a failed comparison then stops the run instead of reading as "differs".
+    burst_diff=$(frame_diff "scrollbar-burst-$i" "scrollbar-burst-$((i + 1))" "$BODY")
+    if [ "$burst_diff" -eq 0 ]; then
+      visible=$i
+      break
+    fi
+  done
+  echo "  attempt $attempt: burst frame $visible is the first the next one matches"
+  cp "$OUT_DIR/frames/scrollbar-burst-$visible-$TAG.png" "$OUT_DIR/frames/scrollbar-visible-$TAG.png"
   sleep 2.2
   capture_now scrollbar-faded
   body_diff=$(frame_diff scrollbar-visible scrollbar-faded "$BODY")
@@ -951,13 +1128,13 @@ for attempt in 1 2 3; do
   fi
 done
 if [ "$bar_seen" -eq 1 ]; then
-  tsv_row 8 "the list body is the same in the visible and the faded frame (it had stopped)" "0" "$body_diff" ok
-  tsv_row 8 "the bar strip differs between the visible and the faded frame (the bar is drawn, then gone)" "> 0" "$strip_diff" ok
+  tsv_row 11 "the list body is the same in the visible and the faded frame (it had stopped)" "0" "$body_diff" ok
+  tsv_row 11 "the bar strip differs between the visible and the faded frame (the bar is drawn, then gone)" "> 0" "$strip_diff" ok
 else
-  tsv_row 8 "the bar strip differs between the visible and the faded frame, the body not" "body 0, strip > 0" "body $body_diff, strip $strip_diff" FAIL
+  tsv_row 11 "the bar strip differs between the visible and the faded frame, the body not" "body 0, strip > 0" "body $body_diff, strip $strip_diff" FAIL
   fail "no attempt showed a scrollbar on an idle list: body $body_diff, strip $strip_diff"
 fi
-expect_frames_differ 8 "the wheel moved the list (it overflows)" scroll-rest scrollbar-faded "$BODY"
+expect_frames_differ 11 "the wheel moved the list (it overflows)" scroll-rest scrollbar-faded "$BODY"
 SB attn-save "$OUT_DIR/attention-final.json" || fail "could not save the attention read"
 
 STEP="the last check"
