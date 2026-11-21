@@ -4,7 +4,9 @@
 //! Every rewrite reaches every depth of the tree (lists, quotes, table cells, alerts,
 //! footnotes), because a hostile source can put a picture or a link anywhere.
 
-use ely_gpui_component::documents::{AlignKind, Inline, MarkdownBlock as Node, Style};
+use ely_gpui_component::documents::{
+    AlignKind, Inline, MarkdownBlock as Node, Style, markdown_picture_path,
+};
 use sirio_diagram::DiagramKind;
 use sirio_markdown::{
     Alignment, Block, Document, Inline as Leaf, ListKind, TableCell, expand_html_capped,
@@ -344,13 +346,18 @@ pub(super) fn diagrams(
         let source = text.trim_end_matches('\n').to_owned();
         let key = sirio_diagram::cache_key(kind, &source, inputs.palette);
         match inputs.states.get(&key) {
-            Some(DiagramState::Ready { path, width }) => vec![Node::Image {
-                alt: "Diagram".to_owned(),
-                url: address_of(&path.to_string_lossy()),
-                link: None,
-                at: *from,
-                width: clamp_width(*width as f32),
-            }],
+            // A cached path that is not UTF-8 cannot be an address: the fence stays, as it does
+            // while the diagram is drawn, not a lossy copy that names another place.
+            Some(DiagramState::Ready { path, width }) => match path.to_str() {
+                Some(path) => vec![Node::Image {
+                    alt: "Diagram".to_owned(),
+                    url: address_of(path),
+                    link: None,
+                    at: *from,
+                    width: clamp_width(*width as f32),
+                }],
+                None => vec![node],
+            },
             // The quote is the muted block the tree has: the note reads as an aside.
             Some(DiagramState::Failed(note)) => {
                 vec![node, Node::Quote(vec![plain_paragraph(note)])]
@@ -420,10 +427,13 @@ pub(super) fn pictures(nodes: Vec<Node>, policy: &mut Policy<'_>) -> Vec<Node> {
 /// written in a document is judged strictly. Only the Preview's own folder may be one (see
 /// [`without_verbatim_prefix`]).
 pub(super) fn names_a_network_path(address: &str) -> bool {
-    let rooted = |text: &str| {
-        text.starts_with('\\') || file_links::is_network_or_device_path(std::path::Path::new(text))
-    };
-    rooted(address) || rooted(&crate::markdown_preview::percent_decode(address))
+    is_rooted_network_path(address) || is_rooted_network_path(&crate::markdown_preview::percent_decode(address))
+}
+
+/// [`names_a_network_path`] for a text that is already decoded, such as the path a Preview
+/// address resolved to: a second decode would read a file named `%5C%5Chost` as a share.
+fn is_rooted_network_path(text: &str) -> bool {
+    text.starts_with('\\') || file_links::is_network_or_device_path(std::path::Path::new(text))
 }
 
 /// `folder` as the ordinary disk path `C:\..` when it is spelled as Windows canonicalises one,
@@ -474,73 +484,119 @@ fn plain_name(name: &str) -> bool {
         || name
             .bytes()
             .any(|c| matches!(c, 0..=31 | b'<' | b'>' | b':' | b'"' | b'/' | b'|' | b'?' | b'*'))
-        || name.ends_with(['.', ' '])
-        || is_dos_device_name(name))
+        || is_a_name_windows_changes(name))
 }
 
-/// Whether `name` is a reserved DOS device name: `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or
-/// `LPT1` to `LPT9` (also with the superscripts `COM¹²³` and `LPT¹²³`), in any case. Windows reads
-/// the device whatever the extension, taking the stem before the FIRST dot (`NUL.tar.gz` is
-/// `NUL`) and ignoring the spaces that end it. A string rule, so it holds on every platform.
+/// Whether `name` is a reserved DOS device name, as dunce's list has it: `CON`, `PRN`, `AUX`,
+/// `NUL`, `COM0` to `COM9` and `LPT0` to `LPT9` (also with the superscripts `COM¹²³` and
+/// `LPT¹²³`), `CONIN$` and `CONOUT$`, in any case. Windows reads the device whatever the
+/// extension, taking the stem before the FIRST dot (`NUL.tar.gz` is `NUL`) and ignoring what ends
+/// it: dots, spaces, and any other white space or control character (`COM1` and a tab). A
+/// string rule, so it holds on every platform.
 fn is_dos_device_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ');
-    if ["CON", "PRN", "AUX", "NUL"].iter().any(|device| stem.eq_ignore_ascii_case(device)) {
+    let stem = name.split('.').next().unwrap_or_default();
+    let stem = stem.trim_end_matches(|ch: char| ch == ' ' || ch.is_whitespace() || ch.is_control());
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+    {
         return true;
     }
     ["COM", "LPT"].iter().any(|device| {
         stem.get(..3).is_some_and(|head| head.eq_ignore_ascii_case(device))
             && matches!(
                 &stem[3..],
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{b9}" | "\u{b2}" | "\u{b3}"
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{b9}" | "\u{b2}" | "\u{b3}"
             )
     })
 }
 
-/// Whether the last component of `path`, a path as the renderer would open it, is a DOS device
-/// name (see [`is_dos_device_name`]). Either separator, as the path may be a Windows one.
-fn ends_in_a_dos_device(path: &str) -> bool {
-    path.rsplit(['/', '\\']).find(|part| !part.is_empty()).is_some_and(is_dos_device_name)
+/// Whether Windows would not read `name`, a component of a path an address names, as the file it
+/// says: a reserved device name (see [`is_dos_device_name`]), or a name that ends in a dot or a
+/// space, which Windows drops. The one rule behind both the verbatim folder and the address.
+fn is_a_name_windows_changes(name: &str) -> bool {
+    name.ends_with(['.', ' ']) || is_dos_device_name(name)
 }
 
-/// `path`, a local path, as an address for the renderer, which reads an address as a URL: it
-/// cuts it at the first `?` or `#` and decodes it once. So those two and the `%` are encoded,
-/// and nothing else, and what it reads back is exactly `path`.
+/// Whether every component `address`, a path an address names, contributes is a name Windows
+/// reads as written. Either separator, as the path may be a Windows one. `.` and `..` are no
+/// names. A colon belongs only to a drive at the start (`C:`): anywhere else it names a device
+/// (`COM1:`) or a stream. Written on the text, so it runs on any platform.
+fn names_are_plain(address: &str) -> bool {
+    let bytes = address.as_bytes();
+    // A drive is `C:` at the very start of the path, then a separator or the end.
+    let drive = bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(1) == Some(&b':')
+        && matches!(bytes.get(2), None | Some(b'/' | b'\\'));
+    let mut parts = address.split(['/', '\\']).filter(|part| !part.is_empty());
+    if drive {
+        parts.next();
+    }
+    parts.all(|part| match part {
+        "." | ".." => true,
+        part => !part.contains(':') && !is_a_name_windows_changes(part),
+    })
+}
+
+/// `path`, a local path, as an address for the renderer, which reads an address as a URL: it trims
+/// it, cuts it at the first `?` or `#`, and decodes it once. Every one of those is neutralised,
+/// so what it reads back is exactly `path`: the `%`, `?` and `#`, any control character, and
+/// the white space at either end are encoded as `%XX` of their UTF-8 bytes, and nothing else is.
 fn address_of(path: &str) -> String {
+    let lead = path.len() - path.trim_start().len();
+    let trail = path.trim_end().len();
     let mut address = String::with_capacity(path.len());
-    for ch in path.chars() {
-        match ch {
-            '%' => address.push_str("%25"),
-            '?' => address.push_str("%3F"),
-            '#' => address.push_str("%23"),
-            ch => address.push(ch),
+    for (at, ch) in path.char_indices() {
+        let edge = at < lead || at >= trail;
+        if matches!(ch, '%' | '?' | '#') || ch.is_control() || (edge && ch.is_whitespace()) {
+            let mut utf8 = [0u8; 4];
+            for byte in ch.encode_utf8(&mut utf8).bytes() {
+                address.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            address.push(ch);
         }
     }
     address
 }
 
-/// Where the Preview loads `url` from, or none: an absolute path, a `data:` or `http(s)`
-/// address. A `file:` address becomes the path it names, so the renderer is handed no
-/// address that points at a file. A network path, or a path that ends in a DOS device name,
-/// is never one.
-fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> {
-    if url.is_empty() || (!is_web_image(url) && !is_data_image(url) && names_a_network_path(url)) {
+/// Whether the renderer's `origin` would read `address` as a local path: not as a web address, a
+/// `data:` or `file:` one, or one with a scheme it refuses. (Its checks, in its order.)
+fn is_read_as_a_path(address: &str) -> bool {
+    let lower = address.to_ascii_lowercase();
+    let scheme = address.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.len() > 1 && scheme.chars().all(|ch| ch.is_ascii_alphanumeric() || "+-.".contains(ch))
+    });
+    !(lower.starts_with("http://") || lower.starts_with("https://") || address.starts_with("//")
+        || lower.starts_with("data:") || lower.starts_with("file:") || scheme)
+}
+
+/// The path the Preview would load for `url`, once the renderer's own reading of an address is
+/// applied first, so that what is checked is what it will open: `url` trimmed, cut at the first
+/// `?` or `#`, decoded once (all in [`markdown_picture_path`], the renderer's), and joined onto
+/// `base` as the renderer joins a relative one (it is given no folder, so the join is here).
+/// A `file:` address is the path it names. None for a network path, and for a path with a name
+/// Windows would read as something else (see [`names_are_plain`], applied to what the address
+/// contributes: all of an absolute path, the part under the folder of a relative one).
+pub(super) fn checked_preview_path(url: &str, base: Option<&std::path::Path>) -> Option<String> {
+    use std::path::{Path, PathBuf};
+    let url = url.trim();
+    if url.is_empty() || is_web_image(url) || is_data_image(url) || names_a_network_path(url) {
         return None;
-    }
-    if is_web_image(url) || is_data_image(url) {
-        return Some(url.to_owned());
     }
     // The renderer reads an address by cutting it at its first `?`: never a verbatim one.
     let base = base.map(without_verbatim_prefix);
     let base = base.as_deref();
     let scheme = url.split_once(':').map(|(scheme, _)| scheme);
-    // `found` is a path, decoded as the renderer would decode the address; the checks below are
-    // on it, and what is handed over is that path as an address again.
-    let found = if std::path::Path::new(url).is_absolute() {
-        let written = url.split(['?', '#']).next().unwrap_or_default();
-        Some(crate::markdown_preview::percent_decode(written))
+    let (contributed, full): (PathBuf, PathBuf) = if Path::new(url).is_absolute() {
+        let local = markdown_picture_path(url)?;
+        (local.clone(), local)
     } else {
         match scheme {
-            Some(scheme) if scheme.eq_ignore_ascii_case("file") => file_address_path(&url[5..]),
+            Some(scheme) if scheme.eq_ignore_ascii_case("file") => {
+                let local = PathBuf::from(file_address_path(&url[5..])?);
+                (local.clone(), local)
+            }
             // Another scheme is no folder's file and no address the renderer loads.
             Some(scheme)
                 if !scheme.is_empty()
@@ -548,14 +604,38 @@ fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> 
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
             {
-                None
+                return None;
             }
-            _ => base.map(|base| crate::markdown_preview::resolve_image(url, base)),
+            _ => {
+                let local = markdown_picture_path(url)?;
+                match local.is_absolute() {
+                    true => (local.clone(), local),
+                    false => (local.clone(), base?.join(local)),
+                }
+            }
         }
     };
-    found
-        .filter(|path| !names_a_network_path(path) && !ends_in_a_dos_device(path))
-        .map(|path| address_of(&path))
+    let (contributed, full) = (contributed.to_str()?, full.to_str()?);
+    (names_are_plain(contributed) && !is_rooted_network_path(full)).then(|| full.to_owned())
+}
+
+/// Where the Preview loads `url` from, or none: an absolute path, a `data:` or `http(s)`
+/// address. A `file:` address becomes the path it names, so the renderer is handed no address
+/// that points at a file. What is handed is the path [`checked_preview_path`] checked, as an
+/// address the renderer reads back whole (see [`address_of`]), or nothing.
+pub(super) fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> {
+    let url = url.trim();
+    if is_web_image(url) || is_data_image(url) {
+        return Some(url.to_owned());
+    }
+    let checked = checked_preview_path(url, base)?;
+    let delivered = address_of(&checked);
+    // The renderer's own reading of what is delivered is the proof: trimmed, cut and decoded it
+    // is the path that was checked, and it is read as a path.
+    (delivered.trim() == delivered
+        && is_read_as_a_path(&delivered)
+        && markdown_picture_path(&delivered).as_deref() == Some(std::path::Path::new(&checked)))
+    .then_some(delivered)
 }
 
 /// The local path a `file:` address names, after its scheme: no host or `localhost`, no
@@ -569,7 +649,8 @@ fn file_address_path(rest: &str) -> Option<String> {
     if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
         return None;
     }
-    let path = crate::markdown_preview::percent_decode(written);
+    // Decoded as the renderer decodes a path.
+    let path = markdown_picture_path(written)?.to_str()?.to_owned();
     // Windows writes file:///C:/…
     let path = match path.as_bytes() {
         [b'/', _, b':', ..] if cfg!(windows) => path[1..].to_owned(),

@@ -16,7 +16,11 @@ horizontal scroll area and the chat's draw-only-what-is-near. The vendored chang
 now has LaTeX, GitHub alerts, footnotes, emoji shortcodes, strikethrough and bare-URL links;
 `[[toc]]` and heading anchors (GitHub slugs) work in the Preview, where the right-click menu
 (Markdown items above the file's), an outline panel and the reading progress bar also live. Forge
-text never loads a picture and a `file:` or `#` link in it opens nothing.
+text never loads a picture and a `file:` or `#` link in it opens nothing. A Preview picture is checked
+and delivered as one string: the renderer's own reading of the address (trim, cut at `?`/`#`, decode once)
+is applied first, the resulting path is checked (no network path, no DOS device name or name Windows
+changes in any component, no non-UTF-8), and it is handed over encoded so that reading gives it back
+exactly (`address_of`, `preview_address`).
 `docs/superpowers/specs/2026-11-20-ely-markdown-documents-design.md` has the design.
 
 The file view's Preview has no HTML engine. `expand_html` maps a GitHub-style

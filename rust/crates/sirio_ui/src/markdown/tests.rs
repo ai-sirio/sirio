@@ -627,6 +627,11 @@ fn a_verbatim_folder_with_a_reserved_dos_name_is_left_verbatim() {
         r"\\?\C:\repo\com1",
         r"\\?\C:\repo\LPT9.x",
         r"\\?\C:\repo\con.. .txt",
+        r"\\?\C:\repo\CONIN$",
+        r"\\?\C:\repo\conout$.txt",
+        r"\\?\C:\repo\COM0",
+        r"\\?\C:\repo\lpt0.png",
+        "\\\\?\\C:\\repo\\COM\u{b9}",
         // The stem is what is before the FIRST dot: `NUL.tar.gz` is `NUL`.
         r"\\?\C:\repo\com1.tar.gz",
         r"\\?\C:\repo\NUL.tar.gz\docs",
@@ -725,14 +730,113 @@ fn preview_refuses_a_picture_named_like_a_dos_device() {
     ] {
         assert_eq!(picture_under(base, url), None, "{url}");
     }
-    // Absolute addresses, in each spelling, and a file address.
+    // Absolute addresses and a file address. The `C:` spellings are no absolute path on Linux and
+    // are refused here whatever the device check says: they stand next to `/x/..`, which reaches it.
     for url in ["/x/COM1", "/x/nul.png", "C:/x/COM1", "C:/x/nul.png", "C:\\x\\Aux.txt", "file:///x/AUX.txt"] {
         assert_eq!(picture_under(base, url), None, "{url}");
     }
     // Names that only look like one.
-    for url in ["console.png", "COM10", "com.png", "a.nul", ".com1", "nul-x.png", "docs/CON/x.png", "LPT0", "COMx"] {
+    for url in ["console.png", "COM10", "com.png", "a.nul", ".com1", "nul-x.png", "COMx", "con-tents.png"] {
         assert!(picture_under(base, url).is_some(), "{url}");
     }
+}
+
+// The renderer trims an address, cuts it at `?` or `#` and decodes it once AFTER Sirio has
+// looked at it, so what Sirio checks is what it delivers (see `preview_address`), and a name
+// the renderer would trim to a device is one: a tab, a line feed or a no-break space at its end.
+#[test]
+fn preview_refuses_a_device_name_that_only_the_renderers_trim_would_reveal() {
+    let base = "/repo/docs";
+    for url in [
+        "COM1%09", "NUL%0A", "CON%C2%A0", "AUX%0B", "prn%0D.png", "LPT1%E2%80%83", "docs/COM1%09",
+        "/x/COM1%09", "file:///x/NUL%0A", "COM1%20", "CON%20.txt",
+    ] {
+        assert_eq!(picture_under(base, url), None, "{url}");
+    }
+}
+
+#[test]
+fn preview_refuses_a_device_spelled_with_a_colon_or_a_dollar_or_a_zero() {
+    let base = "/repo/docs";
+    for url in [
+        "COM1:", "docs/COM1:", "docs/com1:.png", "com1:.png", "CONIN$", "conout$.txt", "docs/CONIN$",
+        "COM0", "LPT0.png", "com0.tar.gz", "docs/a:b.png", "docs/a:/b.png", "C:/x/COM1:",
+    ] {
+        assert_eq!(picture_under(base, url), None, "{url}");
+    }
+}
+
+#[test]
+fn preview_refuses_a_reserved_name_or_a_dotted_end_in_any_component_not_only_the_last() {
+    let base = "/repo/docs";
+    for url in [
+        "C:/x/CON/a.png", "/x/nul.d/a.png", "/x/com1.txt/y/a.png", "docs/CON/x.png", "docs/aux/a.png",
+        "docs/a./x.png", "docs/a /x.png", "/x/a./b.png", "docs/CONOUT$/x.png", "a.", "a%20", "docs/a%20/x.png", "docs/con.tents/x.png",
+    ] {
+        assert_eq!(picture_under(base, url), None, "{url}");
+    }
+    // Only an end that is a dot or a space counts, and only a whole name that is a device.
+    for url in [
+        "a .png", "a..png", "con-tents.png", "console.png", "COM10", "a.nul", "docs/a.con/x.png", "%09COM1",
+        "../logo.png", "./logo.png", "docs/./x.png", "a.b.png", "...a.png",
+    ] {
+        assert!(picture_under(base, url).is_some(), "{url}");
+    }
+    // A drive is the one place a colon may be.
+    assert_eq!(picture_under("/repo", "/x:/a.png"), None);
+}
+
+/// The class, closed: for every address the Preview accepts, the renderer's own reading of the
+/// address it is handed (`markdown_picture_path`: trim, cut at `?` or `#`, decode once) is
+/// exactly the path that was checked. Over the cases of this suite, in a spread of folders.
+#[test]
+fn what_the_renderer_reads_is_what_the_preview_checked_for_every_accepted_address() {
+    let bases = [
+        "/repo/docs", "/src/C#/docs", "/src/100%/docs", "/src/what?/docs", r"C:\src\C#\docs",
+        r"\\?\C:\src\docs", "/caf\u{e9}/docs", "/a b/docs",
+    ];
+    let addresses = [
+        "logo.png", "docs/logo.png", "../logo.png", "./a/../b.png", "my%20pic.png", "a%2523.png", "a%3Fb.png",
+        "a%23b.png", "logo.png#top", "logo.png?x=1", "a.png%09", "a.png%C2%A0", "a.png%0A", "a%09b.png",
+        "a%0Ab.png", "%2E%2E/x.png", "caf\u{e9}.png", "\u{65e5}\u{672c}.png", "console.png", "COM10", "a.nul",
+        "con-tents.png", "a .png", "a..png", "a%20b.png", "%20a.png", "/x/a%2523b.png", "/x/a.png", "/x/a#b.png",
+        "file:///x/a%23b.png", "file:///x/a.png", "file://localhost/x/a.png", "%2Fx%2Fa.png", "100%.png", "a%zz.png",
+        "a%+1.png", "a%2.png", "a%.png", "%255C%255Chost.png", "%09COM1", "docs/%E2%82%AC.png", "a.png%E2%80%83",
+    ];
+    let mut accepted = 0;
+    for base in bases {
+        for address in addresses {
+            let (base, url) = (Path::new(base), address);
+            let Some(checked) = rewrite::checked_preview_path(url, Some(base)) else { continue };
+            let delivered = rewrite::preview_address(url, Some(base))
+                .unwrap_or_else(|| panic!("{base:?} {url}: checked but not delivered"));
+            assert_eq!(
+                markdown_picture_path(&delivered).as_deref(),
+                Some(Path::new(&checked)),
+                "{base:?} {url}: delivered {delivered:?}, checked {checked:?}"
+            );
+            // Nothing the renderer would trim, cut or decode is left bare in what is delivered.
+            assert_eq!(delivered.trim(), delivered, "{url}");
+            assert!(!delivered.contains(['?', '#']), "{delivered}");
+            accepted += 1;
+        }
+    }
+    assert!(accepted > 150, "only {accepted} accepted: the property is not exercised");
+}
+
+/// Each accepted address of the cases above that the renderer would otherwise change, shown.
+#[test]
+fn an_address_the_renderer_would_trim_cut_or_decode_is_delivered_encoded() {
+    let base = Path::new("/repo/docs");
+    let delivered = |url: &str| rewrite::preview_address(url, Some(base)).expect(url);
+    assert_eq!(delivered("a.png%09"), "/repo/docs/a.png%09");
+    assert_eq!(delivered("a.png%C2%A0"), "/repo/docs/a.png%C2%A0");
+    assert_eq!(delivered("a%0Ab.png"), "/repo/docs/a%0Ab.png");
+    assert_eq!(delivered("a%2523.png"), "/repo/docs/a%2523.png");
+    assert_eq!(delivered("a%3Fb.png"), "/repo/docs/a%3Fb.png");
+    assert_eq!(delivered("a%23b.png"), "/repo/docs/a%23b.png");
+    // A space inside is no edge: it is left as it is.
+    assert_eq!(delivered("my%20pic.png"), "/repo/docs/my pic.png");
 }
 
 #[test]
@@ -1401,4 +1505,60 @@ fn file_paths_in_chat_become_file_links() {
     memo.clear();
     let third = build("see README.md", &mut chat(&fx, &mut memo));
     assert!(file_links_of(&third.nodes).is_empty());
+}
+
+// An absolute address is cut at its `?` or `#` and decoded once, as the renderer reads it.
+#[test]
+fn an_absolute_address_is_cut_at_its_query_or_fragment() {
+    let delivered = |url: &str| rewrite::preview_address(url, Some(Path::new("/repo/docs")));
+    assert_eq!(delivered("/img/logo.png?raw=true").as_deref(), Some("/img/logo.png"));
+    assert_eq!(delivered("/img/logo.png#x").as_deref(), Some("/img/logo.png"));
+    assert_eq!(delivered("file:///img/logo.png?v=2#x").as_deref(), Some("/img/logo.png"));
+    assert_eq!(delivered("/img/a%3Fb.png?v=2").as_deref(), Some("/img/a%3Fb.png"));
+}
+
+// What does not decode to UTF-8 is no address: the renderer refuses it ("the path is not UTF-8"),
+// and Sirio must not load the literal `%`-text instead.
+#[test]
+fn an_address_that_does_not_decode_to_utf8_is_refused() {
+    let base = "/repo/docs";
+    for url in ["a%FF.png", "%C3%28.png", "docs/%80", "/x/%C3%28.png", "/x/a%FE%FF.png", "file:///x/%FF.png"] {
+        assert_eq!(picture_under(base, url), None, "{url}");
+    }
+    // A broken escape is no escape: it stays as written, as the renderer reads it.
+    assert!(picture_under(base, "a%zz.png").is_some());
+}
+
+// The final path is decoded once already: a file named like an escape is that file, not the
+// share or the device the escape would spell.
+#[test]
+fn a_file_named_like_an_escape_is_that_file() {
+    let base = Path::new("/repo/docs");
+    // `%255C%255Chost.png` is the file `%5C%5Chost.png`, which is no network path.
+    let delivered = rewrite::preview_address("%255C%255Chost.png", Some(base)).expect("a picture");
+    assert_eq!(markdown_picture_path(&delivered), Some(PathBuf::from("/repo/docs/%5C%5Chost.png")));
+    // Written as a network path, it is still refused, in either spelling.
+    for url in ["%5C%5Chost%5Cs%5Cx.png", "//host/s/x.png", r"\\host\s\x.png"] {
+        assert_eq!(rewrite::preview_address(url, Some(base)), None, "{url}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cached_diagram_and_a_folder_that_are_not_utf8_are_not_loaded() {
+    use std::os::unix::ffi::OsStrExt;
+    // A folder: nothing resolves under it, and nothing is a lossy copy.
+    let folder = Path::new(std::ffi::OsStr::from_bytes(b"/repo/\xFF/docs"));
+    assert_eq!(rewrite::preview_address("logo.png", Some(folder)), None);
+    let built = build("<img src=\"logo.png\" alt=\"the-alt\">\n", &mut preview_in(folder));
+    assert!(images(&built.nodes).is_empty());
+    assert!(texts(&built.nodes).iter().any(|text| text == "the-alt"));
+    // A diagram cached under such a path stays a fence, not a picture of another place.
+    let bad = DiagramState::Ready {
+        path: PathBuf::from(std::ffi::OsStr::from_bytes(b"/cache/\xFF/abc.svg")),
+        width: 300,
+    };
+    let built = diagram_blocks(Surface::Preview, &with_state(Some(bad)), FENCE);
+    assert!(images(&built.nodes).is_empty());
+    assert!(built.nodes.iter().any(is_mermaid), "the fence stays");
 }

@@ -115,32 +115,6 @@ pub(crate) fn preview_blocks(
     )
 }
 
-/// A relative image path joined onto the Markdown file's directory, because
-/// `gpui::img(PathBuf)` would otherwise resolve it against the process's
-/// working directory. Percent escapes are decoded, as a browser would
-/// (`my%20logo.png` is the file `my logo.png`). URLs and absolute paths pass
-/// through.
-pub(crate) fn resolve_image(url: &str, base: &Path) -> String {
-    if url.is_empty() || has_scheme(url) || Path::new(url).is_absolute() {
-        return url.to_string();
-    }
-    let path = url.split(['#', '?']).next().unwrap_or(url);
-    base.join(percent_decode(path))
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// `https:`, `data:`, `file:`: a scheme is letters, digits, `+ - .` before
-/// the first `:`.
-fn has_scheme(url: &str) -> bool {
-    url.split_once(':').is_some_and(|(scheme, _)| {
-        !scheme.is_empty()
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    })
-}
-
 pub(crate) fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
