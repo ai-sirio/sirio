@@ -147,6 +147,7 @@ the crate where the crate's own tests can show it.
 | L6 | `ely-core` `navigation/toc.rs` | `Sections::reveal(&mut self, value, …)`: scrolls the section's spot to the top, the same arithmetic `TableOfContents` uses on a click. | `#heading` links and the `[[toc]]` list jump within the Preview. |
 | L7 | workspace `Cargo.toml`, `rust/vendor/pulldown-cmark` | §5.3. | Upstream's footnote-in-link fix; restores two ignored tests. |
 | L8 | `ely-documents` `render.rs`, `render/table.rs` | `MarkdownRenderer::table_frame(f)` where `f: Fn(ElementId, AnyElement) -> AnyElement`: when set, a table is laid at its natural width (columns do not shrink or wrap below their content) and handed to `f`, which places it. Unset, upstream's wrapping table is unchanged. | Sirio wraps each table in its own horizontal scroll area with `scroll::horizontal_bar`, as fences are, on all three surfaces: tables keep their sideways scroll bar (Enzo, #649; `test-markdown-scroll-probe.sh`). |
+| L9 | `ely-documents` `render.rs`, `lib.rs` | `MarkdownRenderer::cull(Rc<dyn BlockCull>)` with `BlockCull { skip, drawn, placed }` and `BlockUse`: before each top-level block the host may stand in for it; counters (element ids, headings, tables) still advance; drawn blocks get a flex-column wrapper so their bounds hold their margins. Unset, drawing is unchanged. | Chat replies draw only the blocks near the window (§7, streaming cost). |
 
 Names are proposals; the builder may rename, recording it. Anything else found necessary is a new
 row, recorded, never a silent edit.
@@ -175,13 +176,25 @@ when the source or the policy's inputs change:
 - **Chat:** on each streamed chunk (as today) and on restore.
 - **Change requests:** on header refresh and thread change (as today).
 
-**Nesting guard.** Ely's reader and drawing recurse once per nested quote or list, with no depth
-limit (only its HTML has one, `tree/html_block.rs:447`), and chat and forge text are untrusted.
-Before parsing, Sirio walks the same source with `pulldown-cmark`'s event stream (iterative, same
-options as Ely's reader) and measures container depth; above 128 (the cap `sirio_markdown` already
-uses, `parse.rs:12-18`) the text is drawn as one plain paragraph of its source, still selectable.
-This is a Sirio-side check, not a vendored change, and gets a failure-first test (a 10 000-deep `>`
-run renders without overflowing the stack).
+**Nesting guard.** Ely's reader, its element builder and gpui's layout recurse once per nested
+quote or list, with no depth limit (only Ely's HTML has one, `tree/html_block.rs:447`), and chat
+and forge text are untrusted. Ely asks Sirio about each text before it parses it
+(`parse_markdown_guarded`, L10): the exact bytes pulldown-cmark reads (one leading byte order mark
+dropped, lone CRs as LF, `$$` fences as tildes), and each round of the second pass that reads `\(`
+pairs as math, which can nest deeper than the text it started from. Sirio measures container depth
+with `pulldown-cmark`'s event stream, which is iterative and uses Ely's own options. Above
+`MAX_NESTING` = **32** the text is drawn as one plain paragraph of its source, still selectable; a
+refused `\(` round keeps the first pass's tree. It is one parse per build, not a measuring pass
+plus a parse. The cap is measured, not chosen (final review I1): drawing costs about 115 KiB of
+stack per level in a debug build. The deepest that draws (quotes / lists / alerts) is 71 / 82 / 71
+in a release build on 1 MiB (the Windows main thread) and 75 / 94 / 75 in a debug build on 8 MiB
+(Linux and macOS). The cap is half the smaller, rounded down to a multiple of 8, which leaves the
+chat's extra wrappers room. Growing the stack on demand (gpui-pre's `stacksafe` red zone) was tried
+and dropped: a red zone big enough for 127 levels doubled the chat's frame time. Real Markdown
+rarely nests past ten. Failure-first tests: a 10 000-deep `>` run, the same behind a BOM or a lone
+CR, and a draw at `MAX_NESTING - 1` on an 8 MiB debug thread (the 1 MiB release case is an
+`#[ignore]` release test). The documents E2E draws a `MAX_NESTING - 1` fixture in a Preview and in
+a chat reply.
 
 ### 5.5 Rewrites, by surface (`Policy`)
 
@@ -214,8 +227,9 @@ run renders without overflowing the stack).
     behaviour: today `open_links` (`change_request_tab.rs:1330`) hands every address, `file:`
     included, to `cx.open_url`, because `selectable_markdown` handles the release before bezel's own
     `file:` guard runs (D7).
-  - Everywhere: a link press that ends a drag, or that lands while a selection is live in that body,
-    does not follow the link. Today that holds in the Preview and change requests
+  - Everywhere: a link press that makes or extends a selection (a drag, or a shift press) does not
+    follow the link. A plain press first replaces any live selection with a caret, so a click on a link
+    while a selection is live elsewhere opens it, as on main and in browsers (final review). Today that holds in the Preview and change requests
     (`a_drag_across_a_link_selects_it_without_following_it`); in the chat a drag ending on a web link
     opens it, which changes (D8).
 
@@ -444,6 +458,10 @@ is called pre-existing.
     | SHOWCASE | 29.45 ms | 44.17 ms | 8.66 ms | 17.00 ms |
     | one open `rust` fence (40 KiB of real code) | 25.16 ms | 44.84 ms | 12.98 ms | 24.89 ms |
 
+    After the final review's fixes (one guarded parse per build, `$$` fences measured), the Ely side
+    was re-run on the final code (three rounds, load 15–20): SHOWCASE 7.95 / 15.31 ms, open fence
+    11.02 / 22.91 ms (median / p95). It is still under bezel, and within noise of the figures above.
+
   - **Known limit:** the parse alone (`handle_event`) is slower on Ely: 2.98 ms against 0.81 ms per
     chunk, and O(n) in the reply. Step 3's `StreamingMarkdown` is where it goes.
 - **Culling's accepted behaviour changes** (t2s, 2026-11-21):
@@ -493,8 +511,9 @@ Taken as the recommended option, per Enzo's delegation; each with what it costs 
     drawing only, with no file or network access.
 11. **Preview right-click: one merged menu**, Markdown items first, file items after a separator.
     Wrong: show only one of the two depending on where the press lands.
-12. **Nesting guard in Sirio** (depth 128, plain text beyond), not a vendored change. Wrong: a local
-    change in Ely's reader instead.
+12. **Nesting guard in Sirio** (depth 32 after the final review's measurements, plain text beyond).
+    Ely only exposes the hook that hands Sirio each text before it is parsed (L10). Wrong: a depth
+    limit inside Ely's reader instead.
 13. **Silent parts copied** (math as TeX, alert titles, footnote labels) though not highlighted.
     Wrong: they drop out of copies, the renderer's own behaviour.
 14. **Forge `file:` links stop opening** (D7), a fix of a current hole, taken without asking.
