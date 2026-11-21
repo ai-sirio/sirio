@@ -356,6 +356,19 @@ comparison (§6.3); each is accepted by this spec unless the comparison shows it
   leading backslash (Markdown reads `\\host` as `\host`) shows its alt text: on Windows such a path
   would open an SMB connection when the picture is painted. Chat and change requests already refused
   them.
+  After the final review, the Preview also:
+  - refuses a picture when any name its address contributes is one Windows would read as something
+    else: a DOS device name (dunce's list: `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`9`, `LPT0`–`9`,
+    `CONIN$`, `CONOUT$`; any case, any extension, trailing white space ignored), a name with a colon
+    (other than a leading drive), or one ending in a dot or a space. This applies on every platform:
+    such a name is legal on Linux and macOS but is refused there too;
+  - checks exactly the path the renderer will open: it applies Ely's own reading of the address
+    (trim, cut at `?`/`#`, one decode, the join) before checking, and delivers that path in an
+    encoding Ely reads back unchanged;
+  - reads its own folder spelled `\\?\C:\…` as `C:\…` when the plain spelling names the same place
+    (`dunce::simplified`'s rule), and otherwise leaves it verbatim and refused;
+  - encodes `%`, `?` and `#`, control characters and white space at the ends of each local path it
+    hands the renderer, because Ely reads a picture address as a URL.
 
 - **D14 Pictures lose bezel's frame and caption.**
   - **What bezel drew:** a rounded, bordered frame around every picture, with the alt text as a small caption under it. In the Preview that included rendered Mermaid and PlantUML diagrams, which were bezel image blocks.
