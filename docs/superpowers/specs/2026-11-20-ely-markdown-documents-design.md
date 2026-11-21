@@ -343,6 +343,14 @@ comparison (§6.3); each is accepted by this spec unless the comparison shows it
   would open an SMB connection when the picture is painted. Chat and change requests already refused
   them.
 
+- **D14 Pictures lose bezel's frame and caption.**
+  - **What bezel drew:** a rounded, bordered frame around every picture, with the alt text as a small caption under it. In the Preview that included rendered Mermaid and PlantUML diagrams, which were bezel image blocks.
+  - **What Ely draws:** the bare picture, as GitHub does.
+  - **Where the alt text still shows:** it stays the picture's accessible label and is shown in place of a picture that is refused or fails to load.
+  - **Change requests:** a refused remote picture's alt text was a link to its address and is now plain text.
+  - **Found by:** the capture comparison (§6.3); not foreseen when this list was written.
+  - **Cost if wrong:** a Sirio wrapper around Ely's picture element (frame, plus a caption kept out of the copy text unless wanted).
+
 ### 5.10 Order of work (one PR)
 
 0. **Baseline.** On the untouched branch head, build and capture the Preview, a chat reply and a
