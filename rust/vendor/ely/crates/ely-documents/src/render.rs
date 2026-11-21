@@ -1,9 +1,9 @@
 use std::{ops::Range, path::Path, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, FontWeight, HighlightStyle, InteractiveText, IntoElement,
-    MouseButton, ParentElement, Pixels, RenderOnce, Role, SharedString, Styled, StyledText, TextLayout,
-    Window, div, prelude::*, relative,
+    AnyElement, App, Bounds, ElementId, Entity, FontWeight, HighlightStyle, InteractiveText,
+    IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, Role, SharedString, Styled,
+    StyledText, TextLayout, Window, div, prelude::*, relative,
 };
 
 use super::{

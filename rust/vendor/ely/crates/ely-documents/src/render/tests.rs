@@ -580,7 +580,7 @@ mod host {
     }
 
     /// The blocks of `CULLED` and the debug selectors each one draws.
-    const CULLED: [(&str, &[&str]); 8] = [
+    const CULLED: [(&str, &[&str]); 9] = [
         ("intro with [a link](https://x.test/)", &[]),
         ("# First", &["markdown-heading-0"]),
         ("```rust\nfn a() {}\n```", &[]),
@@ -589,6 +589,8 @@ mod host {
         ("```\nlater\n```", &[]),
         ("| e |\n|---|\n| f |", &["markdown-cell-1-0-0", "markdown-cell-1-1-0"]),
         ("the end [link](https://y.test/)", &[]),
+        // A rule is the one block with a vertical margin (`my_2`): the wrapper must hold it.
+        ("---", &["markdown-rule"]),
     ];
 
     /// What one frame's drawing of `CULLED` left: the host gather's events, the ids the code
@@ -615,7 +617,8 @@ mod host {
     ) -> Drawn {
         cx.update(Theme::init);
         let source: &'static str = Box::leak(
-            (CULLED.iter().map(|(text, _)| *text).collect::<Vec<_>>().join("\n\n")).into_boxed_str(),
+            (CULLED.iter().map(|(text, _)| *text).collect::<Vec<_>>().join("\n\n"))
+                .into_boxed_str(),
         );
         let recorder = Rc::new(Recorder::default());
         let test = Rc::new(TestCull {
@@ -656,7 +659,11 @@ mod host {
             .collect::<Vec<&'static str>>();
         let placed = selectors.iter().filter_map(|name| cx.debug_bounds(name)).collect();
         let events = recorder.0.borrow().clone();
-        let pushes = |text: &str| events.iter().filter(|event| **event == Event::Text(text.into())).count();
+        let pushes = |text: &str| {
+            (events.iter())
+                .filter(|event| **event == Event::Text(text.into()))
+                .count()
+        };
         let rounds = pushes("intro with a link").max(pushes("the end link")).max(1);
         let first = |all: &[Event]| all[..all.len() / rounds].to_vec();
         let first_of = |all: &[String]| all[..all.len() / rounds].to_vec();

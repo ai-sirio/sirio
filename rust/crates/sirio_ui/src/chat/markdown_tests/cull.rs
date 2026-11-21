@@ -13,10 +13,15 @@ use super::*;
 use crate::markdown::DrawnPart;
 use crate::markdown::cull::probe;
 
-/// SHOWCASE repeated to 40 KiB: about a hundred blocks, several fences and tables.
-fn long_reply() -> String {
+/// SHOWCASE repeated to 16 KiB for the scenarios, which draw it in full for their oracle: about
+/// forty blocks, still many windows tall. (The oracle streams 40 KiB, the bench's reply.)
+fn short_reply() -> String {
+    reply_of(16)
+}
+
+fn reply_of(kib: usize) -> String {
     let mut source = String::new();
-    while source.len() < 40 * 1024 {
+    while source.len() < kib * 1024 {
         source.push_str(SHOWCASE);
         source.push_str("\n\n");
     }
@@ -54,6 +59,21 @@ impl Frame {
     }
 }
 
+/// Whether two drawings of a text agree: the same part and highlight, laid out within a
+/// thousandth of a pixel. The same-frame redraw lays the body out as its own root, so a text's
+/// unsnapped bounds can differ from the normal frame's by float noise (seen at scale 1.5:
+/// 33.333008 against 33.333984); the snapped boxes (the item) are equal exactly.
+fn same_place(a: &DrawnPart, b: &DrawnPart) -> bool {
+    let near = |x: Pixels, y: Pixels| f32::from(x - y).abs() < 0.01;
+    a.part == b.part
+        && a.start == b.start
+        && a.selected == b.selected
+        && near(a.bounds.origin.x, b.bounds.origin.x)
+        && near(a.bounds.origin.y, b.bounds.origin.y)
+        && near(a.bounds.size.width, b.bounds.size.width)
+        && near(a.bounds.size.height, b.bounds.size.height)
+}
+
 /// Where a jump lands.
 #[derive(Clone, Copy, Debug)]
 enum Jump {
@@ -63,10 +83,18 @@ enum Jump {
 
 /// The long reply followed at the tail until its far blocks are stood in for, then one frame
 /// after `jump`, read straight from that frame, and what the culling did in it.
-fn first_frame_after(cx: &mut TestAppContext, culling: bool, jump: Jump) -> (Frame, probe::Stats) {
+fn first_frame_after(
+    cx: &mut TestAppContext,
+    culling: bool,
+    jump: Jump,
+    scale: Option<f32>,
+) -> (Frame, probe::Stats) {
     probe::culling(culling);
-    let source = long_reply();
+    let source = short_reply();
     let (chat, cx) = chat_with(cx, &[&source]);
+    if let Some(scale) = scale {
+        cx.simulate_scale_factor_change(scale);
+    }
     chat.update(cx, |chat, _| chat.list_state.set_follow_mode(FollowMode::Tail));
     for _ in 0..4 {
         refresh_frame(cx);
@@ -101,20 +129,21 @@ fn first_frame_after(cx: &mut TestAppContext, culling: bool, jump: Jump) -> (Fra
 async fn a_jump_to_culled_blocks_paints_every_visible_block_in_the_first_frame(
     cx: &mut TestAppContext,
 ) {
-    for jump in [Jump::Top, Jump::Middle] {
-        let (full, _) = first_frame_after(cx, false, jump);
-        let (culled, stats) = first_frame_after(cx, true, jump);
-        assert!(stats.redrawn > 0, "{jump:?}: the jump met stand-ins and fixed them: {stats:?}");
-        assert_eq!(stats.widened, 0, "{jump:?}: the width did not change: {stats:?}");
+    for (jump, scale) in [(Jump::Top, None), (Jump::Middle, None), (Jump::Middle, Some(1.5))] {
+        let (full, _) = first_frame_after(cx, false, jump, scale);
+        let (culled, stats) = first_frame_after(cx, true, jump, scale);
+        let at = format!("{jump:?} at {scale:?}");
+        assert!(stats.redrawn > 0, "{at}: the jump met stand-ins and fixed them: {stats:?}");
+        assert_eq!(stats.widened, 0, "{at}: the width did not change: {stats:?}");
         let visible = full.visible();
-        assert!(visible.len() > 10, "{jump:?}: the window shows text: {}", visible.len());
+        assert!(visible.len() > 10, "{at}: the window shows text: {}", visible.len());
         for part in visible {
             assert!(
-                culled.parts.contains(part),
-                "{jump:?}: a text the window shows was not drawn in the first frame: {part:?}"
+                culled.parts.iter().any(|drawn| same_place(drawn, part)),
+                "{at}: a text the window shows was not drawn in the first frame: {part:?}"
             );
         }
-        assert_eq!(culled.item, full.item, "{jump:?}: the item's place");
+        assert_eq!(culled.item, full.item, "{at}: the item's place");
     }
 }
 
@@ -180,7 +209,8 @@ fn stream(cx: &mut TestAppContext, culling: bool, setup: Setup, steps: &[usize])
             cut += 1;
         }
         chat.update(cx, |chat, cx| {
-            chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk(source[from..cut].into()), cx);
+            let chunk = source[from..cut].into();
+            chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk(chunk), cx);
             chat.select_all_transcript(cx);
         });
         from = cut;
@@ -213,7 +243,10 @@ fn same_to_the_reader(culled: &Frame, full: &Frame, at: &str) {
     // 4. Every text drawn is the full draw's, with the same part, start, bounds and highlight,
     // and every text the window shows is drawn.
     for part in &culled.parts {
-        assert!(full.parts.contains(part), "{at}: a drawn text differs from the full draw's: {part:?}");
+        assert!(
+            full.parts.contains(part),
+            "{at}: a drawn text differs from the full draw's: {part:?}"
+        );
     }
     for part in full.visible() {
         assert!(culled.parts.contains(part), "{at}: a text in the window is not drawn: {part:?}");
@@ -244,13 +277,19 @@ fn oracle(cx: &mut TestAppContext, setup: Setup, steps: &[usize]) {
         same_to_the_reader(&on.some, &off.some, &format!("{at}, selected from a third"));
         // 2. The whole transcript's Select All copies the whole transcript.
         assert_eq!(on.all.whole, off.all.whole, "{at}: the transcript");
-        assert_eq!(on.all.copied.as_deref(), Some(on.all.whole.as_str()), "{at}: Select All and copy, culled");
+        assert_eq!(
+            on.all.copied.as_deref(),
+            Some(on.all.whole.as_str()),
+            "{at}: Select All and copy, culled"
+        );
         assert_eq!(off.all.copied, on.all.copied, "{at}: Select All and copy");
         assert_eq!(on.some.copied, off.some.copied, "{at}: a selection from a third");
     }
 }
 
-/// Every Nth of the bench's 200 cuts, the first and the last.
+/// Every Nth of the bench's 200 cuts, and the first. The default run takes few (a debug
+/// draw of 40 KiB is slow, and nextest ends a test after three minutes); the ignored test
+/// takes all.
 fn sampled(every: usize) -> Vec<usize> {
     let mut steps: Vec<usize> = (1..=200).filter(|step| step % every == 0).collect();
     if steps.first() != Some(&1) {
@@ -262,14 +301,14 @@ fn sampled(every: usize) -> Vec<usize> {
 #[gpui::test]
 async fn culling_changes_nothing_a_reader_can_reach_at_the_tail(cx: &mut TestAppContext) {
     let started = std::time::Instant::now();
-    oracle(cx, Setup::default(), &sampled(10));
+    oracle(cx, Setup::default(), &sampled(40));
     eprintln!("oracle tail: {:?}", started.elapsed());
 }
 
 #[gpui::test]
 async fn culling_changes_nothing_a_reader_can_reach_at_the_top(cx: &mut TestAppContext) {
     let started = std::time::Instant::now();
-    oracle(cx, Setup { at_top: true, ..Setup::default() }, &sampled(10));
+    oracle(cx, Setup { at_top: true, ..Setup::default() }, &sampled(40));
     eprintln!("oracle top: {:?}", started.elapsed());
 }
 
@@ -277,8 +316,7 @@ async fn culling_changes_nothing_a_reader_can_reach_at_the_top(cx: &mut TestAppC
 /// logical pixels.
 #[gpui::test]
 async fn culling_changes_nothing_a_reader_can_reach_at_scale_1_5(cx: &mut TestAppContext) {
-    oracle(cx, Setup { scale: Some(1.5), ..Setup::default() }, &sampled(10));
-    oracle(cx, Setup { scale: Some(1.5), at_top: true, ..Setup::default() }, &sampled(10));
+    oracle(cx, Setup { scale: Some(1.5), ..Setup::default() }, &sampled(40));
 }
 
 /// A picture scaled to the width has a fractional height, at a fractional scale too.
@@ -286,8 +324,7 @@ async fn culling_changes_nothing_a_reader_can_reach_at_scale_1_5(cx: &mut TestAp
 async fn culling_changes_nothing_a_reader_can_reach_with_pictures_scaled_to_the_width(
     cx: &mut TestAppContext,
 ) {
-    oracle(cx, Setup { scale: Some(1.5), picture: true, ..Setup::default() }, &sampled(10));
-    oracle(cx, Setup { picture: true, at_top: true, ..Setup::default() }, &sampled(10));
+    oracle(cx, Setup { scale: Some(1.5), picture: true, ..Setup::default() }, &sampled(40));
 }
 
 /// All 200 cuts of the bench: by hand, in release (`cargo nextest run -p sirio_ui
@@ -339,14 +376,19 @@ async fn a_frame_scrolled_sideways_keeps_its_offset_through_a_cull(cx: &mut Test
     let cases = [
         ("a fence", format!("```json\n{{\"key\": \"{wide}\"}}\n```")),
         ("a table", format!("| col | other |\n|---|---|\n| a | {wide} |")),
-        ("a fence in a list item", format!("- item\n\n  ```json\n  {{\"key\": \"{wide}\"}}\n  ```")),
+        (
+            "a fence in a list item",
+            format!("- item\n\n  ```json\n  {{\"key\": \"{wide}\"}}\n  ```"),
+        ),
         ("a fence in a quote", format!("> ```json\n> {{\"key\": \"{wide}\"}}\n> ```")),
     ];
     for (what, first) in cases {
         let source = wide_then_long(&first);
         let (chat, cx) = chat_with(cx, &[&source]);
         scroll_to_top(&chat, cx);
-        let frame = cx.debug_bounds("markdown-frame-0").unwrap_or_else(|| panic!("{what}: drawn at the top"));
+        let frame = cx
+            .debug_bounds("markdown-frame-0")
+            .unwrap_or_else(|| panic!("{what}: drawn at the top"));
         cx.simulate_event(gpui::ScrollEvent {
             position: frame.center(),
             delta: gpui::ScrollDelta::Pixels(point(px(-300.0), px(0.0))),
@@ -356,7 +398,10 @@ async fn a_frame_scrolled_sideways_keeps_its_offset_through_a_cull(cx: &mut Test
             refresh_frame(cx);
         }
         let scrolled = thumb(cx);
-        assert!(scrolled.is_some_and(|x| x > 1.0), "{what}: the wheel moved the thumb: {scrolled:?}");
+        assert!(
+            scrolled.is_some_and(|x| x > 1.0),
+            "{what}: the wheel moved the thumb: {scrolled:?}"
+        );
         // Away to the tail: the frame is far above the window and stood in for.
         probe::reset();
         chat.update(cx, |chat, _| chat.list_state.set_follow_mode(FollowMode::Tail));
@@ -364,7 +409,10 @@ async fn a_frame_scrolled_sideways_keeps_its_offset_through_a_cull(cx: &mut Test
             refresh_frame(cx);
         }
         assert!(probe::stats().last > 0, "{what}: blocks were stood in for while away");
-        assert!(cx.debug_bounds("markdown-frame-0").is_none(), "{what}: the frame is not drawn while away");
+        assert!(
+            cx.debug_bounds("markdown-frame-0").is_none(),
+            "{what}: the frame is not drawn while away"
+        );
         scroll_to_top(&chat, cx);
         assert_eq!(thumb(cx), scrolled, "{what}: the offset survived the cull");
     }
@@ -376,7 +424,7 @@ fn at_the_tail<'a>(
     culling: bool,
 ) -> (Entity<Chat>, &'a mut VisualTestContext) {
     probe::culling(culling);
-    let source = long_reply();
+    let source = short_reply();
     let (chat, cx) = chat_with(cx, &[&source]);
     chat.update(cx, |chat, _| chat.list_state.set_follow_mode(FollowMode::Tail));
     for _ in 0..4 {
@@ -399,7 +447,8 @@ fn drag_and_probe(cx: &mut TestAppContext, culling: bool) -> Dragged {
     let (chat, cx) = at_the_tail(cx, culling);
     let frame = chat.read_with(&cx.cx, |chat, _| Frame::look(chat));
     // The last text the window shows, from near its bottom to near its top.
-    let shown = frame.visible().last().expect("the window shows text").bounds.intersect(&frame.viewport);
+    let last = frame.visible().last().expect("the window shows text").bounds;
+    let shown = last.intersect(&frame.viewport);
     let (from, back) = (
         point(shown.center().x, shown.bottom() - px(4.0)),
         point(shown.center().x, shown.top() + px(4.0)),
@@ -446,8 +495,14 @@ async fn a_drag_past_the_window_top_and_back_selects_what_it_would_and_clamps_pa
     }
     let (far, culled_at) = culled.above[2];
     let (_, full_at) = full.above[2];
-    assert_ne!(culled_at, full_at, "{far} px above is past the margin: the full draw reaches text there");
-    assert_eq!(culled_at, culled.first_drawn, "past the margin the head clamps to the first text drawn");
+    assert_ne!(
+        culled_at, full_at,
+        "{far} px above is past the margin: the full draw reaches text there"
+    );
+    assert_eq!(
+        culled_at, culled.first_drawn,
+        "past the margin the head clamps to the first text drawn"
+    );
 }
 
 /// The bodies' pass over blocks with `width` of window and one frame drawn by hand.
@@ -490,8 +545,14 @@ async fn a_width_change_draws_everything_once_and_settles_in_one_more_frame(
     assert!(stats.widened >= 1, "the first frame drew every block again: {stats:?}");
     assert_eq!(stats.per_pass.first(), Some(&0), "nothing was stood in for in it: {stats:?}");
     assert!(!first.visible().is_empty(), "the window shows text");
-    assert!(*more > 0, "a frame was scheduled for the new width's heights");
-    assert_eq!(settled.item, full.item, "the item is as tall as a full draw's after one more frame");
+    // The full draw's frames are the sideways bars' own requests; the culled body asks for one
+    // more, for the new width's heights.
+    let full_more = results[0].2;
+    assert!(*more > full_more, "the culled body asked for a frame: {more} against {full_more}");
+    assert_eq!(
+        settled.item, full.item,
+        "the item is as tall as a full draw's after one more frame"
+    );
 }
 
 /// 9. A change of the interface's text size, or of the fonts, forgets every height: the same
@@ -528,7 +589,11 @@ async fn a_change_of_text_size_or_font_forgets_every_height(cx: &mut TestAppCont
         }
         let (_, full) = &results[0];
         let (stats, settled) = &results[1];
-        assert_eq!(stats.per_pass.first(), Some(&0), "{what}: the first frame after drew every block: {stats:?}");
+        assert_eq!(
+            stats.per_pass.first(),
+            Some(&0),
+            "{what}: the first frame after drew every block: {stats:?}"
+        );
         assert_eq!(settled.item, full.item, "{what}: no stale height");
     }
 }
@@ -582,7 +647,10 @@ async fn a_rewritten_closed_block_is_laid_out_again_and_the_blocks_after_it_are_
     assert_eq!(height, full_height, "the item is as tall as a full draw's after the rewrite");
     assert!(full_height.is_some());
     for part in full.visible() {
-        assert!(culled.parts.contains(part), "a text after the rewritten block is not where it was drawn: {part:?}");
+        assert!(
+            culled.parts.contains(part),
+            "a text after the rewritten block is not where it was drawn: {part:?}"
+        );
     }
 }
 
@@ -625,7 +693,10 @@ async fn a_link_in_a_block_drawn_again_opens_once_and_offers_its_menu(cx: &mut T
     right_click(cx, spot);
     refresh_frame(cx);
     assert!(cx.debug_bounds("transcript-context-open-link").is_some(), "Open link is offered");
-    assert!(cx.debug_bounds("transcript-context-copy-link").is_some(), "Copy link address is offered");
+    assert!(
+        cx.debug_bounds("transcript-context-copy-link").is_some(),
+        "Copy link address is offered"
+    );
     let _ = std::fs::remove_file(dir.join("cull-link-test.rs"));
 }
 
@@ -633,16 +704,17 @@ async fn a_link_in_a_block_drawn_again_opens_once_and_offers_its_menu(cx: &mut T
 /// ends.
 fn scheduled_while_streaming(cx: &mut TestAppContext, culling: bool) -> (usize, usize) {
     probe::culling(culling);
-    let source = long_reply();
+    let source = short_reply();
     let (chat, cx) = chat_with(cx, &[]);
     let (mut from, mut total) = (0, 0);
-    for step in (4..=200).step_by(4) {
+    for step in (8..=200).step_by(8) {
         let mut cut = (source.len() * step / 200).min(source.len());
         while !source.is_char_boundary(cut) {
             cut += 1;
         }
         chat.update(cx, |chat, cx| {
-            chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk(source[from..cut].into()), cx);
+            let chunk = source[from..cut].into();
+            chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk(chunk), cx);
         });
         from = cut;
         // Run what is scheduled until it stops asking, counting each request.
@@ -675,7 +747,11 @@ async fn culling_schedules_no_more_frames_and_leaves_no_idle_redraw_loop(cx: &mu
     let (on, on_left) = scheduled_while_streaming(cx, true);
     assert!(probe::stats().stood > 0, "culling engaged");
     assert!(on <= off, "frames scheduled while streaming: {on} culled against {off} full");
-    assert_eq!((off_left, on_left), (0, 0), "frames still scheduled after the stream: full {off_left}, culled {on_left}");
+    assert_eq!(
+        (off_left, on_left),
+        (0, 0),
+        "frames still scheduled after the stream: full {off_left}, culled {on_left}"
+    );
     eprintln!("frames scheduled while streaming: culled {on}, full {off}");
 }
 
@@ -707,7 +783,10 @@ async fn link_rows_list_only_the_links_of_drawn_blocks(cx: &mut TestAppContext) 
     }
     let (full, culled) = (&found[0], &found[1]);
     assert!(full.iter().any(|label| label == "the far docs"), "a full draw lists the far link");
-    assert!(!culled.iter().any(|label| label == "the far docs"), "a stood-in block's link is not listed");
+    assert!(
+        !culled.iter().any(|label| label == "the far docs"),
+        "a stood-in block's link is not listed"
+    );
     assert!(culled.len() < full.len() && culled.iter().all(|label| full.contains(label)));
     assert!(culled.iter().any(|label| label == "link 299"), "the links near the window are listed");
 }
