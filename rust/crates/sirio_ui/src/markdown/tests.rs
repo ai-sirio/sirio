@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ely_gpui_component::documents::{
-    AlertKind, Inline, MarkdownBlock as Node, Style, markdown_parsed_text,
+    AlertKind, Inline, MarkdownBlock as Node, Style, markdown_picture_path,
 };
 use sirio_diagram::{DiagramKind, Palette};
 use sirio_project::FileLinkTarget;
@@ -308,12 +308,29 @@ fn the_pass_that_reads_parenthesised_math_does_not_hide_nesting() {
 }
 
 /// What Ely parses is not what was written: its `$$` fences become tildes, which changes where
-/// a block ends. The guard measures that text.
+/// a block ends, and the guard measures that text. Under `MAX_NESTING - 1` quotes, written, the
+/// lines `$$ / $$ / *` are one paragraph (an empty item cannot interrupt one), as deep as the
+/// cap; read by Ely the fence is a code block and the item a list, one level more. The twin
+/// with `xx` for `$$` reads the same either way.
 #[test]
-fn the_guard_measures_the_text_after_the_dollar_fences_are_read() {
-    let source = "\n\n$$\n$$\n* ";
-    assert_eq!(markdown_depth(source), 1, "as written");
-    assert_eq!(markdown_depth(&markdown_parsed_text(source)), 2, "as Ely reads it");
+fn a_dollar_fence_that_takes_the_text_over_the_cap_is_measured_as_ely_reads_it() {
+    let lines = |fence: &str| {
+        let marks = "> ".repeat(MAX_NESTING - 1);
+        format!("{marks}{fence}\n{marks}{fence}\n{marks}* ")
+    };
+    let (fenced, twin) = (lines("$$"), lines("xx"));
+    assert_eq!(markdown_depth(&fenced), MAX_NESTING, "as written, under the cap");
+    let (kept_fenced, kept_twin) = on_stack(8 * 1024 * 1024, {
+        let (fenced, twin) = (fenced.clone(), twin.clone());
+        move || {
+            (
+                build(&fenced, &mut plain(Surface::Chat)).nodes.to_vec(),
+                build(&twin, &mut plain(Surface::Chat)).nodes.to_vec(),
+            )
+        }
+    });
+    assert_eq!(kept_fenced, [paragraph(&fenced)], "the fence takes it over the cap: plain text");
+    assert!(depth(&kept_twin) >= MAX_NESTING - 1, "the twin is drawn as written: {}", depth(&kept_twin));
 }
 
 /// How deep `nodes` nest, a leaf counting one.
@@ -529,14 +546,130 @@ fn picture_under(base: &str, url: &str) -> Option<String> {
 }
 
 // Windows spells a canonical path `\\?\C:\..`, and a worktree path read back from git can be
-// one. Only that exact spelling, on the Preview's own folder, is exempt from the network-path
-// check; the logic is string-based, so it runs here.
+// one. The renderer cuts every address at its first `?`, so a verbatim folder is read as the
+// ordinary disk path `C:\..` (the way `dunce` does) and the address then resolves as it does
+// under that path. The logic is string-based, so it runs here.
+const VERBATIM_AND_PLAIN: [(&str, &str); 4] = [
+    (r"\\?\C:\repo\docs", r"C:\repo\docs"),
+    (r"\\?\c:\repo\docs", r"c:\repo\docs"),
+    (r"\\?\C:", r"C:\"),
+    (r"\\?\C:\", r"C:\"),
+];
+
 #[test]
-fn preview_resolves_pictures_under_a_verbatim_disk_folder() {
-    for base in [r"\\?\C:\repo\docs", r"\\?\c:\repo\docs", r"\\?\C:", r"\\?\C:\"] {
-        let url = picture_under(base, "docs/logo.png").unwrap_or_else(|| panic!("{base}: no picture"));
-        assert!(url.starts_with(base) && url.ends_with("logo.png"), "{base}: {url}");
+fn preview_resolves_pictures_under_a_verbatim_disk_folder_as_under_the_plain_one() {
+    for (verbatim, plain) in VERBATIM_AND_PLAIN {
+        // A relative address, one that leaves the folder, a root-relative one and a decoded one.
+        for url in ["docs/logo.png", "../logo.png", "./a/../b/logo.png", "/img/logo.png", "my%20pic.png"] {
+            let under_plain = picture_under(plain, url).unwrap_or_else(|| panic!("{plain} {url}: no picture"));
+            let under_verbatim = picture_under(verbatim, url);
+            assert_eq!(under_verbatim.as_deref(), Some(under_plain.as_str()), "{verbatim} {url}");
+            assert!(!under_plain.contains('?'), "{url}: {under_plain}");
+        }
     }
+}
+
+// The Preview's folder loses its `\\?\` only when the plain spelling names the same place, the rule
+// of `dunce::simplified`. Otherwise it stays verbatim, where a picture is refused (its alt shows),
+// and is never resolved to a wrong place.
+
+/// Whether `base` is read as the ordinary path (and a picture resolves under it as under that),
+/// or is left verbatim and a picture under it is refused.
+fn assert_simplified(base: &str, plain: Option<&str>) {
+    let read = rewrite::without_verbatim_prefix(Path::new(base));
+    match plain {
+        Some(plain) => {
+            assert_eq!(read.to_string_lossy(), plain, "{base}");
+            assert_eq!(picture_under(base, "docs/logo.png"), picture_under(plain, "docs/logo.png"), "{base}");
+            assert!(picture_under(base, "docs/logo.png").is_some(), "{base}");
+        }
+        None => {
+            assert_eq!(read.to_string_lossy(), base, "{base} is left verbatim");
+            assert_eq!(picture_under(base, "docs/logo.png"), None, "{base}: refused, not resolved wrong");
+        }
+    }
+}
+
+#[test]
+fn a_verbatim_folder_the_plain_spelling_names_is_read_as_the_plain_one() {
+    for (base, plain) in [
+        (r"\\?\C:\repo\docs", r"C:\repo\docs"),
+        (r"\\?\c:\repo", r"c:\repo"),
+        (r"\\?\C:", r"C:\"),
+        (r"\\?\C:\", r"C:\"),
+        // Names that only look reserved or odd: a longer stem, a dot-file, a stem of more than the reserved name (`com1.tar.gz`).
+        (r"\\?\C:\repo\console\com10\.con\com1.tar.gz", r"C:\repo\console\com10\.con\com1.tar.gz"),
+    ] {
+        assert_simplified(base, Some(plain));
+    }
+    // Exactly 260 units, counting the prefix, is the most.
+    let at_the_limit = format!(r"\\?\C:\{}", "a".repeat(260 - r"\\?\C:\".len()));
+    assert_simplified(&at_the_limit, Some(&at_the_limit[4..]));
+}
+
+#[test]
+fn a_verbatim_folder_past_260_units_is_left_verbatim() {
+    let long = format!(r"\\?\C:\{}", "a".repeat(261 - r"\\?\C:\".len()));
+    assert_eq!(long.encode_utf16().count(), 261);
+    assert_simplified(&long, None);
+    // Two long names under it, each under the 255 a name may have.
+    assert_simplified(&format!(r"\\?\C:\{}\{}", "a".repeat(130), "b".repeat(130)), None);
+}
+
+#[test]
+fn a_verbatim_folder_with_a_reserved_dos_name_is_left_verbatim() {
+    for base in [
+        r"\\?\C:\repo\CON\docs",
+        r"\\?\C:\repo\con.txt\docs",
+        r"\\?\C:\repo\Nul",
+        r"\\?\C:\repo\aux.tar",
+        r"\\?\C:\repo\PRN.md\docs",
+        r"\\?\C:\repo\com1",
+        r"\\?\C:\repo\LPT9.x",
+        r"\\?\C:\repo\con.. .txt",
+    ] {
+        assert_simplified(base, None);
+    }
+}
+
+#[test]
+fn a_verbatim_folder_with_a_name_ending_in_a_dot_or_a_space_is_left_verbatim() {
+    assert_simplified(r"\\?\C:\repo.\docs", None);
+    assert_simplified(r"\\?\C:\repo \docs", None);
+    assert_simplified(r"\\?\C:\repo\docs.", None);
+    assert_simplified(r"\\?\C:\repo\docs ", None);
+    // A verbatim path reads `..` and `.` literally, as names that end in a dot; and a colon, a
+    // slash or a wildcard is no part of a name.
+    assert_simplified(r"\\?\C:\repo\..\docs", None);
+    assert_simplified(r"\\?\C:\repo\.\docs", None);
+    assert_simplified(r"\\?\C:\repo\a:b", None);
+    assert_simplified(r"\\?\C:\repo\a/b", None);
+    assert_simplified(r"\\?\C:\repo\a*b", None);
+}
+
+/// `\\?\UNC\host\share` would be `\\host\share` plain, never `\host\share`: it is a network path
+/// and stays refused, which is a refusal either way.
+#[test]
+fn a_verbatim_unc_folder_is_never_reduced_to_a_rooted_path_and_stays_refused() {
+    for base in [r"\\?\UNC\host\share\repo", r"\\?\UNC\host\share", r"\\?\unc\host\share\repo"] {
+        assert_simplified(base, None);
+        let read = rewrite::without_verbatim_prefix(Path::new(base));
+        assert!(!read.to_string_lossy().starts_with(r"\host"), "{base}");
+        assert!(rewrite::names_a_network_path(&read.to_string_lossy()), "{base}: still a network path");
+    }
+}
+
+/// What the renderer is handed must come through its own address reading whole: it cuts at
+/// the first `?`, which is what a verbatim path was reduced to before.
+#[test]
+fn the_renderer_reads_the_address_it_is_handed_under_a_verbatim_folder_whole() {
+    for (verbatim, _) in VERBATIM_AND_PLAIN {
+        let handed = picture_under(verbatim, "docs/logo.png").expect("a picture");
+        assert_eq!(markdown_picture_path(&handed), Some(PathBuf::from(&handed)), "{verbatim}");
+    }
+    // The verbatim spelling itself is cut at its `?`, to the two backslashes before it.
+    let cut = markdown_picture_path(r"\\?\C:\repo\docs\logo.png").expect("a path");
+    assert_eq!(cut, PathBuf::from(r"\\"));
 }
 
 #[test]
@@ -561,19 +694,12 @@ fn preview_refuses_pictures_under_any_other_rooted_folder() {
 }
 
 #[test]
-fn a_relative_picture_under_a_verbatim_folder_keeps_the_strict_check_and_stays_on_the_disk() {
+fn a_relative_picture_under_a_verbatim_folder_keeps_the_strict_check() {
     let base = r"\\?\C:\repo\docs";
     // The relative part is judged as written, and as decoded.
     for url in [r"\\host\s\x.png", "//host/s/x.png", "%5C%5Chost%5Cs%5Cx.png", r"\\?\UNC\h\s\x.png"] {
         assert_eq!(picture_under(base, url), None, "{url}");
     }
-    // Windows folds no `..` in a verbatim path, so it is folded before the join, and never
-    // above the drive root.
-    let at = |url: &str| picture_under(base, url);
-    assert_eq!(at("../logo.png").as_deref(), Some(r"\\?\C:\repo\logo.png"));
-    assert_eq!(at("./a/../b/logo.png").as_deref(), Some(r"\\?\C:\repo\docs\b\logo.png"));
-    assert_eq!(at("../../../../logo.png").as_deref(), Some(r"\\?\C:\logo.png"));
-    assert_eq!(at("%2E%2E/logo.png").as_deref(), Some(r"\\?\C:\repo\logo.png"));
 }
 
 /// An address written in a document is judged strictly: no verbatim spelling is a disk there.

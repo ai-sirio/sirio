@@ -37,12 +37,6 @@ pub(crate) fn math_inside(source: &str, whole: Range<usize>) -> Range<usize> {
     }
 }
 
-/// The text pulldown-cmark reads when `source` is parsed: the byte order mark dropped, lone CRs
-/// as LF, `$$` fences as tildes. A host that measures the source measures this.
-pub fn parsed_text(source: &str) -> String {
-    build::parsed(source)
-}
-
 /// The options pulldown-cmark reads with.
 pub fn parser_options() -> pulldown_cmark::Options {
     build::options()

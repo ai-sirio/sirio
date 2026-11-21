@@ -38,12 +38,6 @@ fn crs(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// The text pulldown-cmark reads when `source` is parsed without front matter: the byte order mark
-/// dropped, lone CRs as LF, `$$` fences as tildes, in the order `tree` and `read` do them.
-pub(crate) fn parsed(source: &str) -> String {
-    flow_of(without_bom(source).unwrap_or(source)).text
-}
-
 /// `text`, lone CRs as LF, with its `$$` fences as tildes: what pulldown-cmark reads.
 fn flow_of(text: &str) -> Flow {
     flow::rewrite(&crs(text), options())

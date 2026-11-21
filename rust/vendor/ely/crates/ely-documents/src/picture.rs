@@ -105,6 +105,18 @@ fn path(written: &str) -> Result<PathBuf, SharedString> {
         .map_err(|_| "the path is not UTF-8".into())
 }
 
+/// The part of a local address the renderer reads: what is before its first `?` or `#`.
+fn written_part(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or_default()
+}
+
+/// The path a local `url` names as the renderer reads it, `%XX` decoded, cut as `origin` cuts it
+/// (so a path with a `?` in it, as a Windows verbatim path has, is cut short). For a host that
+/// hands the renderer addresses and checks that they arrive whole.
+pub fn picture_path(url: &str) -> Option<PathBuf> {
+    path(written_part(url.trim())).ok()
+}
+
 /// Where `url` points, read from the folder `base`.
 pub(crate) fn origin(url: &str, base: Option<&Path>) -> Origin {
     let url = url.trim();
@@ -127,8 +139,7 @@ pub(crate) fn origin(url: &str, base: Option<&Path>) -> Origin {
     if scheme {
         return Origin::Bad(format!("{url} is no picture address").into());
     }
-    let written = url.split(['?', '#']).next().unwrap_or_default();
-    match path(written) {
+    match path(written_part(url)) {
         Ok(path) if path.is_absolute() => Origin::File(path),
         Ok(path) => base.map_or(Origin::Loose, |base| Origin::File(base.join(path))),
         Err(why) => Origin::Bad(why),

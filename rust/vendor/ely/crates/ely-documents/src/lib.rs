@@ -59,14 +59,13 @@ pub use knowledge::{Backlink, Backlinks, Favorite, Favorites, TrashBin, Trashed}
 pub use link::LinkEditor;
 pub use markdown::file_tree as markdown_tree;
 pub use markdown::markdown_highlights;
-pub use markdown::parsed_text as markdown_parsed_text;
 pub use markdown::parser_options as markdown_options;
 pub use markdown::mdast::{self, AlignKind};
 pub use math::{Latex, MathError, formula_svg};
 pub(crate) use math::{failed, typeset};
 pub use modes::{MarkdownEditor, MarkdownMode};
 pub use pages::{PageCover, PageIcon};
-pub use picture::{HeldPicture, Pictures};
+pub use picture::{HeldPicture, Pictures, picture_path as markdown_picture_path};
 pub use print::{Margins, Paper, PrintPreview, PrintSettings, sheet};
 pub use reading::{Footnote, Glossary, ReadingProgress, TooltipTerm, ZenMode};
 pub use render::{BlockCull, BlockUse, MarkdownRenderer, RightPress, TextGather};

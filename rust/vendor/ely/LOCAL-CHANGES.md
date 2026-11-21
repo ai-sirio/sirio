@@ -869,24 +869,27 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
   table hooks, `markdown-heading-N` and `markdown-cell-T-R-C` selectors and the host gather's pushes, with
   each block skipped in turn),
   `without_a_cull_the_tree_is_the_one_a_never_skipping_cull_lays_out`.
-- L10 what the parser reads, for a host that measures a source before it parses it (`markdown.rs`, `markdown/build.rs`,
-  `markdown/tex.rs`, `tree/mod.rs`, `lib.rs`):
-  `markdown_parsed_text(source) -> String` is exactly the text pulldown-cmark reads when `source` is parsed
-  without front matter: one leading U+FEFF dropped, each lone CR as LF, `$$` fences as tildes, from the same
-  helpers (`without_bom`, `crs`, `flow::rewrite`) `build::tree` and `read` use, in the same order.
+- L10 what the parser and the renderer read, for a host that measures or checks a source before it hands it over
+  (`markdown.rs`, `markdown/build.rs`, `markdown/tex.rs`, `tree/mod.rs`, `picture.rs`, `lib.rs`):
   `markdown_options()` is the options `build::options()` gives (it was `pub(super)`).
-  `parse_markdown_guarded(source, html_block, accept)` is `parse_markdown_with` that asks `accept` about the text
-  of each round of the pass that reads `\(` and `\[` pairs as math, before that round is parsed, and keeps the
-  first pass's tree on a refusal (`tex::parse` is `read` with an always-yes callback; `parse_markdown_with` is
-  the guarded parse with one). One parse, no separate measuring pass. Why: a deep tree overflows the stack in
-  the passes that recurse over it, so Sirio refuses a source past a cap first, and a guard that reads the
-  source as written misses a quote marker behind a byte order mark, a line a lone CR ends, a block that a `$$`
-  fence changes, and a closer that the second pass hides inside math (`*a \(x*\) ` repeated, then `a* `
-  repeated, is flat in the first pass and deep in the second). Calling Ely's own functions leaves one
-  implementation, so the two cannot drift. No upstream caller changes. Proof: Sirio's
+  `parse_markdown_guarded(source, html_block, accept)` is `parse_markdown_with` that asks `accept` about each text
+  pulldown-cmark is about to read, before any event is built into a tree: the first pass's (the byte order mark
+  dropped, lone CRs as LF, `$$` fences as tildes, from the helpers `without_bom`, `crs` and `flow_of` that
+  `build::tree_with` and `read` use, in that order) and each round of the pass that reads `\(` and `\[` pairs as
+  math, swapped. It returns None when the first text is refused and keeps the first pass's tree when a swapped one
+  is (`tex::parse` is `read` with an always-yes callback; `parse_markdown_with` is the guarded parse with one).
+  One parse, no separate measuring pass. Why: a deep tree overflows the stack in the passes that recurse over it,
+  so Sirio refuses a source past a cap first, and a guard that reads the source as written misses a quote marker
+  behind a byte order mark, a line a lone CR ends, a block that a `$$` fence changes, and a closer that the second
+  pass hides inside math (`*a \(x*\) ` repeated, then `a* ` repeated, is flat in the first pass and deep in the
+  second). Ely's own text, not a copy of its rules, so the two cannot drift.
+  `markdown_picture_path(url)` is the path a local picture address reads as after `picture::origin` cuts it at its
+  first `?` or `#` (both now use `written_part`), so a host can check that an address it hands the renderer
+  arrives whole: a Windows verbatim path `\\?\C:\..` is cut to `\\`. No upstream caller changes. Proof: Sirio's
   `markdown::tests::a_leading_byte_order_mark_does_not_hide_nesting`, `a_lone_cr_does_not_hide_nesting`,
-  `the_pass_that_reads_parenthesised_math_does_not_hide_nesting` and
-  `the_guard_measures_the_text_after_the_dollar_fences_are_read`.
+  `the_pass_that_reads_parenthesised_math_does_not_hide_nesting`,
+  `a_dollar_fence_that_takes_the_text_over_the_cap_is_measured_as_ely_reads_it` and
+  `the_renderer_reads_the_address_it_is_handed_under_a_verbatim_folder_whole`.
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
 

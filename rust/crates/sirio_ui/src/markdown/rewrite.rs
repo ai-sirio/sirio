@@ -418,7 +418,7 @@ pub(super) fn pictures(nodes: Vec<Node>, policy: &mut Policy<'_>) -> Vec<Node> {
 /// (a drive-relative path on Windows, no folder's file anywhere). Opening one would
 /// connect out (NTLM on Windows) or hang. No verbatim spelling is exempt here: an address
 /// written in a document is judged strictly. Only the Preview's own folder may be one (see
-/// [`verbatim_disk_prefix`]).
+/// [`without_verbatim_prefix`]).
 pub(super) fn names_a_network_path(address: &str) -> bool {
     let rooted = |text: &str| {
         text.starts_with('\\') || file_links::is_network_or_device_path(std::path::Path::new(text))
@@ -426,34 +426,69 @@ pub(super) fn names_a_network_path(address: &str) -> bool {
     rooted(address) || rooted(&crate::markdown_preview::percent_decode(address))
 }
 
-/// The `\\?\C:` that starts `folder`, when it is spelled as Windows canonicalises a disk path:
-/// backslashes only, one ASCII drive letter, then a backslash or the end. A worktree path read
-/// back from git can be spelled so, and it is the Preview's own folder, not text from a
-/// document. Written on the text, so it runs on any platform.
-fn verbatim_disk_prefix(folder: &str) -> Option<&str> {
-    let bytes = folder.as_bytes();
-    let spelled = bytes.starts_with(br"\\?\")
+/// `folder` as the ordinary disk path `C:\..` when it is spelled as Windows canonicalises one,
+/// `\\?\C:\..`, and the plain spelling names the same place (see [`simplified_disk_path`]); any
+/// other folder as it is, so a picture under it does not load, and is never resolved wrong. A
+/// worktree path read back from git can be spelled so, and it is the Preview's own folder, not
+/// text from a document. Ely cuts every picture address at its first `?`, so the renderer must
+/// never be handed a verbatim path; std turns a long path back into one inside its file-system
+/// calls. Written on the text, so it runs on any platform.
+pub(super) fn without_verbatim_prefix(folder: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> {
+    use std::borrow::Cow;
+    match simplified_disk_path(&folder.to_string_lossy()) {
+        Some(plain) => Cow::Owned(std::path::PathBuf::from(plain)),
+        None => Cow::Borrowed(folder),
+    }
+}
+
+/// The rule of `dunce::simplified`, as string logic (the crate does nothing off Windows, which
+/// would leave it out of reach of the tests on Linux): `\\?\C:\..` (backslashes only, one ASCII
+/// drive letter, then a backslash or the end) is `C:\..` when that is representable: the whole
+/// verbatim path is at most 260 UTF-16 units; every component is a plain name (at most 255
+/// units, no control character or any of `< > : " / | ? *`, no `.` or `..` as Windows reads a
+/// verbatim path literally, and no trailing dot or space); and none is a reserved DOS name
+/// (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, with or without an extension,
+/// in any case). `\\?\UNC\server\share` is not a disk path: it is left as it is, as the network
+/// path it names, and is refused, where `\\server\share` would be rooted wrongly as `\server`.
+fn simplified_disk_path(verbatim: &str) -> Option<String> {
+    let bytes = verbatim.as_bytes();
+    let disk = bytes.starts_with(br"\\?\")
         && bytes.get(4).is_some_and(u8::is_ascii_alphabetic)
         && bytes.get(5) == Some(&b':')
         && matches!(bytes.get(6), None | Some(b'\\'));
-    spelled.then(|| &folder[..6])
+    if !disk || verbatim.encode_utf16().count() > 260 {
+        return None;
+    }
+    if !verbatim[6..].split('\\').filter(|part| !part.is_empty()).all(plain_name) {
+        return None;
+    }
+    // `\\?\C:` is the disk's root, `C:` alone the folder the process has open on it.
+    let plain = &verbatim[4..];
+    Some(if bytes.len() == 6 { format!("{plain}\\") } else { plain.to_owned() })
 }
 
-/// `url`, a relative address, under a verbatim `folder` (`prefix` and the rest). Windows folds no
-/// `..` in a verbatim path, so it is folded here, and never above the drive's root.
-fn fold_under_verbatim(prefix: &str, rest: &str, url: &str) -> String {
-    let relative = crate::markdown_preview::percent_decode(url.split(['#', '?']).next().unwrap_or(url));
-    let mut parts: Vec<&str> = rest.split(['\\', '/']).filter(|part| !part.is_empty()).collect();
-    for part in relative.split(['\\', '/']) {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            part => parts.push(part),
-        }
+/// Whether `name`, a component of a verbatim path, is a name Windows reads the same plain.
+fn plain_name(name: &str) -> bool {
+    const RESERVED: [&str; 22] = [
+        "AUX", "NUL", "PRN", "CON", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if name.encode_utf16().count() > 255
+        || name
+            .bytes()
+            .any(|c| matches!(c, 0..=31 | b'<' | b'>' | b':' | b'"' | b'/' | b'|' | b'?' | b'*'))
+        || name.ends_with(['.', ' '])
+    {
+        return false;
     }
-    format!("{prefix}\\{}", parts.join("\\"))
+    // The stem is what is before the last dot, unless the name is only a dot-file; DOS reads
+    // `con.. .txt` as `CON`, so the dots and spaces that end the stem do not count.
+    let stem = match name.rfind('.') {
+        Some(at) if at > 0 => &name[..at],
+        _ => name,
+    };
+    let stem = stem.trim_end_matches(['.', ' ']);
+    !(stem.len() <= 4 && RESERVED.iter().any(|reserved| stem.eq_ignore_ascii_case(reserved)))
 }
 
 /// Where the Preview loads `url` from, or none: an absolute path, a `data:` or `http(s)`
@@ -466,6 +501,9 @@ fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> 
     if is_web_image(url) || is_data_image(url) {
         return Some(url.to_owned());
     }
+    // The renderer reads an address by cutting it at its first `?`: never a verbatim one.
+    let base = base.map(without_verbatim_prefix);
+    let base = base.as_deref();
     let scheme = url.split_once(':').map(|(scheme, _)| scheme);
     let found = if std::path::Path::new(url).is_absolute() {
         Some(url.to_owned())
@@ -481,16 +519,7 @@ fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> 
             {
                 None
             }
-            _ => {
-                // `url` passed the strict check above, as written and decoded.
-                let base = base?;
-                let folder = base.to_string_lossy();
-                return match verbatim_disk_prefix(&folder) {
-                    Some(prefix) => Some(fold_under_verbatim(prefix, &folder[prefix.len()..], url)),
-                    None => Some(crate::markdown_preview::resolve_image(url, base))
-                        .filter(|path| !names_a_network_path(path)),
-                };
-            }
+            _ => base.map(|base| crate::markdown_preview::resolve_image(url, base)),
         }
     };
     found.filter(|path| !names_a_network_path(path))
