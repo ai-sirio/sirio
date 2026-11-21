@@ -967,7 +967,8 @@ Scripts/Tests/capture-markdown-surfaces.sh --bin-dir DIR --out-dir DIR   # -> pr
 # menu's Copy put the expected text on the clipboard; Ctrl+C in the terminal still echoes ^C at the
 # PTY; a chat reply of at least 40 KiB, culled at the tail, is copied whole by the transcript menu's
 # Select All and Copy (equal to the transcript text), and a jump to its top draws no blank band; the
-# deepest nesting (MAX_NESTING - 1 quotes) opens in a Preview and arrives as a chat reply, and the app lives.
+# deepest nesting (MAX_NESTING levels) opens in a Preview and arrives as a chat reply, both drawn as quotes (a row of
+# exactly `deep-end`, which the plain-paragraph fallback does not make), and the app lives.
 # --mutate no-sections starts the app with SIRIO_DEBUG_MARKDOWN_NO_SECTIONS (a debug-build knob: the
 # Preview is drawn without `sections`): the run must FAIL at anchor-toc. --display :N, --out-dir DIR
 # (default artifacts/ely-md/e2e: transcript.json, frames/, the clipboards and expected texts).

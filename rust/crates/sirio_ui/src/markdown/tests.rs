@@ -859,6 +859,27 @@ fn a_failed_diagram_note_stays_within_the_cap() {
     // At the cap there is no room for it: nothing is deeper than the cap.
     let full = built(MAX_NESTING - 1);
     assert!(depth(&full) <= MAX_NESTING, "{}", depth(&full));
+    assert_eq!(texts(&full).len(), 1, "the plain paragraph, not a fence and a note");
+
+    // A note counts when it is inserted, not before: a document at the cap that gets none
+    // (a diagram still being drawn, or none) is drawn as written with diagrams on.
+    let at_the_cap = |state: Option<DiagramState>| {
+        let diagrams = with_state(state);
+        let source = in_quotes(MAX_NESTING - 1);
+        on_stack(8 * 1024 * 1024, move || {
+            diagram_blocks(Surface::Preview, &diagrams, &source).nodes.to_vec()
+        })
+    };
+    for state in [None, Some(DiagramState::Pending)] {
+        let nodes = at_the_cap(state);
+        assert_eq!(depth(&nodes), MAX_NESTING, "drawn as written, at the cap");
+        assert!(all(&nodes).into_iter().any(is_mermaid), "the fence is kept");
+    }
+    let plain_quotes = format!("{}x", "> ".repeat(MAX_NESTING - 1));
+    let nodes = on_stack(8 * 1024 * 1024, move || {
+        diagram_blocks(Surface::Preview, &with_state(None), &plain_quotes).nodes.to_vec()
+    });
+    assert_eq!(depth(&nodes), MAX_NESTING, "a Preview with diagram settings draws the full cap");
 }
 
 #[test]

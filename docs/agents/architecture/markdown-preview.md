@@ -3,14 +3,15 @@
 Every surface that draws Markdown (the chat transcript, the file view's Preview, change
 requests, a subagent's card) draws it with the vendored `ely-documents` renderer through
 `sirio_ui/src/markdown/`; `bezel-markdown` is gone. `MarkdownBlocks` parses a text once per
-change (`parse_markdown_with`, vendored change L2) and rewrites the tree per surface by a
+change (`parse_markdown_guarded`, vendored changes L2 and L10: Ely asks the nesting guard about each text it is about
+to parse, in that one parse) and rewrites the tree per surface by a
 `Policy` (HTML blocks, diagrams, images, file links, `[[toc]]`); an over-nested text (above 32
 levels, measured against a 1 MiB release and an 8 MiB debug main thread: see `MAX_NESTING`) is drawn as one
 plain paragraph. `view.rs` draws it, `gather.rs` is Sirio's `TextGather`
 (selection and link rectangles; `SelectionHost` is `Run`, `Transcript` or `None`, see
 `text-selection.md`), `text.rs` the plain text in push order, `code.rs` the code hook (tree-sitter
 colours through `bezel_syntax`, memoized, copy button), `sideways.rs` and `cull.rs` the
-horizontal scroll area and the chat's draw-only-what-is-near. The vendored changes are L1 to L9 in
+horizontal scroll area and the chat's draw-only-what-is-near. The vendored changes are L1 to L10 in
 `rust/vendor/ely/LOCAL-CHANGES.md`; read them before a sync. Beyond bezel's reader, every surface
 now has LaTeX, GitHub alerts, footnotes, emoji shortcodes, strikethrough and bare-URL links;
 `[[toc]]` and heading anchors (GitHub slugs) work in the Preview, where the right-click menu

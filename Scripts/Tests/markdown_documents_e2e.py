@@ -322,7 +322,8 @@ def top_of_page(name, before, after, jump):
 
 
 def deepest_nesting_source():
-    """The deepest document the app draws as written: `MAX_NESTING - 1` quotes around one line."""
+    """The deepest document the app draws as written: `MAX_NESTING - 1` quotes around one line, which
+    the guard counts as MAX_NESTING levels (each quote, and the paragraph in the last)."""
     global MAX_NESTING
     found = re.search(r"const MAX_NESTING: usize = (\d+);", (Path(__file__).resolve().parents[2] / "rust/crates/sirio_ui/src/markdown/mod.rs").read_text())
     need(found, "preview-deep", "MAX_NESTING is not found in markdown/mod.rs")
@@ -578,11 +579,13 @@ def preview():
     ctl("surface", "editor", "open", f"--path={path}")
     try:
         s = until("the deep document to draw in the Preview",
-                  lambda: (lambda v: v if any("deep-end" in r["text"] for r in drawn_texts(v)) else None)(state()), timeout=30)
+                  lambda: (lambda v: v if any(r["text"] == "deep-end" for r in drawn_texts(v)) else None)(state()), timeout=30)
     except Fail:
-        raise Fail("preview-deep: the deepest nesting never drew in the Preview")
+        # The plain-paragraph fallback draws one row, "> > ... deep-end": not the quotes.
+        rows = [r["text"][:60] for r in drawn_texts(state())]
+        raise Fail(f"preview-deep: no drawn row is exactly 'deep-end', so the {MAX_NESTING} nested levels were not drawn as written (rows: {rows})")
     os.kill(int(E["APP_PID"]), 0)  # raises if the process is gone
-    record("preview-deep", f"{MAX_NESTING - 1} nested quotes opened in the Preview, drew its last line, and the process lives")
+    record("preview-deep", f"{MAX_NESTING} nested levels (as deep as the guard allows) opened in the Preview and drew as quotes, a row of exactly 'deep-end', and the process lives")
 
 
 # What the two drags must put on the clipboard. The paragraph holding emoji and inline math is a
@@ -831,13 +834,21 @@ def chat():
         # chat-deep: the deepest nesting as a reply: the turn completes, the body draws, the app lives.
         (scenario.agent_dir / "reply.md").write_text(deepest_nesting_source())
         chat_app.send("show the deep reply")
-        chat_app.until("the deep reply to draw",
+        chat_app.until("the deep reply to complete",
                        lambda st: st["status"] == "completed" and any("deep-end" in t for t in chatui.texts(st, "assistant")),
                        timeout=90)
         time.sleep(2)
         need(chat_app.process.poll() is None, "chat-deep", "the app exited on the deepest nesting")
-        need(chat_app.call("surface.chat.read", surfaceId=chat_app.surface)["result"], "chat-deep", "the chat no longer answers")
-        record("chat-deep", f"{MAX_NESTING - 1} nested quotes as a chat reply: the turn completed, its last line is in the transcript, and the process lives")
+        # What the chat drew: the quotes' paragraph is a row of exactly 'deep-end'. The plain-paragraph
+        # fallback is one row, '> > ... deep-end', and the reply text matches either.
+        def deep_rows():
+            result = chat_app.call("surface.chat.read", surfaceId=chat_app.surface)["result"]
+            return [r["text"] for r in json.loads(result["transcriptTextRows"] or "[]")]
+        try:
+            until("the deep reply to draw as quotes", lambda: "deep-end" in deep_rows() or None, timeout=20)
+        except Fail:
+            raise Fail(f"chat-deep: no drawn row is exactly 'deep-end', so the {MAX_NESTING} nested levels were not drawn as written (rows: {[t[:60] for t in deep_rows()]})")
+        record("chat-deep", f"{MAX_NESTING} nested levels as a chat reply: the turn completed, the chat drew them as quotes (a row of exactly 'deep-end'), and the process lives")
         scenario.finish()
     except BaseException as error:
         failed = error

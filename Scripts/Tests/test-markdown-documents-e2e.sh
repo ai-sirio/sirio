@@ -34,10 +34,12 @@ set -eEuo pipefail
 #                     viewport over 160 px lacks drawn text (the chat's debug `transcriptTextRows`),
 #                     the same texts are drawn once a one-click scroll away and back has redrawn the
 #                     view, and no capture band is blank
-#   preview-deep      a document of MAX_NESTING - 1 nested quotes (the deepest the app draws as written)
-#                     opens in the Preview, draws its last line, and the process lives
-#   chat-deep         the same document as a chat reply: the turn completes, its last line is in the
-#                     transcript, and the process lives
+#   preview-deep      a document of MAX_NESTING levels (MAX_NESTING - 1 nested quotes: the deepest the
+#                     app draws as written) opens in the Preview and draws as quotes, a row of exactly
+#                     `deep-end` (the plain-paragraph fallback is one row, `> > .. deep-end`), and the
+#                     process lives
+#   chat-deep         the same document as a chat reply: the turn completes, the chat's drawn rows hold
+#                     exactly `deep-end` (the same test), and the process lives
 #
 # --mutate no-sections starts the app with SIRIO_DEBUG_MARKDOWN_NO_SECTIONS (a debug build's
 # knob: the Preview is drawn without `sections`, so no anchor registers). The run must FAIL at

@@ -627,22 +627,23 @@ fn drawn_on(stack: usize, source: String, at_least: usize) {
 fn deepest_sources() -> [(String, usize); 3] {
     // Every quote and the paragraph in it open one tag each: the deepest is `MAX - 1` quotes.
     let quotes = format!("{}x", "> ".repeat(MAX_NESTING - 1));
-    // A list and its item open two: the paragraph takes the last.
-    let lists = format!("{}x", "- ".repeat((MAX_NESTING - 1) / 2));
+    // A list and its item open two, and a tight item holds no paragraph: `MAX / 2` levels.
+    let lists = format!("{}x", "- ".repeat(MAX_NESTING / 2));
     // An alert is a quote that starts with its marker.
     let alerts: String = (1..MAX_NESTING)
         .map(|level| format!("{}[!NOTE]\n", "> ".repeat(level)))
         .collect();
     let alerts = format!("{alerts}{}x", "> ".repeat(MAX_NESTING - 1));
-    [(quotes, MAX_NESTING - 1), (lists, MAX_NESTING / 2 - 1), (alerts, MAX_NESTING / 2)]
+    [(quotes, MAX_NESTING - 1), (lists, MAX_NESTING / 2), (alerts, MAX_NESTING / 2)]
 }
 
-/// On the main thread of Linux and macOS, which dev builds and the E2Es run on, in a debug
-/// build, where a frame is largest.
+/// A debug build, where a frame is largest, on 4 MiB: half the 8 MiB main thread of Linux and
+/// macOS that dev builds and the E2Es run on, which is the margin the cap was chosen by (half of
+/// what draws). A cap raised past what is safe goes red here, not only at twice the cap.
 #[test]
-fn the_deepest_allowed_nesting_is_drawn_on_an_eight_mebibyte_stack() {
+fn the_deepest_allowed_nesting_is_drawn_on_a_four_mebibyte_stack() {
     for (source, at_least) in deepest_sources() {
-        drawn_on(8 * 1024 * 1024, source, at_least);
+        drawn_on(4 * 1024 * 1024, source, at_least);
     }
 }
 

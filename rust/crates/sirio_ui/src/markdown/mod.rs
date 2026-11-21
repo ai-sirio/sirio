@@ -48,8 +48,9 @@ pub(crate) use view::{
 /// by drawing quotes, lists and alerts, the deepest that draws is 71 levels in a release
 /// build on 1 MiB (Windows) and 75 in a debug build on 8 MiB (Linux and macOS). The cap is
 /// half the smaller of the two, rounded down to a multiple of 8, so the chat's extra wrappers
-/// have room too. Real Markdown rarely nests past ten.
-/// `the_deepest_allowed_nesting_is_drawn_on_a_release_one_mebibyte_stack` measures it again.
+/// have room too. Real Markdown rarely nests past ten. A debug draw on 4 MiB (half of 8) and
+/// a release one on 1 MiB (`the_deepest_allowed_nesting_is_drawn_on_a_four_mebibyte_stack`,
+/// `..._on_a_release_one_mebibyte_stack`) go red when the cap is raised past that margin.
 pub(crate) const MAX_NESTING: usize = 32;
 
 /// The deepest block HTML is built: a reader sees nothing in more levels, and what is built
@@ -193,18 +194,22 @@ pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     if let Some(parsed) = parsed {
         // Block HTML nests on top of the Markdown around it: each is under the cap, their
         // sum may not be, and every walk after this one recurses over the tree.
-        // A failed diagram's note is a quote one level below its fence: room for it too.
-        let note = usize::from(policy.surface == Surface::Preview && policy.diagrams.is_some());
-        if tree_depth(&parsed) + note <= MAX_NESTING {
-            nodes = parsed;
+        if tree_depth(&parsed) <= MAX_NESTING {
+            let mut kept = parsed;
             if policy.surface == Surface::Preview
                 && let Some(inputs) = &policy.diagrams
             {
-                nodes = rewrite::diagrams(nodes, inputs, &mut missing);
+                kept = rewrite::diagrams(kept, inputs, &mut missing);
             }
-            nodes = rewrite::pictures(nodes, policy);
-            if policy.surface == Surface::Chat {
-                rewrite::chat_links(&mut nodes, &mut policy.file_links);
+            // A failed diagram's note is a quote beside its fence, one level deeper: it counts
+            // once it is inserted, and not before.
+            if tree_depth(&kept) <= MAX_NESTING {
+                nodes = rewrite::pictures(kept, policy);
+                if policy.surface == Surface::Chat {
+                    rewrite::chat_links(&mut nodes, &mut policy.file_links);
+                }
+            } else {
+                missing.clear();
             }
         }
     }

@@ -181,7 +181,7 @@ fn transcript_link_rows(painted: &[markdown::BodyLayouts]) -> Vec<BTreeMap<Strin
     rows
 }
 
-/// Debug builds only: every text the last painted frame drew, as the box `x`, `y`, `w`, `h` in
+/// Debug builds only: every text the last painted frame drew, with the box `x`, `y`, `w`, `h` in
 /// window pixels, body by body in paint order. An E2E reads it to see that what a jump drew
 /// covers the transcript's viewport.
 #[cfg(debug_assertions)]
@@ -189,8 +189,9 @@ fn transcript_text_row_boxes(painted: &[markdown::BodyLayouts]) -> Vec<BTreeMap<
     painted
         .iter()
         .flat_map(|layouts| layouts.text_rows())
-        .map(|(bounds, _)| {
+        .map(|(bounds, text)| {
             BTreeMap::from([
+                ("text".to_string(), text),
                 ("x".to_string(), format!("{:.1}", f32::from(bounds.left()))),
                 ("y".to_string(), format!("{:.1}", f32::from(bounds.top()))),
                 ("w".to_string(), format!("{:.1}", f32::from(bounds.size.width))),
