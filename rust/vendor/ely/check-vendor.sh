@@ -63,7 +63,14 @@ done
 sort -u -o "$OUT/differing.txt" "$OUT/differing.txt"
 # L7: upstream's patched pulldown-cmark is taken verbatim, so it has no listed paths.
 git -C "$ELY_UPSTREAM" archive "$REV" vendor/pulldown-cmark | tar -x -C "$UP"
-diff -ru "$UP/vendor/pulldown-cmark" "$VENDOR/../pulldown-cmark" > "$OUT/pulldown-cmark.diff" || true
+# A missing directory makes `diff` exit 2 with nothing on stdout, which reads as "no difference".
+: > "$OUT/pulldown-cmark.diff"
+if [ ! -d "$VENDOR/../pulldown-cmark" ]; then
+    echo "PULLDOWN-CMARK MISSING: $VENDOR/../pulldown-cmark" >&2
+    fail=1
+else
+    diff -ru "$UP/vendor/pulldown-cmark" "$VENDOR/../pulldown-cmark" > "$OUT/pulldown-cmark.diff" || true
+fi
 if [ -s "$OUT/pulldown-cmark.diff" ]; then
     while IFS= read -r l; do echo "PULLDOWN-CMARK DIFFERS FROM UPSTREAM: $l" >&2; done < <(grep -E '^(diff |Only in |Binary files )' "$OUT/pulldown-cmark.diff")
     fail=1
