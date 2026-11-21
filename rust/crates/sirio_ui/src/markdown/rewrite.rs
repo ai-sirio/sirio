@@ -413,14 +413,33 @@ pub(super) fn pictures(nodes: Vec<Node>, policy: &mut Policy<'_>) -> Vec<Node> {
     })
 }
 
+/// Whether `text` starts with a verbatim disk prefix, `\\?\C:` (or `//?/C:`, any mix of
+/// separators) and then a separator or its end: a place on this machine, and how a worktree
+/// path read back from git can be spelled on Windows. Written on the text, so it runs on any
+/// platform; `std::path::Prefix` parses only on Windows.
+fn starts_with_verbatim_disk(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let separator = |at: usize| matches!(bytes.get(at), Some(b'/' | b'\\'));
+    separator(0)
+        && separator(1)
+        && bytes.get(2) == Some(&b'?')
+        && separator(3)
+        && bytes.get(4).is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(5) == Some(&b':')
+        && (bytes.len() == 6 || separator(6))
+}
+
 /// Whether a picture address, as written or once decoded, names a network share or a
 /// device (see [`file_links::is_network_or_device_path`]), or is rooted with one backslash
 /// (a drive-relative path on Windows, no folder's file anywhere). Opening one would
-/// connect out (NTLM on Windows) or hang.
-fn names_a_network_path(address: &str) -> bool {
+/// connect out (NTLM on Windows) or hang. A verbatim disk path (`\\?\C:\..`) is none of
+/// these: the Preview's folder may be spelled so. The chat and the change requests keep
+/// the shared predicate, which refuses it, and never resolve a picture against a folder.
+pub(super) fn names_a_network_path(address: &str) -> bool {
     let rooted = |text: &str| {
-        text.starts_with('\\')
-            || file_links::is_network_or_device_path(std::path::Path::new(text))
+        !starts_with_verbatim_disk(text)
+            && (text.starts_with('\\')
+                || file_links::is_network_or_device_path(std::path::Path::new(text)))
     };
     rooted(address) || rooted(&crate::markdown_preview::percent_decode(address))
 }

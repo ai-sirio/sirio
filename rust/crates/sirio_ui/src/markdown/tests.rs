@@ -484,7 +484,7 @@ fn preview_never_names_a_network_path() {
     let source = "![a](//host/s/x.png)\n\n![b](\\\\host\\s\\x.png)\n\n\
                   ![c](%5C%5Chost%5Cs%5Cx.png)\n\n![d](file://host/s/x.png)\n\n\
                   ![e](file:////host/s/x.png)\n\n![f](%2F%2Fhost%2Fx.png)\n\n\
-                  <img src=\"\\\\host\\s\\x.png\">\n\n![g](\\\\?\\C:\\x.png)\n\n\
+                  <img src=\"\\\\host\\s\\x.png\">\n\n![g](\\\\?\\UNC\\host\\s\\x.png)\n\n\
                   ![h](/\\host/s/x.png)\n\n<img src=\"\\/host/s/x.png\" alt=\"i\">\n\n![ok](fine.png)\n";
     let built = build(source, &mut preview_in(base));
     let urls: Vec<_> = images(&built.nodes)
@@ -498,6 +498,78 @@ fn preview_never_names_a_network_path() {
     let shown = texts(&built.nodes);
     for alt in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
         assert!(shown.contains(&alt.to_owned()), "{alt}: {shown:?}");
+    }
+}
+
+/// What the Preview loads for `![a](docs/logo.png)` in a file of `base`.
+fn picture_under(base: &str) -> Option<String> {
+    let built = build("![a](docs/logo.png)\n", &mut preview_in(Path::new(base)));
+    match images(&built.nodes).as_slice() {
+        [] => None,
+        [Node::Image { url, .. }] => Some(url.clone()),
+        other => panic!("{other:?}"),
+    }
+}
+
+// A worktree path read back from git can be spelled `\\?\C:\..` on Windows. The logic is
+// string-based, so it runs here.
+#[test]
+fn preview_resolves_pictures_under_a_verbatim_disk_folder() {
+    for base in [
+        r"\\?\C:\repo\docs",
+        r"\\?\c:\repo\docs",
+        "//?/C:/repo/docs",
+        r"\\?\C:",
+        r"\\?\C:\",
+    ] {
+        let url = picture_under(base).unwrap_or_else(|| panic!("{base}: no picture"));
+        assert!(url.starts_with(base) && url.ends_with("logo.png"), "{base}: {url}");
+    }
+}
+
+#[test]
+fn preview_refuses_pictures_under_any_other_rooted_folder() {
+    for base in [
+        r"\\host\share\repo",
+        "//host/share/repo",
+        r"\\?\UNC\host\share\repo",
+        "//?/UNC/host/share/repo",
+        r"\\.\pipe\x",
+        "//./pipe/x",
+        r"\\?\Volume{0}\repo",
+        r"\\?\C:repo",
+        r"\\?\1:\repo",
+        r"\repo",
+    ] {
+        assert_eq!(picture_under(base), None, "{base}");
+    }
+}
+
+/// The address itself, on every platform: `Path::is_absolute` reads these only on Windows.
+#[test]
+fn a_verbatim_disk_address_is_no_network_path_and_no_other_rooted_one_is_a_disk() {
+    for local in [
+        r"\\?\C:\p\x.png",
+        "//?/C:/p/x.png",
+        r"\/?/c:/p",
+        r"\\?\C:",
+        "%5C%5C%3F%5CC%3A%5Cp%5Cx.png",
+    ] {
+        assert!(!rewrite::names_a_network_path(local), "{local}");
+    }
+    for refused in [
+        r"\\host\s\x.png",
+        "//host/s/x.png",
+        r"\\?\UNC\host\s\x.png",
+        "//?/UNC/host/s/x.png",
+        r"\\.\pipe\x",
+        r"\\?\Volume{0}\x",
+        r"\\?\C:x",
+        r"\\?\CC:\x",
+        r"\x.png",
+        "%5C%5C%3F%5CUNC%5Chost%5Cs%5Cx.png",
+    ] {
+        assert!(rewrite::names_a_network_path(refused), "{refused}");
     }
 }
 

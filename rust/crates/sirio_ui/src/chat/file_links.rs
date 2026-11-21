@@ -557,6 +557,7 @@ mod tests {
             r"\\host\share\x.md",
             "//host/share/x.md",
             r"\\?\C:\x",
+            "//?/C:/x",
             r"\\?\UNC\host\share\x",
             r"\\.\pipe\x",
         ] {
