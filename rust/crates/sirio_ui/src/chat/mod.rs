@@ -1611,12 +1611,15 @@ impl TranscriptInteraction {
         self.chat.read(cx).transcript_dragging
     }
 
-    /// Ends the drag; whether a selection remains.
+    /// Ends the drag, when one is live (a release elsewhere in the window must not wake the
+    /// chat); whether a selection remains.
     pub(crate) fn end_drag(&self, cx: &mut App) -> bool {
-        self.chat.update(cx, |chat, cx| {
-            chat.transcript_dragging = false;
-            cx.notify();
-        });
+        if self.is_dragging(cx) {
+            self.chat.update(cx, |chat, cx| {
+                chat.transcript_dragging = false;
+                cx.notify();
+            });
+        }
         self.selected_span(cx).is_some()
     }
 }
