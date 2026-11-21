@@ -597,8 +597,8 @@ fn a_verbatim_folder_the_plain_spelling_names_is_read_as_the_plain_one() {
         (r"\\?\c:\repo", r"c:\repo"),
         (r"\\?\C:", r"C:\"),
         (r"\\?\C:\", r"C:\"),
-        // Names that only look reserved or odd: a longer stem, a dot-file, a stem of more than the reserved name (`com1.tar.gz`).
-        (r"\\?\C:\repo\console\com10\.con\com1.tar.gz", r"C:\repo\console\com10\.con\com1.tar.gz"),
+        // Names that only look reserved or odd: a longer stem, a dot-file, a stem that only ends in one (`a.com1.gz`).
+        (r"\\?\C:\repo\console\com10\.con\a.com1.gz", r"C:\repo\console\com10\.con\a.com1.gz"),
     ] {
         assert_simplified(base, Some(plain));
     }
@@ -627,6 +627,9 @@ fn a_verbatim_folder_with_a_reserved_dos_name_is_left_verbatim() {
         r"\\?\C:\repo\com1",
         r"\\?\C:\repo\LPT9.x",
         r"\\?\C:\repo\con.. .txt",
+        // The stem is what is before the FIRST dot: `NUL.tar.gz` is `NUL`.
+        r"\\?\C:\repo\com1.tar.gz",
+        r"\\?\C:\repo\NUL.tar.gz\docs",
     ] {
         assert_simplified(base, None);
     }
@@ -667,9 +670,79 @@ fn the_renderer_reads_the_address_it_is_handed_under_a_verbatim_folder_whole() {
         let handed = picture_under(verbatim, "docs/logo.png").expect("a picture");
         assert_eq!(markdown_picture_path(&handed), Some(PathBuf::from(&handed)), "{verbatim}");
     }
-    // The verbatim spelling itself is cut at its `?`, to the two backslashes before it.
-    let cut = markdown_picture_path(r"\\?\C:\repo\docs\logo.png").expect("a path");
-    assert_eq!(cut, PathBuf::from(r"\\"));
+}
+
+/// What the renderer reads from the address it is handed is the path Sirio meant, whatever the
+/// path holds: it cuts an address at a `?` or `#` and decodes it once, so Sirio hands it the path
+/// with those two and the `%` encoded, and nothing else.
+fn assert_arrives(base: &str, url: &str, intended: &str) {
+    let handed = picture_under(base, url).unwrap_or_else(|| panic!("{base} {url}: no picture"));
+    assert_eq!(markdown_picture_path(&handed), Some(PathBuf::from(intended)), "{base} {url}: handed {handed}");
+}
+
+#[test]
+fn the_renderer_reads_back_the_exact_path_of_a_folder_with_a_hash() {
+    assert_arrives("/src/C#/docs", "logo.png", "/src/C#/docs/logo.png");
+    assert_arrives(r"C:\src\C#\docs", "logo.png", r"C:\src\C#\docs/logo.png");
+    assert_arrives(r"\\?\C:\src\C#\docs", "logo.png", r"C:\src\C#\docs/logo.png");
+    // A hash in the address of the document is a fragment, as ever.
+    assert_arrives("/src/docs", "logo.png#top", "/src/docs/logo.png");
+}
+
+#[test]
+fn the_renderer_reads_back_a_file_name_with_a_percent_sign_or_a_question_mark() {
+    // `%2523` in a document is the file `a%23.png`, which is not `a#.png`.
+    assert_arrives("/src/docs", "a%2523.png", "/src/docs/a%23.png");
+    assert_arrives("/src/100%/docs", "logo.png", "/src/100%/docs/logo.png");
+    // A `?` in a name on Linux, written `%3F` in the document.
+    assert_arrives("/src/docs", "a%3Fb.png", "/src/docs/a?b.png");
+    assert_arrives("/src/what?/docs", "logo.png", "/src/what?/docs/logo.png");
+    // An absolute address and a file address are decoded once, too.
+    assert_arrives("/src/docs", "/x/a%2523b.png", "/x/a%23b.png");
+    assert_arrives("/src/docs", "file:///x/a%23b.png", "/x/a#b.png");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_is_not_utf8_stays_as_it_is() {
+    use std::os::unix::ffi::OsStrExt;
+    let folder = Path::new(std::ffi::OsStr::from_bytes(b"\\\\?\\C:\\repo\\\xFF\\docs"));
+    assert!(folder.to_str().is_none());
+    let read = rewrite::without_verbatim_prefix(folder);
+    assert_eq!(read.as_os_str(), folder.as_os_str(), "left verbatim, not read through a lossy copy");
+}
+
+// A reserved DOS device name is no file, on any platform's rules: Windows opens the device
+// whatever the folder and the extension (`NUL.tar.gz` is `NUL`), and a read of `CON` or `COM1`
+// can block. The check is on the last component of the path the address resolves to, as a
+// string, so it runs here.
+#[test]
+fn preview_refuses_a_picture_named_like_a_dos_device() {
+    let base = "/repo/docs";
+    for url in [
+        "COM1", "com9", "nul.png", "Aux", "LPT9.txt", "con.tar.gz", "NUL.tar.gz", "PRN.", "prn .png",
+        "docs/COM1", "COM\u{b9}", "lpt\u{b3}.png", "COM%31", "%4EUL.png", "x/../CON",
+    ] {
+        assert_eq!(picture_under(base, url), None, "{url}");
+    }
+    // Absolute addresses, in each spelling, and a file address.
+    for url in ["/x/COM1", "/x/nul.png", "C:/x/COM1", "C:/x/nul.png", "C:\\x\\Aux.txt", "file:///x/AUX.txt"] {
+        assert_eq!(picture_under(base, url), None, "{url}");
+    }
+    // Names that only look like one.
+    for url in ["console.png", "COM10", "com.png", "a.nul", ".com1", "nul-x.png", "docs/CON/x.png", "LPT0", "COMx"] {
+        assert!(picture_under(base, url).is_some(), "{url}");
+    }
+}
+
+#[test]
+fn a_refused_device_picture_shows_its_alt_text_in_markdown_and_in_html() {
+    let base = Path::new("/repo/docs");
+    for source in ["![the-alt](COM1)\n", "<img src=\"AUX\" alt=\"the-alt\">\n", "<p><img src=\"nul.png\" alt=\"the-alt\"></p>\n"] {
+        let built = build(source, &mut preview_in(base));
+        assert!(images(&built.nodes).is_empty(), "{source}");
+        assert!(texts(&built.nodes).iter().any(|text| text == "the-alt"), "{source}: {:?}", texts(&built.nodes));
+    }
 }
 
 #[test]
@@ -894,6 +967,11 @@ fn diagram_fences_follow_their_state() {
         panic!("one picture: {nodes:?}");
     };
     assert_eq!(url, "/cache/abc.svg");
+    // The renderer reads an address as a URL: a cache folder with a hash arrives whole.
+    let odd = DiagramState::Ready { path: PathBuf::from("/cache/a#b%/abc.svg"), width: 300 };
+    let built = diagram_blocks(Surface::Preview, &with_state(Some(odd)), FENCE);
+    let [Node::Image { url, .. }] = built.nodes.as_ref() else { panic!("one picture") };
+    assert_eq!(markdown_picture_path(url), Some(PathBuf::from("/cache/a#b%/abc.svg")), "{url}");
     assert_eq!((link, width), (&None, &Some(300.0)));
     assert!(built.missing_diagrams.is_empty());
 

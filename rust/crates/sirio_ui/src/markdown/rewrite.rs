@@ -346,7 +346,7 @@ pub(super) fn diagrams(
         match inputs.states.get(&key) {
             Some(DiagramState::Ready { path, width }) => vec![Node::Image {
                 alt: "Diagram".to_owned(),
-                url: path.to_string_lossy().into_owned(),
+                url: address_of(&path.to_string_lossy()),
                 link: None,
                 at: *from,
                 width: clamp_width(*width as f32),
@@ -435,7 +435,8 @@ pub(super) fn names_a_network_path(address: &str) -> bool {
 /// calls. Written on the text, so it runs on any platform.
 pub(super) fn without_verbatim_prefix(folder: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> {
     use std::borrow::Cow;
-    match simplified_disk_path(&folder.to_string_lossy()) {
+    // A folder that is not UTF-8 stays as it is: a lossy copy would name another place.
+    match folder.to_str().and_then(simplified_disk_path) {
         Some(plain) => Cow::Owned(std::path::PathBuf::from(plain)),
         None => Cow::Borrowed(folder),
     }
@@ -469,31 +470,58 @@ fn simplified_disk_path(verbatim: &str) -> Option<String> {
 
 /// Whether `name`, a component of a verbatim path, is a name Windows reads the same plain.
 fn plain_name(name: &str) -> bool {
-    const RESERVED: [&str; 22] = [
-        "AUX", "NUL", "PRN", "CON", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
-    if name.encode_utf16().count() > 255
+    !(name.encode_utf16().count() > 255
         || name
             .bytes()
             .any(|c| matches!(c, 0..=31 | b'<' | b'>' | b':' | b'"' | b'/' | b'|' | b'?' | b'*'))
         || name.ends_with(['.', ' '])
-    {
-        return false;
+        || is_dos_device_name(name))
+}
+
+/// Whether `name` is a reserved DOS device name: `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or
+/// `LPT1` to `LPT9` (also with the superscripts `COM¹²³` and `LPT¹²³`), in any case. Windows reads
+/// the device whatever the extension, taking the stem before the FIRST dot (`NUL.tar.gz` is
+/// `NUL`) and ignoring the spaces that end it. A string rule, so it holds on every platform.
+fn is_dos_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ');
+    if ["CON", "PRN", "AUX", "NUL"].iter().any(|device| stem.eq_ignore_ascii_case(device)) {
+        return true;
     }
-    // The stem is what is before the last dot, unless the name is only a dot-file; DOS reads
-    // `con.. .txt` as `CON`, so the dots and spaces that end the stem do not count.
-    let stem = match name.rfind('.') {
-        Some(at) if at > 0 => &name[..at],
-        _ => name,
-    };
-    let stem = stem.trim_end_matches(['.', ' ']);
-    !(stem.len() <= 4 && RESERVED.iter().any(|reserved| stem.eq_ignore_ascii_case(reserved)))
+    ["COM", "LPT"].iter().any(|device| {
+        stem.get(..3).is_some_and(|head| head.eq_ignore_ascii_case(device))
+            && matches!(
+                &stem[3..],
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{b9}" | "\u{b2}" | "\u{b3}"
+            )
+    })
+}
+
+/// Whether the last component of `path`, a path as the renderer would open it, is a DOS device
+/// name (see [`is_dos_device_name`]). Either separator, as the path may be a Windows one.
+fn ends_in_a_dos_device(path: &str) -> bool {
+    path.rsplit(['/', '\\']).find(|part| !part.is_empty()).is_some_and(is_dos_device_name)
+}
+
+/// `path`, a local path, as an address for the renderer, which reads an address as a URL: it
+/// cuts it at the first `?` or `#` and decodes it once. So those two and the `%` are encoded,
+/// and nothing else, and what it reads back is exactly `path`.
+fn address_of(path: &str) -> String {
+    let mut address = String::with_capacity(path.len());
+    for ch in path.chars() {
+        match ch {
+            '%' => address.push_str("%25"),
+            '?' => address.push_str("%3F"),
+            '#' => address.push_str("%23"),
+            ch => address.push(ch),
+        }
+    }
+    address
 }
 
 /// Where the Preview loads `url` from, or none: an absolute path, a `data:` or `http(s)`
 /// address. A `file:` address becomes the path it names, so the renderer is handed no
-/// address that points at a file. A network or device path is never one.
+/// address that points at a file. A network path, or a path that ends in a DOS device name,
+/// is never one.
 fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> {
     if url.is_empty() || (!is_web_image(url) && !is_data_image(url) && names_a_network_path(url)) {
         return None;
@@ -505,8 +533,11 @@ fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> 
     let base = base.map(without_verbatim_prefix);
     let base = base.as_deref();
     let scheme = url.split_once(':').map(|(scheme, _)| scheme);
+    // `found` is a path, decoded as the renderer would decode the address; the checks below are
+    // on it, and what is handed over is that path as an address again.
     let found = if std::path::Path::new(url).is_absolute() {
-        Some(url.to_owned())
+        let written = url.split(['?', '#']).next().unwrap_or_default();
+        Some(crate::markdown_preview::percent_decode(written))
     } else {
         match scheme {
             Some(scheme) if scheme.eq_ignore_ascii_case("file") => file_address_path(&url[5..]),
@@ -522,7 +553,9 @@ fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> 
             _ => base.map(|base| crate::markdown_preview::resolve_image(url, base)),
         }
     };
-    found.filter(|path| !names_a_network_path(path))
+    found
+        .filter(|path| !names_a_network_path(path) && !ends_in_a_dos_device(path))
+        .map(|path| address_of(&path))
 }
 
 /// The local path a `file:` address names, after its scheme: no host or `localhost`, no
