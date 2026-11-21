@@ -675,7 +675,6 @@ fn diagram_blocks(surface: Surface, diagrams: &Diagrams, source: &str) -> Markdo
             diagrams: Some(DiagramInputs {
                 states: diagrams,
                 palette: &palette,
-                dir: Path::new("/cache"),
             }),
             file_links: None,
         },

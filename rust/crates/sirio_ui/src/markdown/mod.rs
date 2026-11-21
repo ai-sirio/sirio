@@ -31,16 +31,12 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-// Consumers arrive with Tasks 5-7 (the Preview, change requests, the chat).
-#[allow(unused_imports)]
 pub(crate) use gather::BodyLayouts;
 #[cfg(test)]
 pub(crate) use gather::DrawnPart;
-#[allow(unused_imports)]
 pub(crate) use menu::{MarkdownMenuItem, perform};
 pub(crate) use slug::slug;
 pub(crate) use text::{PartKind, PlainText};
-#[allow(unused_imports)]
 pub(crate) use view::{
     BodyActions, LinkHandler, MarkdownView, MenuHandler, MenuPress, SelectionHost, ViewFlags,
     markdown_view, probe_view,
@@ -66,8 +62,6 @@ pub(crate) enum Surface {
 pub(crate) struct DiagramInputs<'a> {
     pub states: &'a Diagrams,
     pub palette: &'a sirio_diagram::Palette,
-    /// Where the rendered diagrams are cached.
-    pub dir: &'a Path,
 }
 
 /// What finding the files a chat reply names takes: `link_file_paths`'s inputs.

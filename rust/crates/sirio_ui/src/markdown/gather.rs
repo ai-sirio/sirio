@@ -27,6 +27,7 @@ pub(crate) struct Drawn {
     /// the text can be neither hit nor highlighted.
     pub part: Option<usize>,
     /// A list item's marker, written before this text.
+    #[cfg(test)]
     pub lead: String,
     pub text: String,
     /// Where the text itself (past any marker) starts in the plain text.
@@ -170,6 +171,7 @@ impl BodyLayouts {
 
     /// Every link drawn, with the boxes it occupies (one per line it spans), in window
     /// pixels.
+    #[cfg(test)]
     pub(crate) fn link_rects(&self) -> Vec<(Bounds<Pixels>, String)> {
         let frame = self.0.borrow();
         let mut rects = Vec::new();
@@ -444,6 +446,7 @@ impl SirioGather {
         });
         self.layouts.add(Drawn {
             part,
+            #[cfg(test)]
             lead: self.lead.take(),
             text: text.to_owned(),
             start,

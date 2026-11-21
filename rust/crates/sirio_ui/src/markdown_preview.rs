@@ -106,10 +106,9 @@ pub(crate) fn preview_blocks(
         &mut crate::markdown::Policy {
             surface: crate::markdown::Surface::Preview,
             base: Some(base),
-            diagrams: cache_dir.map(|dir| crate::markdown::DiagramInputs {
+            diagrams: cache_dir.map(|_| crate::markdown::DiagramInputs {
                 states: diagrams,
                 palette,
-                dir,
             }),
             file_links: None,
         },
