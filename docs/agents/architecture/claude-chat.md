@@ -362,7 +362,7 @@ an agent to its card outlives the turn, even behind a later turn. None of this i
 restored chat shows the `Agent` row and the card's content is gone.
 
 A file path a subagent's text names is a link that opens in Sirio's editor only on a left click,
-with the press and the release on the same link; the card body is a `markdown_view` with
+with the press and the release on the same link; the card body is a `markdown_view` (Ely's `ely-documents` renderer) with
 `SelectionHost::None`, so its `ClickGate` is the one opener (a drag, a right or middle press and a
 drop never open it) and nothing else of the card is stopped. No `file:` URL reaches the system opener:
 the chat's link handler (`reply_links`) opens a file in Sirio and only a web address in the system's.

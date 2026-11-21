@@ -3,7 +3,7 @@
 Sirio builds on the published `gpui-pre` 0.3.12 family (`gpui-pre`, `gpui-pre-platform` and the
 backends under it). This directory holds what that family does not give us as it is: three
 platform backends carrying Sirio's patches, the HTTP client gpui-pre no longer installs, and the
-two Bezel crates the shell still draws with, repointed at the new engine.
+Bezel theme crate the shell still draws with, repointed at the new engine.
 
 `ely/` holds upstream Ely's eight crates (`ely-core`, `ely-chat`, `ely-agent`, `ely-editor`,
 `ely-git`, `ely-documents`, `ely-collab`, `ely-charts`) under `crates/`, vendored at rev `8d7723ec`
@@ -44,7 +44,6 @@ carries their licences either way, with Ely's own MIT licence.
 | `gpui_windows/` | `gpui-pre-windows` 0.3.12 | three Sirio changes | `[patch.crates-io]` |
 | `gpui_macos/` | `gpui-pre-macos` 0.3.12 | one Sirio change (#810) | `[patch.crates-io]` |
 | `bezel_theme/` | `bezel-theme` 0.1.4 | pristine `src/`, manifest repointed | `[patch.crates-io]` |
-| `bezel_markdown/` | `bezel-markdown` 0.1.4 | four changes in `src/render.rs` (+ `lib.rs` re-export), manifest repointed | `[patch.crates-io]` |
 | `reqwest_client/` | `sirio-reqwest-client` | zed's `reqwest_client`, republished by bezel | workspace member |
 | `ely/crates/*` | eight upstream Ely crates at `8d7723ec` | verbatim plus the changes in `ely/LOCAL-CHANGES.md` | workspace members |
 | `ely-palette/`, `ely-gpui-component/` | as above | Ely palette split out; Sirio's facade | workspace members |
@@ -78,14 +77,13 @@ repeating it:
   `curl -sL https://static.crates.io/crates/<name>/<name>-<version>.crate | tar xz -C <empty dir>`,
   then `diff -r <empty dir>/<name>-<version> rust/vendor/<dir>`. Read the manifest diff too: it
   holds real Sirio changes (`gpui_windows`'s `sirio_perf` path dependency, the `gpui-pre =0.3.12`
-  repointing of `bezel_theme` and `bezel_markdown`, which is `bezel_theme`'s only change). The
+  repointing of `bezel_theme`, which is its only change). The
   vendored `Cargo.lock` is Sirio's own standalone lock and differs from any published one;
   `Cargo.toml.orig` and `.cargo_vcs_info.json` (and a `Cargo.lock`, if the crate ships one) in the
   unpacked crate are packaging noise. The branch history that vendored the gpui crates did start
   each with a pristine commit (`06bc49ac6` for `gpui-pre-linux`, `70cb0ad06` for
   `gpui-pre-windows`, under `gpui_pre_linux` / `gpui_pre_windows`, the old directory names), but a
-  squash merge to `main` erases such commits, so do not rely on one. `bezel_markdown` never had a
-  pristine commit: its first commit already contained a fix.
+  squash merge to `main` erases such commits, so do not rely on one.
 - **A normalized manifest.** `[package] name` stays the published package name so it matches
   what `[patch.crates-io]` targets, and `[lib] name` stays the import name consumers already use;
   `publish = false`. Whatever the released manifest expresses as `.workspace = true` (zed's root
@@ -94,7 +92,7 @@ repeating it:
 - **Its own `[workspace]` table**, because Cargo refuses a directory that is both a `[patch]`
   target and an implicit member of the enclosing workspace, plus an entry in `rust/Cargo.toml`'s
   `[workspace] exclude` (today `vendor/gpui_linux`, `vendor/gpui_windows`, `vendor/gpui_macos` and
-  `vendor/bezel_theme`; `bezel_markdown` carries the table but is not listed there).
+  `vendor/bezel_theme`).
   `reqwest_client/` is the exception: it is a workspace member and carries no `[workspace]` table.
 - **Its own committed `Cargo.lock`** where the crate has one (`gpui_linux`, `gpui_windows`,
   `bezel_theme`; `gpui_macos` keeps the published lock, see its section), so a standalone `cargo test --manifest-path rust/vendor/<dir>/Cargo.toml` is
@@ -104,8 +102,7 @@ repeating it:
 - `target/` under any of them is covered by `rust/.gitignore`'s bare `target/` rule; never commit
   it, it runs to several GB.
 - Licences: `gpui_linux`, `gpui_windows`, `gpui_macos` and `reqwest_client` carry `LICENSE-APACHE`;
-  `bezel_markdown` carries the MIT `LICENSE` from the repository's `v0.1.4` tag, which the
-  published crate does not ship; `bezel_theme` carries none, because the published crate has none.
+  `bezel_theme` carries none, because the published crate has none.
 
 After touching a dependency line in a vendored manifest, run
 `cargo tree --target x86_64-unknown-linux-gnu -i gpui-pre-linux` (or `-i gpui-pre-windows` for the
@@ -258,7 +255,7 @@ published crate depends on `bezel-gpui`, an engine this workspace no longer buil
 manifest changed: the `gpui` dependency is `gpui-pre =0.3.12`, and the usual normalization
 (`[workspace]`, `publish = false`, own `Cargo.lock`, `exclude`d from the root workspace) applies.
 `sirio_theme`, `sirio_ui`, `sirio_syntax` and `sirio_terminal` take it by its published name, and
-`bezel-markdown` and `bezel-syntax` take it transitively (`bezel-syntax` is not vendored but gets
+`bezel-syntax` takes it transitively (`bezel-syntax` is not vendored but gets
 the patched copy all the same); the `[patch.crates-io]` entry substitutes it for every one.
 
 ## `reqwest_client` — the HTTP client gpui-pre no longer installs
@@ -277,84 +274,14 @@ and installs `ReqwestClient::new()` with no user agent, proxy override or extra 
 example and probe starts through it, so remote images load the same in each. A program that built
 its `Application` straight from `gpui_platform` would fail those fetches silently.
 
-## `bezel_markdown` — a selection that covers each wrapped row from its first glyph, a bar under wide blocks, and text that follows the interface size
+## `bezel_markdown` — removed
 
-The manifest change is the same as `bezel_theme`'s: `gpui` is `gpui-pre =0.3.12`, and nothing else
-in the manifest moved. The engine swap touched no source; the source changes below are older and
-unrelated to the engine.
-
-Note that `src/lib.rs` (the crate docs, around line 22) still says `gpui_platform::application`
-installs the HTTP client an image at an `http` URL needs. That is stale: gpui-pre's platform
-installs none. Only that comment is left as released, on purpose (the source changes below are
-the other edits);
-`sirio_ui::app_platform::application` is what installs it.
-
-`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with four changes. The first:
-`range_rects` in `src/render.rs`, the function that turns a byte range into one rectangle per
-visual row for the selection, the inline-code wash and the chips. Upstream 0.1.4 walked a range
-row by row through `TextLayout::position_for_index`, finding each row's last index by bisection
-and starting the next row one index later. gpui places a soft-wrap boundary — the first glyph of
-the row below — at the *end of the row above*, so every wrapped row's rectangle began at its second
-glyph: a selected chat response or Markdown Preview showed its rows' first letters unwashed, while
-Copy read them. The function is upstream 0.2.16's, which walks each line's `wrap_boundaries`
-directly, with one difference: the origin comes from `position_for_index(0)` rather than
-`TextLayout::bounds`, which panics on a layout with no bounds (it still does on gpui-pre 0.3.12: `elements/text.rs` unwraps `bounds`). 0.2.16 itself is out
-of reach as a bump — it builds on gpui 0.3.19 and moves the whole bezel family off `=0.1.4`.
-Every other file except `src/lib.rs` (which re-exports `TextOffset`, below) is byte-for-byte the released source, plus the MIT `LICENSE` from the repository's
-`v0.1.4` tag, which the published crate does not ship.
-
-Same manifest conventions as `gpui_windows` (`[workspace]` table, `publish = false`, package name kept
-as `bezel-markdown`), no standalone `Cargo.lock`; `cargo tree -i bezel-markdown` shows the path source,
-used by `sirio_ui` alone. The check is
-`Scripts/Tests/test-markdown-selection-probe.sh --xvfb` (`MARKDOWN SELECTION PROBE OK`): it draws
-`sirio_ui`'s `markdown_selection_probe` example, a selected document whose rows soft-wrap, break
-inside one paragraph and wrap an inline code span, and fails when any row's wash leaves the text's
-left edge bare — as it does with this override commented out.
-
-The second is the horizontal scroll of a wide fenced block and a wide table. Upstream 0.1.4 draws
-both as `overflow_x_scroll` containers with no scroll handle and no bar, so wide content is reachable
-only with Shift+wheel and nothing says it is there; and the fence's horizontal padding sat on the
-scroll container itself, whose trailing padding is not part of what it scrolls to, so the last
-characters of a long line stayed under the right edge. Each block now keeps a `ScrollHandle`
-(`Sideways`, a `RenderOnce`, so the state is keyed under the element ids above it and two documents on
-one page do not share block 0's offset), draws a private horizontal bar as an overlay beside the
-scroller (a child would scroll away with the content; upstream `bezel-ui` 0.1.4's bar is vertical only, and
-`bezel_markdown` takes no dependency on it or on Ely), and the fence's padding moved onto an inner
-column. The thumb stops a left mouse-down from propagating, because a host such as the chat's
-`MarkdownBody` starts a transcript selection from any left press on a response; the drag still
-starts. Upstream 0.2.x carries the same through `ui::scroll::Viewport`. Bumping bezel past 0.1.4
-drops both changes, since 0.2.x carries the function and the viewport. The second change's check is
-`Scripts/Tests/test-markdown-scroll-probe.sh --xvfb` (`MARKDOWN SCROLL PROBE OK`), next to the
-selection probe's: it draws `sirio_ui`'s `markdown_scroll_probe` example and drags the real thumb under
-a fence and a table, in dark and light.
-
-The third is the text size. Upstream 0.1.4 draws every size and line height at a fixed pixel value
-(body 14/22, code 12.5/18, headings 19 to 14, the captions smaller at 11.5 and the cards at 12), so Sirio's
-Interface font size changed everything around a chat reply or a Markdown Preview and left the text
-itself alone. `render.rs` now has a `TextOffset(f32)` gpui `Global` (default 0), re-exported from the
-crate root, which `render_with_selection` (the one `render` and `markdown` go through) reads once per call into a thread-local; the
-private `sized(points)` helper turns each of those constants into `points + offset` (never below 6 px)
-at every text size and text line height, and the list marker column widens in proportion so numbers,
-bullets and checkboxes keep lining up, list indents widen with it so a nested level still clears its
-marker, the code block's Copy button grows with the text and stays centred on the header band, and a bookmark card's fixed height grows by the offset once
-for each of its four lines so its footer is not clipped. Spacing, paddings, radii and the
-glyphs inside fixed boxes (the checkbox tick, the favicon initial) stay as they were. Sirio's theme bridge,
-`sirio_ui::ely::sync_theme_if_changed`, sets it to `base_size - 14.5`, so the offset is 0 at the default
-size and the markdown draws pixel for pixel as before. The check is the unit test
-`rendered_markdown_follows_the_interface_font_size` in `sirio_ui`'s `markdown_preview.rs`. Bumping
-bezel past 0.1.4 means re-applying this change by hand, unless upstream has its own way to set the
-size by then (worth checking first).
-
-The fourth is the link click. Upstream 0.1.4's `InteractiveText` click on a link in a paragraph
-calls `cx.open_url(url)` for every URL, so a `file:` link (Sirio draws the file paths a reply names
-as `file://` links) went to the system opener, which hands the file to whatever owns its type, and
-bezel arms that click on any mouse button. `render.rs`'s `is_file_url` now makes that click do
-nothing for a URL whose scheme is `file` in any letter case, read the way a URL parser reads it
-(ASCII tab, LF and CR dropped, leading controls and spaces trimmed); every other URL opens as
-before. What a `file:` link does is the host's to decide: `sirio_ui`'s chat opens it through
-`ChatEvent::OpenFileAt`. The guard covers bezel's own click handler only; a host that calls
-`cx.open_url` itself is outside it (the known ones are `change_request_tab.rs`'s `open_links` and
-`file_view.rs`, which falls back to it for a link it did not resolve). The bookmark chip and card
-clicks are not touched (they open a web URL).
-The check is the unit test `only_a_file_link_never_reaches_the_system_opener` in `sirio_ui`'s
-`selectable_markdown.rs`. Bumping bezel past 0.1.4 means re-applying this change by hand.
+`bezel-markdown` 0.1.4 used to live here with four local changes (a selection that covers each
+wrapped row from its first glyph, a bar under wide blocks, text that follows the interface size,
+and a link click that never hands a `file:` URL to the system opener). Every Markdown surface now
+draws with `ely-documents` through `sirio_ui::markdown`, and the crate, its `[patch.crates-io]`
+entry and `TextOffset` are gone. The same behaviours live in Sirio's code: the wrapped-row wash in
+the host gather (`markdown/gather.rs`), the sideways scroll bar in `markdown/sideways.rs` and
+`markdown/code.rs` (vendored changes L8 and L9), the size from Ely's theme metrics, and the link
+rule in the view's `ClickGate` and the surfaces' link handlers. The history is in git; the last
+commit that carries the crate is the one before `refactor: remove bezel-markdown`.

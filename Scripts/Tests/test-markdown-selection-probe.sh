@@ -13,10 +13,9 @@ set -euo pipefail
 # of the frame, wherever a reference column inside the text (x 84) is not
 # background, the column just inside the text's left edge (x 26) is not
 # background either. A soft-wrapped row whose wash began one glyph late --
-# the defect rust/vendor/README.md's `bezel_markdown` section describes --
-# leaves that edge bare for a whole line height (the defect bezel had, see
-# rust/vendor/README.md's `bezel_markdown` section; Ely's gather paints each
-# text's own highlight, so it is the wrap that is checked). The probe's text soft-wraps,
+# the defect the removed bezel-markdown had -- leaves that edge bare for a
+# whole line height (Ely's gather paints each text's own highlight, so it is
+# the wrap that is checked). The probe's text soft-wraps,
 # carries a markdown line break inside one paragraph, wraps an inline code
 # span, and ends with a second paragraph; dark and light are both checked.
 #

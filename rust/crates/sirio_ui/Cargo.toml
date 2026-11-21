@@ -12,7 +12,6 @@ gpui.workspace = true
 gpui_platform.workspace = true
 reqwest_client.workspace = true
 bezel_theme.workspace = true
-bezel_markdown.workspace = true
 bezel_syntax.workspace = true
 # The grammars bezel-syntax does not carry: Java, C, C++, Swift, Ruby, …
 sirio_syntax.workspace = true

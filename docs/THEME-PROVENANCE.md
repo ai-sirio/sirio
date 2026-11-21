@@ -379,6 +379,10 @@ today's derivation and writes no Sirio token into it:
 > they agree today, by construction. Sub-project 7 revisits the adapter, when
 > `bezel-markdown` is its only reader.
 
+(Since written: `bezel-markdown` left in 0.47.0, when every Markdown surface moved to
+`ely-documents`; the `sirio_ui` modules that read a `bezel_theme::Theme` are the adapter's
+readers now.)
+
 Concretely, `to_bezel_theme` is still `Theme::branded(Brand { tint })` for
 the appearance plus the hand-written ladders: the Notte ladder painted onto
 the seven surface tokens (`paint_notte_ladder`), and the solid grey ladders
@@ -386,7 +390,7 @@ of Neutral, Onice, Argilla and Grafite (`paint_grey_ladder`). The tint stays
 `NONE` for Neutral and Onice — they move lightness only — and is the
 measured warm hue for Argilla and Grafite, whose ladders also carry text
 rungs that `paint_grey_ladder` writes over bezel's `text`, `text_muted`,
-`text_faint` and `text_dim`, so bezel-markdown and the `sirio_ui` modules that
+`text_faint` and `text_dim`, so the `sirio_ui` modules that
 read a `bezel_theme::Theme` (via `to_bezel_theme`) and Sirio tokens see one
 ladder by construction.
 

@@ -10,7 +10,7 @@ use sirio_markdown::{
     Alignment, Block, Document, Inline as Leaf, ListKind, TableCell, expand_html_capped,
 };
 
-use super::{DiagramInputs, FileLinkInputs, Heading, MAX_NESTING, Policy, Surface};
+use super::{DiagramInputs, FileLinkInputs, Heading, Policy, Surface};
 use crate::chat::file_links;
 use crate::markdown_preview::{DiagramRequest, DiagramState};
 

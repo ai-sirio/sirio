@@ -1,7 +1,7 @@
 # markdown-documents fixture
 
 `showcase.md` is the one document every Markdown surface is compared on. Task 0 of the
-"Markdown on ely-documents" plan records how bezel-markdown draws it; `capture-markdown-surfaces.sh`
+"Markdown on ely-documents" plan recorded how the removed bezel-markdown drew it; `capture-markdown-surfaces.sh`
 opens it in the file Preview, as a chat reply and as a change request description.
 `pixel.png` is a 64x64 solid magenta (250, 40, 190) PNG, a colour the app's palette never draws.
 

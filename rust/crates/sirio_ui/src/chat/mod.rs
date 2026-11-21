@@ -91,23 +91,10 @@ pub use question_dock::ElicitationAct;
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use trace::{RevealTarget, TraceStore};
 
-fn highlight_markdown_code(
-    language: &str,
-    code: &str,
-) -> Option<Vec<(Range<usize>, bezel_theme::HighlightKind)>> {
-    bezel_syntax::highlight(code, language)
-}
-
-/// Installs the app-owned syntax highlighter used by bezel-markdown code
-/// blocks. The renderer remains usable without this registration and simply
-/// paints an unknown language as plain code.
+/// Boots the Ely theme the chat draws with. Code blocks are highlighted by the Markdown code
+/// hook (`markdown::code`), which needs no registration.
 pub fn init(cx: &mut App) {
     crate::ely::init(cx);
-    bezel_markdown::set_highlighter(
-        cx,
-        highlight_markdown_code,
-        bezel_syntax::lang::LANGS.iter().map(|language| language.name),
-    );
 }
 
 /// The opener of a link in a reply or in a subagent's text. Only the view calls it, and only for a
@@ -1377,7 +1364,7 @@ struct TranscriptSelection {
 }
 
 /// The assistant-response copy affordance currently showing its short-lived
-/// confirmation. Code blocks own their native bezel-markdown copy state.
+/// confirmation. Code blocks own their own copy state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CopyTarget {
     Assistant(usize),
@@ -9001,28 +8988,6 @@ mod tests {
         }
     }
 
-    /// The highlighter `init` installs into bezel-markdown is bezel-syntax's
-    /// tree-sitter classification: a fenced block's tag reaches a grammar,
-    /// so a `rust` block gets keyword spans instead of one plain run. A tag
-    /// no grammar answers is `None`, which bezel-markdown paints plain.
-    #[test]
-    fn markdown_code_blocks_are_classified_by_bezel_syntax() {
-        let code = "fn main() {}";
-        let spans = highlight_markdown_code("rust", code)
-            .expect("bezel-syntax carries a rust grammar by default");
-        assert!(
-            spans.iter().any(|(range, kind)| {
-                matches!(kind, bezel_theme::HighlightKind::Keyword) && &code[range.clone()] == "fn"
-            }),
-            "`fn` must be classified as a keyword; got {} spans",
-            spans.len()
-        );
-        assert!(
-            highlight_markdown_code("no-such-language", code).is_none(),
-            "an unknown fence tag falls back to plain code rather than guessing"
-        );
-    }
-
     /// A model that offers no effort retires the selector rather than
     /// opening an empty one. The levels are the model's own, so this is a
     /// state a plain model switch reaches (Claude's Haiku advertises no
@@ -10985,7 +10950,7 @@ two"
         let response = cx
             .debug_bounds("assistant-response-0")
             .expect("the fenced code response is drawn");
-        // bezel-markdown's native copy control is positioned 5px from the
+        // The code block's copy control is positioned 5px from the
         // block's right edge and 3px from its top. Its stable element id is
         // intentionally not a GPUI debug selector, so exercise its actual hit
         // target relative to the single-block response rather than duplicating

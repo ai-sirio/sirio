@@ -36,7 +36,7 @@ pub(crate) use gather::DrawnPart;
 #[allow(unused_imports)]
 pub(crate) use menu::{MarkdownMenuItem, perform};
 pub(crate) use slug::slug;
-pub(crate) use text::{Part, PartKind, PlainText};
+pub(crate) use text::{PartKind, PlainText};
 #[allow(unused_imports)]
 pub(crate) use view::{
     BodyActions, LinkHandler, MarkdownView, MenuHandler, MenuPress, SelectionHost, ViewFlags,

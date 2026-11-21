@@ -7,7 +7,7 @@ set -eEuo pipefail
 # tree, stub agent CLIs, a scratch database, socket and host root) on a private Xvfb, driven
 # over the control socket, with PID-matched X window captures. The same window size (1600x1000)
 # and scale (GPUI_X11_SCALE_FACTOR=1) every run, so two runs, made with two builds, compare
-# frame by frame: the baseline against bezel-markdown, a later run against Ely's renderer.
+# frame by frame: the baseline against the removed bezel-markdown, a later run against Ely's renderer.
 #
 #   preview          Preview of showcase.md in a worktree, a picture beside it, the remote
 #                    picture served by a loopback `python3 -m http.server`

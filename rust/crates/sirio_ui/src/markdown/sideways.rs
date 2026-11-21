@@ -1,6 +1,6 @@
 //! A block that scrolls sideways, with a bar that shows it does.
 //!
-//! The port of bezel's `Sideways` (`bezel_markdown/src/render.rs`). A container that
+//! The port of bezel-markdown's `Sideways` (its `render.rs`, removed from the tree). A container that
 //! scrolls without drawing a bar hides whatever is past its edge, and Ely draws none, so
 //! fenced code and (through its `table_frame`) tables are framed here.
 

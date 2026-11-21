@@ -310,7 +310,7 @@ file, and the reviewer's verdict on the page.
 ### PR A: names, tooling and behaviour checks (`refactor/bezel-off-a`)
 
 PR A changes no pixel: it adds this page's tooling and checks, reaches the three kept bezel crates
-(`bezel-theme`, `bezel-markdown`, `bezel-syntax`) by their own names (`bezel_theme::`,
+(`bezel-theme`, `bezel-markdown`, `bezel-syntax`; `bezel-markdown` was removed in 0.47.0, see `rust/vendor/README.md`) by their own names (`bezel_theme::`,
 `bezel_markdown::`, `bezel_syntax::` in place of `bezel::theme::`, `markdown::`, `syntax::`), and
 drops `bezel-editor`, whose `init` only bound keys in two contexts (`BezelEditor`,
 `BezelImagePrompt`) that nothing in Sirio enters. `bezel::ui` and `bezel::motion` stay until PRs B to E.
@@ -930,7 +930,7 @@ The rows of the table below marked "fix wave" ran on `72e035c4`, whose `rust/` d
 | fix wave | `scroll.rs`, `file_view.rs` and the callers of its bars, `popup.rs`, `loading.rs`, three comments, `forms/text/` in the vendored Ely tree, `THIRD_PARTY_NOTICES.md` | A no-drawing cleanup from the final review (M1, M2, M3, M4, M7); no colour, size or layout changes, so no capture was taken. M1: `scroll::bar` and `scroll::horizontal_bar` are `file_view::scrollbar` and `horizontal_scrollbar`, moved with their bodies unchanged and every caller re-pointed; the two overflow watchers differ in axis (height, `max_offset().y` and `offset().y` against width, `.x` and `.x`), so both bodies stay. M2: `Popup::as_open` is deleted. M3: `loading::bezel_theme`, `redacted_rows`' two unused parameters and `skeleton_rows`' `theme` are deleted (its `id` stays, as `_id`, as in `thinking_indicator` and `indeterminate`). M4: three comments that described code that is gone are reworded. M7: the ported key handlers and `is_word` in the vendored Ely tree carry a provenance comment, and `THIRD_PARTY_NOTICES.md` lists them. M5 and M6 are this page's own (below). |
 
 What still reaches bezel after PR E is the engine and three crates: `bezel-gpui`, `bezel-theme`,
-`bezel-markdown` (vendored, two changes) and `bezel-syntax`. `grep -rn 'bezel::' rust/crates` prints nothing.
+`bezel-markdown` (vendored, two changes; removed in 0.47.0) and `bezel-syntax`. `grep -rn 'bezel::' rust/crates` prints nothing.
 
 **Reproduce.**
 
@@ -992,7 +992,7 @@ x 1032 (below), which is the only change to `Scripts/capture-masks.tsv`. Nothing
 | Check | Result |
 | --- | --- |
 | `cargo build --offline --workspace --all-targets` | exit 0 on the removal commit's tree; 135 warning lines, the count PR D recorded, none at a line Task 14 edited. Fix wave, on `72e035c4`: exit 0, 135 warning lines again, none at a line the fix wave edited (the two in files it touched, `chat/mod.rs:262` and `right_panel/history.rs:389`, are old, unused-code warnings on lines it did not edit) |
-| `cargo tree --offline -i bezel-ui`, `-i bezel-motion`, `-i bezel-agent`, `-i bezel-editor`, `-i bezel` | each: `package ID specification ... did not match any packages`. `bezel-markdown` and `bezel-syntax` still resolve and take none of them. `cargo tree -e features -p sirio` before and after differs by the lines of the four removed crates and nothing else: no kept crate lost a feature |
+| `cargo tree --offline -i bezel-ui`, `-i bezel-motion`, `-i bezel-agent`, `-i bezel-editor`, `-i bezel` | each: `package ID specification ... did not match any packages`. `bezel-markdown` (since removed, 0.47.0) and `bezel-syntax` still resolved and took none of them. `cargo tree -e features -p sirio` before and after differs by the lines of the four removed crates and nothing else: no kept crate lost a feature |
 | `grep -E '^name = "bezel(-ui\|-motion\|-agent\|-editor)?"$' rust/Cargo.lock`; `grep -rn 'bezel::' rust/crates`; `test ! -e rust/vendor/bezel_ui`; `grep -nE '^(bezel\|bezel-editor) *=' rust/Cargo.toml` | each prints nothing (the `test` exits 0); the same on `72e035c4` |
 | `git diff rust/Cargo.lock` | 48 deletions, 0 insertions: four `[[package]]` blocks and the two `"bezel"` dependency lines; no version or source changed |
 | `cargo nextest run -p sirio_ui` | 1420 run, 1420 passed, 0 skipped; against the base's 1420 the sorted `cargo nextest list` is identical. Fix wave, on `72e035c4`: 1420 run, 1420 passed, 0 skipped, and the sorted list is identical to `7093a128`'s (recorded before the first edit) |
