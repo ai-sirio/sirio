@@ -181,6 +181,25 @@ fn transcript_link_rows(painted: &[markdown::BodyLayouts]) -> Vec<BTreeMap<Strin
     rows
 }
 
+/// Debug builds only: every text the last painted frame drew, as the box `x`, `y`, `w`, `h` in
+/// window pixels, body by body in paint order. An E2E reads it to see that what a jump drew
+/// covers the transcript's viewport.
+#[cfg(debug_assertions)]
+fn transcript_text_row_boxes(painted: &[markdown::BodyLayouts]) -> Vec<BTreeMap<String, String>> {
+    painted
+        .iter()
+        .flat_map(|layouts| layouts.text_rows())
+        .map(|(bounds, _)| {
+            BTreeMap::from([
+                ("x".to_string(), format!("{:.1}", f32::from(bounds.left()))),
+                ("y".to_string(), format!("{:.1}", f32::from(bounds.top()))),
+                ("w".to_string(), format!("{:.1}", f32::from(bounds.size.width))),
+                ("h".to_string(), format!("{:.1}", f32::from(bounds.size.height))),
+            ])
+        })
+        .collect()
+}
+
 /// Adds a row to `out` for every link the last paint of a body drew, in window pixels: the
 /// `kind` (`file` for a file link, `web` otherwise), the `label` as written, the `target`, the
 /// point `x`, `y` a few pixels into the label at its vertical middle, and `w`, how wide the
@@ -645,6 +664,9 @@ pub struct ChatControlSnapshot {
     /// copies the transcript, and an E2E reads it.
     #[cfg(debug_assertions)]
     pub transcript_text: String,
+    /// Debug builds only: the boxes of the texts the last paint drew (`x`, `y`, `w`, `h`).
+    #[cfg(debug_assertions)]
+    pub transcript_text_rows: Vec<BTreeMap<String, String>>,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -4567,6 +4589,8 @@ impl Chat {
             transcript_links: transcript_link_rows(&self.transcript_links.borrow()),
             #[cfg(debug_assertions)]
             transcript_text: self.transcript_text(),
+            #[cfg(debug_assertions)]
+            transcript_text_rows: transcript_text_row_boxes(&self.transcript_links.borrow()),
             effort: self
                 .effort
                 .as_ref()

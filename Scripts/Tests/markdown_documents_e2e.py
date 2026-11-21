@@ -522,25 +522,42 @@ def preview():
     sentinel = Owner("sentinel before the terminal")
     try:
         row = next(t for t in drawn_texts(settled()) if t["text"].startswith("A footnote reference"))
+        area = f"{int(row['w'])}x{int(row['h'])}+{int(row['x'])}+{int(row['y'])}"
+
+        def crop(frame):
+            return subprocess.run(["magick", str(frame), "-crop", area, "+repage", "-depth", "8", "rgb:-"],
+                                  capture_output=True, check=True).stdout
+
+        # The baseline: a press on the page's blank margin, beside the row, clears the selection; the
+        # row's pixels then are the unselected ones. Selecting the row again must change them (the
+        # highlight), or the comparison below would pass with no selection at all.
+        press(window, row["x"] - 10, row["y"] + row["h"] / 2)
+        time.sleep(0.5)
+        plain = crop(shoot(window, "terminal-selection-none"))
+        drag(window, row["x"] + 2, row["y"] + row["h"] / 2, row["x"] + row["w"] - 2, row["y"] + row["h"] / 2)
         selected = shoot(window, "terminal-selection-before-click")
+        need(crop(selected) != plain, "terminal-ctrl-c", f"selecting the row ({area}) left its pixels as they were: the baseline has no highlight")
+        # A real click into the terminal gives it the keys. The click clears the Markdown selection
+        # (one selection at a time): the row is plain again, the pixels of the baseline. (With the
+        # selection kept alive and the focus moved by the pane-focus verb instead, Ctrl+C copied the
+        # selection and never reached the PTY: recorded as a finding in the task report.)
         press(window, 500, 400)
         time.sleep(0.5)
         clicked = shoot(window, "terminal-selection-after-click")
-        # The click that gives the terminal the keys left the Markdown selection alone: the selected
-        # row (highlighted when selected) is the same pixels before and after the click.
-        area = f"{int(row['w'])}x{int(row['h'])}+{int(row['x'])}+{int(row['y'])}"
-        crops = [subprocess.run(["magick", str(frame), "-crop", area, "+repage", "-depth", "8", "rgb:-"],
-                                capture_output=True, check=True).stdout for frame in (selected, clicked)]
-        need(crops[0] == crops[1], "terminal-ctrl-c", f"the click into the terminal changed the selected row ({area}): the Markdown selection did not survive it")
+        need(crop(clicked) == plain, "terminal-ctrl-c", f"after the click into the terminal the row ({area}) is neither selected nor plain")
         key("ctrl+c")
-        shown = until("the PTY to echo ^C", lambda: "^C" in screen() and screen(), timeout=8)
+        try:
+            shown = until("the PTY to echo ^C", lambda: "^C" in screen() and screen(), timeout=8)
+        except Fail:
+            shoot(window, "terminal-no-echo")
+            raise Fail(f"terminal-ctrl-c: the PTY never echoed ^C; the clipboard holds {clipboard_get()!r}, the screen {screen()!r}")
         after = clipboard_get()
     finally:
         sentinel.release()
     need(after == "sentinel before the terminal", "terminal-ctrl-c", f"Ctrl+C in the terminal changed the clipboard to {after!r}")
     shoot(window, "terminal-after-ctrl-c")
     (OUT / "terminal-screen.txt").write_text(shown)
-    record("terminal-ctrl-c", "Ctrl+C in the terminal pane after the Markdown selection echoed ^C at the PTY and left the clipboard alone; the Markdown selection was still drawn after the click that focused the terminal")
+    record("terminal-ctrl-c", "Ctrl+C in the terminal pane after a Markdown selection echoed ^C at the PTY and left the clipboard alone (the click that focused the terminal had cleared the Markdown selection, which the check asserts)")
 
 
 # What the two drags must put on the clipboard. The paragraph holding emoji and inline math is a
@@ -582,6 +599,49 @@ def band_ink(frame, left, right, top, bottom):
         counts.append(int(subprocess.run(["magick", str(frame), "-crop", f"{right - left}x100+{left}+{y}", "+repage",
                                          "-format", "%k", "info:"], capture_output=True, text=True, check=True).stdout))
     return counts
+
+
+def row_gaps(result):
+    """The vertical gaps in what the chat's last paint drew inside the transcript's viewport: the viewport
+    runs from the column's top to the composer band's top; the drawn texts, in window pixels, are sorted by
+    their top and merged; a gap is a stretch of the viewport with no drawn text. Returns (gaps, viewport),
+    each gap as (top, height)."""
+    composer = json.loads(result["composerRow"])
+    top, bottom = composer["root"][1], composer["band"][1]
+    boxes = sorted((float(r["y"]), float(r["y"]) + float(r["h"])) for r in json.loads(result["transcriptTextRows"] or "[]"))
+    gaps, reach = [], top
+    for start, end in boxes:
+        if end <= top or start >= bottom:
+            continue
+        if start > reach:
+            gaps.append((reach, start - reach))
+        reach = max(reach, end)
+    if reach < bottom:
+        gaps.append((reach, bottom - reach))
+    return gaps, (top, bottom)
+
+
+# The largest stretch of the transcript's viewport that may hold no drawn text. Ely draws a paragraph
+# that holds math, display math and a picture without a text row, so the showcase leaves gaps: measured
+# 143 px under the viewport's top (above the reply), 153 px (a display-math paragraph with its margins),
+# 120 px (the footer under the reply's end), 62-64 px (the 64 px pictures). 160 px clears them all; a
+# stand-in for a table, a code block or a long paragraph left in the window is a gap at least that tall.
+# A shorter one is caught by the comparison with the same view redrawn by a one-click scroll away and back.
+MAX_GAP = 160
+
+
+def row_boxes(result):
+    """The boxes of the drawn texts that overlap the transcript's viewport, as sorted (top, height)
+    pairs. The chat also draws blocks a margin beyond the viewport; which of those exist may differ
+    between two passes without anything being wrong."""
+    composer = json.loads(result["composerRow"])
+    top, bottom = composer["root"][1], composer["band"][1]
+    boxes = [(float(r["y"]), float(r["h"])) for r in json.loads(result["transcriptTextRows"] or "[]")]
+    return sorted(b for b in boxes if b[0] < bottom and b[0] + b[1] > top)
+
+
+def same_boxes(a, b, tolerance=2.0):
+    return len(a) == len(b) and all(abs(p[0] - q[0]) <= tolerance and abs(p[1] - q[1]) <= tolerance for p, q in zip(a, b))
 
 
 def chat():
@@ -660,6 +720,33 @@ def chat():
         def first_difference(a, b):
             return next((i for i, (x_, y_) in enumerate(zip(a, b)) if x_ != y_), min(len(a), len(b)))
 
+        def jump_view(tag, forth, back):
+            """What a jump left in the window, judged three ways. (1) The drawn texts leave no gap taller
+            than MAX_GAP in the transcript's viewport. (2) They are the texts of the same view redrawn by
+            a one-click scroll `forth` and `back` (a stand-in the jump left in the window is replaced by
+            the next frame). (3) The capture is not blank: a band of 100 colours or fewer is excused only
+            where a drawn text overlaps it."""
+            result, _ = read()
+            first = row_boxes(result)
+            gaps, view = row_gaps(result)
+            log(f"gaps at {tag} (viewport {view}): {[(round(t), round(h)) for t, h in gaps]}")
+            worst = max(gaps, key=lambda g: g[1], default=(0, 0))
+            need(worst[1] <= MAX_GAP, "chat-jump", f"{tag}: nothing is drawn in a {worst[1]:.0f} px stretch at {worst[0]:.0f} (viewport {view}, limit {MAX_GAP}): {gaps}")
+            frame = shoot_chat(run, pid, f"chat-long-{tag}")
+            wheel(window, 528, 350, forth, 1)
+            wheel(window, 528, 350, back, 1)
+            time.sleep(1.0)
+            again = row_boxes(read()[0])
+            need(same_boxes(first, again), "chat-jump",
+                 f"{tag}: the window held {len(first)} drawn texts after the jump and {len(again)} once redrawn by a scroll away and back: the jump left stand-ins in the window")
+            ink = band_ink(frame, 330, 1340, 80, 840)
+            log(f"colours per 100 px band of {frame.name}: {ink}")
+            for i, colours in enumerate(ink):
+                top_y = 80 + 100 * i
+                drawn = any(y < top_y + 100 and y + h > top_y for y, h in first)
+                need(colours >= 100 or drawn, "chat-jump", f"{tag}: the band at y={top_y} is blank: {colours} colours and no drawn text over it")
+            return len(first)
+
         # Run 1: following the tail, so the early blocks are culled.
         tail()
         at_tail = labels()
@@ -676,6 +763,7 @@ def chat():
         at_top = labels()
         need("link-1" in at_top and "end-link" not in at_top, "chat-jump",
              f"after a jump to the top the links drawn are {sorted(at_top)}: want link-1 and not end-link")
+        jump_view("top", "5", "4")
         copied_top = select_all_copy("top")
         (OUT / "clipboard-chat-top.txt").write_text(copied_top)
 
@@ -708,21 +796,13 @@ def chat():
                                   f"are byte-equal ({len(copied_tail)} characters), equal to the transcript text, and hold nine identical "
                                   f"{len(segments[0])}-character segments between the markers (tail drew {sorted(at_tail)}, top drew {sorted(at_top)})")
 
-        frames = [shoot_chat(run, pid, "chat-long-top")]
         wheel(window, 528, 350, "5", 30)
         time.sleep(1.5)
-        frames.append(shoot_chat(run, pid, "chat-long-after-short-wheel"))
+        mid = jump_view("middle", "4", "5")
         wheel(window, 528, 350, "5", 2500)
         time.sleep(1.5)
-        frames.append(shoot_chat(run, pid, "chat-long-back-at-tail"))
-        for frame in frames:
-            ink = band_ink(frame, 330, 1340, 80, 840)
-            log(f"colours per 100 px band of {frame.name}: {ink}")
-            # A band over flat code background or the page's end may hold few colours; a view the culling
-            # left blank has most of its bands near-empty.
-            low = [i for i, colours in enumerate(ink) if colours < 100]
-            need(len(low) <= 1, "chat-jump", f"{frame.name} has blank bands {low}: colours per band {ink}")
-        record("chat-jump", "after a jump to the top link-1 is drawn and end-link is not; three captures are not blank")
+        end = jump_view("back-at-tail", "4", "5")
+        record("chat-jump", f"after a jump to the top link-1 is drawn and end-link is not; at the top, after a short wheel and at the tail no stretch over {MAX_GAP} px of the viewport lacks drawn text, the window holds the same texts once redrawn by a scroll away and back, and no capture band is blank")
         scenario.finish()
     except BaseException as error:
         failed = error

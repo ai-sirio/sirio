@@ -25811,6 +25811,11 @@ impl SirioWorkspace {
         // Copy must put on the clipboard. Debug builds only: it copies the transcript.
         #[cfg(debug_assertions)]
         fields.push(("transcriptText".to_string(), snapshot.transcript_text));
+        #[cfg(debug_assertions)]
+        fields.push((
+            "transcriptTextRows".to_string(),
+            sirio_control::protocol::rows::encode(&snapshot.transcript_text_rows),
+        ));
         fields
     }
 

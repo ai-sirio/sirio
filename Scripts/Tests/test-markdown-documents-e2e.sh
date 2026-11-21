@@ -23,12 +23,17 @@ set -eEuo pipefail
 #   copy-drag         a real drag across rows and Ctrl+C put the expected text on the clipboard:
 #                     the emoji turned, the TeX of the math, the alert titles, the footnote
 #   copy-menu         the right-click menu's Copy puts the same text on the clipboard
-#   terminal-ctrl-c   with that selection made, Ctrl+C in a terminal pane still reaches the PTY
-#                     (its screen shows ^C) and leaves the clipboard alone
+#   terminal-ctrl-c  after a Markdown selection (drawn, then gone once a click focuses the terminal),
+#                     Ctrl+C in a terminal pane still reaches the PTY (its screen shows ^C) and
+#                     leaves the clipboard alone
 #   chat-select-all   a chat reply of at least 40 KiB, drawn only near the window (the early blocks
 #                     are culled at the tail), copied whole through the transcript menu's Select
-#                     All and Copy: the clipboard equals the transcript text; then a jump to the
-#                     top of the reply draws its first blocks, none of them blank
+#                     All and Copy at the tail and again after a jump to the top: the clipboards are
+#                     byte-equal, equal to the transcript text, and hold nine identical segments
+#   chat-jump         after jumps to the top, mid-reply and the tail of that reply no stretch of the
+#                     viewport over 160 px lacks drawn text (the chat's debug `transcriptTextRows`),
+#                     the same texts are drawn once a one-click scroll away and back has redrawn the
+#                     view, and no capture band is blank
 #
 # --mutate no-sections starts the app with SIRIO_DEBUG_MARKDOWN_NO_SECTIONS (a debug build's
 # knob: the Preview is drawn without `sections`, so no anchor registers). The run must FAIL at
