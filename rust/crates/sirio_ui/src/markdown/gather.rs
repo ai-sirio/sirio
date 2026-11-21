@@ -239,6 +239,15 @@ impl BodyLayouts {
         found
     }
 
+    /// Every text of the last frame with the box it was laid out in (window pixels), in
+    /// push order: what the debug readout of a Preview gives a driver to aim at.
+    pub(crate) fn text_rows(&self) -> Vec<(Bounds<Pixels>, String)> {
+        let frame = self.0.borrow();
+        (frame.texts.iter())
+            .map(|drawn| (drawn.layout.bounds(), drawn.text.clone()))
+            .collect()
+    }
+
     /// Every text of the last frame: its part, where it starts, where it was laid out and
     /// which of its bytes the selection highlighted.
     #[cfg(test)]

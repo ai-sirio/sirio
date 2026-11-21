@@ -641,6 +641,8 @@ pub struct ChatControlSnapshot {
     /// `label`, `target`, `x`, `y` (window pixels, a few px into the label at
     /// its vertical middle) and `w` (the label's painted width).
     pub transcript_links: Vec<BTreeMap<String, String>>,
+    /// The whole transcript as the selection's offset space reads it.
+    pub transcript_text: String,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -4561,6 +4563,7 @@ impl Chat {
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
             last_visible_entry: self.last_visible_entry(),
             transcript_links: transcript_link_rows(&self.transcript_links.borrow()),
+            transcript_text: self.transcript_text(),
             effort: self
                 .effort
                 .as_ref()

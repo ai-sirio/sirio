@@ -39,6 +39,21 @@ impl Diagrams {
         self.states.get(key)
     }
 
+    /// What the states hold, for the debug readout: how many diagrams are ready, failed or
+    /// pending, and where the ready ones were rendered.
+    pub(crate) fn summary(&self) -> (usize, usize, usize, Vec<PathBuf>) {
+        let (mut failed, mut pending, mut ready) = (0, 0, Vec::new());
+        for state in self.states.values() {
+            match state {
+                DiagramState::Pending => pending += 1,
+                DiagramState::Failed(_) => failed += 1,
+                DiagramState::Ready { path, .. } => ready.push(path.clone()),
+            }
+        }
+        ready.sort();
+        (ready.len(), failed, pending, ready)
+    }
+
     /// How many times the states have changed.
     pub(crate) fn version(&self) -> u64 {
         self.version

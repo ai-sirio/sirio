@@ -402,6 +402,8 @@ struct SurfaceScroll {
     /// What the Preview's body drew last frame (its texts and links), kept for the tests
     /// that need to find a link on screen.
     layouts: Rc<RefCell<Option<crate::markdown::BodyLayouts>>>,
+    /// Where the outline's rows were laid out last frame (debug readout only).
+    outline: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
 }
 
 impl SurfaceScroll {
@@ -410,6 +412,7 @@ impl SurfaceScroll {
             preview: ScrollHandle::new(),
             preview_horizontal_bar: HorizontalBarState::default(),
             layouts: Rc::default(),
+            outline: Rc::default(),
         }
     }
 }
@@ -468,6 +471,48 @@ pub struct PreviewState {
     pub outline_open: bool,
     /// How far down the page has been read, when it scrolls.
     pub progress: Option<f32>,
+}
+
+/// A box in window pixels: left, top, width, height.
+fn rect(bounds: gpui::Bounds<Pixels>) -> [f32; 4] {
+    [
+        f32::from(bounds.left()),
+        f32::from(bounds.top()),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+    ]
+}
+
+/// A link the Preview drew, where its first line starts (window pixels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewLink {
+    pub label: String,
+    pub url: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// What the Preview laid out last frame, as the debug state reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewDebug {
+    /// How far the page is scrolled down, in pixels, and how far it can be.
+    pub scroll_y: f32,
+    pub max_y: f32,
+    /// The scrolled area's top and height in window pixels.
+    pub view_top: f32,
+    pub view_height: f32,
+    /// Every drawn text, `[left, top, width, height]` and its words.
+    pub texts: Vec<([f32; 4], String)>,
+    pub links: Vec<PreviewLink>,
+    /// The outline's rows as a block, when it is drawn.
+    pub outline: Option<[f32; 4]>,
+    /// The outline toggle in the header.
+    pub outline_toggle: Option<[f32; 4]>,
+    /// Diagrams ready, failed and pending, and the files the ready ones were rendered to.
+    pub diagrams: (usize, usize, usize),
+    pub diagram_paths: Vec<PathBuf>,
 }
 
 /// What the Preview draws this frame: the tree, the directory its diagrams live in (a
@@ -1904,6 +1949,40 @@ impl FileView {
         })
     }
 
+    /// What the Preview laid out last frame, for the debug readout a driver aims real input
+    /// with: the page's scroll, every drawn text and link with its window pixels, where the
+    /// outline's rows sit, and where the diagrams were rendered.
+    pub fn preview_debug(&self) -> Option<PreviewDebug> {
+        let layouts = self.scroll.layouts.borrow();
+        let layouts = layouts.as_ref()?;
+        self.preview.as_ref()?;
+        let handle = &self.scroll.preview;
+        let (ready, failed, pending, paths) = self.diagrams.summary();
+        Some(PreviewDebug {
+            scroll_y: -f32::from(handle.offset().y),
+            max_y: f32::from(handle.max_offset().y),
+            view_top: f32::from(handle.bounds().top()),
+            view_height: f32::from(handle.bounds().size.height),
+            texts: (layouts.text_rows().into_iter())
+                .map(|(bounds, text)| (rect(bounds), text))
+                .collect(),
+            links: (layouts.links().into_iter())
+                .map(|link| PreviewLink {
+                    label: link.label,
+                    url: link.url,
+                    x: f32::from(link.start.x),
+                    y: f32::from(link.start.y),
+                    width: f32::from(link.width),
+                    height: f32::from(link.line_height),
+                })
+                .collect(),
+            outline: self.scroll.outline.get().map(rect),
+            outline_toggle: OUTLINE_TOGGLE.with(|cell| cell.get()).map(rect),
+            diagrams: (ready, failed, pending),
+            diagram_paths: paths,
+        })
+    }
+
     /// Renders one diagram off the UI thread: the disk cache first, then the
     /// renderer. PlantUML waits for the app-wide turn; a cache hit never does.
     fn render_diagram(
@@ -2786,6 +2865,7 @@ fn render_outline_toggle(
     div()
         .id("file-preview-outline")
         .debug_selector(|| "file-preview-outline".into())
+        .relative()
         .px(px(6.0))
         .py(px(3.0))
         .flex()
@@ -2814,6 +2894,7 @@ fn render_outline_toggle(
             "Outline (no headings)"
         }))
         .child(IconElement::new(Icon::TextSnippet, IconSize::Small))
+        .child(OUTLINE_TOGGLE.with(|cell| record_bounds(cell.clone())))
 }
 
 fn render_format_button(
@@ -2869,6 +2950,36 @@ fn reading_progress_bar(scroll: &ScrollHandle) -> AnyElement {
     .into_any_element()
 }
 
+/// The Preview's `sections`, which the heading anchors register in and the links and the
+/// outline reveal through. A debug build started with `SIRIO_DEBUG_MARKDOWN_NO_SECTIONS` draws
+/// the Preview without them, so an E2E can prove its anchor checks fail when jumps do not
+/// work (`Scripts/Tests/test-markdown-documents-e2e.sh --mutate no-sections`). A release build
+/// has no such knob.
+fn debug_sections(sections: &Entity<Sections>) -> Option<Entity<Sections>> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SIRIO_DEBUG_MARKDOWN_NO_SECTIONS").is_some() {
+        return None;
+    }
+    Some(sections.clone())
+}
+
+thread_local! {
+    /// Where the outline toggle was laid out last frame, for the debug readout only. The
+    /// toggle belongs to the file view drawn last, which is the one a driver means.
+    static OUTLINE_TOGGLE: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>> = Rc::default();
+}
+
+/// A canvas over its parent that writes the parent's bounds to `into` on every frame: the
+/// debug readout's way to learn where something Ely draws sits.
+fn record_bounds(into: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>) -> AnyElement {
+    canvas(move |bounds, _, _| into.set(Some(bounds)), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+}
+
 /// `offers_preview` is `FileView::offers_preview`: a large Markdown file in Code
 /// offers its preview only when the file has one to offer.
 fn render_content(
@@ -2918,7 +3029,7 @@ fn render_content(
             links,
             ViewFlags {
                 web_pictures: true,
-                sections: Some(sections.clone()),
+                sections: debug_sections(&sections),
                 cull: false,
             },
         )
@@ -2951,7 +3062,13 @@ fn render_content(
                 .border_l_1()
                 .border_color(theme.ely.border)
                 .bg(theme.ely.surface)
-                .child(div().debug_selector(|| "file-preview-outline-toc".into()).child(toc))
+                .child(
+                    div()
+                        .debug_selector(|| "file-preview-outline-toc".into())
+                        .relative()
+                        .child(toc)
+                        .child(record_bounds(scroll.outline.clone())),
+                )
         });
         // The column is a fixed width, not a cap: a pane narrower than it
         // scrolls the page sideways rather than rewrapping the prose into a
