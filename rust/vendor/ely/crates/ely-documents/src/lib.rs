@@ -59,6 +59,8 @@ pub use knowledge::{Backlink, Backlinks, Favorite, Favorites, TrashBin, Trashed}
 pub use link::LinkEditor;
 pub use markdown::file_tree as markdown_tree;
 pub use markdown::markdown_highlights;
+pub use markdown::parsed_text as markdown_parsed_text;
+pub use markdown::accepts_swapped_texts as markdown_accepts_swapped_texts;
 pub use markdown::mdast::{self, AlignKind};
 pub use math::{Latex, MathError, formula_svg};
 pub(crate) use math::{failed, typeset};

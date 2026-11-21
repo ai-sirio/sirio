@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use ely_gpui_component::documents::{MarkdownBlock, Style, parse_markdown_with};
+use ely_gpui_component::documents::{
+    MarkdownBlock, Style, markdown_accepts_swapped_texts, markdown_parsed_text,
+    parse_markdown_with,
+};
 use gpui::SharedString;
 use pulldown_cmark::{Event, Options, Parser};
 
@@ -175,14 +178,29 @@ fn tree_depth(nodes: &[MarkdownBlock]) -> usize {
 pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     let mut missing = Vec::new();
     let mut nodes = vec![rewrite::plain_paragraph(source)];
-    let depth = markdown_depth(source);
+    // Ely reads another text than the one written: it drops a leading byte order mark, reads a
+    // lone CR as a line end, and reads `\(` pairs as math in a second pass over swapped text.
+    // The guard measures what Ely reads (its own functions, so the two cannot drift); the
+    // source itself is what Ely is handed, so it normalises once.
+    let mut depth = markdown_depth(&markdown_parsed_text(source));
+    if depth <= MAX_NESTING {
+        let mut deepest = depth;
+        markdown_accepts_swapped_texts(source, &mut |swapped| {
+            let read = markdown_depth(&markdown_parsed_text(swapped));
+            deepest = deepest.max(read);
+            read <= MAX_NESTING
+        });
+        depth = deepest;
+    }
     if depth <= MAX_NESTING {
         // What depth the Markdown leaves is all block HTML may nest to, wherever it stands.
         let room = (MAX_NESTING - depth).min(MAX_HTML_NESTING);
         let parsed = parse_markdown_with(source, &|raw: &str| rewrite::html_block(raw, room));
         // Block HTML nests on top of the Markdown around it: each is under the cap, their
         // sum may not be, and every walk after this one recurses over the tree.
-        if tree_depth(&parsed) <= MAX_NESTING {
+        // A failed diagram's note is a quote one level below its fence: room for it too.
+        let note = usize::from(policy.surface == Surface::Preview && policy.diagrams.is_some());
+        if tree_depth(&parsed) + note <= MAX_NESTING {
             nodes = parsed;
             if policy.surface == Surface::Preview
                 && let Some(inputs) = &policy.diagrams

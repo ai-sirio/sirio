@@ -16,6 +16,25 @@ struct Pair {
 
 /// `text` as a syntax tree, each pair read as inline math.
 pub(super) fn parse(text: &str, frontmatter: bool) -> Node {
+    read(text, frontmatter, &mut |_| true)
+}
+
+/// Whether `accept` takes the text of every round of the pass that reads `\(` pairs, as
+/// swapped, each before it is parsed; the first it refuses ends the work, and nothing deeper
+/// than a text it took was ever built. True for a `text` with no pair. The first pass's text
+/// is `text` itself.
+pub(super) fn accepts_swapped(text: &str, accept: &mut dyn FnMut(&str) -> bool) -> bool {
+    let mut all = true;
+    read(text, false, &mut |swapped| {
+        all &= accept(swapped);
+        all
+    });
+    all
+}
+
+/// [`parse`], handing `seen` each text swapped in a round before it is parsed; it returns
+/// the plain tree as soon as `seen` answers no.
+fn read(text: &str, frontmatter: bool, seen: &mut dyn FnMut(&str) -> bool) -> Node {
     let plain = build::tree(text, frontmatter);
     if !text.contains("\\(") && !text.contains("\\[") {
         return plain;
@@ -44,6 +63,9 @@ pub(super) fn parse(text: &str, frontmatter: bool) -> Node {
         }
         let swapped = written(text, &pairs, &dollars, stand_in, pad);
         let swapped = String::from_utf8(swapped).expect("ASCII swaps keep UTF-8");
+        if !seen(&swapped) {
+            return plain;
+        }
         let mut root = build::tree(&swapped, frontmatter);
         let mut maths = Vec::new();
         walk(&root, &mut maths);

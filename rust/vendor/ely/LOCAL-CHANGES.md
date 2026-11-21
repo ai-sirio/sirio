@@ -70,7 +70,10 @@ describes is a review by hand.
 - `crates/ely-core/src/typography/fit.rs`
 - `crates/ely-documents/Cargo.toml`
 - `crates/ely-documents/src/lib.rs`
+- `crates/ely-documents/src/markdown.rs`
+- `crates/ely-documents/src/markdown/build.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
+- `crates/ely-documents/src/markdown/tex.rs`
 - `crates/ely-documents/src/math.rs`
 - `crates/ely-documents/src/modes.rs`
 - `crates/ely-documents/src/picture.rs`
@@ -151,8 +154,8 @@ list is what the check accepts as different from upstream; anything else differi
 
 Two `ely-documents` tests of upstream's `e71b644b` (`markdown::tex::tests::a_note_in_a_markdown_link_frees_the_math_after_it`
 and `tree::tests::inline::a_link_around_a_footnote_reference_stays_a_link`) need upstream's patched
-pulldown-cmark. They were `#[ignore]`d until this change; the `#[ignore]` lines are gone and those two
-`tex/tests.rs` no longer differs from upstream (`tree/tests/inline.rs` still does, for the reasons in its other sections).
+pulldown-cmark. They were `#[ignore]`d until this change; the `#[ignore]` lines are gone, so
+`markdown/tex/tests.rs` no longer differs from upstream. `tree/tests/inline.rs` still does, for the reasons in its other sections.
 
 What: `rust/vendor/pulldown-cmark` is upstream's `vendor/pulldown-cmark` at `8d7723ec` (0.13.6, 47 files),
 taken verbatim, wired through `[patch.crates-io]` in `rust/Cargo.toml` (and listed in the workspace
@@ -814,7 +817,7 @@ Outcomes:
   rows while nothing is wide) has its proof (ran): `ely-documents` `document::tests::scroll::source_margins_scroll`.
 - Row 167: re-applied (`measured` is `pub(super)`). Proof: the closure build (`view.rs` calls it).
 
-## ely-documents host seams (Markdown on ely-documents, rows L1 to L6, L8 and L9)
+## ely-documents host seams (Markdown on ely-documents, rows L1 to L6 and L8 to L10)
 
 Spec `docs/superpowers/specs/2026-11-20-ely-markdown-documents-design.md` §5.2. Sirio parses once,
 rewrites the tree and owns selection, links and menus, so the vendored renderer gains opt-in seams.
@@ -866,6 +869,19 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
   table hooks, `markdown-heading-N` and `markdown-cell-T-R-C` selectors and the host gather's pushes, with
   each block skipped in turn),
   `without_a_cull_the_tree_is_the_one_a_never_skipping_cull_lays_out`.
+- L10 two readers of what the parser reads, for a host that measures a source before it parses it:
+  `markdown_parsed_text(source) -> Cow<str>` (`markdown.rs` `parsed_text`, `markdown/build.rs` `normalised`) is the
+  text of the first pass, one leading U+FEFF dropped and each lone CR as LF (it calls the same `lone_crs` `read`
+  does); `markdown_accepts_swapped_texts(source, accept) -> bool` (`markdown.rs`, `markdown/tex.rs`
+  `accepts_swapped`) hands `accept` the text of each round of the pass that reads `\(` and `\[` pairs as math,
+  before it is parsed, and stops at the first refusal (`tex::parse` is now `read` with an always-yes callback;
+  nothing else in it moves). Both re-exported from `lib.rs`. Why: a deep tree overflows the stack in the passes
+  that recurse over it, so Sirio refuses a source past a cap first, and a guard that reads the source as
+  written misses a quote marker behind a byte order mark, a line a lone CR ends, and a closer that the second
+  pass hides inside math (`*a \(x*\) ` repeated, then `a* ` repeated, is flat in the first pass and deep in the
+  second). Calling Ely's own functions leaves one implementation, so the two cannot drift. No upstream caller
+  changes. Proof: Sirio's `markdown::tests::a_leading_byte_order_mark_does_not_hide_nesting`,
+  `a_lone_cr_does_not_hide_nesting` and `the_pass_that_reads_parenthesised_math_does_not_hide_nesting`.
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
 
@@ -906,9 +922,11 @@ follow-up if they must run in CI; it is not done here, because the task fixes th
 Outcome: local change, re-decided against the featureless build. Proof: `cd rust && cargo nextest run
 -p ely-git -p ely-documents --no-run` and `cargo nextest run -p ely-core -p ely-chat -p ely-agent
 -p ely-editor -p ely-collab -p ely-charts --no-run` both exit 0 with no error and no warning; the
-second needed no further gate. The featureless run is `ely-git` 21 tests and `ely-documents` 159, all
-passing, with nothing skipped. With `--features test-support`,
-`-p ely-palette -p ely-documents -p ely-core` runs 1193 tests, all passing, 2 skipped.
+second needed no further gate. The featureless run (`cargo nextest run -p ely-git -p ely-documents`, 2026-11-21) is 183 tests, all
+passing, none skipped. With `--features test-support`,
+`-p ely-palette -p ely-documents -p ely-core` ran 1207 tests on 2026-11-21, none skipped: 1206 passed on the
+first run, and the wall-clock budget test `html_block::tests::references_and_long_runs_read_as_a_browser_reads_them`
+went red (3.1 s) while another build loaded the machine and passed on its own.
 
 ## Timing tests off the featureless build
 

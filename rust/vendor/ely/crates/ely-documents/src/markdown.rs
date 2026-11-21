@@ -30,6 +30,20 @@ pub(crate) fn math_inside(source: &str, whole: Range<usize>) -> Range<usize> {
     }
 }
 
+/// The text `source` is parsed as, before any `$$` fence is read: a leading byte order mark
+/// dropped and each lone CR as LF. A host that measures the source measures this.
+pub fn parsed_text(source: &str) -> std::borrow::Cow<'_, str> {
+    build::normalised(source)
+}
+
+/// Whether `accept` takes each text the parser reads after the first, in the pass that reads
+/// `\(` and `\[` pairs as math (one per round, the delimiters swapped), each before it is
+/// parsed. A refusal ends the work. A host that measures the source measures these too: a text
+/// with pairs is read twice, and the second reading can nest deeper than the first.
+pub fn accepts_swapped_texts(source: &str, accept: &mut dyn FnMut(&str) -> bool) -> bool {
+    tex::accepts_swapped(source, accept)
+}
+
 /// A whole file as a syntax tree: front matter too.
 pub fn file_tree(text: &str) -> mdast::Node {
     parsed(text, true)

@@ -25,6 +25,15 @@ pub(super) fn options() -> Options {
         | Options::ENABLE_MATH
 }
 
+/// The text pulldown-cmark reads for `source`: one leading byte order mark dropped, each lone CR as LF.
+pub(crate) fn normalised(source: &str) -> Cow<'_, str> {
+    let rest = source.strip_prefix('\u{FEFF}').unwrap_or(source);
+    match rest.contains('\r') {
+        true => Cow::Owned(lone_crs(rest)),
+        false => Cow::Borrowed(rest),
+    }
+}
+
 /// `source` as a syntax tree; front matter too for a whole file.
 pub(super) fn tree(source: &str, frontmatter: bool) -> Node {
     // pulldown-cmark reads a byte order mark as text.

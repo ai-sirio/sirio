@@ -266,6 +266,40 @@ fn deep_nesting_falls_back_to_plain_text() {
     }
 }
 
+// Ely parses another text than the one written, and the guard measures the one it parses.
+
+#[test]
+fn a_leading_byte_order_mark_does_not_hide_nesting() {
+    // pulldown-cmark reads a BOM as text; Ely drops one, so `>` is a quote marker for it.
+    falls_back(format!("\u{FEFF}{} x", ">".repeat(10_000)));
+    // Ely drops one and no more: the second is text, so the `>` run is a paragraph, and the guard
+    // must not drop a second one on its way (it would see 10 000 quotes Ely never reads).
+    let source = format!("\u{FEFF}\u{FEFF}{} x", ">".repeat(10_000));
+    let nodes = on_stack(256 * 1024, move || {
+        build(&source, &mut plain(Surface::Chat)).nodes.to_vec()
+    });
+    assert_eq!(nodes.len(), 1);
+    assert!(matches!(nodes[0], Node::Paragraph(_)), "{:?}", nodes[0]);
+    assert_eq!(depth(&nodes), 1);
+}
+
+#[test]
+fn a_lone_cr_does_not_hide_nesting() {
+    // Inside an indented code block a lone CR ends no line for pulldown-cmark, but it does for
+    // Ely, which reads it as LF.
+    falls_back(format!("    xx\r{} x", ">".repeat(10_000)));
+    falls_back(format!("    xx\r{}x", "- ".repeat(10_000)));
+    falls_back(format!("    xx\r{}x{}", "*a _a ".repeat(2_500), " a_ a*".repeat(2_500)));
+}
+
+#[test]
+fn the_pass_that_reads_parenthesised_math_does_not_hide_nesting() {
+    // Each `\(x*\)` closes its opener while the pair is still text; once the pair is math, its
+    // `*` is hidden and the closers at the end close every opener at once.
+    let n = 5_000;
+    falls_back(format!("{}{}", "*a \\(x*\\) ".repeat(n), "a* ".repeat(n)));
+}
+
 /// How deep `nodes` nest, a leaf counting one.
 fn depth(nodes: &[Node]) -> usize {
     nodes
@@ -277,7 +311,6 @@ fn depth(nodes: &[Node]) -> usize {
 
 #[test]
 fn nesting_is_cut_at_exactly_the_cap() {
-    assert_eq!(MAX_NESTING, 128);
     // Every open tag counts, the paragraph inside the quotes among them.
     let quotes = |n: usize| format!("{} x", ">".repeat(n));
     let (inside, over) = on_stack(8 * 1024 * 1024, move || {
@@ -579,6 +612,32 @@ fn diagram_blocks(surface: Surface, diagrams: &Diagrams, source: &str) -> Markdo
 
 fn is_mermaid(node: &Node) -> bool {
     matches!(node, Node::Code { language: Some(language), .. } if language == "mermaid")
+}
+
+/// A failed diagram's note is a quote beside its fence: one level deeper than the fence.
+#[test]
+fn a_failed_diagram_note_stays_within_the_cap() {
+    let in_quotes = |quotes: usize| {
+        let mark = "> ".repeat(quotes);
+        ["```mermaid", "flowchart TD", "  A --> B", "```"]
+            .iter()
+            .map(|line| format!("{mark}{line}\n"))
+            .collect::<String>()
+    };
+    let built = |quotes: usize| {
+        let failed = with_state(Some(DiagramState::Failed("no mermaid here".into())));
+        let source = in_quotes(quotes);
+        on_stack(8 * 1024 * 1024, move || {
+            diagram_blocks(Surface::Preview, &failed, &source).nodes.to_vec()
+        })
+    };
+    // The fence is a leaf one level above the cap: its note fits, and is shown.
+    let room = built(MAX_NESTING - 2);
+    assert!(depth(&room) <= MAX_NESTING, "{}", depth(&room));
+    assert!(texts(&room).iter().any(|text| text == "no mermaid here"), "{:?}", texts(&room));
+    // At the cap there is no room for it: nothing is deeper than the cap.
+    let full = built(MAX_NESTING - 1);
+    assert!(depth(&full) <= MAX_NESTING, "{}", depth(&full));
 }
 
 #[test]
