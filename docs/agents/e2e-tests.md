@@ -765,6 +765,33 @@ Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 # PID-matched captures in frames/<what>-<appearance>.png.
 Scripts/Tests/test-sidebar-shell-e2e.sh   # -> prints "SIDEBAR SHELL E2E OK (dark|light|default|state only)"; (default) is the line without --appearance
 
+# The font setting (Settings, Appearance, Interface, Font) in a real, isolated Sirio under a
+# private Xvfb, by real clicks and keys: a fresh database reads atkinson in every layer (the
+# startup registration time goes to measurements.tsv); each of the seven pairs is chosen in turn
+# through the Font select (arrow keys and Enter, figtree by a click on its row), then `fonts`
+# names the pair's families in Sirio's typography, Ely and bezel, every measured width (ten `m`, `a`, `0`) is
+# within 0.5 px of the advances Scripts/Tests/font_face_advance.py reads from the bundled file of
+# that slot, and the sidebar's text and the editor's code crop differently from the previous
+# pair's (plex chosen twice crops the same); Escape closes the open list only, a second Escape
+# closes Settings; an interface size step keeps the pair, and the terminal's crop never changes;
+# quit and relaunch brings the pair back, an unknown saved id reads as atkinson; at interface
+# size 18 in Atkinson no digit of a five-digit diff line number crosses its cell's left edge
+# (the pixel strip left of the cell). Where a width cannot tell a weight or a family (most
+# monospace faces draw `m` at 0.600 em, which a fallback with the same advance also passes;
+# Atkinson Mono, 0.632 em, and Fira Code, 0.615 em, are told apart) measurements.tsv says so in
+# weight-limit, italic-limit and width-limit rows (status limit), and a bundled family also installed
+# on the machine in an installed-limit row; the last check prints the ok, limit and skip counts. --diff-only runs just the diff-number step, which fails when
+# `diff_number_width` is forced to the old 40 px (the proof it can). Frames, per-pair sheets,
+# contact-sheet-<appearance>.png (the seven windows, labelled, scaled down) and
+# contact-sheet-detail-<appearance>.png (each pair's chat reply and editor lines at 1:1) are in
+# frames/; the editor's rust server is Scripts/Tests/fake_lsp.py, so no error covers the code.
+# --display :N is a private Xvfb of at least 1600x1000 with Mesa's lavapipe; --appearance
+# light|dark (run both; dark when omitted); --state-only runs the fresh and unknown-id reads
+# with no display;
+# --out-dir DIR (must be empty) keeps transcript.log, app.log, measurements.tsv, reads/, crops/
+# and the frames.
+Scripts/Tests/test-font-setting-e2e.sh   # -> prints "FONT SETTING E2E OK (dark|light|diff only|state only)"
+
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME

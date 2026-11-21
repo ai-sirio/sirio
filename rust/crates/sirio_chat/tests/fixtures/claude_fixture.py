@@ -3046,6 +3046,33 @@ def main():
                      "```text\nsrc/main.rs\n```\n")
                 result()
                 continue
+            if MODE == "font_sheet":
+                # One fixed answer to any prompt, for the font setting's E2E
+                # (Scripts/Tests/test-font-setting-e2e.sh): prose with emphasis and
+                # inline code, a list, a Rust block with the characters a face must
+                # tell apart, and a text block with a file tree, arrows, a check, a
+                # bullet, a lambda and a greater-or-equal sign.
+                init_line()
+                text(
+                    "Here is a **fixed answer** with *emphasis*, `inline code` and a "
+                    "paragraph long enough to wrap onto a second line, so that every "
+                    "face is judged on running text as well as on single words.\n\n"
+                    "- first item, with **bold**\n"
+                    "- second item, with *italic*\n"
+                    "- third item, with `src/main.rs`\n\n"
+                    "```rust\n"
+                    "0O 1lI {}[]() -> != ==\n"
+                    "fn main() { let total = 0; }\n"
+                    "```\n\n"
+                    "```text\n"
+                    "├── src\n"
+                    "│   └── main.rs\n"
+                    "└── README.md\n"
+                    "→ ← ✓ ● λ ≥\n"
+                    "```\n"
+                )
+                result()
+                continue
             if MODE == "permission":
                 init_line()
                 tool_input = {"command": "rm -rf build", "description": "Remove build"}

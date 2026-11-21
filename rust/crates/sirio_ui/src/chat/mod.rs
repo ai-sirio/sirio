@@ -7685,22 +7685,18 @@ impl Chat {
                         .flex_none()
                         .flex()
                         .child(
-                            div()
-                                .w(px(DIFF_GUTTER_WIDTH * f32::from(typography.scaled(12.0)) / 12.0))
-                                .pr(px(4.0))
-                                .flex()
-                                .justify_end()
-                                .text_color(theme.ely.fg_subtle)
-                                .child(old_number),
+                            DiffNumberCell {
+                                number: old_number,
+                                padding: 4.0,
+                                theme: *theme,
+                            },
                         )
                         .child(
-                            div()
-                                .w(px(DIFF_GUTTER_WIDTH * f32::from(typography.scaled(12.0)) / 12.0))
-                                .pr(px(8.0))
-                                .flex()
-                                .justify_end()
-                                .text_color(theme.ely.fg_subtle)
-                                .child(new_number),
+                            DiffNumberCell {
+                                number: new_number,
+                                padding: 8.0,
+                                theme: *theme,
+                            },
                         ),
                 )
                 .child(div().flex_none().w(px(12.0)).child(prefix))
@@ -9114,11 +9110,54 @@ impl DiffLine {
 /// rewrite should not make the transcript unusable.
 const DIFF_PREVIEW_MAX_LINES: usize = 60;
 
-/// Width of each of a diff preview's two line-number columns (old, then
+/// The floor of each of a diff preview's two line-number columns (old, then
 /// new). Swift reserves 30pt for a `%3d` field plus 8pt of trailing padding;
 /// four digits is the realistic worst case in a file this preview would
-/// ever show.
+/// ever show. The width drawn is [`DiffNumberCell`]'s: four digits measured
+/// in the current code family and size, plus the cell's own padding, never
+/// under this.
 const DIFF_GUTTER_WIDTH: f32 = 34.0;
+
+/// One line-number cell of a diff preview. A component rather than a plain
+/// `div` so that it can measure its digits with the window's text system when
+/// it is laid out: the column follows the font pair and the interface size
+/// instead of assuming Geist Mono's advances.
+#[derive(IntoElement)]
+struct DiffNumberCell {
+    number: String,
+    /// The cell's trailing padding, counted in its width.
+    padding: f32,
+    theme: Theme,
+}
+
+impl RenderOnce for DiffNumberCell {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let typography = self.theme.typography;
+        let digits = window
+            .text_system()
+            .layout_line(
+                "0000",
+                typography.scaled(12.0),
+                &[gpui::TextRun {
+                    len: 4,
+                    font: gpui::font(typography.code_family),
+                    color: self.theme.ely.fg,
+                    ..Default::default()
+                }],
+                None,
+            )
+            .width;
+        let width = (f32::from(digits).ceil() + self.padding).max(DIFF_GUTTER_WIDTH);
+        div()
+            .w(px(width))
+            .pr(px(self.padding))
+            .flex()
+            .justify_end()
+            .whitespace_nowrap()
+            .text_color(self.theme.ely.fg_subtle)
+            .child(self.number)
+    }
+}
 
 /// The gallery's standalone Diff pattern is drawn at 760. Recorded so the
 /// number in the spec has a home in the code, and so the rule below can say

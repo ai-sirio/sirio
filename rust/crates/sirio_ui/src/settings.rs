@@ -8,7 +8,10 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
 use crate::text_selection::selectable_text;
 use bezel_theme::Theme as BezelTheme;
-use ely_gpui_component::forms::{InputEvent, TextInput};
+use ely_gpui_component::forms::{Choice, InputEvent, Select, TextInput};
+use ely_gpui_component::theme::{
+    ControlSize, IconSize as ElyIconSize, TextSize, Theme as ElyTheme,
+};
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
     Hsla, KeyDownEvent, MouseButton, Render, ScrollHandle, Window, actions, div, point, prelude::*,
@@ -16,7 +19,7 @@ use gpui::{
 };
 use sirio_agents::{AgentAvailability, DiscoveryError, try_discover_availability};
 use sirio_privacy::{PermissionAction, PermissionKind, PermissionStatus};
-use sirio_theme::{Theme, ThemeMode};
+use sirio_theme::{FontPair, Theme, ThemeMode};
 use sirio_usage::{
     AgentAccountIdentity, CredentialStore, CredentialStoreError, LocalAccountState,
     OllamaCloudUsageFetcher, OpenCodeGoUsageFetcher, UsageProvider, codex_auth_file_path,
@@ -34,6 +37,31 @@ const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
 // Scoped to the menu's key context so the shell's own Escape handling is
 // untouched whenever the menu is not the focused thing.
 actions!(settings_summarizer, [CloseSummarizerPicker]);
+
+/// The key context of the Appearance "Font" row. Escape is bound to `NoAction` there, so the
+/// shell's global Escape binding does not fire while the row holds focus: Ely's select closes
+/// its open list on Escape, and an Escape that reaches the row's wrapper (the list was already
+/// closed) closes Settings, see `Settings::render_font_select`.
+///
+/// Between two bindings at the same depth GPUI runs the one added later, and the shell's global
+/// Escape has no context (it counts as the deepest one), so the shell re-adds this binding after
+/// its own: see `bind_window_keys`.
+pub const FONT_SELECT_CONTEXT: &str = "SettingsFontSelect";
+
+/// Where two controls of the Appearance page were last painted, for the debug layout read: the
+/// Font select's trigger and the interface size stepper's increase button. Each is `None`
+/// while the page is not drawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SettingsProbe {
+    pub font: Option<gpui::Bounds<gpui::Pixels>>,
+    pub font_size_up: Option<gpui::Bounds<gpui::Pixels>>,
+}
+
+#[derive(Default)]
+struct ProbeRects {
+    font: controls::BoundsCell,
+    font_size_up: controls::BoundsCell,
+}
 
 mod agents_page;
 mod editor_page;
@@ -335,6 +363,8 @@ impl AgentAccentColor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsSnapshot {
     pub theme: ThemeMode,
+    /// The bundled font pair (Appearance → Interface → Font).
+    pub font_pair: FontPair,
     pub interface_font_size: i32,
     pub terminal_font_size: i32,
     /// The bezel base colour the greys are tinted with (Appearance → Theme).
@@ -398,6 +428,7 @@ impl Default for SettingsSnapshot {
     fn default() -> Self {
         Self {
             theme: ThemeMode::System,
+            font_pair: FontPair::DEFAULT,
             interface_font_size: 13,
             terminal_font_size: 13,
             base_color: sirio_theme::BaseColor::Neutral,
@@ -802,8 +833,11 @@ pub struct Settings {
     /// The Appearance screen's Translucency toggle (F-SET-20). Part of the
     /// persistence contract — see [`SettingsSnapshot::translucency`].
     translucency: bool,
+    font_pair: FontPair,
     interface_font_size: i32,
     terminal_font_size: i32,
+    /// Where the Appearance page's probed controls were last painted (debug layout read).
+    probe: std::rc::Rc<ProbeRects>,
     base_color: sirio_theme::BaseColor,
     claude_show_in_bar: bool,
     codex_show_in_bar: bool,
@@ -1101,6 +1135,8 @@ impl Settings {
             on_change: None,
             theme_mode: initial.theme,
             translucency: initial.translucency,
+            font_pair: initial.font_pair,
+            probe: Default::default(),
             interface_font_size: initial.interface_font_size.clamp(12, 18),
             terminal_font_size: initial.terminal_font_size.clamp(12, 18),
             base_color: initial.base_color,
@@ -1427,6 +1463,21 @@ impl Settings {
             CloseSummarizerPicker,
             Some("SettingsSummarizerPopover"),
         )]);
+        // The Font select's own Escape: held back from the shell's global binding, see
+        // `FONT_SELECT_CONTEXT`.
+        cx.bind_keys([KeyBinding::new(
+            "escape",
+            gpui::NoAction,
+            Some(FONT_SELECT_CONTEXT),
+        )]);
+    }
+
+    /// The painted bounds of the Appearance page's probed controls, for the debug layout read.
+    pub fn probe_bounds(&self) -> SettingsProbe {
+        SettingsProbe {
+            font: self.probe.font.get(),
+            font_size_up: self.probe.font_size_up.get(),
+        }
     }
 
     /// Pins the provider cards' account states to explicit values.
@@ -1707,6 +1758,7 @@ impl Settings {
     pub fn snapshot(&self) -> SettingsSnapshot {
         SettingsSnapshot {
             theme: self.theme_mode,
+            font_pair: self.font_pair,
             interface_font_size: self.interface_font_size,
             terminal_font_size: self.terminal_font_size,
             base_color: self.base_color,
@@ -1829,6 +1881,14 @@ impl Settings {
 
     fn set_translucency(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.translucency = enabled;
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_font_pair(&mut self, pair: FontPair, cx: &mut Context<Self>) {
+        self.font_pair = pair;
+        Theme::set_font_pair(pair, cx);
+        cx.refresh_windows();
         self.changed();
         cx.notify();
     }
@@ -2665,7 +2725,103 @@ impl Settings {
         list.child(div().flex_1())
     }
 
-    fn render_appearance(&self, theme: Theme, mode: ThemeMode, entity: Entity<Self>) -> gpui::Div {
+    /// The width of the Font select: the widest pair title, laid out in the family and at the
+    /// size the trigger draws its value in, plus the trigger's chrome, rounded up. Every number
+    /// is read from where Ely's `Select` trigger takes it (vendor/ely/crates/ely-core/src/forms/
+    /// select.rs, `field_button` and `Select::render`), so the title never ellipsises:
+    /// - text size: `ElyTheme::text_size(TextSize::Base)`, what `input::text_size` gives a
+    ///   `ControlSize::Md` select (the default); Sirio's `ThemeMetrics` makes it `base_size`.
+    /// - family: the trigger sets none, so it inherits the shell frame's `ui_family`.
+    /// - padding: `ElyTheme::control_padding(ControlSize::Md)` on each side (`.px`).
+    /// - border: 1 px on each side (`.border_1()`).
+    /// - gap: `.gap_2()`, 0.5 rem, between the value and the icon.
+    /// - icon: `ElyTheme::icon_size(IconSize::Xs)`, the `ChevronsUpDown` after the value.
+    /// - 1 px of slack: gpui rounds each border to whole device pixels (2 dp, 1.14 px a side at
+    ///   175%) and floors a `.w()` to the half pixel, together up to about 0.6 px.
+    fn font_select_width(window: &mut Window, cx: &App) -> f32 {
+        let ely = cx.global::<ElyTheme>();
+        let rem = window.rem_size();
+        let text_size = ely.text_size(TextSize::Base).to_pixels(rem);
+        let padding = ely.control_padding(ControlSize::Md).to_pixels(rem);
+        let icon = ely.icon_size(ElyIconSize::Xs).to_pixels(rem);
+        let gap = gpui::rems(0.5).to_pixels(rem);
+        let border = px(1.0);
+        let family = Theme::get(cx).typography.ui_family;
+        let widest = FontPair::ALL
+            .into_iter()
+            .map(|pair| {
+                let title = pair.title();
+                let line = window.text_system().layout_line(
+                    title,
+                    text_size,
+                    &[gpui::TextRun {
+                        len: title.len(),
+                        font: gpui::font(family),
+                        color: Hsla::default(),
+                        ..Default::default()
+                    }],
+                    None,
+                );
+                f32::from(line.width)
+            })
+            .fold(0.0_f32, f32::max);
+        let chrome = f32::from(padding * 2.0 + border * 2.0 + gap + icon);
+        (widest + chrome).ceil() + 1.0
+    }
+
+    /// The Font row's control: Ely's select over the bundled pairs, titled in plain labels. It
+    /// sits in its own key context, where Escape is bound to nothing, so the shell's global
+    /// Escape does not close Settings while the list is open: Ely's trigger closes the list and
+    /// stops the key. An Escape that bubbles up to this wrapper met a closed list, and closes
+    /// Settings like the global binding would have. The wrapper is as wide as the widest title
+    /// needs at the current family and size, see [`Self::font_select_width`].
+    fn render_font_select(
+        &self,
+        entity: Entity<Self>,
+        window: &mut Window,
+        cx: &App,
+    ) -> impl IntoElement {
+        let width = Self::font_select_width(window, cx);
+        let choices = FontPair::ALL
+            .into_iter()
+            .map(|pair| Choice::new(pair.id(), pair.title()));
+        let select = Select::new("appearance-font-select", choices)
+            .label("Font")
+            .selected(self.font_pair.id())
+            .on_change(move |value, _, cx| {
+                let pair = FontPair::from_id(value);
+                entity.update(cx, |this, cx| this.set_font_pair(pair, cx));
+            });
+        let back = self.on_back.clone();
+        div()
+            .id("appearance-font")
+            .debug_selector(|| "appearance-font".into())
+            .key_context(FONT_SELECT_CONTEXT)
+            .w(px(width))
+            .on_key_down(move |event, _, cx| {
+                let keystroke = &event.keystroke;
+                if keystroke.key == "escape"
+                    && !keystroke.modifiers.modified()
+                    && let Some(back) = &back
+                {
+                    cx.stop_propagation();
+                    back();
+                }
+            })
+            .child(select)
+            .children(
+                cfg!(debug_assertions).then(|| controls::probe_canvas(&self.probe.font)),
+            )
+    }
+
+    fn render_appearance(
+        &self,
+        theme: Theme,
+        mode: ThemeMode,
+        entity: Entity<Self>,
+        window: &mut Window,
+        cx: &App,
+    ) -> gpui::Div {
         let theme_entity = entity.clone();
         let theme_control = controls::segmented(
             "appearance-theme",
@@ -2724,11 +2880,12 @@ impl Settings {
         );
 
         let interface_entity = entity.clone();
-        let interface_stepper = controls::stepper(
+        let interface_stepper = controls::stepper_probed(
             "interface-font-size",
             self.interface_font_size,
             "pt",
             theme,
+            Some(&self.probe.font_size_up),
             move |value, cx| {
                 interface_entity.update(cx, |this, cx| this.set_interface_font_size(value, cx));
             },
@@ -2744,8 +2901,19 @@ impl Settings {
             },
         );
 
-        let interface_card =
-            controls::card(theme).child(div().id("settings-interface-font-size-row").child(
+        let interface_card = controls::card(theme)
+            .child(
+                div()
+                    .id("settings-interface-font-row")
+                    .child(controls::row(
+                        "Font",
+                        None,
+                        self.render_font_select(entity.clone(), window, cx),
+                        theme,
+                    )),
+            )
+            .child(controls::separator(theme))
+            .child(div().id("settings-interface-font-size-row").child(
                 // #201: no subtitle. `controls::stepper` is given the
                 // value *and* the unit, so it already reads "13 pt"; a
                 // subtitle repeating it left the row saying the number
@@ -4473,6 +4641,9 @@ impl Render for Settings {
             cx,
         );
         self.field_caret_visible = field_focused && self.field_blink.visible();
+        // The probed controls are repainted by this frame, or not drawn at all.
+        self.probe.font.set(None);
+        self.probe.font_size_up.set(None);
         // The detail is built before the sidebar, which borrows `self` for as
         // long as it lives, so the Editor screen can make its fields here.
         let detail = match self.category {
@@ -4486,7 +4657,9 @@ impl Render for Settings {
             SettingsCategory::GitHosting => self.render_git_hosting(theme, entity.clone()),
             SettingsCategory::General => self.render_general(theme, entity.clone(), window),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
-            SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),
+            SettingsCategory::Appearance => {
+                self.render_appearance(theme, mode, entity.clone(), window, cx)
+            }
             SettingsCategory::Editor => {
                 let fields = self.editor_fields(window, cx);
                 self.render_editor(theme, entity.clone(), fields)

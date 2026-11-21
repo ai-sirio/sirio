@@ -1278,6 +1278,9 @@ impl AppDatabase {
             defaults.ui_font_size =
                 clamp_setting(&value, crate::model::settings_ranges::UI_FONT_SIZE, 13);
         }
+        if let Some(value) = self.setting_value(settings_keys::FONT_PAIR)? {
+            defaults.font_pair = value;
+        }
         if let Some(value) = self.setting_value(settings_keys::TERMINAL_FONT_SIZE)? {
             defaults.terminal_font_size = clamp_setting(
                 &value,
@@ -1460,6 +1463,11 @@ impl AppDatabase {
             &transaction,
             settings_keys::UI_FONT_SIZE,
             &settings.ui_font_size.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::FONT_PAIR,
+            &settings.font_pair,
         )?;
         set_setting(
             &transaction,

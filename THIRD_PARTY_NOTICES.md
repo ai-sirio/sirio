@@ -153,6 +153,30 @@ under the SIL Open Font License 1.1. The license is copied to
 `rust/assets/fonts/Geist-OFL.txt`; SHA-256 sums for each face are in
 `rust/assets/fonts/README.md`.
 
+## Atkinson Hyperlegible Next and Mono (font pair `atkinson`)
+
+The faces in `rust/assets/fonts/atkinson/` — `AtkinsonHyperlegibleNext-Regular.ttf`, `AtkinsonHyperlegibleNext-Medium.ttf`, `AtkinsonHyperlegibleNext-SemiBold.ttf`, `AtkinsonHyperlegibleNext-Bold.ttf`, `AtkinsonHyperlegibleNext-Italic.ttf`, `AtkinsonHyperlegibleMono-Regular.ttf`, `AtkinsonHyperlegibleMono-Bold.ttf` — were copied byte-for-byte from Atkinson Hyperlegible Next 2.001 from [googlefonts/atkinson-hyperlegible-next](https://github.com/googlefonts/atkinson-hyperlegible-next) at commit `7925f50f649b3813257faf2f4c0b381011f434f1` (`fonts/ttf/`), and Atkinson Hyperlegible Mono 2.001 from [googlefonts/atkinson-hyperlegible-next-mono](https://github.com/googlefonts/atkinson-hyperlegible-next-mono) at commit `154d50362016cc3e873eb21d242cd0772384c8f9` (`fonts/ttf/`). Neither repository has tags or releases, so the commits pin the files. All are licensed under the SIL Open Font License 1.1; the licence text is copied to `rust/assets/fonts/atkinson/AtkinsonHyperlegibleMono-OFL.txt`, `rust/assets/fonts/atkinson/AtkinsonHyperlegibleNext-OFL.txt`. SHA-256 sums for each face are in `rust/assets/fonts/README.md`.
+
+## Inter and JetBrains Mono (font pair `inter`)
+
+The faces in `rust/assets/fonts/inter/` — `Inter-Regular.ttf`, `Inter-Medium.ttf`, `Inter-SemiBold.ttf`, `Inter-Bold.ttf`, `Inter-Italic.ttf`, `JetBrainsMono-Regular.ttf`, `JetBrainsMono-Bold.ttf` — were copied byte-for-byte from Inter 4.001 from [rsms/inter](https://github.com/rsms/inter) release v4.1 (`Inter-4.1.zip`, `extras/ttf/`), and JetBrains Mono 2.304 from [JetBrains/JetBrainsMono](https://github.com/JetBrains/JetBrainsMono) release v2.304 (`JetBrainsMono-2.304.zip`, `fonts/ttf/`). All are licensed under the SIL Open Font License 1.1; the licence text is copied to `rust/assets/fonts/inter/Inter-OFL.txt`, `rust/assets/fonts/inter/JetBrainsMono-OFL.txt`. SHA-256 sums for each face are in `rust/assets/fonts/README.md`.
+
+## IBM Plex Sans and Mono (font pair `plex`)
+
+The faces in `rust/assets/fonts/plex/` — `IBMPlexSans-Regular.ttf`, `IBMPlexSans-Medium.ttf`, `IBMPlexSans-SemiBold.ttf`, `IBMPlexSans-Bold.ttf`, `IBMPlexSans-Italic.ttf`, `IBMPlexMono-Regular.ttf`, `IBMPlexMono-Bold.ttf` — were copied byte-for-byte from IBM Plex Sans 3.006 from [IBM/plex](https://github.com/IBM/plex) release `@ibm/plex-sans@1.3.6` (`ibm-plex-sans/fonts/complete/ttf/`), and IBM Plex Mono 2.005 from the same repository's release `@ibm/plex-mono@2.5.0` (`ibm-plex-mono/fonts/complete/ttf/`). All are licensed under the SIL Open Font License 1.1; the licence text is copied to `rust/assets/fonts/plex/IBMPlexMono-OFL.txt`, `rust/assets/fonts/plex/IBMPlexSans-OFL.txt`. SHA-256 sums for each face are in `rust/assets/fonts/README.md`.
+
+## Red Hat Text and Mono (font pair `redhat`)
+
+The faces in `rust/assets/fonts/redhat/` — `RedHatText-Regular.ttf`, `RedHatText-Bold.ttf`, `RedHatMono-Regular.ttf`, `RedHatMono-Bold.ttf`, `RedHatText-SemiBold.ttf` — were copied byte-for-byte from Red Hat Text and Red Hat Mono 1.030 from [RedHatOfficial/RedHatFont](https://github.com/RedHatOfficial/RedHatFont) at tag 5.0.0 (`fonts/Proportional/RedHatText/ttf/` and `fonts/Mono/RedHatMono/ttf/`). Text's Medium and Italic files are not bundled. All are licensed under the SIL Open Font License 1.1; the licence text is copied to `rust/assets/fonts/redhat/RedHat-OFL.txt`. SHA-256 sums for each face are in `rust/assets/fonts/README.md`.
+
+## Recursive Sans and Mono (Linear Static) (font pair `recursive`)
+
+The faces in `rust/assets/fonts/recursive/` — `RecursiveSansLnrSt-Regular.ttf`, `RecursiveSansLnrSt-Med.ttf`, `RecursiveSansLnrSt-SemiBold.ttf`, `RecursiveSansLnrSt-Bold.ttf`, `RecursiveSansLnrSt-Italic.ttf`, `RecursiveMonoLnrSt-Regular.ttf`, `RecursiveMonoLnrSt-Bold.ttf` — were copied byte-for-byte from Recursive 1.085 from [arrowtype/recursive](https://github.com/arrowtype/recursive) release v1.085 (`ArrowType-Recursive-1.085.zip`, `Recursive_Desktop/separate_statics/TTF/`), the `Lnr` (Linear) statics, whose families are named "Recursive Sans Linear Static" and "Recursive Mono Linear Static". All are licensed under the SIL Open Font License 1.1; the licence text is copied to `rust/assets/fonts/recursive/Recursive-OFL.txt`. SHA-256 sums for each face are in `rust/assets/fonts/README.md`.
+
+## Figtree and Fira Code (font pair `figtree`)
+
+The faces in `rust/assets/fonts/figtree/` — `Figtree-Regular.ttf`, `Figtree-Medium.ttf`, `Figtree-SemiBold.ttf`, `Figtree-Bold.ttf`, `Figtree-Italic.ttf`, `FiraCode-Regular.ttf`, `FiraCode-Bold.ttf` — were copied byte-for-byte from Figtree 2.001 from [erikdkennedy/figtree](https://github.com/erikdkennedy/figtree) at tag v2.0.3 (`fonts/ttf/`), and Fira Code 6.002 from [tonsky/FiraCode](https://github.com/tonsky/FiraCode) release 6.2 (`Fira_Code_v6.2.zip`, `ttf/`; its licence text is the repository's at tag 6.2, the zip carries none). All are licensed under the SIL Open Font License 1.1; the licence text is copied to `rust/assets/fonts/figtree/Figtree-OFL.txt`, `rust/assets/fonts/figtree/FiraCode-OFL.txt`. SHA-256 sums for each face are in `rust/assets/fonts/README.md`.
+
 ## JetBrainsMono Nerd Font Mono (terminal font)
 
 The terminal face in `rust/assets/fonts/` is

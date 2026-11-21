@@ -334,6 +334,35 @@ pub fn stepper<F>(
 where
     F: Fn(i32, &mut App) + Clone + 'static,
 {
+    stepper_probed(id, value, unit, theme, None, callback)
+}
+
+/// Where a part of a control was last painted: written by [`probe_canvas`].
+pub(crate) type BoundsCell = std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>;
+
+/// A child that records its parent's painted bounds into `cell`. It spans the parent and takes
+/// no part in layout, so the parent's box is what is recorded.
+pub(crate) fn probe_canvas(cell: &BoundsCell) -> impl IntoElement {
+    let cell = cell.clone();
+    gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+}
+
+/// [`stepper`], recording where its increase button is painted into `increase_probe`.
+pub(crate) fn stepper_probed<F>(
+    id: &'static str,
+    value: i32,
+    unit: &'static str,
+    theme: Theme,
+    increase_probe: Option<&BoundsCell>,
+    callback: F,
+) -> impl IntoElement
+where
+    F: Fn(i32, &mut App) + Clone + 'static,
+{
     let decrement = callback.clone();
     let increment = callback;
     div()
@@ -386,7 +415,8 @@ where
                 .text_color(theme.ely.fg_muted)
                 .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| increment(value + 1, cx))
-                .child(IconElement::new(Icon::ChevronUp, IconSize::Small)),
+                .child(IconElement::new(Icon::ChevronUp, IconSize::Small))
+                .children(increase_probe.filter(|_| cfg!(debug_assertions)).map(probe_canvas)),
         )
 }
 
