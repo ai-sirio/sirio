@@ -202,6 +202,8 @@ A reply that is not live (stored, restored, ended) never reveals.
 - So does any later send that succeeds.
 - Clear all still empties the queue.
 - Without this, the next queued item would replace `last_prompt` and Retry would resend the wrong text. This is visible change V7.
+- **The wait shows.** A held queue has one line under it: "Waiting: press Retry or send a message." (t2s, 2026-11-21). It goes when the queue is released or emptied.
+- **The held items stay editable and removable** as today: ✕ on one, Clear all.
 
 **The error row.** `TurnFailed` pushes an `Entry::Error` with a new `ErrorKind::TurnFailed`, `retryable: true`. It
 ends the turn (`streaming = false`, the trace turn failed) and leaves the client alone. The row keeps today's look:
@@ -270,6 +272,7 @@ which chooses among these:
 - `error`: `errorKind` (`turnFailed`, `connection`, `disconnected`, `authRequired`, `unavailable`, `mcpWarning`) and `retry` (`resend`, `resume`, `composer`, `relaunch`, `none`): what its Retry will do now.
 - `assistant`: `live` (bool) and `shownBytes`. That is the revealed byte count, for proving pacing. `text` stays the received text.
 - **New row kind** `limitCard`, with `resetsAt` and `phase` (`counting`, `retry`, `lifted`).
+- **The queue:** its readout gains `held` (bool) and `heldLine`, the line's text when it is shown. If the snapshot has no queue readout yet, add one with the item texts.
 - `daySeparator`: rows for the separators, with their label. The existing day headings had no row; check first.
 
 **New `surface.chat.transcript` action:** `retry { entry }`. It presses the Retry of that error row or limit card, as a
@@ -287,7 +290,7 @@ All of these are added to `served.rs`'s debug list only.
 | V4 | A failed ACP prompt leaves the agent running; Retry resends in the same conversation. |
 | V5 | Retry after a lost connection: Claude resumes the conversation and resends. ACP restarts and puts the message back in the composer with a note. |
 | V6 | Claude usage limit reached: a card with a countdown, then "Try again" or "Usage limit lifted". |
-| V7 | After a failed turn, queued messages wait. A successful Retry or send releases them. Today a failed Claude turn still sends the next queued message. |
+| V7 | After a failed turn, queued messages wait, with the line "Waiting: press Retry or send a message." under the queue. A successful Retry or send releases them. Today a failed Claude turn still sends the next queued message. |
 | — | Not changed, by my call: the error row's look (Sirio's row with Retry, not Ely's `ErrorMessage`); the thought header. |
 
 ## 7. Testing
@@ -324,6 +327,11 @@ Scenarios, each proved through the socket readouts of §5.7 and a capture:
    - an `is_error` result gives an error row with `errorKind: turnFailed, retry: resend`;
    - `retry` resends the same text, which the stub records, on the same process (same pid);
    - the second answer arrives.
+   - **Queue variant:**
+     - two messages are queued while the failing turn runs;
+     - after the failure, nothing more is sent, the queue reads `held: true`, and `heldLine` is "Waiting: press Retry or send a message.";
+     - one queued item is removed with ✕ and the readout shows it gone;
+     - `retry` resends the failed text, and after its `TurnEnded` the remaining item is sent and `held` is false.
 4. **`acp_prompt_failed`:** the same, over ACP. The process stays alive and the same session gets the prompt.
 5. **`claude_lost_resume`:**
    - the stub exits mid-turn, and the error row says `retry: resume`;
