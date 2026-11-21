@@ -413,35 +413,47 @@ pub(super) fn pictures(nodes: Vec<Node>, policy: &mut Policy<'_>) -> Vec<Node> {
     })
 }
 
-/// Whether `text` starts with a verbatim disk prefix, `\\?\C:` (or `//?/C:`, any mix of
-/// separators) and then a separator or its end: a place on this machine, and how a worktree
-/// path read back from git can be spelled on Windows. Written on the text, so it runs on any
-/// platform; `std::path::Prefix` parses only on Windows.
-fn starts_with_verbatim_disk(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let separator = |at: usize| matches!(bytes.get(at), Some(b'/' | b'\\'));
-    separator(0)
-        && separator(1)
-        && bytes.get(2) == Some(&b'?')
-        && separator(3)
-        && bytes.get(4).is_some_and(u8::is_ascii_alphabetic)
-        && bytes.get(5) == Some(&b':')
-        && (bytes.len() == 6 || separator(6))
-}
-
 /// Whether a picture address, as written or once decoded, names a network share or a
 /// device (see [`file_links::is_network_or_device_path`]), or is rooted with one backslash
 /// (a drive-relative path on Windows, no folder's file anywhere). Opening one would
-/// connect out (NTLM on Windows) or hang. A verbatim disk path (`\\?\C:\..`) is none of
-/// these: the Preview's folder may be spelled so. The chat and the change requests keep
-/// the shared predicate, which refuses it, and never resolve a picture against a folder.
+/// connect out (NTLM on Windows) or hang. No verbatim spelling is exempt here: an address
+/// written in a document is judged strictly. Only the Preview's own folder may be one (see
+/// [`verbatim_disk_prefix`]).
 pub(super) fn names_a_network_path(address: &str) -> bool {
     let rooted = |text: &str| {
-        !starts_with_verbatim_disk(text)
-            && (text.starts_with('\\')
-                || file_links::is_network_or_device_path(std::path::Path::new(text)))
+        text.starts_with('\\') || file_links::is_network_or_device_path(std::path::Path::new(text))
     };
     rooted(address) || rooted(&crate::markdown_preview::percent_decode(address))
+}
+
+/// The `\\?\C:` that starts `folder`, when it is spelled as Windows canonicalises a disk path:
+/// backslashes only, one ASCII drive letter, then a backslash or the end. A worktree path read
+/// back from git can be spelled so, and it is the Preview's own folder, not text from a
+/// document. Written on the text, so it runs on any platform.
+fn verbatim_disk_prefix(folder: &str) -> Option<&str> {
+    let bytes = folder.as_bytes();
+    let spelled = bytes.starts_with(br"\\?\")
+        && bytes.get(4).is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(5) == Some(&b':')
+        && matches!(bytes.get(6), None | Some(b'\\'));
+    spelled.then(|| &folder[..6])
+}
+
+/// `url`, a relative address, under a verbatim `folder` (`prefix` and the rest). Windows folds no
+/// `..` in a verbatim path, so it is folded here, and never above the drive's root.
+fn fold_under_verbatim(prefix: &str, rest: &str, url: &str) -> String {
+    let relative = crate::markdown_preview::percent_decode(url.split(['#', '?']).next().unwrap_or(url));
+    let mut parts: Vec<&str> = rest.split(['\\', '/']).filter(|part| !part.is_empty()).collect();
+    for part in relative.split(['\\', '/']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("{prefix}\\{}", parts.join("\\"))
 }
 
 /// Where the Preview loads `url` from, or none: an absolute path, a `data:` or `http(s)`
@@ -469,7 +481,16 @@ fn preview_address(url: &str, base: Option<&std::path::Path>) -> Option<String> 
             {
                 None
             }
-            _ => base.map(|base| crate::markdown_preview::resolve_image(url, base)),
+            _ => {
+                // `url` passed the strict check above, as written and decoded.
+                let base = base?;
+                let folder = base.to_string_lossy();
+                return match verbatim_disk_prefix(&folder) {
+                    Some(prefix) => Some(fold_under_verbatim(prefix, &folder[prefix.len()..], url)),
+                    None => Some(crate::markdown_preview::resolve_image(url, base))
+                        .filter(|path| !names_a_network_path(path)),
+                };
+            }
         }
     };
     found.filter(|path| !names_a_network_path(path))

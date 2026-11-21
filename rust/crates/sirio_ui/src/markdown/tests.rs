@@ -518,9 +518,10 @@ fn preview_never_names_a_network_path() {
     }
 }
 
-/// What the Preview loads for `![a](docs/logo.png)` in a file of `base`.
-fn picture_under(base: &str) -> Option<String> {
-    let built = build("![a](docs/logo.png)\n", &mut preview_in(Path::new(base)));
+/// What the Preview loads for `![a](url)` in a file of `base`.
+fn picture_under(base: &str, url: &str) -> Option<String> {
+    // A tag, so no Markdown escape reads the backslashes.
+    let built = build(&format!("<img src=\"{url}\" alt=\"a\">\n"), &mut preview_in(Path::new(base)));
     match images(&built.nodes).as_slice() {
         [] => None,
         [Node::Image { url, .. }] => Some(url.clone()),
@@ -528,18 +529,13 @@ fn picture_under(base: &str) -> Option<String> {
     }
 }
 
-// A worktree path read back from git can be spelled `\\?\C:\..` on Windows. The logic is
-// string-based, so it runs here.
+// Windows spells a canonical path `\\?\C:\..`, and a worktree path read back from git can be
+// one. Only that exact spelling, on the Preview's own folder, is exempt from the network-path
+// check; the logic is string-based, so it runs here.
 #[test]
 fn preview_resolves_pictures_under_a_verbatim_disk_folder() {
-    for base in [
-        r"\\?\C:\repo\docs",
-        r"\\?\c:\repo\docs",
-        "//?/C:/repo/docs",
-        r"\\?\C:",
-        r"\\?\C:\",
-    ] {
-        let url = picture_under(base).unwrap_or_else(|| panic!("{base}: no picture"));
+    for base in [r"\\?\C:\repo\docs", r"\\?\c:\repo\docs", r"\\?\C:", r"\\?\C:\"] {
+        let url = picture_under(base, "docs/logo.png").unwrap_or_else(|| panic!("{base}: no picture"));
         assert!(url.starts_with(base) && url.ends_with("logo.png"), "{base}: {url}");
     }
 }
@@ -547,6 +543,9 @@ fn preview_resolves_pictures_under_a_verbatim_disk_folder() {
 #[test]
 fn preview_refuses_pictures_under_any_other_rooted_folder() {
     for base in [
+        "//?/C:/repo/docs",
+        r"\\?/C:\repo",
+        r"\/?\C:\repo",
         r"\\host\share\repo",
         "//host/share/repo",
         r"\\?\UNC\host\share\repo",
@@ -558,31 +557,40 @@ fn preview_refuses_pictures_under_any_other_rooted_folder() {
         r"\\?\1:\repo",
         r"\repo",
     ] {
-        assert_eq!(picture_under(base), None, "{base}");
+        assert_eq!(picture_under(base, "docs/logo.png"), None, "{base}");
     }
 }
 
-/// The address itself, on every platform: `Path::is_absolute` reads these only on Windows.
 #[test]
-fn a_verbatim_disk_address_is_no_network_path_and_no_other_rooted_one_is_a_disk() {
-    for local in [
+fn a_relative_picture_under_a_verbatim_folder_keeps_the_strict_check_and_stays_on_the_disk() {
+    let base = r"\\?\C:\repo\docs";
+    // The relative part is judged as written, and as decoded.
+    for url in [r"\\host\s\x.png", "//host/s/x.png", "%5C%5Chost%5Cs%5Cx.png", r"\\?\UNC\h\s\x.png"] {
+        assert_eq!(picture_under(base, url), None, "{url}");
+    }
+    // Windows folds no `..` in a verbatim path, so it is folded before the join, and never
+    // above the drive root.
+    let at = |url: &str| picture_under(base, url);
+    assert_eq!(at("../logo.png").as_deref(), Some(r"\\?\C:\repo\logo.png"));
+    assert_eq!(at("./a/../b/logo.png").as_deref(), Some(r"\\?\C:\repo\docs\b\logo.png"));
+    assert_eq!(at("../../../../logo.png").as_deref(), Some(r"\\?\C:\logo.png"));
+    assert_eq!(at("%2E%2E/logo.png").as_deref(), Some(r"\\?\C:\repo\logo.png"));
+}
+
+/// An address written in a document is judged strictly: no verbatim spelling is a disk there.
+#[test]
+fn a_written_verbatim_address_is_refused_in_every_spelling() {
+    for written in [
         r"\\?\C:\p\x.png",
         "//?/C:/p/x.png",
         r"\/?/c:/p",
         r"\\?\C:",
         "%5C%5C%3F%5CC%3A%5Cp%5Cx.png",
-    ] {
-        assert!(!rewrite::names_a_network_path(local), "{local}");
-    }
-    for refused in [
         r"\\host\s\x.png",
         "//host/s/x.png",
         r"\\?\UNC\host\s\x.png",
-        "//?/UNC/host/s/x.png",
         r"\\.\pipe\x",
         r"\\?\Volume{0}\x",
-        r"\\?\C:x",
-        r"\\?\CC:\x",
         r"\x.png",
         "%5C%5C%3F%5CUNC%5Chost%5Cs%5Cx.png",
     ] {
