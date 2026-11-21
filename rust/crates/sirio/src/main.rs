@@ -25734,7 +25734,8 @@ impl SirioWorkspace {
         surface_id: &str,
         snapshot: ChatControlSnapshot,
     ) -> Vec<(String, String)> {
-        vec![
+        #[allow(unused_mut)]
+        let mut fields = vec![
             ("surfaceId".to_string(), surface_id.to_string()),
             ("status".to_string(), snapshot.status),
             ("composerText".to_string(), snapshot.composer_text),
@@ -25756,9 +25757,6 @@ impl SirioWorkspace {
                 "transcript".to_string(),
                 sirio_control::protocol::rows::encode(&snapshot.transcript),
             ),
-            // The whole transcript as the selection's offset space reads it, which Select All
-            // plus Copy must put on the clipboard.
-            ("transcriptText".to_string(), snapshot.transcript_text.clone()),
             // Every link the last paint drew, with the window pixel to click it at.
             (
                 "transcriptLinks".to_string(),
@@ -25808,7 +25806,12 @@ impl SirioWorkspace {
                 "taskOutputRetired".to_string(),
                 snapshot.task_output_retired.to_string(),
             ),
-        ]
+        ];
+        // The whole transcript as the selection's offset space reads it, which Select All plus
+        // Copy must put on the clipboard. Debug builds only: it copies the transcript.
+        #[cfg(debug_assertions)]
+        fields.push(("transcriptText".to_string(), snapshot.transcript_text));
+        fields
     }
 
     fn control_chat_read(

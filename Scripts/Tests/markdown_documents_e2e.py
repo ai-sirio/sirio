@@ -521,9 +521,17 @@ def preview():
     need("^C" not in screen(), "terminal-ctrl-c", "the terminal already shows ^C before the keypress")
     sentinel = Owner("sentinel before the terminal")
     try:
+        row = next(t for t in drawn_texts(settled()) if t["text"].startswith("A footnote reference"))
+        selected = shoot(window, "terminal-selection-before-click")
         press(window, 500, 400)
         time.sleep(0.5)
-        shoot(window, "terminal-before-ctrl-c")
+        clicked = shoot(window, "terminal-selection-after-click")
+        # The click that gives the terminal the keys left the Markdown selection alone: the selected
+        # row (highlighted when selected) is the same pixels before and after the click.
+        area = f"{int(row['w'])}x{int(row['h'])}+{int(row['x'])}+{int(row['y'])}"
+        crops = [subprocess.run(["magick", str(frame), "-crop", area, "+repage", "-depth", "8", "rgb:-"],
+                                capture_output=True, check=True).stdout for frame in (selected, clicked)]
+        need(crops[0] == crops[1], "terminal-ctrl-c", f"the click into the terminal changed the selected row ({area}): the Markdown selection did not survive it")
         key("ctrl+c")
         shown = until("the PTY to echo ^C", lambda: "^C" in screen() and screen(), timeout=8)
         after = clipboard_get()
@@ -532,7 +540,7 @@ def preview():
     need(after == "sentinel before the terminal", "terminal-ctrl-c", f"Ctrl+C in the terminal changed the clipboard to {after!r}")
     shoot(window, "terminal-after-ctrl-c")
     (OUT / "terminal-screen.txt").write_text(shown)
-    record("terminal-ctrl-c", "Ctrl+C in the terminal pane after the Markdown selection echoed ^C at the PTY and left the clipboard alone")
+    record("terminal-ctrl-c", "Ctrl+C in the terminal pane after the Markdown selection echoed ^C at the PTY and left the clipboard alone; the Markdown selection was still drawn after the click that focused the terminal")
 
 
 # What the two drags must put on the clipboard. The paragraph holding emoji and inline math is a
@@ -557,13 +565,13 @@ MENU_COPY = (35, 21)
 
 
 def long_reply(showcase, parts):
-    """The showcase `parts` times, each part headed and marked so that a block the copy drops is
-    named by the source alone: 'Marker N' opens a part and 'End N' closes it, each with a link, and the
-    chat reports only the links of blocks it drew, which are those near the window."""
-    blocks = []
-    for n in range(1, parts + 1):
-        blocks.append(f"# Part {n}\n\nMarker {n}: [link-{n}](https://example.com/marker-{n})\n\n" + showcase + f"\n\nEnd {n}: [end-link-{n}](https://example.com/end-{n})\n")
-    return "\n\n".join(blocks) + "\n"
+    """`parts` identical copies of the showcase, each opened by a marker line with a link
+    ('Marker N: link-N') and the last closed by 'End: end-link'. The copies are the same bytes, so what
+    a copy holds between two markers must be the same for every pair, whatever the chat drew to make
+    the copy; the chat reports only the links of blocks it drew, which are those near the window."""
+    blocks = [f"Marker {n}: [link-{n}](https://example.com/marker-{n})\n\n" + showcase + "\n\n"
+              for n in range(1, parts + 1)]
+    return "".join(blocks) + "End: [end-link](https://example.com/end)\n"
 
 
 def band_ink(frame, left, right, top, bottom):
@@ -616,66 +624,90 @@ def chat():
             chatui.scroll_pane(run, pid, 600, "5")
             time.sleep(1.5)
 
+        width, height = (int(v) for v in E["WINDOW_SIZE"].split("x"))
+
+        def select_all_copy(tag):
+            """A right press on plain text, away from every link; the menu's Select All, then its Copy.
+            The menu's rows, from the press that opened it: Copy 40 px right and 18 below, Select All
+            46 below. Returns the clipboard text."""
+            _, links = read()
+            point = None
+            for fx in (0.33, 0.4, 0.28, 0.45):
+                for fy in (0.35, 0.5, 0.25, 0.6):
+                    px, py = int(width * fx), int(height * fy)
+                    if all(not (float(l["x"]) - 30 <= px <= float(l["x"]) + float(l["w"]) + 30 and abs(float(l["y"]) - py) < 30) for l in links):
+                        point = (px, py)
+                        break
+                if point:
+                    break
+            need(point, "chat-select-all", "no plain-text point in the transcript to press on")
+            sentinel = Owner(f"sentinel before the {tag} copy")
+            try:
+                press(window, *point, button="3", hold=0.1)
+                time.sleep(0.8)
+                press(window, point[0] + 40, point[1] + 46)  # Select All
+                time.sleep(1.0)
+                shoot_chat(run, pid, f"chat-select-all-{tag}")
+                need(clipboard_get() == f"sentinel before the {tag} copy", "chat-select-all", "Select All alone changed the clipboard")
+                press(window, *point, button="3", hold=0.1)
+                time.sleep(0.8)
+                press(window, point[0] + 40, point[1] + 18)  # Copy
+                return until("the menu's Copy to reach the clipboard",
+                             lambda: (lambda c: c if c != f"sentinel before the {tag} copy" else None)(clipboard_get()), timeout=10)
+            finally:
+                sentinel.release()
+
+        def first_difference(a, b):
+            return next((i for i, (x_, y_) in enumerate(zip(a, b)) if x_ != y_), min(len(a), len(b)))
+
+        # Run 1: following the tail, so the early blocks are culled.
         tail()
         at_tail = labels()
         log(f"links drawn at the tail: {sorted(at_tail)}")
-        need("end-link-9" in at_tail, "chat-select-all", f"the tail's own end-link-9 is not drawn: {sorted(at_tail)}")
-        need(not ({"link-1", "end-link-1"} & at_tail), "chat-select-all", f"an early block's link is drawn at the tail: {sorted(at_tail)}")
+        need("end-link" in at_tail, "chat-select-all", f"the tail's own end-link is not drawn: {sorted(at_tail)}")
+        need("link-1" not in at_tail, "chat-select-all", f"an early block's link is drawn at the tail: {sorted(at_tail)}")
         shoot_chat(run, pid, "chat-long-tail")
+        copied_tail = select_all_copy("tail")
+        (OUT / "clipboard-chat-tail.txt").write_text(copied_tail)
 
-        # A right press on plain text, away from every link: the menu is Copy and Select All.
-        result, links = read()
-        width, height = (int(v) for v in E["WINDOW_SIZE"].split("x"))
-        point = None
-        for fx in (0.33, 0.4, 0.28, 0.45):
-            for fy in (0.35, 0.5, 0.25, 0.6):
-                px, py = int(width * fx), int(height * fy)
-                if all(not (float(l["x"]) - 30 <= px <= float(l["x"]) + float(l["w"]) + 30 and abs(float(l["y"]) - py) < 30) for l in links):
-                    point = (px, py)
-                    break
-            if point:
-                break
-        need(point, "chat-select-all", "no plain-text point in the transcript to press on")
-        # The menu's rows, from the press that opened it: Copy 40 px right and 18 below, Select All 46 below.
-        sentinel = Owner("sentinel before the chat copy")
-        try:
-            press(window, *point, button="3", hold=0.1)
-            time.sleep(0.8)
-            press(window, point[0] + 40, point[1] + 46)  # Select All
-            time.sleep(1.0)
-            shoot_chat(run, pid, "chat-select-all-selected")
-            need(clipboard_get() == "sentinel before the chat copy", "chat-select-all", "Select All alone changed the clipboard")
-            press(window, *point, button="3", hold=0.1)
-            time.sleep(0.8)
-            press(window, point[0] + 40, point[1] + 18)  # Copy
-            copied = until("the menu's Copy to reach the clipboard",
-                           lambda: (lambda c: c if c != "sentinel before the chat copy" else None)(clipboard_get()), timeout=10)
-        finally:
-            sentinel.release()
-        result, _ = read()
-        expected = result["transcriptText"]
-        (OUT / "clipboard-chat.txt").write_text(copied)
-        (OUT / "expected-chat-transcript.txt").write_text(expected)
-        need(len(expected) > 20000, "chat-select-all", f"the transcript text is only {len(expected)} characters")
-        need(copied == expected, "chat-select-all",
-             f"the clipboard ({len(copied)} characters) is not the transcript text ({len(expected)}): "
-             f"first difference at {next((i for i, (a, b) in enumerate(zip(copied, expected)) if a != b), min(len(copied), len(expected)))}")
-        # The source alone says nothing was dropped: every part's opening and closing line, in order.
-        at = 0
-        for n in range(1, 10):
-            for line in (f"Marker {n}: link-{n}", f"End {n}: end-link-{n}"):
-                found = copied.find(line, at)
-                need(found >= 0, "chat-select-all", f"the copy lacks {line!r} (after offset {at})")
-                at = found
-        record("chat-select-all", f"Select All then Copy from the tail of a {len(reply.encode()) // 1024} KiB reply put all "
-                                  f"{len(copied)} characters of the transcript on the clipboard (links drawn at the tail: {sorted(at_tail)})")
-
-        # A jump to the top of the reply draws its first blocks, and nothing visible is blank.
+        # Run 2: after a jump to the top, so the late blocks are culled instead.
         wheel(window, 528, 350, "4", 2500)
         time.sleep(1.5)
         at_top = labels()
-        need("link-1" in at_top and "end-link-9" not in at_top, "chat-jump",
-             f"after a jump to the top the links drawn are {sorted(at_top)}: want link-1 and not end-link-9")
+        need("link-1" in at_top and "end-link" not in at_top, "chat-jump",
+             f"after a jump to the top the links drawn are {sorted(at_top)}: want link-1 and not end-link")
+        copied_top = select_all_copy("top")
+        (OUT / "clipboard-chat-top.txt").write_text(copied_top)
+
+        # The copies against each other, against the app's own text, and against the source.
+        result, _ = read()
+        expected = result["transcriptText"]
+        (OUT / "expected-chat-transcript.txt").write_text(expected)
+        need(len(copied_tail) > 20000, "chat-select-all", f"the copy is only {len(copied_tail)} characters")
+        need(copied_tail == copied_top, "chat-select-all",
+             f"the copy made at the tail ({len(copied_tail)} characters) differs from the one made at the top ({len(copied_top)}), "
+             f"first at {first_difference(copied_tail, copied_top)}: what the copy holds depends on what was drawn")
+        need(copied_tail == expected, "chat-select-all",
+             f"the clipboard ({len(copied_tail)} characters) is not the transcript text ({len(expected)}), first at {first_difference(copied_tail, expected)}")
+        # Every segment between two markers is the same bytes: the source repeated one document.
+        lines = [f"Marker {n}: link-{n}" for n in range(1, 10)] + ["End: end-link"]
+        starts = []
+        at = 0
+        for line in lines:
+            found = copied_tail.find(line, at)
+            need(found >= 0, "chat-select-all", f"the copy lacks {line!r} (after offset {at})")
+            starts.append(found)
+            at = found + len(line)
+        segments = [copied_tail[starts[i] + len(lines[i]):starts[i + 1]] for i in range(9)]
+        for n, segment in enumerate(segments, 1):
+            need(segment == segments[0], "chat-select-all",
+                 f"the copy between 'Marker {n}' and the next marker ({len(segment)} characters) is not the first one's ({len(segments[0])}); "
+                 f"first difference at {first_difference(segment, segments[0])}")
+        need(len(segments[0]) > 2000, "chat-select-all", f"a segment holds only {len(segments[0])} characters")
+        record("chat-select-all", f"Select All then Copy of a {len(reply.encode()) // 1024} KiB reply made at the tail and again at the top "
+                                  f"are byte-equal ({len(copied_tail)} characters), equal to the transcript text, and hold nine identical "
+                                  f"{len(segments[0])}-character segments between the markers (tail drew {sorted(at_tail)}, top drew {sorted(at_top)})")
+
         frames = [shoot_chat(run, pid, "chat-long-top")]
         wheel(window, 528, 350, "5", 30)
         time.sleep(1.5)
@@ -686,8 +718,11 @@ def chat():
         for frame in frames:
             ink = band_ink(frame, 330, 1340, 80, 840)
             log(f"colours per 100 px band of {frame.name}: {ink}")
-            need(min(ink) >= 100, "chat-jump", f"{frame.name} has a blank band: colours per band {ink}")
-        record("chat-jump", f"after a jump to the top link-1 is drawn and end-link-9 is not; three captures have no blank band")
+            # A band over flat code background or the page's end may hold few colours; a view the culling
+            # left blank has most of its bands near-empty.
+            low = [i for i, colours in enumerate(ink) if colours < 100]
+            need(len(low) <= 1, "chat-jump", f"{frame.name} has blank bands {low}: colours per band {ink}")
+        record("chat-jump", "after a jump to the top link-1 is drawn and end-link is not; three captures are not blank")
         scenario.finish()
     except BaseException as error:
         failed = error

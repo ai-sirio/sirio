@@ -1977,7 +1977,7 @@ impl FileView {
                 })
                 .collect(),
             outline: self.scroll.outline.get().map(rect),
-            outline_toggle: OUTLINE_TOGGLE.with(|cell| cell.get()).map(rect),
+            outline_toggle: toggle_bounds().map(rect),
             diagrams: (ready, failed, pending),
             diagram_paths: paths,
         })
@@ -2894,7 +2894,7 @@ fn render_outline_toggle(
             "Outline (no headings)"
         }))
         .child(IconElement::new(Icon::TextSnippet, IconSize::Small))
-        .child(OUTLINE_TOGGLE.with(|cell| record_bounds(cell.clone())))
+        .child(toggle_marker())
 }
 
 fn render_format_button(
@@ -2963,14 +2963,35 @@ fn debug_sections(sections: &Entity<Sections>) -> Option<Entity<Sections>> {
     Some(sections.clone())
 }
 
+// The debug readout's bounds recorders exist in debug builds only: a release build draws no
+// canvas for them.
+#[cfg(debug_assertions)]
 thread_local! {
     /// Where the outline toggle was laid out last frame, for the debug readout only. The
     /// toggle belongs to the file view drawn last, which is the one a driver means.
     static OUTLINE_TOGGLE: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>> = Rc::default();
 }
 
+#[cfg(debug_assertions)]
+fn toggle_marker() -> AnyElement {
+    OUTLINE_TOGGLE.with(|cell| record_bounds(cell.clone()))
+}
+
+#[cfg(not(debug_assertions))]
+fn toggle_marker() -> AnyElement {
+    gpui::Empty.into_any_element()
+}
+
+fn toggle_bounds() -> Option<gpui::Bounds<Pixels>> {
+    #[cfg(debug_assertions)]
+    return OUTLINE_TOGGLE.with(|cell| cell.get());
+    #[cfg(not(debug_assertions))]
+    None
+}
+
 /// A canvas over its parent that writes the parent's bounds to `into` on every frame: the
 /// debug readout's way to learn where something Ely draws sits.
+#[cfg(debug_assertions)]
 fn record_bounds(into: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>) -> AnyElement {
     canvas(move |bounds, _, _| into.set(Some(bounds)), |_, _, _, _| {})
         .absolute()
@@ -2980,6 +3001,10 @@ fn record_bounds(into: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>) -> Any
         .into_any_element()
 }
 
+#[cfg(not(debug_assertions))]
+fn record_bounds(_: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>) -> AnyElement {
+    gpui::Empty.into_any_element()
+}
 /// `offers_preview` is `FileView::offers_preview`: a large Markdown file in Code
 /// offers its preview only when the file has one to offer.
 fn render_content(
@@ -2993,6 +3018,12 @@ fn render_content(
     scroll: &SurfaceScroll,
     preview: Option<PreviewFrame>,
 ) -> AnyElement {
+    // The debug readout's recorded boxes belong to a Preview that is drawn: leaving it clears them.
+    #[cfg(debug_assertions)]
+    if preview.is_none() {
+        scroll.outline.set(None);
+        OUTLINE_TOGGLE.with(|cell| cell.set(None));
+    }
     // Preview renders the parsed document; a locked preview (large file,
     // F-EDIT-03) or Code mode renders the source. The two modes are
     // behaviour — each shows the *right* content — while the rendering
@@ -3038,6 +3069,10 @@ fn render_content(
             press_entity.update(cx, |view, cx| view.preview_pressed(press, links, window, cx));
         }));
         *scroll.layouts.borrow_mut() = Some(body.layouts());
+        #[cfg(debug_assertions)]
+        if !(outline_open && !blocks.headings.is_empty()) {
+            scroll.outline.set(None);
+        }
         // The outline lists what the page has: with no headings there is nothing to list (the
         // table of contents refuses an empty list), whatever was asked.
         let outline = (outline_open && !blocks.headings.is_empty()).then(|| {
