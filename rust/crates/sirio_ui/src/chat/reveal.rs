@@ -273,7 +273,7 @@ impl Chat {
     /// reader did not panic on its text (its document is then plain text, drawn as it is, with no
     /// caret and no pacing, and no frame asks the reader about it again) and its tail has not gone
     /// past the budget or panicked the reader.
-    fn revealing(&self, entry: usize) -> bool {
+    pub(super) fn revealing(&self, entry: usize) -> bool {
         matches!(
             self.entries.get(entry),
             Some(Entry::Assistant {
@@ -339,15 +339,13 @@ impl Chat {
         // document: it stops revealing, as a reply over the budget does.
         let whole = stream.is_whole();
         if whole && !is_plain_paragraph(document, text) {
-            reveal.plain = true;
-            reveal.drawn = None;
+            self.stop_revealing(entry);
             return None;
         }
         let segments: &[Segment] = if whole { &[] } else { stream.segments() };
         let from = tail_from(segments, end);
         if end - from > TAIL_BUDGET {
-            reveal.plain = true;
-            reveal.drawn = None;
+            self.stop_revealing(entry);
             return None;
         }
         let key = (end, from, segments.len(), text.len());
@@ -363,12 +361,33 @@ impl Chat {
             }),
         };
         if blocks.reader_panicked {
-            reveal.plain = true;
-            reveal.drawn = None;
+            self.stop_revealing(entry);
             return None;
         }
         reveal.drawn = Some((key, blocks.clone()));
         Some(blocks)
+    }
+
+    /// Ends the reveal of the reply at `entry` for the rest of its turn: it is drawn from `document`
+    /// from now on. A drag with an end in it goes, as when the reply ends.
+    fn stop_revealing(&mut self, entry: usize) {
+        if let Some(reveal) = self.reveal.as_mut() {
+            reveal.plain = true;
+            reveal.drawn = None;
+        }
+        self.drop_selection_in(entry);
+    }
+
+    /// Drops a selection with an end placed in the reply at `entry`, when the reply stops being
+    /// drawn by the reveal (it ends, or it stops revealing in mid-turn): the end is a place in the
+    /// text drawn for the reply, which the document it is drawn from now does not measure, and a
+    /// selection that silently changed what it covers would be worse than none.
+    pub(super) fn drop_selection_in(&mut self, entry: usize) {
+        if self.transcript_selection.as_ref().is_some_and(|selection| {
+            selection.anchor_entry == Some(entry) || selection.head_entry == Some(entry)
+        }) {
+            self.transcript_selection = None;
+        }
     }
 
     /// What the row of the reply at `entry` draws on this frame: the reveal moves on to now, and
@@ -1273,6 +1292,75 @@ mod tests {
             assert_eq!(highlighted(&chat, cx), Vec::<std::ops::Range<usize>>::new(), "{how}: the reply is not lit");
             assert!(chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()), "{how}");
         }
+    }
+
+    /// A reply that stops revealing in mid-turn is drawn from `document` from the next frame on, and
+    /// the offsets of a drag made in it were places in the text drawn for it: the drag goes, as when
+    /// the reply ends. Four ways: the tail goes past the budget, the stream goes whole without a
+    /// refusal, the reader panics on the tail, the reader panics on the document.
+    #[gpui::test]
+    async fn a_drag_in_a_live_reply_goes_when_the_reply_stops_revealing(cx: &mut TestAppContext) {
+        let ways = ["over the budget", "gone whole", "the tail panics", "the document panics"];
+        // Each way: whether the reply stopped revealing, what Ctrl+C writes then, whether a
+        // selection is left. Gathered, so that one way's failure does not hide another's.
+        let mut found = Vec::new();
+        for how in ways {
+            let (chat, cx) = chat_with(cx, &[]);
+            let row = a_live_line_longer_than_its_document(&chat, cx);
+            drag(cx, gpui::point(row.left() + px(1.0), row.center().y), gpui::point(row.right() - px(10.0), row.center().y));
+            assert_eq!(copy_keys(cx).as_deref(), Some("See [a][1] and [b][2]."), "{how}: the drag copies the line");
+
+            let mut fault = None;
+            match how {
+                "over the budget" => {
+                    // Lines with no blank one between them never freeze: the tail grows past 7 KiB.
+                    let mut more = String::from("\n");
+                    let mut line = 0;
+                    while more.len() < 8 * 1024 {
+                        line += 1;
+                        more.push_str(&format!("Line {line} of a compact reply, with `code` and **emphasis**.\n"));
+                    }
+                    chat.update(cx, |chat, cx| chat.handle_event(chunk(&more), cx));
+                    for _ in 0..40 {
+                        tick(cx, Duration::from_millis(100));
+                        if chat.update(cx, |chat, _| chat.drawn_reply(0)).is_none() {
+                            break;
+                        }
+                    }
+                }
+                "gone whole" => {
+                    // No reply of ours goes whole without a refusal: as in
+                    // `a_reply_gone_whole_without_a_refusal_draws_its_formatted_document`, a deep
+                    // quote turns the stream whole and the document is swapped for a formatted one.
+                    let deep = format!("\n{} too deep\n", ">".repeat(40));
+                    chat.update(cx, |chat, cx| {
+                        chat.handle_event(chunk(&deep), cx);
+                        let Some(Entry::Assistant { document, stream: Some(stream), .. }) = chat.entries.first_mut() else {
+                            panic!("{how}: a live reply");
+                        };
+                        assert!(stream.is_whole(), "{how}: the deep quote turned the stream whole");
+                        *document = super::super::parse_chat_markdown("# A heading\n\nWith **bold** words.");
+                    });
+                    tick(cx, Duration::from_millis(30));
+                }
+                "the tail panics" => {
+                    fault = Some(crate::markdown::reader_fault::on());
+                    tick(cx, Duration::from_millis(30));
+                }
+                _ => {
+                    fault = Some(crate::markdown::reader_fault::on());
+                    chat.update(cx, |chat, cx| chat.handle_event(chunk(" And more."), cx));
+                    tick(cx, Duration::from_millis(30));
+                }
+            }
+            let stopped = chat.update(cx, |chat, _| chat.drawn_reply(0)).is_none();
+            let copied = copy_keys(cx);
+            let selected = chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_some());
+            found.push((how, stopped, copied, selected));
+            drop(fault);
+        }
+        let expected: Vec<_> = ways.iter().map(|how| (*how, true, None, false)).collect();
+        assert_eq!(found, expected, "(way, stopped revealing, Ctrl+C wrote, a selection left)");
     }
 
     /// A drag pressed in the live reply and let go in a notice below it, whose offsets (in the

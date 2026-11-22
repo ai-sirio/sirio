@@ -2757,16 +2757,9 @@ impl Chat {
         if finished.is_empty() {
             return;
         }
-        // A drag with an end in a reply that ends here goes with it: the end is a place in the text
-        // drawn for the reply, which the document it is drawn from now does not measure.
-        if let Some(selection) = &self.transcript_selection
-            && [selection.anchor_entry, selection.head_entry]
-                .iter()
-                .any(|entry| entry.is_some_and(|entry| finished.contains(&entry)))
-        {
-            self.transcript_selection = None;
-        }
         for index in finished {
+            // A drag with an end in a reply that ends here goes with it (`reveal.rs`).
+            self.drop_selection_in(index);
             self.remeasure_entry(index);
         }
         self.clamp_transcript_selection();
@@ -3496,6 +3489,8 @@ impl Chat {
         match event {
             sirio_chat::ChatEvent::AgentMessageChunk(text) => {
                 let streamed = self.streamed_entry();
+                // A chunk whose document the reader panics on stops the reply's reveal.
+                let was_revealing = streamed.is_some_and(|index| self.revealing(index));
                 if let Some(index) = streamed
                     && let Some(Entry::Assistant {
                         text: existing,
@@ -3527,6 +3522,9 @@ impl Chat {
                         }
                     };
                     self.remeasure_entry(index);
+                    if was_revealing && !self.revealing(index) {
+                        self.drop_selection_in(index);
+                    }
                     self.clamp_transcript_selection();
                 } else {
                     // A new response ends the replies this turn already streamed (a tool call
