@@ -70,6 +70,52 @@ fn an_image_splits_its_paragraph_and_references_resolve() {
 }
 
 #[test]
+fn a_reference_goes_to_the_definition_pulldown_chose() {
+    use pulldown_cmark::{Event, Parser, Tag};
+    // pulldown-cmark matches labels by Unicode case folding and takes the first definition that
+    // matches. `identifier` folds more (`ı` is `i`, `ﬃ` is `FFI`), so reading the address back by it
+    // found an earlier definition pulldown-cmark does not count as the same label.
+    let addresses = |source: &str| -> Vec<String> {
+        parse(source)
+            .iter()
+            .flat_map(|node| match node {
+                Node::Paragraph(text) => text.links.iter().map(|(_, url)| url.clone()).collect(),
+                Node::Image { url, .. } => vec![url.clone()],
+                other => panic!("not read here: {other:?}"),
+            })
+            .collect()
+    };
+    for (source, chose) in [
+        ("[ı]\n\n[i]: https://a.example\n[ı]: https://b.example\n", "https://b.example"),
+        ("[x][ı]\n\n[i]: https://a.example\n[ı]: https://b.example\n", "https://b.example"),
+        ("[ı][]\n\n[i]: https://a.example\n[ı]: https://b.example\n", "https://b.example"),
+        ("![ı]\n\n[i]: a.png\n[ı]: b.png\n", "b.png"),
+        ("[FFI]\n\n[ﬃ]: https://a.example\n[FFI]: https://b.example\n", "https://b.example"),
+        ("[ﬃ]\n\n[FFI]: https://a.example\n[ﬃ]: https://b.example\n", "https://b.example"),
+        // Labels pulldown-cmark folds together too: the first definition is the one, as before.
+        ("[a]\n\n[A]: https://a.example\n[a]: https://b.example\n", "https://a.example"),
+        ("[ß]\n\n[SS]: https://a.example\n[ß]: https://b.example\n", "https://a.example"),
+        ("[ς]\n\n[σ]: https://a.example\n[ς]: https://b.example\n", "https://a.example"),
+        (
+            "[\u{212a}]\n\n[k]: https://a.example\n[\u{212a}]: https://b.example\n",
+            "https://a.example",
+        ),
+    ] {
+        let events = Parser::new_ext(source, crate::markdown_options());
+        let pulldown: Vec<String> = events
+            .filter_map(|event| match event {
+                Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                    Some(dest_url.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pulldown, [chose], "pulldown-cmark's choice for {source:?}");
+        assert_eq!(addresses(source), [chose], "{source:?}");
+    }
+}
+
+#[test]
 fn a_soft_break_draws_as_a_line() {
     for source in [
         "one\ntwo  \nthree",
@@ -128,6 +174,166 @@ fn definitions_nested_in_quotes_and_lists_resolve() {
     }
 }
 
+/// Every link address in `nodes`, in order; a picture counts by its own address.
+fn addresses(nodes: &[Node]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Paragraph(text) | Node::Heading(_, text) => {
+                out.extend(text.links.iter().map(|(_, url)| url.clone()));
+            }
+            Node::Image { url, .. } => out.push(url.clone()),
+            Node::Quote(inner)
+            | Node::Alert { body: inner, .. }
+            | Node::Footnote { body: inner, .. } => out.extend(addresses(inner)),
+            Node::List { items, .. } => {
+                for (_, inner) in items {
+                    out.extend(addresses(inner));
+                }
+            }
+            Node::Table { head, rows, .. } => {
+                let cells = head.iter().chain(rows.iter().flatten());
+                for cell in cells {
+                    out.extend(addresses(cell));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Each source must give exactly the one address `want`.
+fn resolve_to(want: &str, sources: &[&str]) {
+    for source in sources {
+        assert_eq!(addresses(&parse(source)), [want], "{source:?}");
+    }
+}
+
+#[test]
+fn a_reference_label_that_breaks_inside_a_quote_resolves() {
+    // pulldown-cmark drops the quote marker from a label that goes on past a line end, and matches
+    // it to a definition as `one two`; the label as written still has the `> ` in it.
+    let nodes = parse("> see [x][one\n> two]\n\n[one two]: https://d.example\n");
+    let Node::Quote(inner) = &nodes[0] else {
+        panic!("a quote, not {:?}", nodes[0])
+    };
+    let Node::Paragraph(text) = &inner[0] else {
+        panic!("a paragraph, not {:?}", inner[0])
+    };
+    assert_eq!(text.text, "see x");
+    assert_eq!(text.links, [(4..5, "https://d.example".to_string())]);
+    assert_eq!(nodes.len(), 1, "the definition draws nothing: {nodes:?}");
+    resolve_to(
+        "https://d.example",
+        &[
+            // The marker is deeper, or has no space after it.
+            ">> see [x][one\n>> two]\n\n[one two]: https://d.example\n",
+            "> see [x][one\n>two]\n\n[one two]: https://d.example\n",
+            "> > see [x][one\n> > two]\n\n[one two]: https://d.example\n",
+            // The reference follows a line of the quote.
+            "> first line\n> see [x][one\n> two] after\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_shortcut_or_collapsed_reference_that_breaks_inside_a_quote_resolves() {
+    resolve_to(
+        "https://d.example",
+        &[
+            "> see [one\n> two]\n\n[one two]: https://d.example\n",
+            "> see [one\n> two][]\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_definition_label_that_breaks_inside_a_quote_resolves() {
+    resolve_to(
+        "https://d.example",
+        &[
+            // Only the definition breaks.
+            "see [x][one two]\n\n> [one\n> two]: https://d.example\n",
+            // Both do.
+            "> see [x][one\n> two]\n>\n> [one\n> two]: https://d.example\n",
+            "> see [one\n> two]\n>\n> [one\n> two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_picture_reference_label_that_breaks_inside_a_quote_resolves() {
+    resolve_to(
+        "a.png",
+        &[
+            "> ![a][one\n> two]\n\n[one two]: a.png\n",
+            "> ![one\n> two]\n\n[one two]: a.png\n",
+            "> ![one\n> two][]\n\n[one two]: a.png\n",
+        ],
+    );
+}
+
+#[test]
+fn a_reference_label_that_breaks_inside_a_list_item_resolves() {
+    resolve_to(
+        "https://d.example",
+        &[
+            // A plain list's indent is only blanks, which `identifier` always collapsed: these two
+            // passed before the change and only guard it.
+            "- see [x][one\n  two]\n\n[one two]: https://d.example\n",
+            "1. see [x][one\n   two]\n\n[one two]: https://d.example\n",
+            // A quote marker around or inside the item leads the continuation line, and is cut.
+            "> - see [x][one\n>   two]\n\n[one two]: https://d.example\n",
+            "> 1. see [x][one\n>    two]\n\n[one two]: https://d.example\n",
+            "- > see [x][one\n  > two]\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_reference_label_in_a_table_cell_reads_its_pipe_as_pulldown_does() {
+    // pulldown-cmark reads `\|` in a cell as `|` before it matches the label.
+    resolve_to(
+        "https://d.example",
+        &[
+            "| head |\n| --- |\n| [x][a\\|b] |\n\n[a|b]: https://d.example\n",
+            "| head |\n| --- |\n| [a\\|b] |\n\n[a|b]: https://d.example\n",
+            "| head |\n| --- |\n| ![a\\|b] |\n\n[a|b]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_vertical_tab_or_form_feed_in_a_label_is_a_blank_as_pulldown_reads_it() {
+    // pulldown-cmark folds every ASCII blank, \x0b and \x0c too, to one space in a label.
+    resolve_to(
+        "https://d.example",
+        &[
+            "[x][one\x0btwo]\n\n[one two]: https://d.example\n",
+            "[x][one\x0ctwo]\n\n[one two]: https://d.example\n",
+            "[one\x0b\x0c two]\n\n[one two]: https://d.example\n",
+            "[one two]\n\n[one\x0ctwo]: https://d.example\n",
+            "[x][ONE\x0btwo]\n\n[one\x0ctwo]: https://d.example\n",
+            "> see [x][one\x0b\n> two]\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_reference_finds_its_definition_by_case_and_spacing_as_pulldown_does() {
+    resolve_to(
+        "https://d.example",
+        &[
+            "[x][ONE   Two]\n\n[one\ttwo]: https://d.example\n",
+            "[one two]\n\n[ONE\n  TWO]: https://d.example\n",
+            "[Straße]\n\n[STRASSE]: https://d.example\n",
+            // Both at once, over a quote's line break.
+            "> see [x][ONE\n> Two]\n\n[one   two]: https://d.example\n",
+        ],
+    );
+}
+
 #[test]
 fn an_image_inside_styles_and_links_stays_an_image() {
     let nodes = parse("*a ![x](x.png) b* [![y](y.png)](https://ely.dev)");
@@ -173,6 +379,101 @@ fn a_heading_keeps_its_images_after_it() {
     let nodes = parse("# Lift ![x](x.png)");
     assert!(matches!(&nodes[0], Node::Heading(1, text) if text.text == "Lift "));
     assert!(matches!(&nodes[1], Node::Image { url, .. } if url == "x.png"));
+}
+
+/// Lists, quotes and paragraphs as a line, for what pulldown-cmark's events say: `ul[item[p(a)]]`,
+/// `ol3[..]`, `quote[..]`, blocks side by side after a space.
+fn outline(nodes: &[Node]) -> String {
+    let lines: Vec<String> = nodes
+        .iter()
+        .map(|node| match node {
+            Node::Paragraph(text) => format!("p({})", text.text),
+            Node::Quote(inner) => format!("quote[{}]", outline(inner)),
+            Node::List { start, items } => {
+                let items: String = (items.iter())
+                    .map(|(_, inner)| format!("item[{}]", outline(inner)))
+                    .collect();
+                match start {
+                    Some(number) => format!("ol{number}[{items}]"),
+                    None => format!("ul[{items}]"),
+                }
+            }
+            other => panic!("not read here: {other:?}"),
+        })
+        .collect();
+    lines.join(" ")
+}
+
+/// Every link address in `nodes`, in order.
+fn links(nodes: &[Node]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Paragraph(text) => out.extend(text.links.iter().map(|(_, url)| url.clone())),
+            Node::Quote(inner) => out.extend(links(inner)),
+            Node::List { items, .. } => {
+                for (_, inner) in items {
+                    out.extend(links(inner));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn a_definition_right_after_a_list_builds_as_the_events_say() {
+    // pulldown-cmark ends the list at the first line of the paragraph the definition opens, so
+    // the list's span covers the definition; its events are the list, then the paragraph.
+    for (source, outlined) in [
+        ("- a\n\n[a]: https://e.example\nx", "ul[item[p(a)]] p(x)"),
+        ("- \n[a]: u\nx", "ul[item[]] p(x)"),
+        ("- a\n- b\n\n[a]: u\nx", "ul[item[p(a)]item[p(b)]] p(x)"),
+        // The definitions are all there is after the list.
+        ("- a\n\n[a]: u\n[b]: v", "ul[item[p(a)]]"),
+        ("- a\n\n[a]: u\n[b]: v\nx", "ul[item[p(a)]] p(x)"),
+        // An ordered list keeps its first number.
+        ("3. a\n\n[a]: u\nx", "ol3[item[p(a)]] p(x)"),
+    ] {
+        assert_eq!(outline(&parse(source)), outlined, "{source:?}");
+    }
+}
+
+#[test]
+fn a_definition_right_after_a_nested_list_builds_as_the_events_say() {
+    for (source, outlined) in [
+        // The definition ends both lists: it follows the outer one.
+        ("- a\n  - b\n\n[a]: u\nx", "ul[item[p(a) ul[item[p(b)]]]] p(x)"),
+        // It sits in the outer item, after the inner list.
+        (
+            "- a\n  - b\n\n  [a]: u\n  x",
+            "ul[item[p(a) ul[item[p(b)]] p(x)]]",
+        ),
+        // The same, in a quote.
+        ("> - a\n>\n> [a]: u\n> x", "quote[ul[item[p(a)]] p(x)]"),
+        ("> - a\n>   - b\n>\n> [a]: u\n> x", "quote[ul[item[p(a) ul[item[p(b)]]]] p(x)]"),
+    ] {
+        assert_eq!(outline(&parse(source)), outlined, "{source:?}");
+    }
+}
+
+#[test]
+fn a_definition_right_after_a_list_still_resolves_its_references() {
+    // References around a definition right after a list resolve to it: in the paragraph it opened,
+    // in the list before it, in a list inside it and in a quote.
+    for source in [
+        "- a\n\n[a]: https://e.example\nsee [a]",
+        "- see [a]\n\n[a]: https://e.example\nx",
+        "- a\n  - b\n\n  [a]: https://e.example\n  see [a]",
+        "> - see [a]\n>\n> [a]: https://e.example\n> x",
+    ] {
+        assert_eq!(
+            links(&parse(source)),
+            ["https://e.example".to_string()],
+            "{source:?}"
+        );
+    }
 }
 
 #[test]

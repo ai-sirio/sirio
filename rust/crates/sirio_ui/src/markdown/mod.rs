@@ -6,6 +6,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -57,6 +58,36 @@ pub(crate) const MAX_NESTING: usize = 32;
 /// The deepest block HTML is built: a reader sees nothing in more levels, and what is built
 /// is walked, dropped and drawn by recursion on whatever stack the caller has.
 pub(crate) const MAX_HTML_NESTING: usize = 32;
+
+/// A panic a test makes Ely's reader raise, from the callback the reader calls about each text
+/// it is about to parse: it unwinds through the reader's own frames, as one left in the vendored
+/// code would. Compiled into tests only.
+#[cfg(test)]
+pub(crate) mod reader_fault {
+    use std::cell::Cell;
+
+    thread_local!(static ARMED: Cell<bool> = const { Cell::new(false) });
+
+    /// While it lives, every read of a text on this thread panics.
+    pub(crate) struct ReaderFault(());
+
+    pub(crate) fn on() -> ReaderFault {
+        ARMED.with(|armed| armed.set(true));
+        ReaderFault(())
+    }
+
+    impl Drop for ReaderFault {
+        fn drop(&mut self) {
+            ARMED.with(|armed| armed.set(false));
+        }
+    }
+
+    pub(super) fn strike() {
+        if ARMED.with(Cell::get) {
+            panic!("a panic injected into the Markdown reader");
+        }
+    }
+}
 
 /// Who shows the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +151,9 @@ pub(crate) struct MarkdownBlocks {
     /// Diagrams the tree names that nobody has scheduled yet.
     pub missing_diagrams: Vec<DiagramRequest>,
     pub kinds: NodeCounts,
+    /// Ely's reader panicked on the source, and `nodes` is that source as plain text. A chat
+    /// reply whose document carries it is not read again while it streams.
+    pub reader_panicked: bool,
 }
 
 impl std::fmt::Debug for MarkdownBlocks {
@@ -177,22 +211,30 @@ pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     // Ely reads, in one parse: a refused first text leaves the plain paragraph, a refused
     // second one keeps the first pass's tree. What depth the Markdown leaves is all block HTML
     // may nest to, wherever it stands; HTML is read after every text was measured.
+    //
+    // The reader is vendored, and an `expect` left in it would take the app down from a reply:
+    // a panic in it leaves the source as the plain paragraph, marked so that a caller can tell.
     let deepest = Cell::new(0usize);
-    let parsed = parse_markdown_guarded(
-        source,
-        &|raw: &str| {
-            let room = MAX_NESTING.saturating_sub(deepest.get()).min(MAX_HTML_NESTING);
-            rewrite::html_block(raw, room)
-        },
-        &mut |read| {
-            let depth = markdown_depth(read);
-            if depth <= MAX_NESTING {
-                deepest.set(deepest.get().max(depth));
-            }
-            depth <= MAX_NESTING
-        },
-    );
-    if let Some(parsed) = parsed {
+    let parsed = catch_unwind(AssertUnwindSafe(|| {
+        parse_markdown_guarded(
+            source,
+            &|raw: &str| {
+                let room = MAX_NESTING.saturating_sub(deepest.get()).min(MAX_HTML_NESTING);
+                rewrite::html_block(raw, room)
+            },
+            &mut |read| {
+                #[cfg(test)]
+                reader_fault::strike();
+                let depth = markdown_depth(read);
+                if depth <= MAX_NESTING {
+                    deepest.set(deepest.get().max(depth));
+                }
+                depth <= MAX_NESTING
+            },
+        )
+    }));
+    let reader_panicked = parsed.is_err();
+    if let Ok(Some(parsed)) = parsed {
         // Block HTML nests on top of the Markdown around it: each is under the cap, their
         // sum may not be, and every walk after this one recurses over the tree.
         if tree_depth(&parsed) <= MAX_NESTING {
@@ -215,6 +257,21 @@ pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
         }
     }
 
+    finish(nodes, missing, reader_panicked)
+}
+
+/// `source` as plain text, without asking Ely's reader: what a reply it panicked on shows while
+/// it streams, so that the reader is not asked, and does not panic, again on each chunk.
+pub(crate) fn as_plain_text(source: &str) -> MarkdownBlocks {
+    finish(vec![rewrite::plain_paragraph(source)], Vec::new(), true)
+}
+
+/// What [`build`] keeps beside `nodes`, the tree its surface draws.
+fn finish(
+    nodes: Vec<MarkdownBlock>,
+    missing: Vec<DiagramRequest>,
+    reader_panicked: bool,
+) -> MarkdownBlocks {
     // The headings are read before the tables of contents that link to them are made:
     // a list of links holds no heading, so the order of the others does not move.
     let headings = headings(&nodes);
@@ -245,6 +302,7 @@ pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
         headings: Rc::from(headings),
         missing_diagrams: missing,
         kinds,
+        reader_panicked,
     }
 }
 

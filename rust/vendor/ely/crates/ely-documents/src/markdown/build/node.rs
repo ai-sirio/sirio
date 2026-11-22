@@ -53,18 +53,22 @@ impl Builder<'_> {
             Tag::Link {
                 link_type,
                 dest_url,
+                id,
                 ..
             } => Kind::Link {
                 url: address(link_type, &dest_url),
                 link: link_type,
+                id: id.to_string(),
             },
             Tag::Image {
                 link_type,
                 dest_url,
+                id,
                 ..
             } => Kind::Image {
                 url: address(link_type, &dest_url),
                 link: link_type,
+                id: id.to_string(),
                 depth: 0,
                 muted: None,
             },
@@ -157,11 +161,12 @@ impl Builder<'_> {
                 children,
                 position: range,
             }),
-            Kind::Link { url, link } => match reference(self.source, &range, link) {
+            Kind::Link { url, link, id } => match reference(link, &id) {
                 Some(identifier) => Node::LinkReference(mdast::LinkReference {
                     children,
                     position: range,
                     identifier,
+                    url,
                 }),
                 None => Node::Link(mdast::Link {
                     children,
@@ -169,11 +174,12 @@ impl Builder<'_> {
                     url,
                 }),
             },
-            Kind::Image { url, link, .. } => match reference(self.source, &range, link) {
+            Kind::Image { url, link, id, .. } => match reference(link, &id) {
                 Some(identifier) => Node::ImageReference(mdast::ImageReference {
                     position: range,
                     alt: value,
                     identifier,
+                    url,
                 }),
                 None => Node::Image(mdast::Image {
                     position: range,

@@ -56,12 +56,6 @@ fn beyond(source: &str, rest: Range<usize>) -> Vec<Node> {
     out
 }
 
-/// Whether the byte at `at` follows an odd run of backslashes.
-fn escaped(source: &str, at: usize) -> bool {
-    let before = &source[..at];
-    (before.len() - before.trim_end_matches('\\').len()) % 2 == 1
-}
-
 fn trim(source: &str, range: Range<usize>) -> Range<usize> {
     let text = &source[range.clone()];
     let start = range.start + (text.len() - text.trim_start_matches([' ', '\t']).len());
@@ -133,23 +127,19 @@ pub(super) fn written<'a>(source: &'a str, span: &Range<usize>, text: &'a str) -
     if same { raw } else { text }
 }
 
-/// A reference link's identifier, from its label as written.
-pub(super) fn reference(source: &str, range: &Range<usize>, link: LinkType) -> Option<String> {
-    let written = &source[range.clone()];
-    let written = written.strip_prefix('!').unwrap_or(written);
-    let label = match link {
-        LinkType::Reference | LinkType::ReferenceUnknown => {
-            let open = (1..written.len() - 1)
-                .rev()
-                .find(|ix| written.as_bytes()[*ix] == b'[' && !escaped(written, *ix))
-                .expect("a full reference ends in its label");
-            &written[open + 1..written.len() - 1]
-        }
-        LinkType::Collapsed | LinkType::CollapsedUnknown => &written[1..written.len() - 3],
-        LinkType::Shortcut | LinkType::ShortcutUnknown => &written[1..written.len() - 1],
-        _ => return None,
-    };
-    Some(mdast::identifier(label))
+/// A reference link's identifier, from the label pulldown-cmark matched it by (`id`). Not the label
+/// as written: that keeps the `> ` of a quote, and the `\` of a `\|` in a cell, which pulldown-cmark
+/// cuts before it looks for the definition.
+pub(super) fn reference(link: LinkType, id: &str) -> Option<String> {
+    match link {
+        LinkType::Reference
+        | LinkType::ReferenceUnknown
+        | LinkType::Collapsed
+        | LinkType::CollapsedUnknown
+        | LinkType::Shortcut
+        | LinkType::ShortcutUnknown => Some(mdast::identifier(id)),
+        _ => None,
+    }
 }
 
 /// `[text][]` with its `[]`, which pulldown-cmark leaves out.
@@ -182,14 +172,20 @@ pub(super) fn place(parent: &mut Node, mut definitions: Vec<Node>, source: &str)
         let ix = children.partition_point(|child| child.position().start <= at.start);
         let holder = ix.checked_sub(1).filter(|ix| {
             let child = &children[*ix];
-            let holds = matches!(
-                child,
-                Node::Blockquote(_)
-                    | Node::List(_)
-                    | Node::ListItem(_)
-                    | Node::FootnoteDefinition(_)
-            );
-            holds && at.end <= child.position().end
+            at.end <= child.position().end
+                && match child {
+                    // A list holds a definition only in one of its items, the last that starts
+                    // by it. pulldown-cmark ends a list at the first line of the paragraph a
+                    // definition opens, so its span can run on over a definition after it, which
+                    // then sits beside the list.
+                    Node::List(list) => {
+                        let k = (list.children)
+                            .partition_point(|item| item.position().start <= at.start);
+                        k > 0 && at.end <= list.children[k - 1].position().end
+                    }
+                    Node::Blockquote(_) | Node::ListItem(_) | Node::FootnoteDefinition(_) => true,
+                    _ => false,
+                }
         });
         match (holder, inner.last_mut()) {
             (Some(ix), Some((last, group))) if *last == ix => group.push(definition),

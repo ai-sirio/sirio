@@ -69,10 +69,14 @@ describes is a review by hand.
 - `crates/ely-core/src/typography/effects.rs`
 - `crates/ely-core/src/typography/fit.rs`
 - `crates/ely-documents/Cargo.toml`
+- `crates/ely-documents/src/document/point.rs`
 - `crates/ely-documents/src/lib.rs`
 - `crates/ely-documents/src/markdown.rs`
 - `crates/ely-documents/src/markdown/build.rs`
+- `crates/ely-documents/src/markdown/build/node.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
+- `crates/ely-documents/src/markdown/mdast.rs`
+- `crates/ely-documents/src/markdown/shape.rs`
 - `crates/ely-documents/src/markdown/tex.rs`
 - `crates/ely-documents/src/math.rs`
 - `crates/ely-documents/src/modes.rs`
@@ -893,6 +897,47 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
 
+## ely-documents reference labels (L13)
+
+Numbered after L11 (`ely-chat` host seams) and L12 (`ely-documents` `next_run`) of the chat delivery, which may
+land after it, so the three do not collide.
+
+Paths: `ely-documents` `src/markdown/build.rs`, `src/markdown/build/node.rs`, `src/markdown/shape.rs` and
+`src/tree/mod.rs` (tests in `src/tree/tests.rs`). Issue #839: a Markdown build panicked
+(`a reference names a definition`, `Reader::url`) on a reference whose label breaks across lines inside a
+block quote, `> see [x][one\n> two]` over `[one two]: https://d.example`.
+
+Why: the builder cut a reference's identifier from the label as written in the source (`shape::reference`),
+while a definition's identifier comes from the label pulldown-cmark keeps. pulldown-cmark cuts text from a
+label before it matches it, which the written label still carries: the `> ` a label that goes on to the next
+line crosses, the `\` of a `\|` in a table cell, and a vertical tab or form
+feed, which it folds to one space and `mdast::identifier` does not split on. The reference read as `one > two`,
+pulldown-cmark matched it to the definition `one two` and emitted a link, and the lookup missed.
+
+What: `Tag::Link` and `Tag::Image` carry `id`, the label pulldown-cmark matched the reference by (full,
+collapsed and shortcut forms alike). `Kind::Link` and `Kind::Image` keep it, and `shape::reference(link, id)`
+passes it through `mdast::identifier`, as the definition's label is, so the two sides read one label. The
+slicing of the written label and its `escaped` helper are gone; `mdast::identifier` is unchanged. Also
+`Reader::url` returns an `Option` and no longer panics: a picture whose definition is missing draws its alt
+text, a link its text without a target. No input from `parse` reaches that branch, by reading: pulldown-cmark
+emits a reference only for a definition it matched, both sides now read one label, and every `Reader` is built
+over the tree of the text it reads. So it has no test of its own, which would need a call no source produces.
+
+Proof: eight tests in `tree/tests.rs`, 31 sources: `a_reference_label_that_breaks_inside_a_quote_resolves` (the
+issue's input, drawn exactly, then a deeper marker, a marker with no space and a label after a line of the
+quote), `a_shortcut_or_collapsed_reference_that_breaks_inside_a_quote_resolves`,
+`a_definition_label_that_breaks_inside_a_quote_resolves`,
+`a_picture_reference_label_that_breaks_inside_a_quote_resolves`,
+`a_reference_label_that_breaks_inside_a_list_item_resolves` (a quote marker around or inside a list item is cut;
+a plain list's indent is only blanks, which `identifier` always collapsed, so its two sources are guards),
+`a_reference_label_in_a_table_cell_reads_its_pipe_as_pulldown_does`,
+`a_vertical_tab_or_form_feed_in_a_label_is_a_blank_as_pulldown_reads_it` and
+`a_reference_finds_its_definition_by_case_and_spacing_as_pulldown_does` (case, runs of blanks, a tab, `Straße`
+against `STRASSE`). Before the change all eight panic at `tree/mod.rs:261`. 24 of their 31 sources panic before
+and none after; the seven that already resolved are a definition alone split over quote lines, a label split
+inside a plain list item (two sources), a definition label with a form feed, and three case and spacing
+sources.
+
 ## Featureless test build
 
 `Scripts/ci.sh` runs `cargo nextest run --workspace` with no features. Upstream always tests with
@@ -1003,6 +1048,85 @@ Also in `markdown/build/`: the repository's `.gitignore` has a bare `build/` rul
 directory (`node.rs`, `tests.rs`, `text.rs`) from git, so it was on disk and not in any commit. The root
 `.gitignore` now un-ignores `rust/vendor/ely/crates/ely-documents/src/markdown/build/`, and the three
 files are committed.
+
+## ely-documents definitions after a list (L14)
+
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
+the entries do not collide.
+
+Path: `ely-documents` `src/markdown/shape.rs`, `place` (tests in `src/tree/tests.rs` and
+`src/markdown/build/tests.rs`). Issue #840: a Markdown build panicked (`a list holds items, not Definition`, in
+`Reader::block`, `tree/mod.rs:302` on main and 299 after L13) on a list followed by a link reference definition
+with text on the next line, `- a`, a blank line, `[a]: u`, `x`; also an empty item (`- ` then `[a]: u`, `x`), an
+ordered or nested list, and definitions with nothing after them but more definitions (`- a`, blank, `[a]: u`,
+`[b]: v`).
+
+Why: pulldown-cmark ends a list at the first line of the paragraph a definition opens, so the list's span runs on
+over the definition (`- a\n\n[a]: u\nx`: list 0..12, item 0..5, definition 5..11, as pulldown-cmark gives
+them). `place` took a list that covers a definition as its container; no item held it, so it went among the
+list's children, and `Reader::block`'s list arm, which holds items alone, stopped at `unreachable!`. A definition
+set off by a blank line, at the end, or after a block quote never reached that: the container's span ended
+before it.
+
+What: `place` takes a list as the container of a definition only when the last item that starts by it also
+covers it (a binary search over the items, as the container itself is found, run after the check that the
+container's span covers the definition, so `place` stays linear in the definitions). Otherwise the definition
+stays among the parent's children, laid in by start, beside the list: where it already sat for a definition after
+a blank line or at the end of the text. An item still takes the definitions it holds, at any depth: after a
+nested list, inside the outer item; after the outer list, in the parent. `tighten` then ends the list at its last
+item. Definitions draw nothing, so no drawn output changes: a list that held items only reads as before.
+`Reader::block`'s list arm is not changed and stays strict: the invariant now holds where the tree is built, and
+the editor's readers of a list (`document/block.rs`, `document/block/list.rs`) count its children as items too,
+which a skip in the one reader would leave broken for them.
+
+Proof, in `tree/tests.rs`: `a_definition_right_after_a_list_builds_as_the_events_say` (an ordered list among its
+sources) and `a_definition_right_after_a_nested_list_builds_as_the_events_say` (each source's blocks as
+pulldown-cmark's events give them: the list, then the paragraph, nothing for the definition), and
+`a_definition_right_after_a_list_still_resolves_its_references` (from the paragraph, the list, a nested list and
+a quote). In `markdown/build/tests.rs`: `a_definition_after_a_list_sits_beside_it` (the tree, definitions
+included, for eight sources), `a_definition_that_does_not_touch_a_list_stays_where_it_was` (the forms that
+never panicked) and `a_definition_in_every_item_of_a_long_list_stays_in_its_item` (64 items with a definition
+each and one after the list: the tree, not the time); the existing `a_definition_in_an_item_stays_in_the_item`
+covers an item too. On `ee59579e1` five of these seven fail (the three in `tree/tests.rs` at `tree/mod.rs:302`,
+two of the build tests on their assertions) and the other two, which are guards, pass. A rule that never makes a
+list a container turns four of the build tests red, the guards among them; the old rule (every list that covers
+the definition) turns the same five red as before.
+
+## ely-documents the address a reference resolved to (L15)
+
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
+the entries do not collide.
+
+Paths: `ely-documents` `src/markdown/mdast.rs`, `src/markdown/build/node.rs`, `src/tree/mod.rs` and
+`src/document/point.rs` (tests in `src/tree/tests.rs` and, for `point.rs`, in the file). Issue #840, its second
+part: a reference could link to the wrong definition, without a panic. pulldown-cmark matches reference labels
+by Unicode case folding and takes the first definition that matches. `mdast::identifier` folds more (`ı` is `i`,
+`ﬃ` is `FFI`), and the reader found the address by identifier, the first definition with the same one: `[ı]` over
+`[i]: a` and `[ı]: b` is `b` in pulldown-cmark and was drawn as `a`. The link or picture under the caret
+(`document/point.rs`) did the same.
+
+What: `mdast::LinkReference` and `mdast::ImageReference` carry `url`, the `dest_url` pulldown-cmark resolved on the
+`Tag::Link` or `Tag::Image` (`Kind::Link` and `Kind::Image` already had it; `node` hands it on). The reader and
+`point.rs` read it. The reader's map of definitions and `Reader::url` are gone, and with them what hung on a
+lookup that could miss: the `expect` in `Reader::url` and, where L13 is in, the `Option` L13 made of it and the
+fallbacks at its two call sites (a picture without a definition draws its alt text, a link its text), which
+cannot be reached once the address comes from the node. `point.rs`'s search of the definitions by identifier is
+gone too. Where both sides fold a label alike nothing changes: the address pulldown-cmark resolved is the first
+definition's, which the map gave.
+
+Left unread: after this, no code in the crate reads `Definition.url`, none outside tests reads
+`Definition.identifier`, and nothing reads the references' `identifier`. Where L13 is in, the `id` it adds to
+`Kind::Link` and `Kind::Image` is still read, but only to build that unread `identifier`. They are `pub` or still
+set, so no warning fires. They stay: they are the
+tree's public shape, and a later change can drop them if no host needs them.
+
+Proof: `tree::tests::a_reference_goes_to_the_definition_pulldown_chose`: ten sources (link, full, collapsed and
+picture references), each asserting first which address pulldown-cmark's own events resolve, then which Ely draws.
+The six with `ı` or `ﬃ` fail before the change (Ely drew the first definition's address); the four whose labels
+both fold alike (`a` and `A`, `ß` and `SS`, `ς` and `σ`, the Kelvin sign and `k`) pass either way.
+`document::point::tests::a_pressed_reference_gives_the_definition_pulldown_chose`: `target_at` on the same
+`[ı]` over `[i]: a` and `[ı]: b`, pressed on a link's text, on a reference's label and on a shortcut link, gives
+`b`; before the change it gave `a`.
 
 ## The facade and the switch (Task 8)
 

@@ -129,14 +129,17 @@ enum Kind {
     Emphasis,
     Strong,
     Delete,
+    /// `id`: the label pulldown-cmark matched a reference by.
     Link {
         url: String,
         link: LinkType,
+        id: String,
     },
-    /// `muted`: the depth an image inside it opened at.
+    /// `muted`: the depth an image inside it opened at. `id` as for a link.
     Image {
         url: String,
         link: LinkType,
+        id: String,
         depth: usize,
         muted: Option<usize>,
     },

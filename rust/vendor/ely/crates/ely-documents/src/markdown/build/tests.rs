@@ -73,6 +73,96 @@ fn a_definition_in_an_item_stays_in_the_item() {
     );
 }
 
+/// Whether each list under `node` holds items and nothing else.
+fn lists_hold_items(node: &Node) -> bool {
+    let kids = || node.children().into_iter().flatten();
+    let list = matches!(node, Node::List(_));
+    (!list || kids().all(|kid| matches!(kid, Node::ListItem(_)))) && kids().all(lists_hold_items)
+}
+
+/// Blocks as a line, definitions included: `list[item[p def]] def p`.
+fn kinds(nodes: &[Node]) -> String {
+    let lines: Vec<String> = nodes
+        .iter()
+        .map(|node| match node {
+            Node::Paragraph(_) => "p".into(),
+            Node::Definition(_) => "def".into(),
+            Node::Blockquote(quote) => format!("quote[{}]", kinds(&quote.children)),
+            Node::List(list) => format!("list[{}]", kinds(&list.children)),
+            Node::ListItem(item) => format!("item[{}]", kinds(&item.children)),
+            other => panic!("not read here: {other:?}"),
+        })
+        .collect();
+    lines.join(" ")
+}
+
+#[test]
+fn a_definition_after_a_list_sits_beside_it() {
+    // pulldown-cmark ends a list at the first line of the paragraph a definition opens, so the
+    // list's span covers the definition, which no item holds. It belongs beside the list; one
+    // an item holds stays in the item, at any depth.
+    for (source, kind) in [
+        ("- a\n\n[a]: u\nx", "list[item[p]] def p"),
+        ("- \n[a]: u\nx", "list[item[]] def p"),
+        ("1. a\n2. b\n\n[a]: u\nx", "list[item[p] item[p]] def p"),
+        ("- a\n\n[a]: u\n[b]: v", "list[item[p]] def def"),
+        ("- a\n  - b\n\n[a]: u\nx", "list[item[p list[item[p]]]] def p"),
+        ("- a\n  - b\n\n  [a]: u\n  x", "list[item[p list[item[p]] def p]]"),
+        ("> - a\n>\n> [a]: u\n> x", "quote[list[item[p]] def p]"),
+        ("- a\n\n  [a]: u\n\n- b\n\n[b]: v\nx", "list[item[p def] item[p]] def p"),
+    ] {
+        let root = tree(source, false);
+        assert!(lists_hold_items(&root), "{source:?}: {root:?}");
+        assert_eq!(kinds(blocks(&root)), kind, "{source:?}");
+    }
+    let root = tree("- a\n\n[a]: u\nx", false);
+    let [Node::List(list), Node::Definition(definition), Node::Paragraph(_)] = blocks(&root) else {
+        panic!("a list, its definition and a paragraph: {root:?}");
+    };
+    assert!(list.position.end <= definition.position.start, "{root:?}");
+}
+
+#[test]
+fn a_definition_that_does_not_touch_a_list_stays_where_it_was() {
+    // None of these reached the list's children: the container's span ended before the definition,
+    // or the item held it.
+    for (source, kind) in [
+        ("- a\n\n[a]: u\n\nx", "list[item[p]] def p"),
+        ("- a\n\n[a]: u", "list[item[p]] def"),
+        ("- a\n\n  [r]: u\n\nx", "list[item[p def]] p"),
+        ("- a\n  - b\n\n  [a]: u\n\n  x", "list[item[p list[item[p]] def p]]"),
+        ("> a\n\n[a]: u\nx", "quote[p] def p"),
+    ] {
+        let root = tree(source, false);
+        assert_eq!(kinds(blocks(&root)), kind, "{source:?}");
+    }
+}
+
+#[test]
+fn a_definition_in_every_item_of_a_long_list_stays_in_its_item() {
+    // Each definition finds its item among many, and the one after the list sits beside it.
+    let count = 64;
+    let mut source: String = (0..count)
+        .map(|ix| format!("- item {ix}\n\n  [r{ix}]: /u{ix}\n\n"))
+        .collect();
+    source.push_str("[last]: /l\nx");
+    let root = tree(&source, false);
+    let [Node::List(list), Node::Definition(last), Node::Paragraph(_)] = blocks(&root) else {
+        panic!("a list, a definition and a paragraph: {} blocks", blocks(&root).len());
+    };
+    assert_eq!(last.identifier, "last");
+    assert_eq!(list.children.len(), count);
+    for (ix, item) in list.children.iter().enumerate() {
+        let Node::ListItem(item) = item else {
+            panic!("item {ix}: {item:?}");
+        };
+        let [Node::Paragraph(_), Node::Definition(definition)] = &item.children[..] else {
+            panic!("item {ix} holds a paragraph and its definition: {item:?}");
+        };
+        assert_eq!(definition.identifier, format!("r{ix}"), "item {ix}");
+    }
+}
+
 #[test]
 fn cells_past_the_head_keep_their_text_as_written() {
     let root = tree("| a |\n| - |\n| b | [l][r] | x\\|y |\n\n[r]: /url\n", false);

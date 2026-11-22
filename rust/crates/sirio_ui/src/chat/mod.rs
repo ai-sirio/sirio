@@ -2640,6 +2640,24 @@ impl Chat {
         })
     }
 
+    /// The reply of this turn that Ely's reader panicked on while it streamed gets one read of
+    /// its whole text now, since the panic may have come of a text cut short. If the reader
+    /// panics again it stays plain text. Earlier turns' replies are not asked again.
+    fn reread_plain_replies(&mut self) {
+        for index in (0..self.entries.len()).rev() {
+            match &mut self.entries[index] {
+                Entry::User { .. } | Entry::TurnFooter(_) => break,
+                Entry::Assistant { text, document } if document.reader_panicked => {
+                    self.file_link_memo.clear();
+                    *document = parse_linked_markdown(text, &self.agent_cwd, &mut self.file_link_memo);
+                    self.remeasure_entry(index);
+                    self.clamp_transcript_selection();
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Turns one notice into the row, or the status line, it belongs in, at
     /// the point in the transcript where it arrived.
     fn apply_notice(&mut self, notice: SessionNotice, cx: &mut Context<Self>) {
@@ -3338,8 +3356,13 @@ impl Chat {
                     }) = self.entries.get_mut(index)
                 {
                     existing.push_str(&text);
-                    *document =
-                        parse_linked_markdown(existing, &self.agent_cwd, &mut self.file_link_memo);
+                    *document = if document.reader_panicked {
+                        // Ely's reader panicked on this reply: it is not asked again until
+                        // the turn ends, since each ask prints another panic message.
+                        markdown::as_plain_text(existing)
+                    } else {
+                        parse_linked_markdown(existing, &self.agent_cwd, &mut self.file_link_memo)
+                    };
                     self.remeasure_entry(index);
                     self.clamp_transcript_selection();
                 } else {
@@ -3881,6 +3904,7 @@ impl Chat {
             }
             sirio_chat::ChatEvent::TurnEnded { stop_reason } => {
                 self.settle_open_thought();
+                self.reread_plain_replies();
                 // The footer must state *why* the turn stopped. A cancelled
                 // or refused turn that ends in a plain timestamp looks like an
                 // ordinary completion, and that is the exact failure class

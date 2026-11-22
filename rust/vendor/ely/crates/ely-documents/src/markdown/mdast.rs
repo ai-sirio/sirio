@@ -180,6 +180,8 @@ pub struct LinkReference {
     pub position: Range<usize>,
     /// The label, as references match it.
     pub identifier: String,
+    /// The address of the definition pulldown-cmark matched, which `identifier` may not name first.
+    pub url: String,
 }
 
 /// An image by reference.
@@ -191,6 +193,8 @@ pub struct ImageReference {
     pub alt: String,
     /// The label, as references match it.
     pub identifier: String,
+    /// The address of the definition pulldown-cmark matched, which `identifier` may not name first.
+    pub url: String,
 }
 
 /// A footnote definition.
