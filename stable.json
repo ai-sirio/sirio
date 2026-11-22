@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.47.0",
-  "notes": "Sirio now draws all of its Markdown with Ely, lets you choose the app's font,\nand has a tidier sidebar.\n\n**Markdown drawn by Ely everywhere**\n\nThe chat, the Markdown Preview, the file view and change requests now draw\nMarkdown with Ely's document renderer, the same one on every surface. Long\nchat replies also draw faster while they stream.\n\nThe Preview gains:\n\n- LaTeX math (`$…$`, `$$…$$`, `\\(…\\)`);\n- GitHub alerts (`> [!NOTE]`, `> [!WARNING]` and the others);\n- footnotes and emoji shortcodes;\n- a `[[toc]]` table of contents, heading anchors, an outline panel and a\n  reading-progress bar;\n- strikethrough and bare web addresses, which change requests read too.\n\nA few things look or behave differently:\n\n- Markdown uses the font chosen in Settings (see below).\n- Pictures, and diagrams in the Preview, are drawn without a frame or a\n  caption. A picture inside a sentence gets a line of its own.\n- In a chat reply, `<url>` chips, bookmark cards and `![alt|480]` widths are\n  gone.\n- A copied list has no blank lines between its items.\n- In the chat, a drag that ends on a link selects text instead of opening the\n  link.\n- The Preview's right-click menu lists the Markdown items above the file\n  items.\n- Text nested more than 32 levels deep, in quotes or lists, is shown as one\n  plain paragraph.\n- In the Preview, a picture whose path names a network share or a Windows\n  device name (`NUL`, `COM1` and the like) shows its alt text instead.\n- A `file:` or `#…` link in a change request no longer opens in another app.\n\n**Choose the app's font**\n\nSettings → Appearance → Interface has a new **Font** row, above Font size. It\npicks a pair: one face for the interface and one for code. The change applies\nat once, and every pair ships inside Sirio:\n\n- Atkinson Hyperlegible, the new default;\n- Inter + JetBrains Mono;\n- IBM Plex;\n- Red Hat;\n- Recursive;\n- Figtree + Fira Code;\n- Geist, the font Sirio used until now.\n\n**A tidier sidebar**\n\n- Project rows no longer sit on a band, and each folder icon lines up with\n  New Chat's icon.\n- A worktree is one line: its name and the icons of its tabs. The task title\n  and the worktree's comment are in the card that opens on hover.\n- A project folder that is not a git repository shows its folder name, muted,\n  where a branch name would be.\n- A thin line runs down the left of each open project, beside its worktrees.\n\nFixed: a moved project folder that is not a git repository was listed as\n\"main (missing)\".",
+  "version": "0.47.1",
+  "notes": "Sirio 0.47.1 fixes two ways a chat reply could close the app, and the chat\nnow draws pictures by the same rule as the Markdown Preview.\n\n**A reply can no longer close Sirio**\n\n- A chat reply, or a Markdown file in the Preview, closed Sirio when it held\n  a reference link whose label broke across two lines of a quote, or a link\n  definition right after a list with text on the next line. Both now draw as\n  intended.\n- A reference link whose label matched two definitions only loosely (`ı` and\n  `i`, for example) could open the wrong address. It now opens the one the\n  Markdown rules pick.\n- If the Markdown reader still fails on some text, that text is shown plain\n  instead of closing the app. A chat reply that hits this stays plain until\n  its turn ends.\n\n**Pictures in the chat follow the Preview's rule**\n\n- A picture whose path holds `?`, `#` or `%` now draws the exact file the\n  path names.\n- A picture whose path names a Windows device name (`NUL`, `COM1`, `aux.png`\n  and the like), on any system, shows its alt text, as in the Preview. Sirio\n  no longer looks such a name up on disk, which on Windows could hang the\n  window.\n\n**Sidebar**\n\n- With a larger interface font, the pinned project header now changes to the\n  next project at the right place while you scroll.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.0/Sirio-0.47.0.dmg",
-      "sha256": "102e788795f29a44ecebb99267829d562cec89e02af9ea5829dc70223570de51",
-      "signature": "JQfLY0jUhm2G8Pcfl2phHjN6f/YquTcHToF2yw2vni7//CtBmVvvN6iLEcFRTgP5Tjqo97chyY5vzlgdYuuODA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.1/Sirio-0.47.1.dmg",
+      "sha256": "346071d689ae102560c9a3f9cad4442151af4d09cf372798d66705829acec405",
+      "signature": "ienejYDBMjv/Fvnt8v8SJiYRDExwTXgFiCzjrGwb2r5ySGwukqRRQ3RkzShg02JRbdvNgWCf0FWS2JMkWHEMDg=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.0/Sirio-0.47.0-x86_64.AppImage",
-      "sha256": "0c1ad1b937e396aeea4521391221d67961292316bc5e6ace2712ee403f523d53",
-      "signature": "w04HB5GGRK2s7p2zZ8/n2zqEkY4iJFDekw/vaWCf7y0S1OcZLWRPb7jJXHohInT735BB/ICJNFMYcRgpqaywDQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.1/Sirio-0.47.1-x86_64.AppImage",
+      "sha256": "b346d175586960e706c5247b41ff4a2d7fa7507b560b94d451c175812ea847d6",
+      "signature": "L/14lwVbna4qGj5ExwSIAyuM9qAtttQHr8EPBf8AQmYeRijtBXznkvRiLBoN97XbIoUs1glMGcOL7Z7jh7LFCg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.0/SirioSetup-0.47.0.exe",
-      "sha256": "b5d81eb3222f47fbc1ec47555690de7eb0f5c9563ddd39eeff12c1812c36eee0",
-      "signature": "0Txo4Gvm4N9nm9vvTqmeYt+KKhFAhG8N3w2CwITXI51IL58N1QYlugmV5OXDb+VdB4RGpFBqPfyScT6xwdsqAA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.1/SirioSetup-0.47.1.exe",
+      "sha256": "4895b86c30a383c5cfad0f33f30e96ea57b374e6396b6032d3f37509f1c071b1",
+      "signature": "Tkvur6pOb5XWUeG7ulefHevuwSnvWnBQyXa+9JZgBxZ7oEOij8Kjv5yjk9X9tFEBoEpTYX5eLPUIZk61vpoPCw=="
     }
   }
 }
