@@ -337,13 +337,14 @@ impl MarkdownView {
     }
 
     /// The caret, after the end of the last text of the body: where the next word will go. A body
-    /// whose last text is not on this frame (it ends in a formula, which no layout holds, or in a
-    /// culled block) has none, and one with no text has none.
+    /// that does not end in a text (a rule, a picture, a formula, a table of contents: the nearest
+    /// text is above them, and a caret there would be in the wrong row) has none, nor has one
+    /// whose last text is not on this frame (a culled block), nor one with no text at all.
     fn paint_caret(&self, window: &mut Window, cx: &mut App) {
         let Some(last) = (self.plain.parts.len()).checked_sub(1) else {
             return;
         };
-        if self.plain.parts[last].kind != PartKind::Drawn {
+        if !self.plain.ends_in_text || self.plain.parts[last].kind != PartKind::Drawn {
             return;
         }
         let Some(spot) = self.layouts.caret_spot(last) else {

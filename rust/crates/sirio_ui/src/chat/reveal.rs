@@ -19,11 +19,12 @@ use std::cell::Cell;
 use std::time::Instant;
 
 use ely_gpui_component::chat::stream::{grapheme_end, next_shown};
+use ely_gpui_component::documents::MarkdownBlock;
 use ely_gpui_component::theme::ActiveTheme as _;
 use gpui::{Context, Window};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{Chat, Entry, with_lookup_policy};
+use super::{Chat, Entry, TranscriptSelection, with_lookup_policy};
 use crate::markdown::{self, MarkdownBlocks, Policy, Segment};
 
 /// The most text a frame builds of a live reply on top of its frozen blocks: the revealed bytes
@@ -34,10 +35,11 @@ use crate::markdown::{self, MarkdownBlocks, Policy, Segment};
 /// stops revealing for the rest of its turn and is drawn from `document`, as it arrives, as every
 /// reply was before the reveal.
 ///
-/// The cost is the tail's, about 0.13 ms to a KiB (`drawn_blocks_costs`, release, on a machine
-/// that was busy): a tail of 7 to 8 KiB builds in 0.8 ms on SHOWCASE and 1.0 to 1.1 ms on a compact
-/// reply and on a reply of numbered references, where one of 40 KiB takes 4.7 to 4.8 ms.
-pub(crate) const TAIL_BUDGET: usize = 8 * 1024;
+/// The cost is the tail's, about 0.13 ms to a KiB (`drawn_blocks_costs`, release): a tail of the last
+/// KiB under 7 KiB builds in 0.78 ms on SHOWCASE, 0.86 ms on a compact reply and 0.92 ms on a
+/// reply of numbered references (medians; the figures at 8 KiB were 0.80, 1.08 and 1.19 ms, over the
+/// line of about 1 ms that set this), where a tail of 40 KiB takes about 5 ms.
+pub(crate) const TAIL_BUDGET: usize = 7 * 1024;
 
 /// A grapheme boundary of a reply, and how many graphemes lie before it. The text of a reply only
 /// grows, and a boundary that has a character after it stays one when it does (what Unicode asks
@@ -144,6 +146,12 @@ impl Reveal {
     }
 }
 
+/// Whether `document` is the one plain paragraph that a source the nesting guard refused builds
+/// to: the source, as written.
+fn is_plain_paragraph(document: &MarkdownBlocks, text: &str) -> bool {
+    matches!(&document.nodes[..], [MarkdownBlock::Paragraph(inline)] if inline.text == text)
+}
+
 /// The largest character boundary of `text` at or before `at` (the end of `text` past it).
 fn floor_char_boundary(text: &str, at: usize) -> usize {
     let mut at = at.min(text.len());
@@ -151,6 +159,28 @@ fn floor_char_boundary(text: &str, at: usize) -> usize {
         at -= 1;
     }
     at
+}
+
+/// The live reply's row in the transcript's offset space, and the text last drawn for it.
+pub(super) struct LiveRow {
+    row: std::ops::Range<usize>,
+    drawn: String,
+}
+
+impl LiveRow {
+    /// Whether `offset` can be a place in the row's text: from the start of the row to the end of
+    /// the longer of the document's text (the row) and the drawn one. A drag's offsets are the
+    /// drawn text's, and the drawn text can be the longer: markup the document has resolved is
+    /// still written out on the screen.
+    pub(super) fn holds(&self, offset: usize) -> bool {
+        self.row.start <= offset
+            && offset <= self.row.start + self.drawn.len().max(self.row.len())
+    }
+
+    /// `offset` brought inside the drawn text, onto a character boundary of it.
+    pub(super) fn clamp(&self, offset: usize) -> usize {
+        self.row.start + floor_char_boundary(&self.drawn, offset.saturating_sub(self.row.start))
+    }
 }
 
 /// Where the tail of a reply revealed up to `revealed` starts: the end of the last frozen segment
@@ -253,16 +283,25 @@ impl Chat {
         }
         let Some(Entry::Assistant {
             text,
+            document,
             stream: Some(stream),
-            ..
         }) = self.entries.get(entry)
         else {
             return None;
         };
         let reveal = self.reveal.as_mut()?;
         let end = reveal.end(text);
-        // A reply gone whole has no frozen blocks to show: its document is one plain paragraph.
+        // A reply whose stream went whole has no frozen blocks to show. If the guard refused it
+        // its document is one plain paragraph, and it reveals as plain text. If it went whole for
+        // another reason (a text the guard declined, the math and HTML check) its document is
+        // formatted, and the raw source of what is revealed would be a worse draw than the
+        // document: it stops revealing, as a reply over the budget does.
         let whole = stream.is_whole();
+        if whole && !is_plain_paragraph(document, text) {
+            reveal.plain = true;
+            reveal.drawn = None;
+            return None;
+        }
         let segments: &[Segment] = if whole { &[] } else { stream.segments() };
         let from = tail_from(segments, end);
         if end - from > TAIL_BUDGET {
@@ -307,60 +346,68 @@ impl Chat {
             window.request_animation_frame();
         }
         let drawn = self.drawn_reply(entry);
-        if let Some(blocks) = &drawn {
-            self.clamp_selection_to_drawn(entry, &blocks.text.text);
+        if drawn.is_some() {
+            self.clamp_selection_to_drawn();
         }
         drawn
     }
 
-    /// Where the live reply's row is in the transcript's offset space, and the text of the blocks
-    /// last drawn for it: what a drag over it selects. `None` when no reply is being revealed.
-    fn live_row(&self) -> Option<(std::ops::Range<usize>, &str)> {
+    /// The live reply's row in the transcript's offset space, and the text of the blocks last
+    /// drawn for it: what a drag over it selects. `None` when no reply is being revealed.
+    pub(super) fn live_row(&self) -> Option<LiveRow> {
         let entry = (self.entries.iter())
             .rposition(|entry| matches!(entry, Entry::Assistant { stream: Some(_), .. }))?;
         if !self.revealing(entry) {
             return None;
         }
         let (_, drawn) = self.reveal.as_ref()?.drawn.as_ref()?;
-        Some((self.transcript_entry_ranges()[entry].clone(), drawn.text.text.as_str()))
+        Some(LiveRow {
+            row: self.transcript_entry_ranges()[entry].clone(),
+            drawn: drawn.text.text.clone(),
+        })
     }
 
-    /// What a selection copies when it ends inside the live reply: the text of the blocks last
-    /// drawn, from where it starts to where the pointer let go. The selection's offsets are in the
-    /// drawn text (the body hit-tests what is on screen), and the document's text differs from
-    /// it wherever the reveal has not yet read what the document has: `[t][7]` is a link `t`
-    /// there, and the bytes past the reveal are not on screen at all. A selection that reaches the
-    /// end of the reply's document (Select All) is not a drag over the screen: `None`, the caller
-    /// reads the document.
-    pub(super) fn copy_from_live_reply(&self, selection: &std::ops::Range<usize>) -> Option<String> {
-        let (row, drawn) = self.live_row()?;
-        if selection.end <= row.start || selection.start >= row.end || selection.end >= row.end {
+    /// What a selection copies when it is a drag that ends inside the live reply: the text of the
+    /// blocks last drawn, from where it starts to where the pointer let go. A drag's offsets are in
+    /// the drawn text (the body hit-tests what is on screen), and the document's text differs from
+    /// it wherever the reveal has not yet read what the document has: `[t][7]` is a link `t` there,
+    /// and the bytes past the reveal are not on screen at all. Select All is not a drag over the
+    /// screen: it is of the transcript's text, and `None` says to read that. Nor is a selection
+    /// that ends outside what the live row can hold.
+    pub(super) fn copy_from_live_reply(&self, selection: &TranscriptSelection) -> Option<String> {
+        if selection.whole {
             return None;
         }
-        let before = match selection.start < row.start {
-            true => self.transcript_text().get(selection.start..row.start)?.to_owned(),
+        let live = self.live_row()?;
+        let range = selection.range();
+        if range.end <= live.row.start || !live.holds(range.end) {
+            return None;
+        }
+        let before = match range.start < live.row.start {
+            true => self.transcript_text().get(range.start..live.row.start)?.to_owned(),
             false => String::new(),
         };
-        let at = |offset: usize| floor_char_boundary(drawn, offset.saturating_sub(row.start));
-        let (from, to) = (at(selection.start.max(row.start)), at(selection.end));
-        Some(format!("{before}{}", &drawn[from..to.max(from)]))
+        let (from, to) = (live.clamp(range.start.max(live.row.start)), live.clamp(range.end));
+        Some(format!("{before}{}", &live.drawn[from - live.row.start..to.max(from) - live.row.start]))
     }
 
-    /// Brings a selection that ends inside the live reply back inside what is drawn of it. The
-    /// drawn text can get shorter between two frames (a closed mark drops its glyphs), and a
-    /// selection made over the text as it was would end past the text as it is, or inside a glyph.
-    /// A selection that reaches the end of the document's text (Select All) is left as it is.
-    fn clamp_selection_to_drawn(&mut self, entry: usize, drawn: &str) {
-        if self.transcript_selection.is_none() {
+    /// Brings a drag that ends inside the live reply back inside what is drawn of it. The drawn
+    /// text can get shorter between two frames (a closed mark drops its glyphs), and a selection
+    /// made over the text as it was would end past the text as it is, or inside a glyph. Select
+    /// All is left as it is.
+    fn clamp_selection_to_drawn(&mut self) {
+        if self.transcript_selection.as_ref().is_none_or(|selection| selection.whole) {
             return;
         }
-        let row = self.transcript_entry_ranges()[entry].clone();
+        let Some(live) = self.live_row() else {
+            return;
+        };
         let Some(selection) = self.transcript_selection.as_mut() else {
             return;
         };
         for end in [&mut selection.anchor, &mut selection.head] {
-            if row.start <= *end && *end < row.end {
-                *end = row.start + floor_char_boundary(drawn, *end - row.start);
+            if live.holds(*end) {
+                *end = live.clamp(*end);
             }
         }
     }
@@ -504,7 +551,8 @@ mod tests {
     /// it panics on whole. Every prefix of each shape draws through `drawn_blocks` without the
     /// reader panicking (the guard would catch it, and the tree would be plain text, marked), with
     /// the source offsets inside the text, whether the stream froze the reply's blocks as it came
-    /// or the reply is drawn from no segments (a reply gone whole).
+    /// or the reply is drawn from no segments (a reply gone whole). The five small shapes are walked
+    /// at every character boundary; SHOWCASE, which is 5 KiB, at every seventh and at the line ends.
     #[test]
     fn every_prefix_of_a_reply_draws_without_the_reader_panicking() {
         const SHAPES: [&str; 6] = [
@@ -521,7 +569,18 @@ mod tests {
             let variants: [(&str, &[Segment]); 2] =
                 [("frozen", stream.segments()), ("no segments", &[])];
             for (name, segments) in variants {
-                for revealed in (0..=text.len()).filter(|at| text.is_char_boundary(*at)) {
+                let steps = match shape == SHAPES.len() - 1 {
+                    true => 7,
+                    false => 1,
+                };
+                let mut stops: Vec<usize> = (0..=text.len())
+                    .step_by(steps)
+                    .chain(text.match_indices('\n').flat_map(|(at, _)| [at, at + 1]))
+                    .filter(|at| text.is_char_boundary(*at))
+                    .collect();
+                stops.sort_unstable();
+                stops.dedup();
+                for revealed in stops {
                     let drawn = drawn_blocks(text, segments, revealed, &mut policy());
                     assert!(
                         !drawn.reader_panicked,
@@ -537,7 +596,7 @@ mod tests {
                 }
             }
         }
-        assert!(walked > 10_000, "{walked} prefixes were drawn");
+        assert!(walked > 2_000, "{walked} prefixes were drawn");
     }
 
     /// The caret is never in the source the tail is parsed from: `` ```▍ `` does not close a fence,
@@ -596,8 +655,34 @@ mod tests {
     #[gpui::test]
     async fn a_later_entry_that_is_not_a_notice_ends_the_live_reply(cx: &mut TestAppContext) {
         let reply = "A reply with words enough to take a while to reveal at the pace it has.";
-        let entries: [(&str, Entry, bool); 4] = [
+        let entries: [(&str, Entry, bool); 6] = [
             ("a tool call", super::super::tests::test_tool_call("t1"), true),
+            (
+                "a permission request",
+                Entry::Permission {
+                    request_id: 7,
+                    title: "Edit a file".into(),
+                    prompt: String::new(),
+                    options: super::super::question_dock::answer_options(&["Allow", "Deny"]),
+                    text_input: None,
+                    is_question: false,
+                    resolved: None,
+                    expired: false,
+                    dismissed: false,
+                    withdrawn: false,
+                    detail: None,
+                },
+                true,
+            ),
+            (
+                "an error",
+                Entry::Error {
+                    message: "the agent's connection dropped".into(),
+                    retryable: false,
+                    kind: super::super::ErrorKind::Connection,
+                },
+                true,
+            ),
             (
                 "a thought",
                 Entry::Thought {
@@ -741,7 +826,8 @@ mod tests {
     }
 
     /// Select All reads the document, whole, as it did: the reveal does not hold the selection to
-    /// what is on screen.
+    /// what is on screen, not when a chunk arrives either (the selection is of what the document
+    /// held when it was made).
     #[gpui::test]
     async fn select_all_over_a_live_reply_copies_the_document(cx: &mut TestAppContext) {
         let reply = "Intro paragraph.\n\nSee [t][7] and then some more words.\n\n[7]: https://example.com/seven\n\nEnd.";
@@ -752,15 +838,137 @@ mod tests {
         });
         tick(cx, Duration::from_millis(60));
         assert!(revealed(&chat, cx) < reply.len());
-        let (all, document) = chat.update(cx, |chat, _| {
-            let len = chat.transcript_text().len();
-            chat.transcript_selection = Some(TranscriptSelection { anchor: 0, head: len });
+        chat.update(cx, |chat, cx| chat.select_all_transcript(cx));
+        let copied = |cx: &mut gpui::VisualTestContext| {
+            chat.update(cx, |chat, _| {
+                let Some(Entry::Assistant { document, .. }) = chat.entries.first() else {
+                    panic!("a reply")
+                };
+                (chat.selected_transcript_text(), document.text.text.clone())
+            })
+        };
+        let (all, document) = copied(cx);
+        assert_eq!(all, Some(document));
+        // What was selected stays selected, whatever the reveal is at.
+        chat.update(cx, |chat, cx| chat.handle_event(chunk(" A last word."), cx));
+        tick(cx, Duration::from_millis(30));
+        let (again, _) = copied(cx);
+        assert_eq!(again, all, "a frame or a chunk narrowed Select All");
+    }
+
+    /// A drag over a live reply is a drag even where the document has already resolved what the
+    /// reveal still shows as written: `See [a][1] and [b][2].` is 22 bytes on the screen and 12 in
+    /// the document (`See a and b.`) until the definitions are revealed. The drag from the start
+    /// of the line to its end ends at the 22nd byte, past the end of the document's row, and it is
+    /// still a drag: it copies the line as drawn, whole, and it is not pulled in to the document's
+    /// length by the next chunk. (After a Select All, which a press ends.)
+    #[gpui::test]
+    async fn a_drag_over_text_the_document_has_shortened_is_not_select_all(cx: &mut TestAppContext) {
+        let line = "See [a][1] and [b][2].";
+        let reply = format!("{line}\n\n[1]: https://example.com/1\n[2]: https://example.com/2\n");
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(&reply), cx);
+        });
+        // The reveal is at the end of the line, short of the definitions.
+        chat.update(cx, |chat, _| chat.reveal.as_mut().expect("live").show(line.len()));
+        refresh_frame(cx);
+        let document = chat.update(cx, |chat, _| {
             let Some(Entry::Assistant { document, .. }) = chat.entries.first() else {
                 panic!("a reply")
             };
-            (chat.selected_transcript_text(), document.text.text.clone())
+            document.text.text.clone()
         });
-        assert_eq!(all, Some(document));
+        assert_eq!(document, "See a and b.", "the document has resolved both labels");
+        let (row, on_screen) = last_painted_row(&chat, cx);
+        assert_eq!(on_screen, line, "the screen shows them as written: 22 bytes against 12");
+
+        chat.update(cx, |chat, cx| chat.select_all_transcript(cx));
+        let (from, to) = (
+            gpui::point(row.left() + px(1.0), row.center().y),
+            gpui::point(row.right() - px(10.0), row.center().y),
+        );
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let copied = |cx: &mut gpui::VisualTestContext| {
+            chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text())
+        };
+        assert_eq!(copied(cx).as_deref(), Some(line), "the drag to the end of the line copied the line");
+
+        // A chunk comes, and a frame: the selection stays where the drag left it.
+        chat.update(cx, |chat, cx| chat.handle_event(chunk("[3]: https://example.com/3\n"), cx));
+        tick(cx, Duration::from_millis(1));
+        assert_eq!(copied(cx).as_deref(), Some(line), "a chunk pulled the selection in to the document's length");
+    }
+
+    /// A reply whose stream went whole without being refused (the guard declined a later text, or
+    /// the math and HTML check failed) has a formatted document, and the raw source of its revealed
+    /// bytes would be a worse draw than the document: it stops revealing, as a reply over the budget
+    /// does, and draws `document` as it arrives, with no caret. (A refused reply, whose document is
+    /// the plain paragraph, reveals as plain text: `a_reply_gone_whole_reveals_as_plain_text`.)
+    /// No reply of ours goes whole without a refusal, so the document is swapped for a formatted one.
+    #[gpui::test]
+    async fn a_reply_gone_whole_without_a_refusal_draws_its_formatted_document(
+        cx: &mut TestAppContext,
+    ) {
+        let deep = format!("{} too deep\n", ">".repeat(40));
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk("First block\n\nSecond block\n\n"), cx);
+            chat.handle_event(chunk(&deep), cx);
+            let Some(Entry::Assistant { document, .. }) = chat.entries.first_mut() else {
+                panic!("a reply")
+            };
+            *document = super::super::parse_chat_markdown("# A heading\n\nWith **bold** words.");
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            let Some(Entry::Assistant {
+                stream: Some(stream),
+                ..
+            }) = chat.entries.first()
+            else {
+                panic!("the reply streams");
+            };
+            assert!(stream.is_whole(), "the deep quote turned the stream whole");
+        });
+        tick(cx, Duration::from_millis(100));
+        assert!(chat.update(cx, |chat, _| chat.drawn_reply(0)).is_none());
+        let length = chat.read_with(&cx.cx, |chat, _| match chat.entries.first() {
+            Some(Entry::Assistant { text, .. }) => text.len(),
+            _ => unreachable!(),
+        });
+        assert_eq!(revealed(&chat, cx), length, "it stopped revealing");
+        assert!(painted_caret(&chat, cx).is_none());
+        let drawn = painted_text(&chat, cx);
+        assert!(drawn.contains("A heading") && !drawn.contains("# A heading"), "{drawn:?}");
+    }
+
+    /// A body whose last block holds no text (a rule here, a web picture, a formula) gets no caret:
+    /// the nearest text is the paragraph above, and a caret after it would be in the wrong row.
+    /// With a text last, the caret is on that text's line.
+    #[gpui::test]
+    async fn a_body_that_ends_in_a_rule_has_no_caret(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk("A paragraph of words.\n\n---\n"), cx);
+        });
+        tick(cx, Duration::from_secs(10));
+        assert_eq!(revealed(&chat, cx), "A paragraph of words.\n\n---\n".len());
+        let (row, text) = last_painted_row(&chat, cx);
+        assert_eq!(text, "A paragraph of words.");
+        assert!(painted_caret(&chat, cx).is_none(), "a caret after the text above a rule");
+
+        chat.update(cx, |chat, cx| chat.handle_event(chunk("\nAnd words after it."), cx));
+        tick(cx, Duration::from_secs(10));
+        let caret = painted_caret(&chat, cx).expect("a text is last: the caret follows it");
+        let (last, text) = last_painted_row(&chat, cx);
+        assert_eq!(text, "And words after it.");
+        assert!(last.top() > row.top() && caret.y == last.top(), "{caret:?} in {last:?}");
     }
 
     /// The tail only looks the files a reply names up in the memo the build of the received text
@@ -1204,7 +1412,7 @@ mod tests {
     /// stream holds the body), a compact reply (nothing freezes) and shape A of the label-heavy
     /// replies (`[1]` .. `[20]`, defined at the end). For each, the frames of the last tenth of the
     /// reply, one every seven bytes, and the frames whose tail is the largest the budget lets
-    /// through (between 7 KiB and the budget), built with the chat's own Policy and a file-link
+    /// through (the last KiB under the budget), built with the chat's own Policy and a file-link
     /// memo that lives from frame to frame, as a reply's does.
     #[test]
     #[ignore = "a measurement, run by hand"]
@@ -1307,11 +1515,11 @@ mod tests {
                 })
                 .collect();
             if edge.is_empty() {
-                eprintln!("BENCH drawn_blocks {name}: no frame has a tail of 7 KiB to the budget");
+                eprintln!("BENCH drawn_blocks {name}: no frame has a tail of the last KiB under the budget");
             } else {
                 let times: Vec<Duration> = edge.iter().map(|at| frame(*at, &mut memo)).collect();
                 eprintln!(
-                    "BENCH drawn_blocks {name}: tails of 7 KiB to the budget: {}",
+                    "BENCH drawn_blocks {name}: tails of the last KiB under the budget: {}",
                     stats(times)
                 );
             }

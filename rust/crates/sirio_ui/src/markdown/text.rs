@@ -17,6 +17,10 @@ pub(crate) struct PlainText {
     /// Blocks a blank line apart, the texts of one block a line end apart.
     pub text: String,
     pub parts: Vec<Part>,
+    /// The last thing the tree draws is a text the renderer pushes (a paragraph, a heading, code),
+    /// so the last part is where its end is. A tree that ends in a picture, a rule, a formula or a
+    /// table of contents has the last text above it, and an end that is not here.
+    pub ends_in_text: bool,
 }
 
 /// One text of the tree.
@@ -149,9 +153,30 @@ impl Walk {
     }
 }
 
+/// Whether the last thing `nodes` draws is a text the renderer pushes to the gather.
+fn ends_in_text(nodes: &[Node]) -> bool {
+    match nodes.last() {
+        Some(Node::Paragraph(inline) | Node::Heading(_, inline)) => {
+            !inline.styles.iter().any(|(_, style)| *style == Style::Math)
+        }
+        Some(Node::Code { .. }) => true,
+        Some(
+            node @ (Node::Quote(_)
+            | Node::List { .. }
+            | Node::Footnote { .. }
+            | Node::Alert { .. }
+            | Node::Table { .. }),
+        ) => bodies(node).last().is_some_and(|body| ends_in_text(body)),
+        _ => false,
+    }
+}
+
 /// The plain text of `nodes`, one block per root node that has a text.
 pub(crate) fn plain_text(nodes: &[Node]) -> PlainText {
-    let mut out = PlainText::default();
+    let mut out = PlainText {
+        ends_in_text: ends_in_text(nodes),
+        ..PlainText::default()
+    };
     let mut first = true;
     for node in nodes {
         let mut walk = Walk::default();

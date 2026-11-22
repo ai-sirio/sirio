@@ -1445,6 +1445,11 @@ struct ChatPersistence {
 struct TranscriptSelection {
     anchor: usize,
     head: usize,
+    /// Made by Select All (`select_all_transcript`), and by nothing else: a press or a drag makes a
+    /// selection of its own. Select All is of the transcript's text, the document of a live reply
+    /// included; a drag over a live reply is of what its body drew (`reveal.rs`), and its offsets
+    /// are the drawn text's, which can run past the document's.
+    whole: bool,
 }
 
 /// The assistant-response copy affordance currently showing its short-lived
@@ -1623,6 +1628,7 @@ impl TranscriptInteraction {
             cx.notify();
             chat.transcript_selection.as_mut().is_some_and(|selection| {
                 selection.head = head;
+                selection.whole = false;
                 selection.anchor != selection.head
             })
         });
@@ -1655,7 +1661,11 @@ impl TranscriptInteraction {
         cx: &mut App,
     ) {
         self.chat.update(cx, |chat, cx| {
-            chat.transcript_selection = Some(TranscriptSelection { anchor, head });
+            chat.transcript_selection = Some(TranscriptSelection {
+                anchor,
+                head,
+                whole: false,
+            });
             chat.transcript_dragging = true;
             cx.notify();
         });
@@ -1880,6 +1890,7 @@ impl Element for TranscriptSelectableText {
                     chat.transcript_selection = Some(TranscriptSelection {
                         anchor: position,
                         head: position,
+                        whole: false,
                     });
                     chat.transcript_dragging = true;
                     cx.notify();
@@ -5143,12 +5154,13 @@ impl Chat {
     }
 
     fn selected_transcript_text(&self) -> Option<String> {
-        let selection = self.transcript_selection.as_ref()?.range();
+        let made = self.transcript_selection.as_ref()?;
+        let selection = made.range();
         if selection.start >= selection.end {
             return None;
         }
         // A drag that ends in the reply being revealed copies what is on the screen.
-        if let Some(on_screen) = self.copy_from_live_reply(&selection) {
+        if let Some(on_screen) = self.copy_from_live_reply(made) {
             return Some(on_screen);
         }
         self.transcript_text().get(selection).map(ToOwned::to_owned)
@@ -5768,6 +5780,7 @@ impl Chat {
             self.transcript_selection = Some(TranscriptSelection {
                 anchor: 0,
                 head: len,
+                whole: true,
             });
         }
         cx.notify();
@@ -5818,16 +5831,24 @@ impl Chat {
 
     /// Brings the transcript's selection back inside the transcript. A streamed reply can
     /// get shorter between two chunks (a closed mark drops its glyphs), and a selection made
-    /// over the text as it was would end past the text as it is, or inside a glyph.
+    /// over the text as it was would end past the text as it is, or inside a glyph. An end of a
+    /// drag that lies in the live reply is held to the text drawn for it, which can be longer
+    /// than the document's (`reveal.rs`); every other end, and Select All, to the document's.
     fn clamp_transcript_selection(&mut self) {
         if self.transcript_selection.is_none() {
             return;
         }
         let text = self.transcript_text();
+        let live = self.live_row();
         let Some(selection) = self.transcript_selection.as_mut() else {
             return;
         };
+        let drag = !selection.whole;
         for end in [&mut selection.anchor, &mut selection.head] {
+            if let Some(live) = live.as_ref().filter(|live| drag && live.holds(*end)) {
+                *end = live.clamp(*end);
+                continue;
+            }
             *end = (*end).min(text.len());
             while !text.is_char_boundary(*end) {
                 *end -= 1;
@@ -14710,6 +14731,7 @@ two"
             chat.transcript_selection = Some(TranscriptSelection {
                 anchor: ranges[0].start,
                 head: ranges[0].end,
+                whole: false,
             });
             assert!(
                 chat.selected_transcript_text()
@@ -18552,6 +18574,7 @@ two"
             chat.transcript_selection = Some(TranscriptSelection {
                 anchor: start,
                 head: end,
+                whole: false,
             });
             assert_eq!(
                 chat.selected_transcript_text().as_deref(),
