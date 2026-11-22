@@ -17,12 +17,17 @@
 //!   rewinds to it, and no cut falls between two references.
 //! - **`$$` pairs.** Ely pairs every run of two dollars outside code with the next one, from the
 //!   top of the reply, and a fence pair is a math block across the blocks between. The cut never
-//!   passes a run that is still waiting for its partner.
+//!   falls inside a pair, nor passes a run that is still waiting for its partner.
 //! - **Block HTML room.** It is the cap less the deepest Markdown of the whole reply. Each
 //!   segment keeps the deepest it was built under, and is built again when that changes.
-//! - **A line still being written.** A block that starts on it may not start there once it is
-//!   done (`#` and then `#tag`, a `| ` that is no row of the table above), and it would join the
-//!   block before it: that block stays in the tail until the line ends.
+//! - **A block start that a line to come can undo.** A block that starts right under a line of
+//!   text is told by the lines after it (a table needs its delimiter row, a definition goes on
+//!   over its title), and what the text above is changes with them. After a blank line a block
+//!   starts whatever follows, but the line it starts on may still change under it: `2` is a
+//!   paragraph, `2.` the next item of the list above (`#` and then `#tag` too). So a cut falls
+//!   only before a block that follows a blank line, and not on the line being written.
+//! - **A byte order mark.** Ely drops one from the start of the text it reads and keeps any
+//!   other as text, so no part starts at one except the first.
 //! - **The nesting cap.** A part the guard refuses makes the whole reply one plain paragraph, as
 //!   [`build`] does: from then on every chunk is a full build.
 //!
@@ -87,6 +92,8 @@ impl Label {
             (true, Some(rest)) => rest,
             (true, None) => return false,
         };
+        // A reference may pad its label: the white space at both ends is not part of it.
+        let rest = rest.trim_start_matches(char::is_whitespace);
         if !self.name.is_ascii() {
             return true;
         }
@@ -103,8 +110,14 @@ impl Label {
                 while text.peek().is_some_and(|next| next.is_whitespace()) {
                     text.next();
                 }
-            } else if text.next().is_none_or(|found| !found.eq_ignore_ascii_case(&wanted)) {
-                return false;
+            } else {
+                match text.next() {
+                    None => return false,
+                    // Case folding writes some ASCII letters in other scripts (`ß` is `ss`).
+                    Some(found) if !found.is_ascii() => return true,
+                    Some(found) if !found.eq_ignore_ascii_case(&wanted) => return false,
+                    Some(_) => {}
+                }
             }
         }
         true
@@ -209,25 +222,61 @@ fn line_start(text: &str, at: usize) -> usize {
     text[..at].rfind(['\n', '\r']).map_or(0, |end| end + 1)
 }
 
-/// Where the first `$$` run still waiting for a partner stands in `text`, if there is one.
-/// Ely pairs `$$` runs from the top of the reply: every run of two dollars or more outside code
-/// takes the next as long (Ely's `flow::paired`). A pair is settled whatever follows; a run
-/// that has none yet may take one that arrives, and everything after it with it.
-fn open_dollars(text: &str) -> Option<usize> {
-    if !text.contains("$$") {
-        return None;
-    }
-    let text = lone_crs_as_lf(text);
-    let held = not_prose(&text);
-    let bytes = text.as_bytes();
-    let mut at = 0;
-    while let Some(open) = next_run(bytes, at, 2, &held) {
-        match next_run(bytes, open.end, open.len(), &held) {
-            Some(close) => at = close.end,
-            None => return Some(open.start),
+/// Where the `$$` runs of a text pair. Ely pairs them from the top of the reply: every run of
+/// two dollars or more outside code takes the next as long (Ely's `flow::paired`), whatever
+/// stands between the two.
+#[derive(Default)]
+struct Dollars {
+    /// Each pair, from the first byte of its opening run to the last of its closing one.
+    pairs: Vec<Range<usize>>,
+    /// The first run that has no partner yet.
+    open: Option<usize>,
+}
+
+impl Dollars {
+    fn of(text: &str) -> Self {
+        let mut found = Self::default();
+        if !text.contains("$$") {
+            return found;
         }
+        let text = lone_crs_as_lf(text);
+        let held = not_prose(&text);
+        let bytes = text.as_bytes();
+        let mut at = 0;
+        while let Some(open) = next_run(bytes, at, 2, &held) {
+            match next_run(bytes, open.end, open.len(), &held) {
+                Some(close) => {
+                    found.pairs.push(open.start..close.end);
+                    at = close.end;
+                }
+                None => {
+                    found.open = Some(open.start);
+                    break;
+                }
+            }
+        }
+        found
     }
-    None
+
+    /// Whether a part may start at byte `at`. A pair is settled whole: a part that starts
+    /// between its runs would pair them with others. A run that has no partner yet may take one
+    /// that arrives, and everything after it with it.
+    fn allows(&self, at: usize) -> bool {
+        self.open.is_none_or(|open| at <= open)
+            && !self.pairs.iter().any(|pair| pair.start < at && at < pair.end)
+    }
+}
+
+/// Whether the line before the one that starts at byte `at` of `text` (a line start after the
+/// first) is blank. A block that follows a blank line starts there whatever the lines after it
+/// say; under a line of text it starts only if they say so.
+fn after_blank_line(text: &str, at: usize) -> bool {
+    let before = &text[..at];
+    let before = (before.strip_suffix("\r\n"))
+        .or_else(|| before.strip_suffix(['\n', '\r']))
+        .unwrap_or(before);
+    let line = &before[before.rfind(['\n', '\r']).map_or(0, |end| end + 1)..];
+    line.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
 }
 
 /// `text` with each lone CR as LF: what pulldown-cmark ends a line at, of the same width.
@@ -280,7 +329,12 @@ fn not_prose(text: &str) -> Vec<Range<usize>> {
 }
 
 /// The first run of at least `len` dollars from byte `from`, outside `held`.
-fn next_run(bytes: &[u8], from: usize, len: usize, held: &[Range<usize>]) -> Option<Range<usize>> {
+fn next_run(
+    bytes: &[u8],
+    from: usize,
+    len: usize,
+    held: &[Range<usize>],
+) -> Option<Range<usize>> {
     let mut at = from;
     while at < bytes.len() {
         if let Some(block) = held.iter().find(|block| block.contains(&at)) {
@@ -315,12 +369,15 @@ pub(crate) struct Segment {
 }
 
 /// A reply that streams in, built part by part. `text` only grows between two calls of
-/// [`update`](Self::update); a text that does not start the way the last one did starts over.
+/// [`update`](Self::update); a text that does not start with the bytes frozen so far is no
+/// continuation of the reply, and starts over.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StreamingDoc {
     /// Everything before it is frozen: the segments tile `text[..cut]`.
     cut: usize,
     segments: Vec<Segment>,
+    /// The bytes frozen, `text[..cut]`: what a text must start with to continue the reply.
+    frozen: String,
     /// The nesting guard refused a part: every build is a build of the whole reply.
     whole: bool,
 }
@@ -344,11 +401,11 @@ impl StreamingDoc {
 
     /// The tree of `text`, the reply so far: what [`build`] returns for it.
     pub(crate) fn update(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
+        if !text.starts_with(&self.frozen) {
+            *self = Self::new();
+        }
         if self.whole {
             return build(text, policy);
-        }
-        if self.cut > text.len() || !text.is_char_boundary(self.cut) {
-            *self = Self::new();
         }
         let (mut tail, read, scan) = loop {
             let mut tail = parts(
@@ -401,6 +458,7 @@ impl StreamingDoc {
     fn truncate(&mut self, index: usize) {
         self.cut = self.segments[index].range.start;
         self.segments.truncate(index);
+        self.frozen.truncate(self.cut);
     }
 
     /// The first frozen segment the tail makes wrong, if there is one.
@@ -460,17 +518,10 @@ impl StreamingDoc {
             .filter(|at| *at > 0)
             .collect();
         starts.dedup();
-        // A block that starts on a line still being written may not start there once the line is
-        // done: `#` and then `#tag`, `<div` and then `<divine`, a `| ` that is no row of the table
-        // above it. The block before it was ended by that line and would be joined by it: it
-        // stays in the tail until the line is complete.
-        if !tail.ends_with(['\n', '\r']) && starts.last() == Some(&line_start(tail, tail.len())) {
-            starts.pop();
-        }
-
         // Between the first and the last place a defined label is written, a cut would part a
         // reference from its definition. Between two footnote references it would number the
-        // second from one. Past a `$$` run that waits for a partner it would pair it elsewhere.
+        // second from one. Inside a `$$` pair, or past a run that waits for a partner, it would
+        // pair the runs after it elsewhere.
         let mut spans: Vec<(usize, usize)> = (scan.labels.iter())
             .filter_map(|label| label.mentions(tail))
             .collect();
@@ -480,9 +531,16 @@ impl StreamingDoc {
         if let (Some(first), Some(last)) = (notes.iter().min(), notes.iter().max()) {
             spans.push((*first, *last));
         }
-        let open = open_dollars(tail).unwrap_or(usize::MAX);
+        let dollars = Dollars::of(tail);
+        // The line being written: the block that starts on it may be none once it is done, or
+        // taken up by the block above (`#` and `#tag`, `2` and `2.` after a list item).
+        let unfinished = (!tail.ends_with(['\n', '\r'])).then(|| line_start(tail, tail.len()));
         starts.retain(|at| {
-            *at <= open && !spans.iter().any(|(first, last)| first < at && at <= last)
+            after_blank_line(tail, *at)
+                && Some(*at) != unfinished
+                && !tail[*at..].starts_with('\u{feff}')
+                && dollars.allows(*at)
+                && !spans.iter().any(|(first, last)| first < at && at <= last)
         });
 
         let mut from = 0;
@@ -498,8 +556,9 @@ impl StreamingDoc {
                 true,
             );
             if made.refused || made.declined {
+                // The segments made so far stay: they tile the text up to the cut.
                 self.whole = true;
-                return;
+                break;
             }
             let own = Scan::of(made.read.as_deref().unwrap_or_default());
             self.segments.push(Segment {
@@ -514,6 +573,7 @@ impl StreamingDoc {
             });
             from = at;
         }
+        self.frozen.push_str(&text[self.cut..self.cut + from]);
         self.cut += from;
     }
 }

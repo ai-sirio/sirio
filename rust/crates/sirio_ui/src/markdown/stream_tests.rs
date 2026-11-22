@@ -28,9 +28,21 @@
 // 15. A cut inside a fence, a list, a quote, a table or an HTML block; or after the indent of
 //     an indented block, which turns an indented code block into a paragraph.
 // 16. A cut that never advances: the equality holds only because nothing was ever frozen.
-// 17. A block that starts on a line still being written and is no block start once the line is
-//     done (`#` then `#tag`, `<div` then `<divine`, a `| ` that is no row of the table above):
-//     the block before it frozen as if that start were certain.
+// 17. A block start that depends on a line that is not there yet: on the line being written
+//     (`#` then `#tag`, `<div` then `<divine`, a `| ` that is no row of the table above); on the
+//     lines after it (a table that needs its delimiter row, and may interrupt a paragraph; a
+//     definition's title on the next lines, which takes what looked like a paragraph); on the
+//     line before (after a blank line `2` is a paragraph and `2.` the next item of the list
+//     above). The block before it frozen as if that start were certain.
+// 18. A cut inside a pair of `$$` runs, a stray one in prose or display math written inline: the
+//     runs after the cut pair with each other, and not as they do in the whole.
+// 19. A byte order mark that starts a part in the middle of a reply: Ely drops it from the text
+//     it reads, and in the whole reply it is text.
+// 20. A reference that pads its label (`[ x ]`) not taken for a mention of `x`: no hold, no rewind.
+// 21. A text that does not continue the one frozen (another reply, an edited one) answered with
+//     the segments of the old one.
+// 22. `segments()` and `cut()` out of step after a part was refused: the segments must always
+//     tile the text up to the cut.
 
 use super::*;
 use crate::markdown::{Policy, Surface, build};
@@ -98,7 +110,8 @@ fn assert_equivalent_at_every_cut(fixture: &str, chunk: usize) {
 /// [`assert_equivalent_at_every_cut`], against the builds of the cuts already made.
 ///
 /// One stream is fed `chunk` bytes at a time; at each step the cuts up to the next one are
-/// checked on a clone of it, which is the stream a reply cut there would have been.
+/// checked on a clone of it, which is the stream a reply cut there would have been. The clone's
+/// segments must tile the text up to its cut too (failures 6 and 22).
 fn assert_equivalent_against(fixture: &str, chunk: usize, fulls: &[Option<MarkdownBlocks>]) {
     let mut policy = chat();
     let mut stream = StreamingDoc::new();
@@ -115,6 +128,7 @@ fn assert_equivalent_against(fixture: &str, chunk: usize, fulls: &[Option<Markdo
         for cut in (fed + 1..=next).filter(|at| fixture.is_char_boundary(*at)) {
             let mut fork = stream.clone();
             let streamed = fork.update(&fixture[..cut], &mut policy);
+            assert_tiles(&fork, &fixture[..cut]);
             let full = fulls[cut].as_ref().expect("a build of every boundary");
             assert_same(
                 &streamed,
@@ -253,12 +267,35 @@ fn an_open_display_math_holds_the_cut() {
 }
 
 /// A `$$` that is not on a line of its own pairs with the next run, bare lines or not: one
-/// stray run before a fence pair leaves the pair unfenced (failure 12).
+/// stray run before a fence pair takes the first fence, and the second fence is left alone
+/// (failures 12 and 18). The math body holds a blank line, so that the two readings differ: a lone
+/// formula is the same math block either way.
 #[test]
 fn a_stray_dollar_run_shifts_which_fences_pair() {
-    let text = "cost $$ here\n\npara\n\n$$\nx\n$$\n\nafter\n\nlast\n";
-    assert_equivalent_at_every_cut(text, 3);
-    assert_equivalent_at_every_cut(text, 1);
+    for text in [
+        "cost $$ here\n\npara\n\n$$\nx\n\ny\n$$\n\nafter\n\nlast\n",
+        "cost $$ here\n\npara\n\n$$\nx\n$$\n\nafter\n\nlast\n",
+    ] {
+        assert_equivalent_at_every_cut(text, 3);
+        assert_equivalent_at_every_cut(text, 1);
+    }
+}
+
+/// A pair of runs that is no fence (display math written inline) can still stand across
+/// blocks, and the cut may not fall inside it either: the fences after it would pair otherwise
+/// (failure 18).
+#[test]
+fn a_dollar_pair_across_blocks_is_not_cut() {
+    for text in [
+        "$$x = 1\n\ny = 2$$\n\n$$\nz\n\nw\n$$\n\nend\n",
+        "a $$b\n\nc$$ d\n\n$$\nz\n\nw\n$$\n\nend\n",
+    ] {
+        // One byte at a time the cut gets to the fence in time; a chunk that brings both
+        // fences at once finds it inside the pair.
+        for chunk in [1, 5, 11, 17, 29] {
+            assert_equivalent_at_every_cut(text, chunk);
+        }
+    }
 }
 
 /// A closed pair lets the cut pass, so a math reply still streams part by part (failure 16),
@@ -302,8 +339,8 @@ fn crlf_and_bom_replies_match() {
     for text in [
         "\u{feff}# T\r\n\r\npara\r\n\r\n- a\r\n- b\r\n",
         "# T\r\rpara\r\r- a\r- b\r\r```\rcode\r```\r\rend\r",
-        "\u{feff}para\r\n\r\n$$\r\nx\r\n$$\r\n\r\n![a](b.png)\r\n\r\n```rust\r\nlet a = 1;\r\n```\r\n\r\n\
-         end\r\n",
+        "\u{feff}para\r\n\r\n$$\r\nx\r\n$$\r\n\r\n![a](b.png)\r\n\r\n\
+         ```rust\r\nlet a = 1;\r\n```\r\n\r\nend\r\n",
     ] {
         assert_equivalent_at_every_cut(text, 3);
         assert_equivalent_at_every_cut(text, 1);
@@ -386,6 +423,115 @@ fn a_block_start_on_an_unfinished_line_is_not_trusted() {
     }
 }
 
+/// A block that starts on a line right under a line of text can start there only by what the
+/// lines after it say: a table needs its delimiter row, and may interrupt a paragraph, so the
+/// text above it is a paragraph of its own or the first lines of the table's (failure 17).
+#[test]
+fn a_table_under_a_text_line_depends_on_its_delimiter_row() {
+    for text in [
+        // The delimiter row has three cells, the header two: no table, one paragraph.
+        "Intro line\n| a | b |\n|---|---|---|\n| 1 | 2 |\n\nafter\n\nlast\n",
+        "Intro line\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n\nlast\n",
+        "Intro\nsecond line\n| a |\n|---|\n| 1 |\n\nafter\n\nlast\n",
+        "# Head\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n\nlast\n",
+    ] {
+        assert_equivalent_at_every_cut(text, 1);
+        assert_equivalent_at_every_cut(text, 5);
+    }
+}
+
+/// After a blank line a block can still be taken up by the one before it, until its line is
+/// done: `2` is a paragraph and `2.` the next item of the list above (failure 17).
+#[test]
+fn a_list_item_after_a_blank_line_is_no_paragraph_until_its_line_ends() {
+    for text in [
+        "1. a\n\n2. b\n\nafter\n\nlast\n",
+        "- a\n\n- b\n\nafter\n\nlast\n",
+        "- a\n\n* b\n\n* c\n\nlast\n",
+    ] {
+        assert_equivalent_at_every_cut(text, 1);
+    }
+}
+
+/// Ely drops one byte order mark from the start of the text it reads, and reads any other as
+/// text: a part that starts at one would lose it (failure 19).
+#[test]
+fn a_byte_order_mark_inside_a_reply_is_text() {
+    for text in [
+        "para\n\n\u{feff}# T\n\nmore\n\nlast\n",
+        "\u{feff}para\n\n\u{feff}\u{feff}x\n\nmore\n\nlast\n",
+        "para\r\n\r\n\u{feff}- a\r\n- b\r\n\r\nlast\r\n",
+    ] {
+        assert_equivalent_at_every_cut(text, 1);
+    }
+}
+
+/// A reference may pad its label with white space (`[ x ]` names `[x]:`), so that is a mention
+/// of the label too (failure 20).
+#[test]
+fn a_padded_reference_label_is_a_mention() {
+    for text in [
+        "[a][ x ]\n\npara\n\n[x]: https://e.com\n\nmore\n\nlast\n",
+        "[a][\tx]\n\npara\n\n[x]: https://e.com\n\nmore\n\nlast\n",
+        "[ x ]\n\npara\n\n[x]: https://e.com\n\nmore\n\nlast\n",
+        "ref[^ n ]\n\npara\n\n[^n]: note\n\nmore\n\nlast\n",
+        "[x]: https://e.com\n\npara\n\n[a][ x ]\n\nmore\n\nlast\n",
+    ] {
+        assert_equivalent_at_every_cut(text, 1);
+    }
+}
+
+/// A reference matches its definition by case folding, which writes some ASCII letters in other
+/// ones: `ß` is `ss`, and the Kelvin sign is `k` (failure 20).
+#[test]
+fn a_label_that_folds_to_ascii_is_a_mention() {
+    for text in [
+        "[a][ß]\n\npara\n\n[ss]: https://e.com\n\nmore\n\nlast\n",
+        "[a][\u{212a}]\n\npara\n\n[k]: https://e.com\n\nmore\n\nlast\n",
+    ] {
+        assert_equivalent_at_every_cut(text, 1);
+    }
+}
+
+/// A definition goes on over the lines under it: its title can stand on the next line, and can
+/// run over several, so what follows it is no block until the title is closed or given up.
+#[test]
+fn a_definition_title_on_the_next_lines_stays_with_it() {
+    for text in [
+        "para\n\n[x]: https://e.com\n\"multi\nline\"\n\nend\n\nlast\n",
+        "para\n\n[x]: https://e.com\n'multi\nline'\n\nend\n\nlast\n",
+        "para\n\n[x]: https://e.com\n(multi\nline)\n\nend\n\nlast\n",
+        "para\n\n[x]:\nhttps://e.com\n\"title\"\nafter\n\nlast\n",
+        "para\n\n[x]: https://e.com\n\"never closed\nstill open\n\nend\n\nlast\n",
+        "[a][x]\n\n[x]: https://e.com\n\"t\" and more\n\nend\n\nlast\n",
+    ] {
+        assert_equivalent_at_every_cut(text, 1);
+    }
+}
+
+/// `update` takes a text that only grows. One that does not start with what was frozen starts
+/// over, whatever its length: the doc is for one reply.
+#[test]
+fn a_text_that_does_not_continue_the_last_one_starts_over() {
+    let mut policy = chat();
+    let first = "one\n\ntwo\n\nthree\n\nfour\n";
+    let mut stream = StreamingDoc::new();
+    stream.update(first, &mut policy);
+    assert!(stream.cut() > 0, "something froze");
+    for second in [
+        "ONE\n\ntwo\n\nthree\n\nfour\n\nfive\n",
+        "one\n\nTWO\n\nthree\n\nfour\n\nfive\n",
+        "uno\n\ndue\n\ntre\n\nquattro\n",
+        "one\n",
+        "",
+    ] {
+        let mut fork = stream.clone();
+        let streamed = fork.update(second, &mut policy);
+        assert_same(&streamed, &build(second, &mut policy), &format!("then {second:?}"));
+        assert_tiles(&fork, second);
+    }
+}
+
 /// Block HTML nests to what the Markdown of the whole reply leaves (failure 11). A `div` makes
 /// no level, so half of the fixtures nest `blockquote`s, which past the room keep their text.
 #[test]
@@ -426,6 +572,26 @@ fn a_reply_past_the_cap_turns_whole() {
     ));
 }
 
+/// Another reply fed to a doc that turned whole starts over, as it does for one that did not
+/// (failure 21).
+#[test]
+fn another_reply_after_a_whole_one_starts_over() {
+    let mut policy = chat();
+    let mut stream = StreamingDoc::new();
+    let text = format!("one\n\ntwo\n\n{}x\n", "> ".repeat(33));
+    let mut fed = 0;
+    while fed < text.len() {
+        fed = (fed + 3).min(text.len());
+        stream.update(&text[..fed], &mut policy);
+    }
+    assert!(stream.is_whole());
+    assert!(stream.cut() > 0, "something was frozen before the reply turned whole");
+    let other = "zzz\n\nyyy\n";
+    let streamed = stream.update(other, &mut policy);
+    assert!(!stream.is_whole(), "another reply is not past the cap");
+    assert_same(&streamed, &build(other, &mut policy), "another reply after a whole one");
+}
+
 #[test]
 fn a_toc_lists_headings_that_arrive_after_it() {
     let text = "[[toc]]\n\n# A\n\n# B\n\n## A\n";
@@ -451,7 +617,8 @@ fn the_cut_never_moves_back_except_on_a_rewind() {
             let fed = ((step + 1) * chunk).min(SHOWCASE.len());
             assert!(
                 fed > definition && fed < end + chunk,
-                "chunk {chunk}: the cut moved back at byte {fed}, not at the definition ({definition})"
+                "chunk {chunk}: the cut moved back at byte {fed}, not at the definition \
+                 ({definition})"
             );
         }
         assert!(
