@@ -321,9 +321,11 @@ fn a_closed_transport_is_not_a_failed_turn() {
             other => panic!("unexpected event for a closed transport: {other:?}"),
         }
     };
+    // The prompt handler's own error, not the connection's tail ("ACP transport closed
+    // unexpectedly"): the handler is what chose `TransportError` over `TurnFailed`.
     assert!(
-        message.to_ascii_lowercase().contains("transport closed"),
-        "the report should name the closed transport: {message}"
+        message.starts_with("prompt failed:") && message.contains("Incoming transport closed"),
+        "the TransportError should come from the prompt handler: {message}"
     );
     let _ = client.shutdown();
 }

@@ -5428,10 +5428,11 @@ PY
   done
   check_panel "the warnings, once per change, then the refusals, each saying which and when" \
     "[r['text'] for r in c['transcript'] if r['kind'] == 'warning'] == ['Approaching the 5-hour usage limit: 92% used, resets at $ts.', 'Approaching the 5-hour usage limit: 92% used, resets at $ts.', '5-hour usage limit reached, resets at $ts.', \"Extra usage limit reached (your team's pooled budget), resets at $tl.\"]"
-  # The refusal is a failed turn, so its text is an error row, still drawn once (it was an assistant row
-  # before a failed result became `TurnFailed`).
-  check_panel "the CLI's refusal text is one error row" \
-    "len([r for r in c['transcript'] if r['kind'] == 'error' and r.get('text') == \"You've hit your limit · resets 3:15pm (UTC)\"]) == 1"
+  # The refusal is a failed turn, so its text is an error row (it was an assistant row before a failed result
+  # became `TurnFailed`), and the only row of any kind that holds it: the fixture's synthetic assistant line
+  # repeats the text and is not drawn.
+  check_panel "the CLI's refusal text is exactly one row, an error row" \
+    "[r['kind'] for r in c['transcript'] if r.get('text') == \"You've hit your limit · resets 3:15pm (UTC)\"] == ['error']"
   echo "OK: limit_notice: the rate-limit rows name the window, the fill, the scope and the reset"
   stop_app
 }

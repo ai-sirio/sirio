@@ -2684,9 +2684,11 @@ def cli_notices_prompt(message):
 # again. `unasked interrupt` is a result that reads like a Stop's (`error_during_execution`,
 # "Interrupted by user") that nobody asked for. `hold` streams a word and waits for the
 # `interrupt` request, then answers it the way the real CLI does: `error_during_execution`,
-# `is_error`, no stop reason. Any other prompt is an ordinary answer, so a test can tell the
-# client is still usable after a failure. The results carry no `stop_reason`, as the CLI's own
-# failures do.
+# `is_error`, no stop reason. `hold late` is `hold` with the answer owed: the CLI winds the
+# stopped turn down after Stop freed the composer, so the stopped turn's result is written only
+# when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
+# ordinary answer, so a test can tell the client is still usable after a failure. The results
+# carry no `stop_reason`, as the CLI's own failures do.
 # ---------------------------------------------------------------------------
 
 FAILED_TURNS = {
@@ -2696,6 +2698,8 @@ FAILED_TURNS = {
     "unasked interrupt": ("error_during_execution", "Interrupted by user"),
 }
 HOLDING = threading.Event()
+HOLDING_LATE = threading.Event()
+STOPPED_RESULT_OWED = threading.Event()
 
 
 def interrupted_result():
@@ -2707,9 +2711,12 @@ def interrupted_result():
 def failed_turn(prompt):
     if not INIT_PRINTED:
         init_line()
-    if prompt == "hold":
+    if STOPPED_RESULT_OWED.is_set():
+        STOPPED_RESULT_OWED.clear()
+        interrupted_result()
+    if prompt in ("hold", "hold late"):
         text("working")
-        HOLDING.set()
+        (HOLDING_LATE if prompt == "hold late" else HOLDING).set()
         return
     if prompt not in FAILED_TURNS:
         text("ok")
@@ -2941,6 +2948,9 @@ def main():
                 if MODE == "failed_turns" and HOLDING.is_set():
                     HOLDING.clear()
                     interrupted_result()
+                elif MODE == "failed_turns" and HOLDING_LATE.is_set():
+                    HOLDING_LATE.clear()
+                    STOPPED_RESULT_OWED.set()
                 if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):
                     result(subtype="error_during_execution", is_error=True,
                            text_body="Interrupted by user")

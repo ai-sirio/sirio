@@ -100,7 +100,13 @@ pub(crate) struct Fold {
     /// `content_block_stop` has closed, by block index. A stop does not say what it closed,
     /// and indexes restart in every message, so a message's start and end empty it.
     open_blocks: HashMap<u64, String>,
-    /// The worker sent an `interrupt` since the turn began, and no `result` has closed that
+    /// A prompt was written and its `result` has not come. A `result` with none open is a turn
+    /// the CLI started on its own.
+    turn_open: bool,
+    /// Prompts written while a turn was open: each starts its turn at the `result` of the one
+    /// before it.
+    queued_prompts: usize,
+    /// The worker sent an `interrupt` during the open turn, and no `result` has closed that
     /// turn yet: the result that does is a stopped turn's, whatever it says.
     interrupted: bool,
     /// A text delta arrived while no message was open. The real CLI never
@@ -130,19 +136,31 @@ impl Fold {
         Self::default()
     }
 
-    /// The worker wrote an `interrupt` (a Stop). The `result` that closes the turn is then a
-    /// stopped turn's: it keeps the events of a turn that ended (`TurnEnded`, and its text as a
-    /// reply), not a failure's, whatever its subtype and text say. The real CLI answers an
+    /// The worker wrote an `interrupt` (a Stop). The `result` that closes the turn then in flight
+    /// is a stopped turn's: it keeps the events of a turn that ended (`TurnEnded`, and its text as
+    /// a reply), not a failure's, whatever its subtype and text say. The real CLI answers an
     /// interrupt with `error_during_execution`, `is_error` and no text, so no string in the
     /// result tells a Stop from a failure; only the worker knows it asked.
+    ///
+    /// With no turn open there is nothing to interrupt (agents run on, or the turn's `result` is
+    /// read and its end is still on its way to the surface), so the Stop marks nothing.
     pub(crate) fn interrupt_sent(&mut self) {
-        self.interrupted = true;
+        if self.turn_open {
+            self.interrupted = true;
+        }
     }
 
-    /// The worker sent a prompt: a new turn begins, and a Stop sent before it (with nothing
-    /// to interrupt, or whose result never came) is not this turn's.
+    /// The worker wrote a prompt. A turn is open from here to its `result`, as in the trace
+    /// (`TraceFold::prompt_sent`). Stop frees the composer at once, so a prompt can be written
+    /// while the CLI is still winding a stopped turn down: it waits for that `result`, which
+    /// stays the stopped turn's and uses the mark up, and the turn of the prompt that waited
+    /// begins behind it.
     pub(crate) fn turn_started(&mut self) {
-        self.interrupted = false;
+        if self.turn_open {
+            self.queued_prompts += 1;
+        } else {
+            self.turn_open = true;
+        }
     }
 
     /// Turns the MCP tool notices on or off. The worker sets it from `system/init`.
@@ -943,8 +961,13 @@ impl Fold {
         let mut events = Vec::new();
         let local_command_text = self.local_command_text.take();
         let stop_reason = stop_reason_label(&result);
-        // A Stop's result closes the turn it interrupted, once.
+        // A Stop's result closes the turn it interrupted, once, and a prompt that waited for it
+        // begins its own turn now, without the mark.
         let stopped = std::mem::take(&mut self.interrupted);
+        if self.turn_open {
+            self.turn_open = self.queued_prompts > 0;
+            self.queued_prompts = self.queued_prompts.saturating_sub(1);
+        }
         // The sentence of a turn that failed, which ends it in place of `TurnEnded`.
         let mut failure = None;
         if result.is_error
@@ -2083,6 +2106,7 @@ mod tests {
     #[test]
     fn a_stopped_turns_result_keeps_the_events_of_a_turn_that_ended() {
         let mut fold = Fold::new();
+        fold.turn_started();
         fold.interrupt_sent();
         let events = fold.apply(interrupted_result());
         assert!(!is_failure(&events), "a Stop is not a failure: {events:?}");
@@ -2093,19 +2117,43 @@ mod tests {
     #[test]
     fn the_same_result_with_no_stop_behind_it_fails_the_turn() {
         let mut fold = Fold::new();
+        fold.turn_started();
         let events = fold.apply(interrupted_result());
         assert!(is_failure(&events), "nobody asked for it: {events:?}");
     }
 
     #[test]
-    fn a_stop_excuses_the_turn_it_interrupted_and_no_other() {
-        // Consumed by its turn's result.
+    fn a_stop_belongs_to_the_turn_it_interrupted_even_when_a_prompt_follows_it() {
+        // Stop frees the composer, so the next prompt is written before the stopped turn's
+        // `result` comes. The result is still the stopped turn's, and uses the mark up: the
+        // turn of the prompt that waited is judged on its own result.
         let mut fold = Fold::new();
+        fold.turn_started();
         fold.interrupt_sent();
-        assert!(!is_failure(&fold.apply(interrupted_result())));
+        fold.turn_started();
+        assert!(
+            !is_failure(&fold.apply(interrupted_result())),
+            "the stopped turn's result, though a prompt was written after the Stop"
+        );
+        assert!(
+            is_failure(&fold.apply(interrupted_result())),
+            "the next turn's result, which nobody stopped"
+        );
+    }
+
+    #[test]
+    fn a_stop_with_no_turn_open_is_no_turns() {
+        // The turn's `result` was read and its end is still on its way to the surface: a Stop
+        // pressed now interrupts nothing, so a turn the CLI starts on its own is not stopped by it.
+        let mut fold = Fold::new();
+        fold.turn_started();
+        fold.apply(parse(json!({
+            "type": "result", "subtype": "success", "is_error": false, "result": "Done."
+        })));
+        fold.interrupt_sent();
         assert!(is_failure(&fold.apply(interrupted_result())));
 
-        // A Stop whose result never came is not the next turn's.
+        // A Stop before any prompt interrupts nothing either.
         let mut fold = Fold::new();
         fold.interrupt_sent();
         fold.turn_started();

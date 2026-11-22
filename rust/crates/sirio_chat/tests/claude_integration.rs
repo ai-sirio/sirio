@@ -607,6 +607,37 @@ fn a_stop_excuses_only_its_own_turn() {
 }
 
 #[test]
+fn a_stop_still_excuses_its_turn_when_the_next_prompt_is_written_first() {
+    // Stop frees the composer at once, so the next prompt is written while the CLI winds the
+    // stopped turn down: the stopped turn's result comes after it. That result is still the
+    // stopped turn's, and the second prompt's own failure is still its own.
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("hold late").expect("prompt is accepted");
+    loop {
+        if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
+            break;
+        }
+    }
+    client.cancel().expect("cancel is accepted");
+    client.prompt("overloaded").expect("second prompt is accepted");
+
+    let stopped = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(stopped.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the stopped turn ends with TurnEnded, though a prompt was written after the Stop: {stopped:?}"
+    );
+    let second = drain_until(&events, ends_the_turn);
+    assert!(
+        second.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "API Error: 529 overloaded"
+        )),
+        "the second prompt's own failure is still a failure: {second:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
 fn a_thinking_block_stop_ends_the_thought() {
     let (mut client, events) = launch("thinking_blocks");
     client.prompt("think first").expect("prompt is accepted");
