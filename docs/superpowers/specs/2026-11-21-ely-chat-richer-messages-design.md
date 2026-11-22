@@ -222,6 +222,11 @@ A reply that is not live (stored, restored, ended) never reveals.
 - **Claude emits it** for an `is_error` result whose text is not a local command's echo, except the subtypes `error_max_turns` and `error_max_budget_usd`. Those keep today's text and footer: a resend would hit the same limit.
 
   It replaces both today's `AgentMessageChunk` of that text and the `TurnEnded` that `apply_result` sends after it (`claude/events.rs:905-913`, `:965`).
+
+  **A Stop is not a failure.** The result that closes a turn the worker interrupted (Stop sent the `interrupt` control
+  request) keeps today's events, whatever its subtype and text: the real CLI answers an interrupt with
+  `error_during_execution`, `is_error: true` and no text. The worker knows it sent the interrupt; no string in the
+  result decides it. (Controller's call during Task 5's review, 2026-11-22.)
 - **ACP emits it** for a `session/prompt` RPC error that is not auth-required. `sirio_acp` no longer turns that error into `TransportError`, and the client stays.
 
 `TransportError` keeps its other uses unchanged: auth-required over ACP (`sirio_acp/src/lib.rs:1074-1082`), Claude's
