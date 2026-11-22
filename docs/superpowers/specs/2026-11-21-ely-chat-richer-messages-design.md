@@ -191,9 +191,9 @@ That build is small by construction: at most the blocks that are not yet frozen,
 the parts half, then the join half over the drawn list. It runs on each animation frame while the reveal is behind,
 and it does not touch `document`.
 
-**The tail's budget (ruled 2026-11-22, after Task 3 as built).** The tail is not always small. A reply with no blank lines never freezes. Labels cited from the first section to the last hold the whole body. The wait after a fruitless look, and a deep rewind, leave the frozen blocks short. In those cases the tail can be the whole reply, about 3 ms per frame at 40 KiB. So when `revealed - from` exceeds 8 KiB, the reply stops revealing for the rest of its turn. It then draws `document` as it arrives, with no caret and no pacing, the way every reply was drawn before this delivery. A reply of a turn the CLI started on its own has no stream, and it never reveals.
+**The tail's budget (ruled 2026-11-22, after Task 3 as built).** The tail is not always small. A reply with no blank lines never freezes. Labels cited from the first section to the last hold the whole body. The wait after a fruitless look, and a deep rewind, leave the frozen blocks short. In those cases the tail can be the whole reply, about 3 ms per frame at 40 KiB. So when `revealed - from` exceeds 7 KiB, the reply stops revealing for the rest of its turn. It then draws `document` as it arrives, with no caret and no pacing, the way every reply was drawn before this delivery. A reply of a turn the CLI started on its own has no stream, and it never reveals. The budget was 8 KiB at first. Measured in release at the edge, a frame cost 0.80 ms on SHOWCASE, 1.08 ms on the compact reply and 1.19 ms on a label-heavy reply, over the 1 ms line. At 7 KiB the same frames cost 0.78, 0.86 and 0.92 ms (medians). The compact reply's p95 is 1.5 ms, on a machine that was not idle.
 
-A reply gone `whole` has no frozen blocks. It reveals as plain text: it is one plain paragraph by then. The caret sits inline after the
+A reply gone `whole` has no frozen blocks. A refused reply (nested past the cap) reveals as plain text, because it is one plain paragraph by then. A reply that went whole any other way (declined, or the math-with-HTML check) has a formatted `document`, so it stops revealing and draws `document` as it arrives, like a reply over the budget. A body that ends in a block with no text (a rule, a picture, a formula, a table of contents, front matter) draws no caret rather than a misplaced one. The caret sits inline after the
 text, as in Ely, including inside an open fence.
 
 **What reads the received text, never the revealed one:**
@@ -205,7 +205,7 @@ text, as in Ely, including inside an open fence.
 
 A drag selection copies what it covers on screen. While a reply is live, that is the text of the blocks last drawn. The caret is drawn on the built tree and is never part of the parsed source, so it cannot change how the text parses, and no copy contains it.
 
-A reply is live only while it is the last entry that is not a notice. A tool call, a thought, a permission request, an error or a user message pushed after it finishes the reply.
+A reply is live only while every entry after it is an aside: a compaction, background-task or warning notice. Any other entry pushed after it finishes the reply. That covers a tool call, a thought, a permission request, an error, a user message, and an info notice, warning or not. This is the same rule that decides whether a later chunk still grows the reply.
 
 **When it ends.** On `TurnEnded`, a failure, Stop, or a lost client, the reply is no longer live:
 - the next frame draws `document` whole, with no caret and no pacing;
