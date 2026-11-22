@@ -229,10 +229,13 @@ A reply that is not live (stored, restored, ended) never reveals.
   result decides it. (Controller's call during Task 5's review, 2026-11-22.)
 
   **A turn nobody prompted is not a failed turn either.** An `is_error` result that closes a turn the CLI started on
-  its own (a background agent's wake, no prompt of Sirio's open) keeps today's events: there is no prompt to retry.
-  The worker counts the prompts it wrote against the results that closed them, and realigns on the result's
-  `queued_turn_count` when the result carries it, since the CLI can fold queued prompts into one turn. (Controller's
-  call, 2026-11-23.)
+  its own (a background agent's wake) keeps today's events: there is no prompt to retry.
+  The worker counts the prompts it wrote and not yet closed (`pending`). A result that carries `queued_turn_count = q`
+  closed one of Sirio's prompts only if `q < pending`; after it, `pending = q`, since the CLI can fold queued prompts
+  into one turn. A result without the field closed a prompt if one was pending, and takes one off. So a CLI turn that
+  ends while a prompt of Sirio's waits behind it is spared too. (Controller's call, 2026-11-23.) Known gap: the count
+  is read after the CLI's end-of-turn wait, so a prompt still in the pipe at that moment is mis-paired; pairing by
+  the result's `user_message_uuids` would close it.
 - **ACP emits it** for a `session/prompt` RPC error that is not auth-required. `sirio_acp` no longer turns that error into `TransportError`, and the client stays.
 
 `TransportError` keeps its other uses unchanged: auth-required over ACP (`sirio_acp/src/lib.rs:1074-1082`), Claude's
