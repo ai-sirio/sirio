@@ -432,7 +432,12 @@ impl MarkdownView {
                         interaction,
                     } if interaction.is_dragging(cx) && hitbox.is_hovered(window) => {
                         if let Some(offset) = layouts.offset_at(event.position) {
-                            interaction.extend_selection(source_start + offset, window, cx);
+                            interaction.extend_selection(
+                                source_start + offset,
+                                *source_start,
+                                window,
+                                cx,
+                            );
                         }
                     }
                     _ => {}
@@ -534,7 +539,12 @@ fn press(
             source_start,
             interaction,
         } => {
-            interaction.begin_selection((source_start + anchor, source_start + head), window, cx);
+            interaction.begin_selection(
+                (source_start + anchor, source_start + head),
+                *source_start,
+                window,
+                cx,
+            );
         }
         Mode::None => {}
     }

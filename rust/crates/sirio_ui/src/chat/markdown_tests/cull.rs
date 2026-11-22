@@ -225,7 +225,7 @@ fn stream(cx: &mut TestAppContext, culling: bool, setup: Setup, steps: &[usize])
             chat.transcript_selection = Some(TranscriptSelection {
                 anchor: start,
                 head: text.len(),
-                whole: false,
+                ..TranscriptSelection::default()
             });
             cx.notify();
         });

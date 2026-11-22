@@ -66,7 +66,7 @@ async fn ely_theme_change_preserves_chat_state_and_bezel_palette(cx: &mut TestAp
             });
         }
         v.control_compose("bozza 🌙 non inviata", cx);
-        v.transcript_selection = Some(TranscriptSelection { anchor: 0, head: 5, whole: false });
+        v.transcript_selection = Some(TranscriptSelection { anchor: 0, head: 5, ..TranscriptSelection::default() });
         v.list_state.scroll_to(gpui::ListOffset {
             item_ix: 0,
             offset_in_item: px(0.0),
@@ -191,7 +191,7 @@ async fn ely_unicode_selection_survives_row_remeasurement(cx: &mut TestAppContex
         v.transcript_selection = Some(TranscriptSelection {
             anchor: 0,
             head: end,
-            whole: false,
+            ..TranscriptSelection::default()
         });
         v.list_state.scroll_to(gpui::ListOffset {
             item_ix: 0,
@@ -314,7 +314,7 @@ async fn ely_tool_and_thought_expansion_survives_virtualization(cx: &mut TestApp
             v.transcript_selection = Some(TranscriptSelection {
                 anchor: 0,
                 head: "Analisi 🌙 α".len(),
-                whole: false,
+                ..TranscriptSelection::default()
             });
             v
         });

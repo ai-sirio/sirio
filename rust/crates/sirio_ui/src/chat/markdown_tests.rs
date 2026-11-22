@@ -95,6 +95,7 @@ async fn a_reply_cut_at_every_byte_renders_and_keeps_its_selection_in_bounds(
                     anchor: 0,
                     head: seen,
                     whole: true,
+                    ..TranscriptSelection::default()
                 });
             }
             chat.handle_event(

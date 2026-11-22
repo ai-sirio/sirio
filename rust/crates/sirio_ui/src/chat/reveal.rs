@@ -168,16 +168,9 @@ pub(super) struct LiveRow {
 }
 
 impl LiveRow {
-    /// Whether `offset` can be a place in the row's text: from the start of the row to the end of
-    /// the longer of the document's text (the row) and the drawn one. A drag's offsets are the
-    /// drawn text's, and the drawn text can be the longer: markup the document has resolved is
-    /// still written out on the screen.
-    pub(super) fn holds(&self, offset: usize) -> bool {
-        self.row.start <= offset
-            && offset <= self.row.start + self.drawn.len().max(self.row.len())
-    }
-
-    /// `offset` brought inside the drawn text, onto a character boundary of it.
+    /// `offset` of an endpoint placed in the live row, brought inside the drawn text, onto a
+    /// character boundary of it. However the drawn text changes (it can shrink under a drag as
+    /// the reveal reads what the document has already resolved), the endpoint stays in the row.
     pub(super) fn clamp(&self, offset: usize) -> usize {
         self.row.start + floor_char_boundary(&self.drawn, offset.saturating_sub(self.row.start))
     }
@@ -367,34 +360,59 @@ impl Chat {
         })
     }
 
-    /// What a selection copies when it is a drag that ends inside the live reply: the text of the
-    /// blocks last drawn, from where it starts to where the pointer let go. A drag's offsets are in
-    /// the drawn text (the body hit-tests what is on screen), and the document's text differs from
-    /// it wherever the reveal has not yet read what the document has: `[t][7]` is a link `t` there,
-    /// and the bytes past the reveal are not on screen at all. Select All is not a drag over the
-    /// screen: it is of the transcript's text, and `None` says to read that. Nor is a selection
-    /// that ends outside what the live row can hold.
+    /// Whether the body that starts at `row` in the transcript's offset space is the live reply's:
+    /// what the press or the move of a drag asks to tell where an endpoint was placed.
+    pub(super) fn is_live_row(&self, row: usize) -> bool {
+        self.live_row().is_some_and(|live| live.row.start == row)
+    }
+
+    /// What a selection copies when one of its ends was placed in the live reply: the text of the
+    /// blocks last drawn, from where it starts to where the pointer let go, up to the drawn text's
+    /// length, whatever the drawn text has become since. A drag's offsets are in the drawn text (the
+    /// body hit-tests what is on screen), and the document's text differs from it wherever the
+    /// reveal has not yet read what the document has: `[t][7]` is a link `t` there, and the bytes
+    /// past the reveal are not on screen at all. An end placed above the reply is a place in the
+    /// document's text, which is read up to the reply; one placed below it, from the end of the
+    /// reply's document row. Select All is not a drag over the screen: it is of the transcript's
+    /// text, and `None` says to read that, as it does for a selection with no end in the reply (a
+    /// notice below it, whose offsets can fall inside the drawn text's).
     pub(super) fn copy_from_live_reply(&self, selection: &TranscriptSelection) -> Option<String> {
         if selection.whole {
             return None;
         }
-        let live = self.live_row()?;
-        let range = selection.range();
-        if range.end <= live.row.start || !live.holds(range.end) {
+        let (start_live, end_live) = match selection.anchor <= selection.head {
+            true => (selection.anchor_live, selection.head_live),
+            false => (selection.head_live, selection.anchor_live),
+        };
+        if !start_live && !end_live {
             return None;
         }
-        let before = match range.start < live.row.start {
-            true => self.transcript_text().get(range.start..live.row.start)?.to_owned(),
-            false => String::new(),
+        let live = self.live_row()?;
+        let range = selection.range();
+        let document = self.transcript_text();
+        let mut copied = String::new();
+        if !start_live {
+            copied.push_str(document.get(range.start..live.row.start)?);
+        }
+        let from = match start_live {
+            true => live.clamp(range.start),
+            false => live.row.start,
         };
-        let (from, to) = (live.clamp(range.start.max(live.row.start)), live.clamp(range.end));
-        Some(format!("{before}{}", &live.drawn[from - live.row.start..to.max(from) - live.row.start]))
+        let to = match end_live {
+            true => live.clamp(range.end),
+            false => live.row.start + live.drawn.len(),
+        };
+        copied.push_str(&live.drawn[from - live.row.start..to.max(from) - live.row.start]);
+        if !end_live {
+            copied.push_str(document.get(live.row.end..range.end)?);
+        }
+        Some(copied)
     }
 
-    /// Brings a drag that ends inside the live reply back inside what is drawn of it. The drawn
-    /// text can get shorter between two frames (a closed mark drops its glyphs), and a selection
-    /// made over the text as it was would end past the text as it is, or inside a glyph. Select
-    /// All is left as it is.
+    /// Brings the ends of a drag that were placed in the live reply back inside what is drawn of
+    /// it. The drawn text can get shorter between two frames (a closed mark drops its glyphs, a
+    /// reference resolves), and a selection made over the text as it was would end past the text as
+    /// it is, or inside a glyph. Select All and the ends placed in other rows are left as they are.
     fn clamp_selection_to_drawn(&mut self) {
         if self.transcript_selection.as_ref().is_none_or(|selection| selection.whole) {
             return;
@@ -405,10 +423,11 @@ impl Chat {
         let Some(selection) = self.transcript_selection.as_mut() else {
             return;
         };
-        for end in [&mut selection.anchor, &mut selection.head] {
-            if live.holds(*end) {
-                *end = live.clamp(*end);
-            }
+        if selection.anchor_live {
+            selection.anchor = live.clamp(selection.anchor);
+        }
+        if selection.head_live {
+            selection.head = live.clamp(selection.head);
         }
     }
 
@@ -902,6 +921,115 @@ mod tests {
         chat.update(cx, |chat, cx| chat.handle_event(chunk("[3]: https://example.com/3\n"), cx));
         tick(cx, Duration::from_millis(1));
         assert_eq!(copied(cx).as_deref(), Some(line), "a chunk pulled the selection in to the document's length");
+    }
+
+    /// A drag's end that was placed in the live reply stays in it, whatever the drawn text becomes
+    /// under it. The line `See [a][1] and [b][2].` is 22 bytes drawn; as the reveal runs through the
+    /// definitions that follow, the drawn text shrinks to 17 and then to 12 bytes, the document's
+    /// length, and a notice sits below. On every frame the copy is exactly what the drawn text
+    /// holds up to the end of the drag, which each frame clamps to the drawn length: never the
+    /// document's text or the notice's, and not nothing. Real frames, the reveal at its own pace.
+    #[gpui::test]
+    async fn a_drag_end_in_the_live_reply_stays_there_as_the_drawn_text_shrinks_under_it(
+        cx: &mut TestAppContext,
+    ) {
+        let line = "See [a][1] and [b][2].";
+        let reply = format!("{line}\n\n[1]: https://example.com/1\n[2]: https://example.com/2\n");
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(&reply), cx);
+            chat.push_entry(Entry::Notice {
+                text: "a background task finished, and said so at some length".into(),
+                kind: NoticeKind::BackgroundTask,
+            });
+        });
+        let drawn_text = |cx: &mut gpui::VisualTestContext| {
+            chat.update(cx, |chat, _| chat.drawn_reply(0).map(|blocks| blocks.text.text.clone()))
+        };
+        let copied = |cx: &mut gpui::VisualTestContext| {
+            chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text())
+        };
+        for _ in 0..60 {
+            tick(cx, Duration::from_millis(10));
+            if revealed(&chat, cx) >= line.len() {
+                break;
+            }
+        }
+        assert_eq!(drawn_text(cx).as_deref(), Some(line), "the reveal stands at the end of the line");
+        let (row, on_screen) = last_painted_row(&chat, cx);
+        assert_eq!(on_screen, line);
+
+        let (from, to) = (
+            gpui::point(row.left() + px(1.0), row.center().y),
+            gpui::point(row.right() - px(10.0), row.center().y),
+        );
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(copied(cx).as_deref(), Some(line));
+
+        // The reveal runs on through the definitions, and the drawn text under the drag shrinks.
+        // The end of the drag is clamped to the drawn text on every frame, so it stays at the
+        // shortest the text has been (ASCII here: a byte is a character).
+        let mut end = line.len();
+        for _ in 0..80 {
+            tick(cx, Duration::from_millis(10));
+            let drawn = drawn_text(cx).expect("the reply is revealed");
+            end = end.min(drawn.len());
+            assert_eq!(
+                copied(cx).as_deref(),
+                Some(&drawn[..end]),
+                "the copy is what the drawn text {drawn:?} holds up to the drag's end, {end}"
+            );
+            if revealed(&chat, cx) == reply.len() {
+                break;
+            }
+        }
+        assert!(end < line.len(), "the drawn text never shrank under the drag: {end} bytes");
+        assert_eq!(drawn_text(cx).as_deref(), Some("See a and b."));
+        assert_eq!(copied(cx).as_deref(), Some("See a and b."));
+    }
+
+    /// A selection made in a notice below the live reply is the notice's, even where the reply's
+    /// drawn text is longer than its document and the notice's offsets fall inside the drawn text's:
+    /// `done` is at 14..18, and the reply's 22 drawn bytes cover them.
+    #[gpui::test]
+    async fn a_selection_inside_a_notice_below_a_live_reply_copies_the_notice(
+        cx: &mut TestAppContext,
+    ) {
+        let line = "See [a][1] and [b][2].";
+        let reply = format!("{line}\n\n[1]: https://example.com/1\n[2]: https://example.com/2\n");
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(&reply), cx);
+            chat.push_entry(Entry::Notice {
+                text: "done".into(),
+                kind: NoticeKind::BackgroundTask,
+            });
+            chat.reveal.as_mut().expect("live").show(line.len());
+        });
+        refresh_frame(cx);
+        let drawn = chat.update(cx, |chat, _| chat.drawn_reply(0).expect("live").text.text.clone());
+        assert_eq!(drawn, line, "the drawn text is longer than the document's row");
+
+        let notice = cx.debug_bounds("notice-task-text").expect("the notice is drawn");
+        let (from, to) = (
+            gpui::point(notice.left() + px(1.0), notice.center().y),
+            gpui::point(notice.left() + px(22.0), notice.center().y),
+        );
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let copied = chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text());
+        let copied = copied.expect("the drag selected something");
+        assert!(
+            !copied.is_empty() && "done".contains(&copied),
+            "a drag over the notice copied {copied:?}"
+        );
     }
 
     /// A reply whose stream went whole without being refused (the guard declined a later text, or
