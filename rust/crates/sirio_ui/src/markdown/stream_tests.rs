@@ -627,3 +627,27 @@ fn the_cut_never_moves_back_except_on_a_rewind() {
         );
     }
 }
+
+/// A reply that reuses a footnote and a link label in every copy of one document: each reuse
+/// rewinds the stream to the first copy, and the chunks after it must go on freezing (the tail
+/// is small again at the end) and still give the build of the text at every cut, with segments
+/// that tile it. The `$$` runs of the copies pair across them, so the cut waits for them too.
+#[test]
+fn a_rewind_is_followed_by_chunks_that_freeze_again() {
+    const DOC: &str = "## Part\n\nA line with a note[^1] and a [link][ref].\n\n\
+        More text $$x^2$$ and `code`.\n\n```sh\necho $$\n```\n\n- one\n- two\n\n\
+        [ref]: https://e.com\n\n[^1]: The note.\n\nClosing words.\n\n";
+    let text = DOC.repeat(3);
+    for chunk in [1, 7, 31] {
+        assert_equivalent_at_every_cut(&text, chunk);
+    }
+    let (cuts, stream) = cuts_by_step(&text, 5);
+    assert!(!rewinds(&cuts).is_empty(), "the reuse rewound nothing: {cuts:?}");
+    assert_tiles(&stream, &text);
+    assert!(
+        text.len() - stream.cut() < DOC.len(),
+        "the tail still holds {} bytes after the last reuse",
+        text.len() - stream.cut()
+    );
+    assert!(!stream.is_whole());
+}

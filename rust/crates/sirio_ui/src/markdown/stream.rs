@@ -40,7 +40,9 @@ use std::rc::Rc;
 use ely_gpui_component::documents::{MarkdownBlock, markdown_options};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 
-use super::{MarkdownBlocks, Parts, Policy, Within, build, join, parts, rewrite};
+use super::{
+    MAX_NESTING, MarkdownBlocks, Parts, Policy, Within, build, join, parts, read_of, rewrite,
+};
 use crate::markdown_preview::DiagramRequest;
 
 /// Moves every source offset the tree keeps by `by`, wrapping: the first byte of the part it was
@@ -133,6 +135,8 @@ struct Scan {
     labels: Vec<Label>,
     /// Where it writes a footnote reference.
     notes: Vec<usize>,
+    /// How deep it nests: `markdown_depth` of the text, from the same events.
+    deepest: usize,
 }
 
 impl Scan {
@@ -153,6 +157,7 @@ impl Scan {
                         });
                     }
                     depth += 1;
+                    found.deepest = found.deepest.max(depth);
                 }
                 Event::End(_) => depth = depth.saturating_sub(1),
                 Event::Rule if depth == 0 => found.starts.push(range.start),
@@ -336,8 +341,14 @@ fn next_run(
     held: &[Range<usize>],
 ) -> Option<Range<usize>> {
     let mut at = from;
+    // `held` is in order and its ranges do not overlap, so the only range that can hold `at` is
+    // the first that ends after it: a pointer that only moves on, not a search from the top.
+    let mut next = held.partition_point(|block| block.end <= at);
     while at < bytes.len() {
-        if let Some(block) = held.iter().find(|block| block.contains(&at)) {
+        while held.get(next).is_some_and(|block| block.end <= at) {
+            next += 1;
+        }
+        if let Some(block) = held.get(next).filter(|block| block.start <= at) {
             at = block.end;
             continue;
         }
@@ -405,6 +416,12 @@ impl StreamingDoc {
     }
 
     /// The tree of `text`, the reply so far: what [`build`] returns for it.
+    ///
+    /// What the tail says about itself (the text Ely reads of it, where its blocks start, which
+    /// labels it defines, how deep it nests) is read before anything of it is built into a tree.
+    /// So a rewind costs a pass over the text, not a parse of it, and what freezes is parsed once,
+    /// as a segment, and not again as part of the tail: after the cut moves a long way (a rewound
+    /// stream freezing everything it held) only the new tail is parsed besides.
     pub(crate) fn update(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
         if !text.starts_with(&self.frozen) {
             *self = Self::new();
@@ -412,7 +429,58 @@ impl StreamingDoc {
         if self.whole {
             return build(text, policy);
         }
-        let (mut tail, read, scan) = loop {
+        let (read, scan, depth) = loop {
+            let tail = &text[self.cut..];
+            // Ely reads `\(` pairs in a second pass, over a text it swaps itself and that only it can
+            // tell the depth of, and refuses a text that nests past the cap: those parse the tail
+            // first, as it was done before.
+            if tail.contains("\\(") || tail.contains("\\[") {
+                return self.update_by_parsing_the_tail(text, policy);
+            }
+            let read = read_of(tail);
+            let scan = Scan::of(&read);
+            let depth = scan.deepest;
+            if depth > MAX_NESTING {
+                return self.update_by_parsing_the_tail(text, policy);
+            }
+            match self.rewind_from(text, depth, &scan) {
+                Some(index) => {
+                    self.truncate(index);
+                    // A rewind that leaves most of the reply to parse costs no more as a build,
+                    // and it skips the work of freezing what is held again: that is for the
+                    // chunks after it.
+                    if self.cut < text.len() - self.cut {
+                        return build(text, policy);
+                    }
+                }
+                None => break (read, scan, depth),
+            }
+        };
+        let deepest = self.deepest().max(depth);
+        self.freeze(text, &read, &scan, deepest, policy);
+        if self.whole {
+            return build(text, policy);
+        }
+        let tail = parts(
+            &text[self.cut..],
+            policy,
+            Within {
+                deepest: self.deepest(),
+                offset: self.cut,
+            },
+            false,
+        );
+        if tail.refused || tail.declined {
+            self.whole = true;
+            return build(text, policy);
+        }
+        self.joined(tail)
+    }
+
+    /// [`update`](Self::update) for a tail that cannot be read before it is built: the tail is
+    /// parsed, then the segments are looked at, then what can freeze does.
+    fn update_by_parsing_the_tail(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
+        let (tail, read, scan) = loop {
             let mut tail = parts(
                 &text[self.cut..],
                 policy,
@@ -428,12 +496,19 @@ impl StreamingDoc {
             }
             let read = tail.read.take().unwrap_or_default();
             let scan = Scan::of(&read);
-            match self.rewind_from(text, &tail, &scan) {
+            match self.rewind_from(text, tail.deepest, &scan) {
                 Some(index) => self.truncate(index),
                 None => break (tail, read, scan),
             }
         };
         let deepest = self.deepest().max(tail.deepest);
+        let document = self.joined(tail);
+        self.freeze(text, &read, &scan, deepest, policy);
+        document
+    }
+
+    /// The tree of the frozen segments followed by the nodes of `tail`.
+    fn joined(&self, mut tail: Parts) -> MarkdownBlocks {
         let mut missing: Vec<DiagramRequest> = Vec::new();
         let wanted = self.segments.iter().flat_map(|segment| segment.missing.iter());
         for request in wanted.chain(tail.missing.iter()) {
@@ -446,9 +521,7 @@ impl StreamingDoc {
             nodes.extend(segment.nodes.iter().cloned());
         }
         nodes.append(&mut tail.nodes);
-        let document = join(nodes, missing, tail.panicked);
-        self.freeze(text, &read, &scan, deepest, policy);
-        document
+        join(nodes, missing, tail.panicked)
     }
 
     /// The deepest nesting of the Markdown of the frozen segments.
@@ -467,13 +540,13 @@ impl StreamingDoc {
     }
 
     /// The first frozen segment the tail makes wrong, if there is one.
-    fn rewind_from(&self, text: &str, tail: &Parts, scan: &Scan) -> Option<usize> {
+    fn rewind_from(&self, text: &str, tail_deepest: usize, scan: &Scan) -> Option<usize> {
         let mut first: Option<usize> = None;
         let mut note = |index: usize| first = Some(first.map_or(index, |known| known.min(index)));
         let source = |segment: &Segment| &text[segment.range.clone()];
 
         // Block HTML took its room from another depth than the reply has now.
-        let reply = self.deepest().max(tail.deepest);
+        let reply = self.deepest().max(tail_deepest);
         if let Some(index) = (self.segments.iter())
             .position(|segment| segment.has_block_html && segment.room != reply)
         {

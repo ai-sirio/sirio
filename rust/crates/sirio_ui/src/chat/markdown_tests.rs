@@ -83,6 +83,7 @@ async fn a_reply_cut_at_every_byte_renders_and_keeps_its_selection_in_bounds(
     cx: &mut TestAppContext,
 ) {
     let (chat, cx) = chat_with(cx, &[]);
+    chat.update(cx, |chat, _| chat.streaming = true);
     let started = std::time::Instant::now();
     let mut from = 0;
     let steps = cuts(SHOWCASE);
@@ -194,6 +195,99 @@ async fn a_finished_reply_equals_a_one_chunk_reply(cx: &mut TestAppContext) {
             "the streamed reply's nodes differ from the one-chunk reply's"
         );
         assert_eq!(chunked.text.text, whole.text.text);
+    });
+}
+
+/// A reply that is still arriving, at several cuts, is the tree `parse_linked_markdown` builds
+/// of the text so far: the chat's own Policy (the files a reply names are links), not the bare
+/// one the stream oracle builds with. The reply defines a label and a footnote after their
+/// mentions, so the stream rewinds on the way.
+#[gpui::test]
+async fn a_streamed_reply_is_the_linked_build_of_its_text_so_far(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!("sirio-stream-links-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a folder for the files the reply names");
+    std::fs::write(dir.join("streamed_link.rs"), "fn main() {}\n").expect("a file to link to");
+    let reply = "It names `streamed_link.rs` and `streamed_missing.rs`.\n\n\
+        ## A heading\n\nSee [the docs][ref] and a note[^n].\n\n\
+        - an item with `streamed_link.rs`\n- another\n\n\
+        ```rust\nfn main() {}\n```\n\n\
+        [ref]: https://example.com\n\n[^n]: the note\n\n\
+        The last paragraph names `streamed_link.rs` again.\n";
+    let (chat, cx) = chat_with(cx, &[]);
+    let mut checked = 0;
+    chat.update(cx, |chat, cx| {
+        chat.streaming = true;
+        chat.agent_cwd = dir.clone();
+        let mut from = 0;
+        while from < reply.len() {
+            let mut cut = (from + 13).min(reply.len());
+            while !reply.is_char_boundary(cut) {
+                cut += 1;
+            }
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk(reply[from..cut].into()),
+                cx,
+            );
+            from = cut;
+            let Some(Entry::Assistant {
+                text,
+                document,
+                stream,
+            }) = chat.entries.last()
+            else {
+                panic!("the reply is the last row");
+            };
+            assert!(stream.is_some(), "cut {cut}: the reply streams");
+            let full = parse_linked_markdown(text, &dir, &mut Default::default());
+            assert!(
+                document.nodes == full.nodes,
+                "cut {cut}: the streamed nodes differ from the linked build's"
+            );
+            assert_eq!(document.text.text, full.text.text, "cut {cut}: the plain text");
+            checked += 1;
+        }
+    });
+    assert!(checked > 10, "{checked} cuts were checked");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A reply that Stop ended keeps no streaming state, and a chunk that still arrives after it
+/// does not start one: the rest of the reply is built whole and shown at once, and nothing
+/// stays alive after the turn.
+#[gpui::test]
+async fn a_chunk_after_stop_starts_no_stream(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_with(cx, &[]);
+    let chunk = |text: &str| sirio_chat::ChatEvent::AgentMessageChunk(text.into());
+    chat.update(cx, |chat, cx| {
+        chat.streaming = true;
+        chat.handle_event(chunk("first block\n\nsecond "), cx);
+        assert!(
+            matches!(
+                chat.entries.last(),
+                Some(Entry::Assistant {
+                    stream: Some(_),
+                    ..
+                })
+            ),
+            "the reply streams until Stop"
+        );
+        chat.cancel_turn(cx);
+        chat.handle_event(chunk("block\n\nthird block"), cx);
+    });
+    chat.read_with(&cx.cx, |chat, _| {
+        let Some(Entry::Assistant {
+            text,
+            document,
+            stream,
+        }) = chat.entries.last()
+        else {
+            panic!("the reply is the last row");
+        };
+        assert_eq!(chat.entries.len(), 1, "the late chunk joined the reply");
+        assert_eq!(text, "first block\n\nsecond block\n\nthird block");
+        assert!(stream.is_none(), "a chunk after Stop started a streaming state");
+        let full = parse_linked_markdown(text, &chat.agent_cwd, &mut Default::default());
+        assert!(document.nodes == full.nodes);
     });
 }
 
@@ -376,10 +470,13 @@ async fn a_drag_from_the_users_prose_into_a_reply_is_one_selection(cx: &mut Test
 /// each chunk) after the 20th, the 100th and the last chunk.
 async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
     let (chat, cx) = chat_with(cx, &[]);
+    chat.update(cx, |chat, _| chat.streaming = true);
     let cwd = std::env::temp_dir();
     let (mut from, mut handles, mut built, mut drawn, mut before) =
         (0, Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut tails = Vec::new();
+    // After each chunk: how much of the reply the stream still parses again (its tail), and how
+    // many segments it holds frozen.
+    let mut tails: Vec<(usize, usize)> = Vec::new();
     for step in 1..=200usize {
         let mut cut = (source.len() * step / 200).min(source.len());
         while !source.is_char_boundary(cut) {
@@ -405,17 +502,15 @@ async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
         let full = std::time::Instant::now();
         let _ = parse_linked_markdown(&source[..cut], &cwd, &mut Default::default());
         before.push(full.elapsed());
-        if matches!(step, 20 | 100 | 200) {
-            chat.read_with(&cx.cx, |chat, _| {
-                if let Some(Entry::Assistant {
-                    stream: Some(stream),
-                    ..
-                }) = chat.entries.last()
-                {
-                    tails.push((step, cut - stream.cut(), stream.segments().len()));
-                }
-            });
-        }
+        chat.read_with(&cx.cx, |chat, _| {
+            if let Some(Entry::Assistant {
+                stream: Some(stream),
+                ..
+            }) = chat.entries.last()
+            {
+                tails.push((cut - stream.cut(), stream.segments().len()));
+            }
+        });
         from = cut;
     }
     let stats = |label: &str, mut times: Vec<std::time::Duration>| {
@@ -443,17 +538,57 @@ async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
             last.as_secs_f64() / first.as_secs_f64()
         );
     }
-    for (step, tail, segments) in &tails {
-        eprintln!(
-            "BENCH {fixture} tail after chunk {step}: {tail} bytes still parsed again, {segments} frozen segments"
-        );
+    for step in [20usize, 100, 200] {
+        if let Some((tail, segments)) = tails.get(step - 1) {
+            eprintln!(
+                "BENCH {fixture} tail after chunk {step}: {tail} bytes still parsed again, {segments} frozen segments"
+            );
+        }
     }
     // A rewind (a reply that reuses a footnote or a link label parses again from its first
-    // mention) is one slow chunk among fast ones: the median hides it, the slowest show it.
-    let mut slowest: Vec<(usize, std::time::Duration)> = handles.iter().copied().enumerate().collect();
-    slowest.sort_by(|a, b| b.1.cmp(&a.1));
-    slowest.truncate(8);
-    eprintln!("BENCH {fixture} slowest handle_event chunks (index, time): {slowest:?}");
+    // mention) is a slow chunk among fast ones: the median hides it. A chunk rewinds when the
+    // tail grows by more than the chunk brought. Each of the slowest chunks is printed next to
+    // the full build of the same text, and so is the worst ratio over every chunk.
+    let ratio = |index: usize| handles[index].as_secs_f64() / before[index].as_secs_f64();
+    let chunk_bytes = source.len() / 200 + 8;
+    let rewinding = |index: usize| {
+        index > 0 && tails.get(index).zip(tails.get(index - 1)).is_some_and(|(now, last)| now.0 > last.0 + chunk_bytes)
+    };
+    let mut slowest: Vec<usize> = (0..handles.len()).collect();
+    slowest.sort_by(|a, b| handles[*b].cmp(&handles[*a]));
+    for index in slowest.iter().take(8) {
+        eprintln!(
+            "BENCH {fixture} slow chunk {index}: handle_event {:?}, full build {:?}, ratio {:.2}{}",
+            handles[*index],
+            before[*index],
+            ratio(*index),
+            if rewinding(*index) { ", rewinds (the tail grew)" } else { "" }
+        );
+    }
+    // A chunk whose full build takes under a millisecond is the row's own cost (the list, the
+    // layout) more than the parse: the ratio of those says nothing.
+    let sizeable: Vec<usize> = (0..handles.len())
+        .filter(|index| before[*index] >= std::time::Duration::from_millis(1))
+        .collect();
+    match sizeable.iter().copied().max_by(|a, b| ratio(*a).total_cmp(&ratio(*b))) {
+        Some(worst) => eprintln!(
+            "BENCH {fixture} worst ratio handle_event / full build over the {} chunks whose full build takes 1 ms or more: {:.2} at chunk {worst} ({:?} against {:?})",
+            sizeable.len(),
+            ratio(worst),
+            handles[worst],
+            before[worst]
+        ),
+        None => eprintln!("BENCH {fixture} no chunk has a full build of 1 ms or more"),
+    }
+    let worst_rewind = (0..handles.len()).filter(|index| rewinding(*index)).max_by(|a, b| ratio(*a).total_cmp(&ratio(*b)));
+    match worst_rewind {
+        Some(index) => eprintln!(
+            "BENCH {fixture} worst ratio over the {} chunks that rewind: {:.2} at chunk {index}",
+            (0..handles.len()).filter(|index| rewinding(*index)).count(),
+            ratio(index)
+        ),
+        None => eprintln!("BENCH {fixture} no chunk rewinds"),
+    }
     stats("handle_event per chunk", handles);
     stats("full build per chunk", before);
     stats("parse per chunk", built);
@@ -474,22 +609,43 @@ async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
     bench_streaming(cx, "SHOWCASE", &source).await;
 }
 
-/// One fence that never closes, of 40 KiB of real code (a source file of this crate): its tail
-/// is the whole fence, so a chunk costs what the fence is long. Run it alone, as the one above.
+/// One fence that never closes, of 40 KiB of real code: its tail is the whole fence, so a chunk
+/// costs what the fence is long. The code is a fixed file (`open-fence-code.txt`, copied from three
+/// sources of this crate), so the before and after of a change, and the figures of an earlier one,
+/// are on the same input. Run it alone, as the one above.
 #[gpui::test]
 #[ignore = "a measurement, run by hand"]
 async fn streaming_an_open_fence_costs(cx: &mut TestAppContext) {
-    const CODE: &str = include_str!("../markdown/stream.rs");
-    let mut source = String::from("```rust\n");
-    while source.len() < 40 * 1024 {
-        source.push_str(CODE);
-    }
-    let mut end = 40 * 1024;
-    while !source.is_char_boundary(end) {
-        end += 1;
-    }
-    source.truncate(end);
+    const CODE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../Scripts/Tests/fixtures/markdown-documents/open-fence-code.txt"
+    ));
+    let source = format!("```rust\n{CODE}");
     bench_streaming(cx, "open fence", &source).await;
+}
+
+/// Spec 5.1's rewinds: 40 KiB in which many distinct link labels are each used in one paragraph
+/// and defined three blocks later. Every definition is late, so each rewinds the stream to the
+/// paragraph that used it: the median must stay flat, and a rewind shows as a slow chunk. The
+/// labels have one width: a label that starts another (`topic-1` and `topic-10`) is taken for a
+/// mention of it, and the reply holds everything between the two.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_late_definitions_cost(cx: &mut TestAppContext) {
+    let mut source = String::new();
+    let mut step = 0;
+    while source.len() < 40 * 1024 {
+        step += 1;
+        source.push_str(&format!(
+            "Step {step} reads [the notes on topic {step}][topic-{step:04}] before it goes on, with \
+             some `code` and **emphasis** to give the line a few runs.\n\n\
+             A second paragraph of step {step}, longer than the first, so that the blocks have a size \
+             worth parsing.\n\n\
+             - a list item of step {step}\n- and another\n\n\
+             [topic-{step:04}]: https://example.com/topics/{step}\n\n"
+        ));
+    }
+    bench_streaming(cx, "late definitions", &source).await;
 }
 
 /// A reply with no blank line (headings on their text, `Run:` on its fence), 40 KiB of it. A cut

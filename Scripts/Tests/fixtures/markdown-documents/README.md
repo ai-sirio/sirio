@@ -23,3 +23,7 @@ opens it in the file Preview, as a chat reply and as a change request descriptio
 | README HTML | a centred `<img>` and a `<details>` block |
 | `![local](pixel.png)`, `![remote](http://127.0.0.1:{{REMOTE_PORT}}/pixel.png)` | a picture beside the file and one over loopback HTTP |
 | 60 numbered lines | a tail long enough that every surface scrolls |
+
+`open-fence-code.txt` is 40 KiB of Rust (the first 40 KiB of three source files as they stood when it was copied here). The streaming
+bench in `chat/markdown_tests.rs` wraps it in a `rust` fence that never closes, so that bench has the same input on every run, whatever
+becomes of the files it was copied from.

@@ -189,6 +189,22 @@ fn markdown_depth(source: &str) -> usize {
     deepest
 }
 
+/// The text Ely reads for `source` (a byte order mark dropped, lone CRs as line ends, `$$` fences
+/// as tildes): the first text `parts` hands the guard, taken without reading it into a tree. A
+/// guard that refuses it ends the reading there.
+pub(super) fn read_of(source: &str) -> String {
+    let mut read = None;
+    let _ = parse_markdown_guarded(
+        source,
+        &|_: &str| -> Option<Vec<MarkdownBlock>> { None },
+        &mut |text| {
+            read = Some(text.to_owned());
+            false
+        },
+    );
+    read.unwrap_or_default()
+}
+
 /// How deep `nodes` nest, a leaf counting one.
 fn tree_depth(nodes: &[MarkdownBlock]) -> usize {
     (nodes.iter())
@@ -229,12 +245,6 @@ pub(crate) struct Parts {
 pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     let parts = parts(source, policy, Within::default(), false);
     join(parts.nodes, parts.missing, parts.panicked)
-}
-
-/// The per-block half of [`build`]: everything up to and including the chat links.
-#[allow(dead_code)] // `stream` calls `parts` with the place of its part; nothing else builds parts
-pub(crate) fn build_parts(source: &str, policy: &mut Policy<'_>) -> Parts {
-    parts(source, policy, Within::default(), true)
 }
 
 /// Where a source stands in the reply it is a part of, so that built alone it comes out as it

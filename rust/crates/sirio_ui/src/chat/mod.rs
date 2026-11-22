@@ -487,8 +487,11 @@ enum Entry {
     /// The parsed tree is updated at ingestion time rather than during
     /// rendering, so a redraw never reparses the entire reply.
     ///
-    /// `stream` is what builds the tree while the reply arrives, and is `Some` only then
-    /// (`Chat::finish_reply` ends it with a full build): a reply restored or made whole has none.
+    /// `stream` is what builds the tree while the reply arrives. It is `Some` only while a turn
+    /// streams: the first chunk of a reply starts it only if `Chat::streaming` is set, and
+    /// `Chat::finish_reply` ends it (with a full build) at the turn's end, at Stop and when the
+    /// client is lost. A reply restored, made whole, or arriving outside a streaming turn has none,
+    /// and each of its chunks is a full build.
     Assistant {
         text: String,
         document: MarkdownBlocks,
@@ -3425,15 +3428,22 @@ impl Chat {
                         // the turn ends, since each ask prints another panic message.
                         markdown::as_plain_text(existing)
                     } else {
-                        // A reply made whole (restored, or ended by Stop before this late chunk)
-                        // starts its streaming state here, with the text it already has.
-                        let stream = stream.get_or_insert_with(Default::default);
-                        stream_linked_markdown(
-                            stream,
-                            existing,
-                            &self.agent_cwd,
-                            &mut self.file_link_memo,
-                        )
+                        // A reply without a streaming state (restored, or ended by Stop before
+                        // this late chunk) is built whole: no state is started for it, so
+                        // nothing of it stays alive once its turn is over.
+                        match stream {
+                            Some(stream) => stream_linked_markdown(
+                                stream,
+                                existing,
+                                &self.agent_cwd,
+                                &mut self.file_link_memo,
+                            ),
+                            None => parse_linked_markdown(
+                                existing,
+                                &self.agent_cwd,
+                                &mut self.file_link_memo,
+                            ),
+                        }
                     };
                     self.remeasure_entry(index);
                     self.clamp_transcript_selection();
@@ -3443,17 +3453,27 @@ impl Chat {
                     // not this one's.
                     self.finish_reply();
                     self.file_link_memo.clear();
-                    let mut stream = Box::<StreamingDoc>::default();
-                    let document = stream_linked_markdown(
-                        &mut stream,
-                        &text,
-                        &self.agent_cwd,
-                        &mut self.file_link_memo,
-                    );
+                    // Only a turn that is streaming builds its reply in parts: a chunk that comes
+                    // when none is (after Stop, or from a turn the CLI started on its own) is
+                    // built whole.
+                    let mut stream = self.streaming.then(Box::<StreamingDoc>::default);
+                    let document = match &mut stream {
+                        Some(stream) => stream_linked_markdown(
+                            stream,
+                            &text,
+                            &self.agent_cwd,
+                            &mut self.file_link_memo,
+                        ),
+                        None => parse_linked_markdown(
+                            &text,
+                            &self.agent_cwd,
+                            &mut self.file_link_memo,
+                        ),
+                    };
                     self.push_entry(Entry::Assistant {
                         document,
                         text,
-                        stream: Some(stream),
+                        stream,
                     });
                 }
             }
