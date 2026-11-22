@@ -18,18 +18,19 @@ use std::rc::Rc;
 
 use ely_gpui_component::documents::{BlockCull, MarkdownBlock, MarkdownRenderer, TextGather};
 use ely_gpui_component::navigation::Sections;
+use ely_gpui_component::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, Bounds, DispatchPhase, Element, ElementId, Entity, EntityId, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size, Window, canvas, div,
-    prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size, TextAlign, TextRun, Window,
+    canvas, div, prelude::*, px,
 };
 
 use super::code::{CodeStyle, code_hook, table_frame};
 use super::cull::{Culler, Force, Memory, Plan, redrew};
 use super::gather::{BodyLayouts, SirioGather};
 use super::menu::{self, MarkdownMenuItem};
-use super::{MarkdownBlocks, PlainText};
+use super::{MarkdownBlocks, PartKind, PlainText};
 use crate::chat::TranscriptInteraction;
 use crate::text_selection::{
     Active, RunKey, begin, dragging, extend, finish, focus_sink, owns, release, selected_range,
@@ -40,6 +41,9 @@ use crate::text_selection::{
 pub(crate) type LinkHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 /// Takes a right press on the body.
 pub(crate) type MenuHandler = Rc<dyn Fn(MenuPress, &mut Window, &mut App)>;
+
+/// The mark a live reply is drawn with after its last text, where more will come.
+const CARET: &str = "▍";
 
 /// How far a press may travel and still be a click.
 const CLICK_SLOP: f32 = 4.0;
@@ -187,6 +191,7 @@ pub(crate) fn markdown_view(
         id,
         plain: blocks.text.clone(),
         nodes: blocks.nodes.clone(),
+        caret: blocks.caret,
         host,
         links,
         flags,
@@ -205,6 +210,9 @@ pub(crate) struct MarkdownView {
     id: ElementId,
     plain: Rc<PlainText>,
     nodes: Rc<[MarkdownBlock]>,
+    /// Paints a caret after the last text of the body (a live reply): in no text of its own, so
+    /// the plain text, a copy and a selection never hold it.
+    caret: bool,
     host: SelectionHost,
     links: LinkHandler,
     flags: ViewFlags,
@@ -326,6 +334,36 @@ impl MarkdownView {
             window.request_animation_frame();
         }
         true
+    }
+
+    /// The caret, after the end of the last text of the body: where the next word will go. A body
+    /// whose last text is not on this frame (it ends in a formula, which no layout holds, or in a
+    /// culled block) has none, and one with no text has none.
+    fn paint_caret(&self, window: &mut Window, cx: &mut App) {
+        let Some(last) = (self.plain.parts.len()).checked_sub(1) else {
+            return;
+        };
+        if self.plain.parts[last].kind != PartKind::Drawn {
+            return;
+        }
+        let Some(spot) = self.layouts.caret_spot(last) else {
+            return;
+        };
+        let run = TextRun {
+            len: CARET.len(),
+            font: window.text_style().font(),
+            color: cx.theme().colors.fg_muted,
+            ..TextRun::default()
+        };
+        let line = window
+            .text_system()
+            .shape_line(CARET.into(), spot.font_size, &[run], None);
+        if line
+            .paint(spot.origin, spot.line_height, TextAlign::Left, None, window, cx)
+            .is_ok()
+        {
+            self.layouts.set_caret(spot.origin);
+        }
     }
 
     fn listen(&self, hitbox: Hitbox, window: &mut Window) {
@@ -610,6 +648,9 @@ impl Element for MarkdownView {
             .as_mut()
             .expect("markdown prepainted before paint")
             .paint(window, cx);
+        if self.caret {
+            self.paint_caret(window, cx);
+        }
     }
 }
 

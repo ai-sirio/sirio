@@ -23,12 +23,29 @@ pub(crate) struct FileLinkMemo {
     /// Image url -> the address the renderer is handed for it, or `None` when it is shown
     /// as its alt text: the resolution and the size check, asked once.
     images: HashMap<String, Option<String>>,
+    /// Only what the memo already knows is answered, and nothing is asked of the disk or added
+    /// (see [`Self::lookup_only`]).
+    lookup_only: bool,
 }
 
 impl FileLinkMemo {
+    /// Sets whether the memo only looks up. A tail drawn on a frame must not stat a path (the
+    /// last word of the text revealed so far is a new candidate on nearly every frame, and the
+    /// disk is asked while a document is built, never while it paints): what the build of the
+    /// received text found is linked, and anything else is plain text.
+    pub(crate) fn lookup_only(&mut self, on: bool) {
+        self.lookup_only = on;
+    }
+
     pub(crate) fn clear(&mut self) {
         self.links.clear();
         self.images.clear();
+    }
+
+    /// How many candidates and pictures the memo has an answer for.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.links.len() + self.images.len()
     }
 
     /// The memoised resolution of one candidate, asking the disk only the
@@ -41,6 +58,9 @@ impl FileLinkMemo {
     ) -> Option<FileLinkTarget> {
         if let Some(known) = self.links.get(candidate) {
             return known.clone();
+        }
+        if self.lookup_only {
+            return None;
         }
         let found = resolve_chat_path(candidate, cwd, home);
         self.links.insert(candidate.to_string(), found.clone());
@@ -227,6 +247,9 @@ pub(crate) fn local_image_path(
 ) -> Option<String> {
     if let Some(known) = memo.images.get(url) {
         return known.clone();
+    }
+    if memo.lookup_only {
+        return None;
     }
     let kept = local_image_on_disk(url, cwd, home);
     memo.images.insert(url.to_string(), kept.clone());

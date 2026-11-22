@@ -118,8 +118,10 @@ fn remember_pressed_link(chat: Entity<Chat>) -> markdown::MenuHandler {
 }
 
 /// A transcript reply: part of the chat's one selection, so a drag across it selects its
-/// visible text and Copy reads that text. Where the last paint drew its links is reported to the
-/// control socket, and a right press leaves the link under it for the transcript's menu.
+/// visible text. Copy reads that text from the transcript's text (`document`), except for a drag
+/// that ends in a reply being revealed, which copies the blocks last drawn (`reveal.rs`). Where
+/// the last paint drew its links is reported to the control socket, and a right press leaves the
+/// link under it for the transcript's menu.
 fn reply_body(
     document: &MarkdownBlocks,
     interaction: TranscriptInteraction,
@@ -286,6 +288,32 @@ fn with_linked_policy<R>(
             memo,
         }),
     })
+}
+
+/// [`with_linked_policy`] for what a frame draws of a live reply: the files it names are looked
+/// up in `memo`, which the build of the received text filled, and the disk is never asked, so a
+/// frame never waits for it. A candidate the memo has not seen is plain text.
+fn with_lookup_policy<R>(
+    cwd: &Path,
+    memo: &mut file_links::FileLinkMemo,
+    read: impl FnOnce(&mut Policy<'_>) -> R,
+) -> R {
+    memo.lookup_only(true);
+    let made = with_linked_policy(cwd, &mut *memo, read);
+    memo.lookup_only(false);
+    made
+}
+
+/// Whether `entry` is news about the session that sits below a reply without ending it: a chunk
+/// that arrives after it still grows the reply (`Chat::streamed_entry`), and the reply stays live.
+fn is_aside(entry: &Entry) -> bool {
+    matches!(
+        entry,
+        Entry::Notice {
+            kind: NoticeKind::Compaction | NoticeKind::BackgroundTask | NoticeKind::Warning,
+            ..
+        }
+    )
 }
 
 /// An assistant response's document with the files it names marked as links.
@@ -2660,17 +2688,7 @@ impl Chat {
     /// answer that follows opens a row below it instead of growing the
     /// refused one.
     fn streamed_entry(&self) -> Option<usize> {
-        self.entries.iter().rposition(|entry| {
-            !matches!(
-                entry,
-                Entry::Notice {
-                    kind: NoticeKind::Compaction
-                        | NoticeKind::BackgroundTask
-                        | NoticeKind::Warning,
-                    ..
-                }
-            )
-        })
+        self.entries.iter().rposition(|entry| !is_aside(entry))
     }
 
     /// Ends the streaming build of every reply that still has one: its tree is built whole from
@@ -3139,6 +3157,14 @@ impl Chat {
 
     /// Add one transcript row and keep the virtualizer's index tree in sync.
     fn push_entry(&mut self, entry: Entry) {
+        // A reply is live only while it is the last entry that is not an aside: a tool call, a
+        // thought, a permission request, an error or a user message after it ends it, since the
+        // next chunk opens a new reply (`streamed_entry`). It is not left with its caret and its
+        // pace through the minutes such a row can take. A reply pushed here is a new one, which
+        // the chunk arm has already ended the last of.
+        if self.reveal.is_some() && !is_aside(&entry) && !matches!(entry, Entry::Assistant { .. }) {
+            self.finish_reply();
+        }
         let index = self.entries.len();
         self.turn_message_ids.push(None);
         let following_tail = self.list_state.is_following_tail();
@@ -4970,6 +4996,7 @@ impl Chat {
         // The widgets go, and their asks are denied, before the cards are cleared with the rest.
         self.close_widgets(cx);
         self.entries.clear();
+        self.reveal = None;
         self.turn_message_ids.clear();
         // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
@@ -5119,6 +5146,10 @@ impl Chat {
         let selection = self.transcript_selection.as_ref()?.range();
         if selection.start >= selection.end {
             return None;
+        }
+        // A drag that ends in the reply being revealed copies what is on the screen.
+        if let Some(on_screen) = self.copy_from_live_reply(&selection) {
+            return Some(on_screen);
         }
         self.transcript_text().get(selection).map(ToOwned::to_owned)
     }
@@ -5957,6 +5988,7 @@ impl Chat {
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.close_widgets(cx);
         self.entries.clear();
+        self.reveal = None;
         self.turn_message_ids.clear();
         self.pending_rewind = None;
         self.folded_turns.clear();

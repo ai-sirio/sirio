@@ -2,12 +2,18 @@
 //!
 //! While a turn streams, the reply is not drawn from `document` (the tree of all that has arrived)
 //! but from [`drawn_blocks`]: the frozen blocks of its [`StreamingDoc`] that are shown whole, then
-//! the text revealed since, built as the tail of the reply, with a `▍` after it. Ely's own
-//! `next_shown` and `grapheme_end` set the pace (90 graphemes a second, catching up within 350 ms,
-//! all at once under reduced motion) and the end of every step on a grapheme.
+//! the text revealed since, built as the tail of the reply. The caret is not part of that text: it
+//! is a mark on the drawn tree (`MarkdownBlocks::caret`) that the view paints after the last text,
+//! so it cannot change how the tail parses (`` ```▍ `` would not close a fence), and no text, copy
+//! or selection holds it. Ely's own `next_shown` and `grapheme_end` set the pace (90 graphemes a
+//! second, catching up within 350 ms, all at once under reduced motion) and the end of every step
+//! on a grapheme.
 //!
-//! The text received, `document` included, is what copy, the control socket and the file-link memo
-//! read. What is revealed is only what the next frame draws.
+//! A reply is live while it is the last entry that is not an aside (`push_entry` ends it when
+//! something else comes after it), and its drawn blocks are kept from frame to frame while nothing
+//! they depend on moves. The text received, `document` included, is what Select All and the
+//! control socket read, and what the file-link memo was filled from: the tail only looks files up
+//! in it. A drag selection over the reply copies the drawn blocks' text.
 
 use std::cell::Cell;
 use std::time::Instant;
@@ -17,11 +23,8 @@ use ely_gpui_component::theme::ActiveTheme as _;
 use gpui::{Context, Window};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{Chat, Entry, with_linked_policy};
+use super::{Chat, Entry, with_lookup_policy};
 use crate::markdown::{self, MarkdownBlocks, Policy, Segment};
-
-/// The mark where more will come, set inline after the text, as Ely's `StreamingMarkdown` does.
-const CARET: &str = "▍";
 
 /// The most text a frame builds of a live reply on top of its frozen blocks: the revealed bytes
 /// past the end of the last frozen block that is shown. A reply that freezes as it arrives has a
@@ -73,7 +76,16 @@ pub(crate) struct Reveal {
     /// grew by and the reveal moved by, not the length of the reply.
     counted: Cell<Spot>,
     walked: Cell<Spot>,
+    /// What the last frame drew, and what it depended on: where the reveal stood, where the tail
+    /// began, how many segments there were and how long the text was. A render that changes none
+    /// of them (a key typed in the composer, a tool call updated) draws the same blocks, the same
+    /// `Rc`s, which the culling memory compares; it is not a cache of segments, only of a frame.
+    drawn: Option<(Drew, MarkdownBlocks)>,
 }
+
+/// What a drawn tail depends on: the byte the reveal stands at, the byte the tail starts at, how
+/// many segments the stream held, and how long the text was.
+type Drew = (usize, usize, usize, usize);
 
 impl Reveal {
     /// A reveal that has shown nothing yet, started at `at`.
@@ -84,7 +96,14 @@ impl Reveal {
             plain: false,
             counted: Cell::default(),
             walked: Cell::default(),
+            drawn: None,
         }
+    }
+
+    /// Moves the reveal to `graphemes` shown.
+    #[cfg(test)]
+    pub(super) fn show(&mut self, graphemes: usize) {
+        self.shown = graphemes as f32;
     }
 
     /// How many graphemes `text` holds.
@@ -125,6 +144,15 @@ impl Reveal {
     }
 }
 
+/// The largest character boundary of `text` at or before `at` (the end of `text` past it).
+fn floor_char_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
 /// Where the tail of a reply revealed up to `revealed` starts: the end of the last frozen segment
 /// that is shown whole (`0` when none is). The segments tile the text, in order.
 fn tail_from(segments: &[Segment], revealed: usize) -> usize {
@@ -139,11 +167,14 @@ fn frozen_by(segments: &[Segment], revealed: usize) -> &[Segment] {
 }
 
 /// The blocks a live reply draws when `text` is shown up to the byte `revealed`: every frozen
-/// segment that ends by it, then `text[from..revealed]` and the caret built as the tail (`from`
-/// is where the last of those segments ends), all joined. `document` is not touched.
+/// segment that ends by it, then `text[from..revealed]` built as the tail (`from` is where the last
+/// of those segments ends), all joined, and marked to be drawn with a caret. The caret is not in
+/// the tail's source. `document` is not touched.
 ///
 /// `revealed` is a character boundary of `text`, and `segments` are those of the reply's
-/// [`StreamingDoc`] (none for a reply gone whole: its document is one plain paragraph).
+/// [`StreamingDoc`] (none for a reply gone whole, which is drawn by [`plain_blocks`]). The result
+/// is marked `reader_panicked` when the reader panicked on the tail, in which case it is plain
+/// text; the caller does not draw it.
 pub(crate) fn drawn_blocks(
     text: &str,
     segments: &[Segment],
@@ -152,20 +183,33 @@ pub(crate) fn drawn_blocks(
 ) -> MarkdownBlocks {
     let shown = frozen_by(segments, revealed);
     let from = tail_from(shown, revealed);
-    let tail = format!("{}{CARET}", &text[from..revealed]);
-    markdown::with_tail(shown, &tail, policy)
+    let mut blocks = markdown::with_tail(shown, &text[from..revealed], policy);
+    blocks.caret = true;
+    blocks
+}
+
+/// What a reply gone whole (the nesting guard refused it) draws when `text` is shown up to the
+/// byte `revealed`: the revealed bytes as one plain paragraph, as the document of such a reply is,
+/// and a caret. The reader is not asked.
+fn plain_blocks(text: &str, revealed: usize) -> MarkdownBlocks {
+    let mut blocks = markdown::as_plain(&text[..revealed]);
+    blocks.caret = true;
+    blocks
 }
 
 impl Chat {
-    /// Whether the reply at `entry` is being revealed: it is live (its stream is alive) and has
-    /// not gone past the tail's budget.
+    /// Whether the reply at `entry` is being revealed: it is live (its stream is alive), the
+    /// reader did not panic on its text (its document is then plain text, drawn as it is, with no
+    /// caret and no pacing, and no frame asks the reader about it again) and its tail has not gone
+    /// past the budget or panicked the reader.
     fn revealing(&self, entry: usize) -> bool {
         matches!(
             self.entries.get(entry),
             Some(Entry::Assistant {
                 stream: Some(_),
+                document,
                 ..
-            })
+            }) if !document.reader_panicked
         ) && self.reveal.as_ref().is_some_and(|reveal| !reveal.plain)
     }
 
@@ -199,8 +243,10 @@ impl Chat {
         (reveal.shown as usize) < total
     }
 
-    /// What the reply at `entry` draws now, when the reveal draws it: `None` draws `document`
-    /// (it is not live, or its tail went past the budget, which it does for good).
+    /// What the reply at `entry` draws now, when the reveal draws it: `None` draws `document` (it
+    /// is not live, or the reveal ended for good: its tail went past the budget, or the reader
+    /// panicked on it). The tail only looks files up, and the blocks are the last frame's when
+    /// nothing they depend on moved.
     fn drawn_reply(&mut self, entry: usize) -> Option<MarkdownBlocks> {
         if !self.revealing(entry) {
             return None;
@@ -216,20 +262,33 @@ impl Chat {
         let reveal = self.reveal.as_mut()?;
         let end = reveal.end(text);
         // A reply gone whole has no frozen blocks to show: its document is one plain paragraph.
-        let segments: &[Segment] = if stream.is_whole() {
-            &[]
-        } else {
-            stream.segments()
-        };
-        if end - tail_from(segments, end) > TAIL_BUDGET {
+        let whole = stream.is_whole();
+        let segments: &[Segment] = if whole { &[] } else { stream.segments() };
+        let from = tail_from(segments, end);
+        if end - from > TAIL_BUDGET {
             reveal.plain = true;
+            reveal.drawn = None;
             return None;
         }
-        Some(with_linked_policy(
-            &self.agent_cwd,
-            &mut self.file_link_memo,
-            |policy| drawn_blocks(text, segments, end, policy),
-        ))
+        let key = (end, from, segments.len(), text.len());
+        if let Some((drew, blocks)) = &reveal.drawn
+            && *drew == key
+        {
+            return Some(blocks.clone());
+        }
+        let blocks = match whole {
+            true => plain_blocks(text, end),
+            false => with_lookup_policy(&self.agent_cwd, &mut self.file_link_memo, |policy| {
+                drawn_blocks(text, segments, end, policy)
+            }),
+        };
+        if blocks.reader_panicked {
+            reveal.plain = true;
+            reveal.drawn = None;
+            return None;
+        }
+        reveal.drawn = Some((key, blocks.clone()));
+        Some(blocks)
     }
 
     /// What the row of the reply at `entry` draws on this frame: the reveal moves on to now, and
@@ -247,7 +306,63 @@ impl Chat {
         if self.advance_reveal(entry, cx.theme().reduced_motion, now) {
             window.request_animation_frame();
         }
-        self.drawn_reply(entry)
+        let drawn = self.drawn_reply(entry);
+        if let Some(blocks) = &drawn {
+            self.clamp_selection_to_drawn(entry, &blocks.text.text);
+        }
+        drawn
+    }
+
+    /// Where the live reply's row is in the transcript's offset space, and the text of the blocks
+    /// last drawn for it: what a drag over it selects. `None` when no reply is being revealed.
+    fn live_row(&self) -> Option<(std::ops::Range<usize>, &str)> {
+        let entry = (self.entries.iter())
+            .rposition(|entry| matches!(entry, Entry::Assistant { stream: Some(_), .. }))?;
+        if !self.revealing(entry) {
+            return None;
+        }
+        let (_, drawn) = self.reveal.as_ref()?.drawn.as_ref()?;
+        Some((self.transcript_entry_ranges()[entry].clone(), drawn.text.text.as_str()))
+    }
+
+    /// What a selection copies when it ends inside the live reply: the text of the blocks last
+    /// drawn, from where it starts to where the pointer let go. The selection's offsets are in the
+    /// drawn text (the body hit-tests what is on screen), and the document's text differs from
+    /// it wherever the reveal has not yet read what the document has: `[t][7]` is a link `t`
+    /// there, and the bytes past the reveal are not on screen at all. A selection that reaches the
+    /// end of the reply's document (Select All) is not a drag over the screen: `None`, the caller
+    /// reads the document.
+    pub(super) fn copy_from_live_reply(&self, selection: &std::ops::Range<usize>) -> Option<String> {
+        let (row, drawn) = self.live_row()?;
+        if selection.end <= row.start || selection.start >= row.end || selection.end >= row.end {
+            return None;
+        }
+        let before = match selection.start < row.start {
+            true => self.transcript_text().get(selection.start..row.start)?.to_owned(),
+            false => String::new(),
+        };
+        let at = |offset: usize| floor_char_boundary(drawn, offset.saturating_sub(row.start));
+        let (from, to) = (at(selection.start.max(row.start)), at(selection.end));
+        Some(format!("{before}{}", &drawn[from..to.max(from)]))
+    }
+
+    /// Brings a selection that ends inside the live reply back inside what is drawn of it. The
+    /// drawn text can get shorter between two frames (a closed mark drops its glyphs), and a
+    /// selection made over the text as it was would end past the text as it is, or inside a glyph.
+    /// A selection that reaches the end of the document's text (Select All) is left as it is.
+    fn clamp_selection_to_drawn(&mut self, entry: usize, drawn: &str) {
+        if self.transcript_selection.is_none() {
+            return;
+        }
+        let row = self.transcript_entry_ranges()[entry].clone();
+        let Some(selection) = self.transcript_selection.as_mut() else {
+            return;
+        };
+        for end in [&mut selection.anchor, &mut selection.head] {
+            if row.start <= *end && *end < row.end {
+                *end = row.start + floor_char_boundary(drawn, *end - row.start);
+            }
+        }
     }
 
     /// Debug builds only, the control socket's two readouts of a reply row: `live` (its stream is
@@ -269,12 +384,15 @@ impl Chat {
 mod tests {
     use std::time::Duration;
 
-    use gpui::TestAppContext;
     use ely_gpui_component::documents::MarkdownBlock;
+    use gpui::{TestAppContext, px};
     use unicode_segmentation::UnicodeSegmentation;
 
-    use super::super::markdown_tests::{SHOWCASE, chat_with, painted_text, revealed, tick};
+    use super::super::markdown_tests::{
+        SHOWCASE, chat_with, last_painted_row, painted_caret, painted_text, revealed, tick,
+    };
     use super::super::tests::refresh_frame;
+    use super::super::{NoticeKind, TranscriptSelection};
     use super::*;
     use crate::markdown::{Policy, StreamingDoc, Surface};
 
@@ -306,8 +424,9 @@ mod tests {
         sirio_chat::ChatEvent::AgentMessageChunk(text.into())
     }
 
-    /// The frozen blocks of the segments up to the reveal, then what is revealed of the next one
-    /// with the caret after it: the segments are not parsed again, the tail is.
+    /// The frozen blocks of the segments up to the reveal, then what is revealed of the next one,
+    /// with the caret on the tree and in none of its text: the segments are not parsed again, the
+    /// tail is, without the caret, so that it parses as the reply does.
     #[test]
     fn drawn_blocks_shows_frozen_segments_then_the_caret_tail() {
         let stream = streamed(SHOWCASE);
@@ -336,20 +455,18 @@ mod tests {
             panic!("the tail is the heading being revealed: {:?}", drawn.nodes[frozen.len()]);
         };
         assert_eq!(usize::from(*level), 2);
-        assert_eq!(tail.text, "Second ▍", "the revealed words and the caret, nothing after");
-        assert!(drawn.text.text.ends_with('▍'));
+        assert_eq!(tail.text, "Second", "the revealed words, nothing after them");
+        assert!(drawn.caret, "the tree is drawn with its caret");
+        assert!(!drawn.text.text.contains('▍'), "no text holds the caret: {:?}", drawn.text.text);
 
-        // Revealed to the end of the third block, it is frozen too, and the caret stands alone.
+        // Revealed to the end of the third block, it is frozen too, and nothing is built.
         let drawn = drawn_blocks(SHOWCASE, segments, third.end, &mut policy());
-        assert_eq!(drawn.nodes.len(), frozen.len() + segments[2].nodes.len() + 1);
-        let MarkdownBlock::Paragraph(caret) = drawn.nodes.last().unwrap() else {
-            panic!("the caret after the last revealed block is a paragraph");
-        };
-        assert_eq!(caret.text, "▍");
+        assert_eq!(drawn.nodes.len(), frozen.len() + segments[2].nodes.len());
+        assert!(drawn.caret);
     }
 
     /// A reply whose blocks do not depend on each other draws, at every byte it can be revealed to,
-    /// what a build of that text and the caret makes: the same nodes, with the source offsets of a
+    /// what a build of that text makes: the same nodes, with the source offsets of a
     /// code block or a picture counted from the start of the reply and not of the tail, the same
     /// headings, kinds and text. Written with line ends of both kinds.
     #[test]
@@ -365,7 +482,8 @@ mod tests {
             let mut checked = 0;
             for revealed in (1..=reply.len()).filter(|at| reply.is_char_boundary(*at)) {
                 let drawn = drawn_blocks(&reply, segments, revealed, &mut policy());
-                let full = markdown::build(&format!("{}{CARET}", &reply[..revealed]), &mut policy());
+                let full = markdown::build(&reply[..revealed], &mut policy());
+                assert!(drawn.caret, "revealed {revealed}: no caret");
                 let what = format!("revealed {revealed} of {:?}", &reply[..revealed]);
                 assert_eq!(drawn.nodes.len(), full.nodes.len(), "{what}: top-level nodes");
                 for (at, (got, want)) in drawn.nodes.iter().zip(full.nodes.iter()).enumerate() {
@@ -378,6 +496,372 @@ mod tests {
             }
             assert!(checked > 300, "{checked} positions were checked");
         }
+    }
+
+    /// The reveal draws every prefix of a reply the stream passes through, so a text the reader
+    /// panics on only at a prefix (a definition at the end of a list, a label broken over a quote
+    /// line, a letter that folds to another, a `\|` in a table's label) is as much a crash as one
+    /// it panics on whole. Every prefix of each shape draws through `drawn_blocks` without the
+    /// reader panicking (the guard would catch it, and the tree would be plain text, marked), with
+    /// the source offsets inside the text, whether the stream froze the reply's blocks as it came
+    /// or the reply is drawn from no segments (a reply gone whole).
+    #[test]
+    fn every_prefix_of_a_reply_draws_without_the_reader_panicking() {
+        const SHAPES: [&str; 6] = [
+            "- see [1]\n\n[1]: https://x\n\nmore",
+            "- see [1]\n\n[1]: https://x\n[2]: https://y\n\nmore",
+            "> see [x][one\n> two]\n\n[one two]: u\n\nmore",
+            "[\u{131}] and [i]\n\n[i]: a\n[\u{131}]: b\n\nmore",
+            "| a | b |\n|---|---|\n| [x\\|y] | 2 |\n\n[x|y]: u\n\nmore",
+            SHOWCASE,
+        ];
+        let mut walked = 0;
+        for (shape, text) in SHAPES.iter().enumerate() {
+            let stream = streamed(text);
+            let variants: [(&str, &[Segment]); 2] =
+                [("frozen", stream.segments()), ("no segments", &[])];
+            for (name, segments) in variants {
+                for revealed in (0..=text.len()).filter(|at| text.is_char_boundary(*at)) {
+                    let drawn = drawn_blocks(text, segments, revealed, &mut policy());
+                    assert!(
+                        !drawn.reader_panicked,
+                        "shape {shape} ({name}): the reader panicked on the first {revealed} bytes of {text:?}"
+                    );
+                    let offsets = crate::markdown::source_offsets(&drawn.nodes);
+                    assert!(
+                        offsets.iter().all(|at| *at <= text.len()),
+                        "shape {shape} ({name}), {revealed} bytes: an offset out of {} bytes: {offsets:?}",
+                        text.len()
+                    );
+                    walked += 1;
+                }
+            }
+        }
+        assert!(walked > 10_000, "{walked} prefixes were drawn");
+    }
+
+    /// The caret is never in the source the tail is parsed from: `` ```▍ `` does not close a fence,
+    /// and the Copy of a code block would put the caret on the clipboard. A fence that the
+    /// revealed text closes is a closed code block, as in a build of that text, and in a fence
+    /// that is still open the code is the revealed code, and nothing else.
+    #[test]
+    fn the_caret_neither_changes_how_the_tail_parses_nor_enters_a_code_block() {
+        let text = "```bash\nnpm i foo\n```\n\nafter";
+        let closed = text.find("```\n\n").unwrap() + 3;
+        let drawn = drawn_blocks(text, &[], closed, &mut policy());
+        let built = markdown::build(&text[..closed], &mut policy());
+        assert_eq!(drawn.nodes.len(), 1);
+        assert!(drawn.nodes == built.nodes, "the fence is as closed as in a build: {:?}", drawn.nodes);
+        assert!(drawn.caret);
+
+        let open = "```bash\nnpm i foo";
+        let drawn = drawn_blocks(open, &[], open.len(), &mut policy());
+        let [MarkdownBlock::Code { text: code, .. }] = &drawn.nodes[..] else {
+            panic!("an open fence is one code block: {:?}", drawn.nodes);
+        };
+        assert_eq!(code, "npm i foo");
+        assert!(drawn.caret && !drawn.text.text.contains('▍'));
+    }
+
+    /// The view paints the caret itself, at the end of the last text of the body, and it is in no
+    /// text: not in what the paint laid out, not in what a copy reads. A reply that is no longer
+    /// live has none.
+    #[gpui::test]
+    async fn the_caret_is_painted_at_the_end_of_the_last_text(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk("First paragraph.\n\nSecond one, which goes on"), cx);
+        });
+        tick(cx, Duration::from_secs(10));
+        let caret = painted_caret(&chat, cx).expect("a live reply is drawn with its caret");
+        let (row, text) = last_painted_row(&chat, cx);
+        assert_eq!(text, "Second one, which goes on");
+        // The row is as wide as the body; the caret is on its line, well past its start, where
+        // the text ends.
+        assert!(
+            row.left() + px(100.0) < caret.x && caret.x < row.right() && caret.y == row.top(),
+            "the caret at {caret:?}, the last text in {row:?}"
+        );
+        assert!(!painted_text(&chat, cx).contains('▍'));
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(!chat.transcript_text().contains('▍'));
+        });
+    }
+
+    /// A reply is live while it is the last entry that is not a notice. A tool call, a thought, a
+    /// user message pushed after it finishes it: no caret, its document drawn whole, and its stream
+    /// ended. A notice does not (the next chunk still joins the reply, `streamed_entry`). A chunk
+    /// after a tool call starts a new reply.
+    #[gpui::test]
+    async fn a_later_entry_that_is_not_a_notice_ends_the_live_reply(cx: &mut TestAppContext) {
+        let reply = "A reply with words enough to take a while to reveal at the pace it has.";
+        let entries: [(&str, Entry, bool); 4] = [
+            ("a tool call", super::super::tests::test_tool_call("t1"), true),
+            (
+                "a thought",
+                Entry::Thought {
+                    text: "hm".into(),
+                    open: Default::default(),
+                    started: None,
+                    duration_ms: None,
+                },
+                true,
+            ),
+            (
+                "a user message",
+                Entry::User {
+                    text: "and another thing".into(),
+                    at: None,
+                },
+                true,
+            ),
+            (
+                "a compaction notice",
+                Entry::Notice {
+                    text: "compacted".into(),
+                    kind: NoticeKind::Compaction,
+                },
+                false,
+            ),
+        ];
+        for (what, entry, ends) in entries {
+            let (chat, cx) = chat_with(cx, &[]);
+            chat.update(cx, |chat, cx| {
+                chat.streaming = true;
+                chat.handle_event(chunk(reply), cx);
+            });
+            tick(cx, Duration::from_millis(100));
+            assert!(painted_caret(&chat, cx).is_some(), "{what}: the reply is live and shows its caret");
+            chat.update(cx, |chat, _| chat.push_entry(entry));
+            refresh_frame(cx);
+            chat.read_with(&cx.cx, |chat, _| {
+                let Some(Entry::Assistant { stream, .. }) = chat.entries.first() else {
+                    panic!("{what}: the reply is the first row");
+                };
+                assert_eq!(stream.is_none(), ends, "{what}: the reply's stream");
+                let bytes = chat.revealed_bytes(0);
+                assert_eq!(bytes == reply.len(), ends, "{what}: {bytes} bytes shown");
+            });
+            assert_eq!(painted_caret(&chat, cx).is_none(), ends, "{what}: the caret");
+            if ends {
+                chat.update(cx, |chat, cx| chat.handle_event(chunk("A second reply."), cx));
+                chat.read_with(&cx.cx, |chat, _| {
+                    let replies = (chat.entries.iter())
+                        .filter(|entry| matches!(entry, Entry::Assistant { .. }))
+                        .count();
+                    assert_eq!(replies, 2, "{what}: a chunk after it opens a new reply");
+                });
+            }
+        }
+    }
+
+    /// What a render draws of a live reply is memoised on what it depends on, so that a render that
+    /// changes none of them (a key typed in the composer, a tool call updated) gets the same
+    /// blocks, not a build of them: the same `Rc`, which the culling memory compares. A chunk, or
+    /// the reveal moving, is a new one.
+    #[gpui::test]
+    async fn a_render_that_changes_nothing_reuses_the_drawn_blocks(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk("A reply that goes on for a while, in a paragraph.\n\nAnd a second"), cx);
+        });
+        tick(cx, Duration::from_millis(100));
+        let drawn = |cx: &mut gpui::VisualTestContext| {
+            chat.update(cx, |chat, _| chat.drawn_reply(0)).expect("a live reply")
+        };
+        let first = drawn(cx);
+        assert!(std::rc::Rc::ptr_eq(&first.nodes, &drawn(cx).nodes), "asked twice, built twice");
+        refresh_frame(cx);
+        assert!(std::rc::Rc::ptr_eq(&first.nodes, &drawn(cx).nodes), "a frame that moved nothing rebuilt it");
+
+        chat.update(cx, |chat, cx| chat.handle_event(chunk(" paragraph, more"), cx));
+        let after_a_chunk = drawn(cx);
+        assert!(!std::rc::Rc::ptr_eq(&first.nodes, &after_a_chunk.nodes), "a chunk changed the reply");
+        tick(cx, Duration::from_millis(30));
+        assert!(!std::rc::Rc::ptr_eq(&after_a_chunk.nodes, &drawn(cx).nodes), "the reveal moved");
+    }
+
+    /// A drag over a live reply selects the text on screen, and copies it: the revealed text as it
+    /// is drawn (an unresolved `[t][7]` is still `[t][7]`, though the document, which has the
+    /// definition, reads `t`), up to the caret and not past it.
+    #[gpui::test]
+    async fn a_drag_over_a_live_reply_copies_what_is_on_the_screen(cx: &mut TestAppContext) {
+        let reply = "Intro paragraph.\n\nSee [t][7] and then some more words.\n\n[7]: https://example.com/seven\n\nEnd.";
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(reply), cx);
+        });
+        let through = reply.find("[t][7] and").unwrap() + "[t][7] and th".len();
+        for _ in 0..40 {
+            tick(cx, Duration::from_millis(10));
+            if revealed(&chat, cx) >= through {
+                break;
+            }
+        }
+        let (row, on_screen) = last_painted_row(&chat, cx);
+        let shown = revealed(&chat, cx);
+        let tail_from = reply.find("See").unwrap();
+        assert_eq!(on_screen, reply[tail_from..shown], "the revealed words of the tail, as written");
+        assert!(on_screen.starts_with("See [t][7] and th"), "{on_screen:?}");
+        let (document, drawn) = chat.update(cx, |chat, _| {
+            let Some(Entry::Assistant { document, .. }) = chat.entries.first() else {
+                panic!("a reply")
+            };
+            let document = document.text.text.clone();
+            (document, chat.drawn_reply(0).expect("live").text.text.clone())
+        });
+        assert!(document.contains("See t and"), "the document has the definition: {document:?}");
+        assert_eq!(drawn, reply[..shown]);
+
+        // From the start of the tail to the caret, which stands past the end of the text.
+        let (from, to) = (
+            gpui::point(row.left() + px(1.0), row.center().y),
+            gpui::point(row.right() - px(10.0), row.center().y),
+        );
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let copied = chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text());
+        assert_eq!(copied.as_deref(), Some(on_screen.as_str()), "the drag copied the screen's text");
+
+        // From the top of the reply to the caret: all of it, the paragraph above included.
+        let body = cx.debug_bounds("assistant-response-0").expect("the reply is drawn");
+        let from = gpui::point(body.left() + px(1.0), body.top() + px(2.0));
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let copied = chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text());
+        assert_eq!(copied.as_deref(), Some(drawn.as_str()));
+        assert!(!copied.unwrap().contains('▍'));
+    }
+
+    /// Select All reads the document, whole, as it did: the reveal does not hold the selection to
+    /// what is on screen.
+    #[gpui::test]
+    async fn select_all_over_a_live_reply_copies_the_document(cx: &mut TestAppContext) {
+        let reply = "Intro paragraph.\n\nSee [t][7] and then some more words.\n\n[7]: https://example.com/seven\n\nEnd.";
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(reply), cx);
+        });
+        tick(cx, Duration::from_millis(60));
+        assert!(revealed(&chat, cx) < reply.len());
+        let (all, document) = chat.update(cx, |chat, _| {
+            let len = chat.transcript_text().len();
+            chat.transcript_selection = Some(TranscriptSelection { anchor: 0, head: len });
+            let Some(Entry::Assistant { document, .. }) = chat.entries.first() else {
+                panic!("a reply")
+            };
+            (chat.selected_transcript_text(), document.text.text.clone())
+        });
+        assert_eq!(all, Some(document));
+    }
+
+    /// The tail only looks the files a reply names up in the memo the build of the received text
+    /// filled, and never asks the disk: a token the memo has not seen (`src/li`, the start of one
+    /// to come) is plain text, and adds no entry to the memo.
+    #[gpui::test]
+    async fn the_tail_looks_files_up_and_never_asks_the_disk(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("sirio-reveal-links-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).expect("a folder for the files the reply names");
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("a file to link to");
+        let reply = "Open src/main.rs and then src/lib.rs please";
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.agent_cwd = dir.clone();
+            chat.handle_event(chunk(reply), cx);
+        });
+        let known = chat.read_with(&cx.cx, |chat, _| chat.file_link_memo.len());
+        assert_eq!(known, 2, "the build of the whole text asked about the two files");
+        for through in ["Open src/main.rs and then src/li", "Open src/main.rs and"] {
+            // The reveal is moved to `through` by hand: no clock does it to the byte.
+            let drawn = chat.update(cx, |chat, _| {
+                chat.reveal.as_mut().expect("live").show(through.chars().count());
+                chat.drawn_reply(0).expect("live")
+            });
+            assert_eq!(drawn.text.text, through);
+            let links: usize = drawn
+                .nodes
+                .iter()
+                .map(|node| match node {
+                    MarkdownBlock::Paragraph(inline) => inline.links.len(),
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(links, 1, "{through:?}: the file the memo knew is a link, the rest is not");
+            let now = chat.read_with(&cx.cx, |chat, _| chat.file_link_memo.len());
+            assert_eq!(now, known, "{through:?}: the tail added to the memo, so it asked the disk");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A reply marked as plain text because the reader panicked on it stops revealing: it draws
+    /// its text as the document has it, with no caret and no pacing, and no frame parses it again.
+    #[gpui::test]
+    async fn a_reply_marked_plain_is_not_parsed_on_any_frame(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, _| chat.streaming = true);
+        let fault = crate::markdown::reader_fault::on();
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(chunk("# A reply the reader panicked on, **in full**"), cx);
+        });
+        let asked = crate::markdown::reader_fault::strikes();
+        assert!(asked >= 1, "the chunk asked the reader");
+        for _ in 0..3 {
+            tick(cx, Duration::from_millis(100));
+        }
+        assert_eq!(crate::markdown::reader_fault::strikes(), asked, "a frame asked the reader");
+        drop(fault);
+        chat.read_with(&cx.cx, |chat, _| {
+            let Some(Entry::Assistant { text, document, .. }) = chat.entries.first() else {
+                panic!("a reply")
+            };
+            assert!(document.reader_panicked);
+            assert_eq!(chat.revealed_bytes(0), text.len(), "a marked reply shows all of its text");
+        });
+        assert!(painted_caret(&chat, cx).is_none());
+        assert!(painted_text(&chat, cx).contains("# A reply the reader panicked on, **in full**"));
+    }
+
+    /// A prefix the reader panics on, of a reply it reads whole: the frame that draws it gets plain
+    /// text, marked. That ends the reveal for the turn, as the budget does: no caret, the document
+    /// (which is fine) drawn whole, and no later frame asks the reader again.
+    #[gpui::test]
+    async fn a_prefix_the_reader_panics_on_ends_the_reveal_and_leaves_the_document(
+        cx: &mut TestAppContext,
+    ) {
+        let reply = "A reply read fine in the whole, **bold** and all, which goes on a while.";
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(reply), cx);
+        });
+        let fault = crate::markdown::reader_fault::on();
+        tick(cx, Duration::from_millis(100));
+        let asked = crate::markdown::reader_fault::strikes();
+        assert!(asked >= 1, "the frame asked the reader, and it panicked");
+        assert!(chat.update(cx, |chat, _| chat.drawn_reply(0)).is_none());
+        assert_eq!(revealed(&chat, cx), reply.len());
+        for _ in 0..3 {
+            tick(cx, Duration::from_millis(100));
+        }
+        assert_eq!(crate::markdown::reader_fault::strikes(), asked, "a later frame asked the reader");
+        drop(fault);
+        chat.read_with(&cx.cx, |chat, _| {
+            let Some(Entry::Assistant { document, .. }) = chat.entries.first() else {
+                panic!("a reply")
+            };
+            assert!(!document.reader_panicked, "the document of the whole text was read fine");
+        });
+        assert!(painted_caret(&chat, cx).is_none());
+        assert!(painted_text(&chat, cx).contains("A reply read fine in the whole, bold and all"));
     }
 
     /// Ely drops a leading byte order mark from the text it reads, so the offsets of what it read
@@ -393,13 +877,13 @@ mod tests {
         // Inside the first block, nothing is frozen yet: the tail is the reply from its start.
         let first = "\u{feff}Fir".len();
         let drawn = drawn_blocks(text, segments, first, &mut policy());
-        assert_eq!(drawn.text.text, "Fir▍");
+        assert_eq!(drawn.text.text, "Fir");
 
         // Inside the third, after two frozen segments that begin with the mark.
         let third = text.find("Third").unwrap() + "Third b".len();
         let drawn = drawn_blocks(text, segments, third, &mut policy());
         assert!(
-            drawn.text.text.starts_with("First block") && drawn.text.text.ends_with("Third b▍"),
+            drawn.text.text.starts_with("First block") && drawn.text.text.ends_with("Third b"),
             "{:?}",
             drawn.text.text
         );
@@ -454,17 +938,42 @@ mod tests {
         assert_eq!(*seen.last().unwrap(), reply.len(), "the reveal reached the end");
     }
 
-    /// A reply that is not live (restored, or ended) is drawn from `document`, whole.
+    /// A reply that is not live (restored, or ended) is drawn from `document`, whole. Ended: a
+    /// reply that was live and part of the way through its reveal, with its caret drawn, until its
+    /// turn ended.
     #[gpui::test]
     async fn not_live_draws_the_document(cx: &mut TestAppContext) {
         let reply = "A **restored** reply.\n\nWith two blocks.";
-        let (chat, cx) = chat_with(cx, &[reply]);
+        {
+            let (chat, cx) = chat_with(cx, &[reply]);
+            refresh_frame(cx);
+            chat.read_with(&cx.cx, |chat, _| assert_eq!(chat.revealed_bytes(0), reply.len()));
+            let drawn = painted_text(&chat, cx);
+            assert!(painted_caret(&chat, cx).is_none(), "{drawn:?}");
+            assert!(drawn.contains("A restored reply."), "{drawn:?}");
+        }
+
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(reply), cx);
+        });
+        tick(cx, Duration::from_millis(100));
+        assert!(revealed(&chat, cx) < reply.len(), "the live reply is part of the way through");
+        assert!(painted_caret(&chat, cx).is_some());
+        assert!(!painted_text(&chat, cx).contains("two blocks"));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::TurnEnded {
+                    stop_reason: "EndTurn".into(),
+                },
+                cx,
+            );
+        });
         refresh_frame(cx);
-        chat.read_with(&cx.cx, |chat, _| assert_eq!(chat.revealed_bytes(0), reply.len()));
-        let drawn = painted_text(&chat, cx);
-        assert!(!drawn.contains('▍'), "{drawn:?}");
-        assert!(drawn.contains("A restored reply."), "{drawn:?}");
         assert_eq!(revealed(&chat, cx), reply.len());
+        assert!(painted_caret(&chat, cx).is_none());
+        assert!(painted_text(&chat, cx).contains("With two blocks."));
     }
 
     /// 12 KiB without a blank line never freezes, so the tail is the whole of what is revealed.
@@ -496,9 +1005,7 @@ mod tests {
             }
         });
         let drawn = |cx: &mut gpui::VisualTestContext| {
-            chat.update(cx, |chat, _| {
-                chat.drawn_reply(0).map(|blocks| blocks.text.text.clone())
-            })
+            chat.update(cx, |chat, _| chat.drawn_reply(0))
         };
 
         // It reveals, within the budget, at first.
@@ -510,8 +1017,8 @@ mod tests {
                 break;
             }
             assert!(shown <= TAIL_BUDGET, "{shown} bytes shown past the budget");
-            let text = drawn(cx).expect("a reply within the budget is drawn by the reveal");
-            assert!(text.ends_with('▍'), "{:?}", &text[text.len().saturating_sub(40)..]);
+            let blocks = drawn(cx).expect("a reply within the budget is drawn by the reveal");
+            assert!(blocks.caret && !blocks.text.text.contains('▍'));
             revealing += 1;
         }
         assert!(revealing >= 2, "it revealed before it gave up: {revealing} frames");
@@ -519,7 +1026,7 @@ mod tests {
         // Past it, it is the document, whole.
         assert_eq!(revealed(&chat, cx), reply.len());
         assert!(drawn(cx).is_none(), "a reply past the budget is drawn from `document`");
-        assert!(!painted_text(&chat, cx).contains('▍'));
+        assert!(painted_caret(&chat, cx).is_none());
 
         // Blocks arrive that let the stream freeze all of it: the tail is short again.
         let more: String = (1..=40)
@@ -543,25 +1050,21 @@ mod tests {
         tick(cx, Duration::from_millis(100));
         assert!(drawn(cx).is_none(), "the reply came back to the reveal");
         assert_eq!(revealed(&chat, cx), reply.len() + more.len());
-        assert!(!painted_text(&chat, cx).contains('▍'));
+        assert!(painted_caret(&chat, cx).is_none());
     }
 
     /// A reply the nesting guard refused has one plain paragraph for its document, and the frozen
-    /// blocks it held before are not what it shows: it reveals as that paragraph, from its start.
-    /// The budget is the same for it as for any other.
+    /// blocks it held before are not what it shows: it reveals as plain text, the revealed bytes
+    /// as they were written (a heading's `#` and a `**` stay what they are), from the start of the
+    /// reply, with the caret. The budget is the same for it as for any other.
     #[gpui::test]
-    async fn a_reply_gone_whole_reveals_as_one_plain_paragraph(cx: &mut TestAppContext) {
+    async fn a_reply_gone_whole_reveals_as_plain_text(cx: &mut TestAppContext) {
+        let lead = "# Heading\n\nFirst **bold** words\n\n";
         let deep = format!("{} too deep\n", ">".repeat(40));
         let (chat, cx) = chat_with(cx, &[]);
-        // All at once: the prefixes of the deep quote that stay under the cap are real nested
-        // quotes, and a debug draw of them overflows the 2 MiB stack a test thread has.
-        cx.update(|_, cx| {
-            cx.set_reduce_motion(true);
-            crate::ely::sync_theme_if_changed(cx);
-        });
         chat.update(cx, |chat, cx| {
             chat.streaming = true;
-            chat.handle_event(chunk("First block\n\nSecond block\n\n"), cx);
+            chat.handle_event(chunk(lead), cx);
             chat.handle_event(chunk(&deep), cx);
         });
         chat.read_with(&cx.cx, |chat, _| {
@@ -575,14 +1078,25 @@ mod tests {
             assert!(stream.is_whole(), "the nesting guard refused the deep quote");
             assert!(!stream.segments().is_empty(), "blocks were frozen before it");
         });
-        tick(cx, Duration::from_secs(10));
+        // Some of it: a heading and a bold mark that are Markdown in any other reply.
+        tick(cx, Duration::from_millis(100));
+        let shown = revealed(&chat, cx);
+        assert!(lead.len() / 2 < shown && shown < lead.len(), "{shown} bytes of {}", lead.len());
         let drawn = chat
             .update(cx, |chat, _| chat.drawn_reply(0))
             .expect("a short reply is drawn by the reveal");
         assert_eq!(drawn.nodes.len(), 1, "{:?}", drawn.nodes);
-        assert!(drawn.text.text.starts_with("First block"), "{:?}", drawn.text.text);
-        assert!(drawn.text.text.contains("Second block"));
-        assert!(drawn.text.text.ends_with("too deep\n▍"), "{:?}", drawn.text.text);
+        assert!(drawn.headings.is_empty());
+        assert_eq!(drawn.text.text, lead[..shown], "the revealed bytes as written");
+        assert!(drawn.caret && !drawn.reader_panicked);
+
+        // All of it: the document's own paragraph, up to the caret.
+        tick(cx, Duration::from_secs(10));
+        let drawn = chat
+            .update(cx, |chat, _| chat.drawn_reply(0))
+            .expect("a short reply is drawn by the reveal");
+        assert_eq!(drawn.text.text, format!("{lead}{deep}"));
+        assert_eq!(drawn.nodes.len(), 1);
 
         // 9 KiB more of it, and the budget applies as to any reply.
         chat.update(cx, |chat, cx| chat.handle_event(chunk(&"x ".repeat(4608)), cx));
@@ -610,7 +1124,8 @@ mod tests {
         });
         tick(cx, Duration::from_millis(16));
         assert_eq!(revealed(&chat, cx), reply.len());
-        assert!(painted_text(&chat, cx).ends_with('▍'));
+        assert!(painted_caret(&chat, cx).is_some());
+        assert!(painted_text(&chat, cx).ends_with("a second"));
     }
 
     /// While the reveal is behind, the view asks for the next frame itself, and when it has
@@ -696,7 +1211,7 @@ mod tests {
     fn drawn_blocks_costs() {
         use super::super::file_links::FileLinkMemo;
         use super::super::markdown_tests::{compact_source, numbered_references_source};
-        use super::super::with_linked_policy;
+        use super::super::with_lookup_policy;
         use std::time::Instant;
 
         let mut showcase = String::new();
@@ -739,7 +1254,7 @@ mod tests {
             };
             let frame = |revealed: usize, memo: &mut FileLinkMemo| {
                 let started = Instant::now();
-                let drawn = with_linked_policy(&cwd, memo, |policy| {
+                let drawn = with_lookup_policy(&cwd, memo, |policy| {
                     drawn_blocks(&source, segments, revealed, policy)
                 });
                 std::hint::black_box(&drawn);
@@ -766,6 +1281,20 @@ mod tests {
                 tails.iter().min().unwrap(),
                 tails.iter().max().unwrap(),
                 tails.len(),
+                stats(times)
+            );
+
+            // Every frame of the reveal the budget lets through, from the first byte to the last.
+            let mut memo = FileLinkMemo::default();
+            let within: Vec<usize> = positions(0)
+                .into_iter()
+                .filter(|at| at - tail_from(segments, *at) <= TAIL_BUDGET)
+                .collect();
+            let all = positions(0).len();
+            let times: Vec<Duration> = within.iter().map(|at| frame(*at, &mut memo)).collect();
+            eprintln!(
+                "BENCH drawn_blocks {name}: every frame within the budget ({} of {all} positions): {}",
+                within.len(),
                 stats(times)
             );
 
@@ -822,6 +1351,17 @@ mod tests {
             std::hint::black_box(frame.total(text));
             frame.shown += 3.0;
             std::hint::black_box(frame.end(text));
+        });
+        let drawn = {
+            let stream = streamed(text);
+            let mut at = text.len() - 100;
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            drawn_blocks(text, stream.segments(), at, &mut policy())
+        };
+        timed("a render that moved nothing: the memoised blocks cloned", &|| {
+            std::hint::black_box(drawn.clone());
         });
         timed("clone of the 40 KiB text", &|| {
             std::hint::black_box(text.clone());

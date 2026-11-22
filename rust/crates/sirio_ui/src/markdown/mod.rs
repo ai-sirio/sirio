@@ -178,6 +178,9 @@ pub(crate) struct MarkdownBlocks {
     /// Ely's reader panicked on the source, and `nodes` is that source as plain text. A chat
     /// reply whose document carries it is not read again while it streams.
     pub reader_panicked: bool,
+    /// The view paints a caret after the last text of the body, as a live reply is drawn. A
+    /// decoration of the drawn tree: no text and no part of the source holds it.
+    pub caret: bool,
 }
 
 impl std::fmt::Debug for MarkdownBlocks {
@@ -273,6 +276,19 @@ pub(crate) struct Parts {
 pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     let parts = parts(source, policy, Within::default(), false);
     join(parts.nodes, parts.missing, parts.panicked)
+}
+
+/// `source` as plain text, without asking Ely's reader: what a reply it panicked on shows while it
+/// streams, so that the reader is not asked, and does not panic, again on each chunk. The document
+/// is marked as one the reader panicked on.
+pub(crate) fn as_plain_text(source: &str) -> MarkdownBlocks {
+    join(vec![rewrite::plain_paragraph(source)], Vec::new(), true)
+}
+
+/// `source` as plain text, without asking Ely's reader, and not marked: what a reply the nesting
+/// guard refused is, and so what it shows while it is revealed.
+pub(crate) fn as_plain(source: &str) -> MarkdownBlocks {
+    join(vec![rewrite::plain_paragraph(source)], Vec::new(), false)
 }
 
 /// Where a source stands in the reply it is a part of, so that built alone it comes out as it
@@ -384,10 +400,22 @@ fn parts(source: &str, policy: &mut Policy<'_>, within: Within, keep_read: bool)
     }
 }
 
-/// `source` as plain text, without asking Ely's reader: what a reply it panicked on shows while
-/// it streams, so that the reader is not asked, and does not panic, again on each chunk.
-pub(crate) fn as_plain_text(source: &str) -> MarkdownBlocks {
-    join(vec![rewrite::plain_paragraph(source)], Vec::new(), true)
+/// Every source offset the tree keeps (the spans of an inline's pieces, a code block's start, a
+/// picture's place): what must lie inside the text the tree was built from.
+#[cfg(test)]
+pub(crate) fn source_offsets(nodes: &[MarkdownBlock]) -> Vec<usize> {
+    let mut found = Vec::new();
+    rewrite::each(nodes, &mut |node| match node {
+        MarkdownBlock::Paragraph(inline) | MarkdownBlock::Heading(_, inline) => {
+            for (_, span, _) in &inline.sources {
+                found.extend([span.start, span.end]);
+            }
+        }
+        MarkdownBlock::Code { from, .. } => found.push(*from),
+        MarkdownBlock::Image { at, .. } => found.push(*at),
+        _ => {}
+    });
+    found
 }
 
 /// The half of [`build`] that looks across the reply: headings and their slugs, the tables of
@@ -431,6 +459,7 @@ pub(crate) fn join(
         missing_diagrams: missing,
         kinds,
         reader_panicked,
+        caret: false,
     }
 }
 

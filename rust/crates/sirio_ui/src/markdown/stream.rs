@@ -859,7 +859,10 @@ fn join_segments(segments: &[Segment], mut tail: Parts) -> MarkdownBlocks {
 /// ends: what the reveal draws of a reply that is still arriving. `tail` is built as a part of
 /// that reply, as the stream builds its own (its source offsets counted from the reply, its block
 /// HTML nested to what the deepest Markdown of the segments leaves), and the segments are taken as
-/// they stand, so the cost is the tail's.
+/// they stand: they are not parsed again. They are cloned into the joined tree, and the join
+/// (headings, tables of contents, counts, plain text) walks all of it, so a frame costs the tail's
+/// parse and a walk of the whole drawn tree. The reveal keeps a frame's result while nothing it
+/// depends on moves.
 pub(crate) fn with_tail(segments: &[Segment], tail: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
     let offset = segments.last().map_or(0, |segment| segment.range.end);
     let deepest = segments.iter().map(|segment| segment.deepest).max().unwrap_or(0);

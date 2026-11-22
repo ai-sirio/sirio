@@ -303,6 +303,27 @@ pub(super) fn painted_text(chat: &Entity<Chat>, cx: &VisualTestContext) -> Strin
     })
 }
 
+/// Where the last paint drew the caret of a live reply, if it drew one: a decoration the view
+/// paints after the body's last text, in no text of its own.
+pub(super) fn painted_caret(chat: &Entity<Chat>, cx: &VisualTestContext) -> Option<Point<Pixels>> {
+    chat.read_with(&cx.cx, |chat, _| {
+        chat.transcript_links.borrow().iter().find_map(|layouts| layouts.caret())
+    })
+}
+
+/// The box and the text of the last text the last paint drew of the transcript's replies.
+pub(super) fn last_painted_row(
+    chat: &Entity<Chat>,
+    cx: &VisualTestContext,
+) -> (gpui::Bounds<Pixels>, String) {
+    chat.read_with(&cx.cx, |chat, _| {
+        (chat.transcript_links.borrow().iter())
+            .flat_map(|layouts| layouts.text_rows())
+            .last()
+            .expect("the paint drew a text")
+    })
+}
+
 /// Lets `by` pass on the clock a reveal reads, and draws the frame after it.
 pub(super) fn tick(cx: &mut VisualTestContext, by: std::time::Duration) {
     cx.executor().advance_clock(by);
@@ -356,7 +377,7 @@ async fn a_turn_end_in_mid_reveal_shows_everything_at_once(cx: &mut TestAppConte
         "a live reply is revealed part of the way: {shown} of {}",
         source.len()
     );
-    assert!(painted_text(&chat, cx).contains('▍'), "the live reply is drawn with its caret");
+    assert!(painted_caret(&chat, cx).is_some(), "the live reply is drawn with its caret");
 
     chat.update(cx, |chat, cx| {
         chat.handle_event(
@@ -368,7 +389,8 @@ async fn a_turn_end_in_mid_reveal_shows_everything_at_once(cx: &mut TestAppConte
     });
     refresh_frame(cx);
     assert_eq!(revealed(&chat, cx), source.len(), "a finished reply shows whole");
-    assert!(!painted_text(&chat, cx).contains('▍'), "the caret stayed after the turn ended");
+    assert!(painted_caret(&chat, cx).is_none(), "the caret stayed after the turn ended");
+    assert!(!painted_text(&chat, cx).contains('▍'));
 }
 
 /// Stop ends the reveal as a turn's end does, and a chunk that still arrives after it joins a
@@ -386,7 +408,7 @@ async fn a_chunk_after_stop_shows_everything_without_a_caret(cx: &mut TestAppCon
         revealed(&chat, cx) < "first block\n\nsecond ".len(),
         "the reply is part of the way through its reveal when Stop comes"
     );
-    assert!(painted_text(&chat, cx).contains('▍'));
+    assert!(painted_caret(&chat, cx).is_some());
 
     chat.update(cx, |chat, cx| {
         chat.cancel_turn(cx);
@@ -401,7 +423,7 @@ async fn a_chunk_after_stop_shows_everything_without_a_caret(cx: &mut TestAppCon
         assert_eq!(chat.revealed_bytes(chat.entries.len() - 1), text.len());
     });
     let drawn = painted_text(&chat, cx);
-    assert!(!drawn.contains('▍'), "a late chunk after Stop drew a caret: {drawn:?}");
+    assert!(!drawn.contains('▍') && painted_caret(&chat, cx).is_none(), "a late chunk after Stop drew a caret: {drawn:?}");
     assert!(drawn.contains("third block"), "the late chunk shows at once: {drawn:?}");
 }
 
