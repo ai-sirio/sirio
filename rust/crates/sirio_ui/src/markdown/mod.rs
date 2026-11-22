@@ -39,7 +39,7 @@ pub(crate) use gather::DrawnPart;
 pub(crate) use menu::{MarkdownMenuItem, perform};
 pub(crate) use rewrite::{names_are_plain, picture_address};
 pub(crate) use slug::slug;
-pub(crate) use stream::StreamingDoc;
+pub(crate) use stream::{Segment, StreamingDoc, with_tail};
 pub(crate) use text::{PartKind, PlainText};
 pub(crate) use view::{
     BodyActions, LinkHandler, MarkdownView, MenuHandler, MenuPress, SelectionHost, ViewFlags,

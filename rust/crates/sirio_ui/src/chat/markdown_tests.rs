@@ -7,7 +7,7 @@ use gpui::{Modifiers, MouseButton, Pixels, Point, TestAppContext, VisualTestCont
 use super::tests::{composer_is_focused, focus_composer, offline_chat_view, refresh_frame, right_click};
 use super::*;
 
-const SHOWCASE: &str = include_str!(concat!(
+pub(super) const SHOWCASE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../Scripts/Tests/fixtures/markdown-documents/showcase.md"
 ));
@@ -16,7 +16,7 @@ const SHOWCASE: &str = include_str!(concat!(
 const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAH0lEQVR4nGNQaHhAFcQwatCoQaMGjRo0atCoQQNvEACD/WAuD5bdZgAAAABJRU5ErkJggg==";
 
 /// A drawn chat holding `replies`, one reply each.
-fn chat_with<'a>(
+pub(super) fn chat_with<'a>(
     cx: &'a mut TestAppContext,
     replies: &[&str],
 ) -> (Entity<Chat>, &'a mut VisualTestContext) {
@@ -289,6 +289,120 @@ async fn a_chunk_after_stop_starts_no_stream(cx: &mut TestAppContext) {
         let full = parse_linked_markdown(text, &chat.agent_cwd, &mut Default::default());
         assert!(document.nodes == full.nodes);
     });
+}
+
+/// Every text the last paint drew of the transcript's replies, in paint order: what is on the
+/// screen, whatever `document` holds.
+pub(super) fn painted_text(chat: &Entity<Chat>, cx: &VisualTestContext) -> String {
+    chat.read_with(&cx.cx, |chat, _| {
+        (chat.transcript_links.borrow().iter())
+            .flat_map(|layouts| layouts.text_rows())
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
+/// Lets `by` pass on the clock a reveal reads, and draws the frame after it.
+pub(super) fn tick(cx: &mut VisualTestContext, by: std::time::Duration) {
+    cx.executor().advance_clock(by);
+    refresh_frame(cx);
+}
+
+/// How many bytes of the last reply show now.
+pub(super) fn revealed(chat: &Entity<Chat>, cx: &VisualTestContext) -> usize {
+    chat.read_with(&cx.cx, |chat, _| {
+        let reply = (chat.entries.iter())
+            .rposition(|entry| matches!(entry, Entry::Assistant { .. }))
+            .expect("a reply");
+        chat.revealed_bytes(reply)
+    })
+}
+
+/// A reply that is still streaming shows as much of it as the reveal has come to; when the turn
+/// ends, in the middle of that, the rest shows at once and the caret goes.
+#[gpui::test]
+async fn a_turn_end_in_mid_reveal_shows_everything_at_once(cx: &mut TestAppContext) {
+    // Parts of a few blocks each, so that the stream freezes as it goes and the tail stays short.
+    let mut source = String::new();
+    let mut part = 0;
+    while source.len() < 40 * 1024 {
+        part += 1;
+        source.push_str(&format!(
+            "## Part {part}\n\nA paragraph of part {part}, with **bold**, `code` and a \
+             [link](https://example.com/{part}).\n\n- the first point\n- the second\n\n"
+        ));
+    }
+    let (chat, cx) = chat_with(cx, &[]);
+    chat.update(cx, |chat, cx| {
+        chat.streaming = true;
+        let mut from = 0;
+        for step in 1..=200usize {
+            let mut cut = source.len() * step / 200;
+            while !source.is_char_boundary(cut) {
+                cut += 1;
+            }
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk(source[from..cut].into()),
+                cx,
+            );
+            from = cut;
+        }
+    });
+    tick(cx, std::time::Duration::from_millis(100));
+    let shown = revealed(&chat, cx);
+    assert!(
+        0 < shown && shown < source.len(),
+        "a live reply is revealed part of the way: {shown} of {}",
+        source.len()
+    );
+    assert!(painted_text(&chat, cx).contains('▍'), "the live reply is drawn with its caret");
+
+    chat.update(cx, |chat, cx| {
+        chat.handle_event(
+            sirio_chat::ChatEvent::TurnEnded {
+                stop_reason: "EndTurn".into(),
+            },
+            cx,
+        );
+    });
+    refresh_frame(cx);
+    assert_eq!(revealed(&chat, cx), source.len(), "a finished reply shows whole");
+    assert!(!painted_text(&chat, cx).contains('▍'), "the caret stayed after the turn ended");
+}
+
+/// Stop ends the reveal as a turn's end does, and a chunk that still arrives after it joins a
+/// reply that is not live: it shows at once, with no caret.
+#[gpui::test]
+async fn a_chunk_after_stop_shows_everything_without_a_caret(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_with(cx, &[]);
+    let chunk = |text: &str| sirio_chat::ChatEvent::AgentMessageChunk(text.into());
+    chat.update(cx, |chat, cx| {
+        chat.streaming = true;
+        chat.handle_event(chunk("first block\n\nsecond "), cx);
+    });
+    tick(cx, std::time::Duration::from_millis(30));
+    assert!(
+        revealed(&chat, cx) < "first block\n\nsecond ".len(),
+        "the reply is part of the way through its reveal when Stop comes"
+    );
+    assert!(painted_text(&chat, cx).contains('▍'));
+
+    chat.update(cx, |chat, cx| {
+        chat.cancel_turn(cx);
+        chat.handle_event(chunk("block\n\nthird block"), cx);
+    });
+    refresh_frame(cx);
+    chat.read_with(&cx.cx, |chat, _| {
+        let Some(Entry::Assistant { text, .. }) = chat.entries.last() else {
+            panic!("the reply is the last row");
+        };
+        assert_eq!(text, "first block\n\nsecond block\n\nthird block");
+        assert_eq!(chat.revealed_bytes(chat.entries.len() - 1), text.len());
+    });
+    let drawn = painted_text(&chat, cx);
+    assert!(!drawn.contains('▍'), "a late chunk after Stop drew a caret: {drawn:?}");
+    assert!(drawn.contains("third block"), "the late chunk shows at once: {drawn:?}");
 }
 
 /// The anti-goal of spec §2: a click in a reply moves nothing out of the composer. (A pane
@@ -726,6 +840,11 @@ async fn streaming_late_definitions_cost(cx: &mut TestAppContext) {
 #[gpui::test]
 #[ignore = "a measurement, run by hand"]
 async fn streaming_a_compact_reply_costs(cx: &mut TestAppContext) {
+    bench_streaming(cx, "compact", &compact_source()).await;
+}
+
+/// 40 KiB with no blank line (headings on their text, `Run:` on its fence): nothing freezes.
+pub(super) fn compact_source() -> String {
     let mut source = String::new();
     let mut step = 0;
     while source.len() < 40 * 1024 {
@@ -737,7 +856,7 @@ async fn streaming_a_compact_reply_costs(cx: &mut TestAppContext) {
              Run:\n```sh\ncargo test -p sirio_ui step_{step}\n```\n"
         ));
     }
-    bench_streaming(cx, "compact", &source).await;
+    source
 }
 
 /// What a whole build costs, three 40 KiB documents with display math in them, built thirty times
@@ -790,7 +909,7 @@ async fn building_a_whole_reply_costs(_cx: &mut TestAppContext) {
 /// two `[the text][7]` references, a list, a fence, a table, a quote) that cites twenty numbered
 /// references and twelve footnotes, `[^3]`. `late`: each definition follows the section after
 /// the one that first used it; else every definition is at the very end.
-fn numbered_references_source(late: bool) -> String {
+pub(super) fn numbered_references_source(late: bool) -> String {
     let mut source = String::new();
     let mut seen_links = [false; 21];
     let mut pending: Vec<String> = Vec::new();

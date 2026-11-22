@@ -503,19 +503,22 @@ impl StreamingDoc {
         Self::default()
     }
 
-    // The next three are read by the tests now, and by the reveal (a later task of this
-    // delivery) once it draws a reply by its parts.
-    #[allow(dead_code)]
+    /// The frozen segments, which tile the text up to [`cut`](Self::cut). They can lag the text
+    /// (the wait after a fruitless look, a deep rewind), and unless the stream is
+    /// [whole](Self::is_whole) they are a true prefix of what [`build`] makes of it: the reveal
+    /// draws them as they stand.
     pub(crate) fn segments(&self) -> &[Segment] {
         &self.segments
     }
 
+    // Read by the tests.
     #[allow(dead_code)]
     pub(crate) fn cut(&self) -> usize {
         self.cut
     }
 
-    #[allow(dead_code)]
+    /// The nesting guard refused a part: every build of this reply is a build of the whole of it,
+    /// and the segments left standing are not a prefix of what [`build`] shows.
     pub(crate) fn is_whole(&self) -> bool {
         self.whole
     }
@@ -647,20 +650,8 @@ impl StreamingDoc {
     }
 
     /// The tree of the frozen segments followed by the nodes of `tail`.
-    fn joined(&self, mut tail: Parts) -> MarkdownBlocks {
-        let mut missing: Vec<DiagramRequest> = Vec::new();
-        let wanted = self.segments.iter().flat_map(|segment| segment.missing.iter());
-        for request in wanted.chain(tail.missing.iter()) {
-            if !missing.iter().any(|known| known.key == request.key) {
-                missing.push(request.clone());
-            }
-        }
-        let mut nodes = Vec::new();
-        for segment in &self.segments {
-            nodes.extend(segment.nodes.iter().cloned());
-        }
-        nodes.append(&mut tail.nodes);
-        join(nodes, missing, tail.panicked)
+    fn joined(&self, tail: Parts) -> MarkdownBlocks {
+        join_segments(&self.segments, tail)
     }
 
     /// The deepest nesting of the Markdown of the frozen segments.
@@ -798,6 +789,37 @@ impl StreamingDoc {
         self.frozen.push_str(&text[self.cut..self.cut + from]);
         self.cut += from;
     }
+}
+
+/// The tree of `segments` followed by the nodes of `tail`.
+fn join_segments(segments: &[Segment], mut tail: Parts) -> MarkdownBlocks {
+    let mut missing: Vec<DiagramRequest> = Vec::new();
+    let wanted = segments.iter().flat_map(|segment| segment.missing.iter());
+    for request in wanted.chain(tail.missing.iter()) {
+        if !missing.iter().any(|known| known.key == request.key) {
+            missing.push(request.clone());
+        }
+    }
+    let mut nodes = Vec::new();
+    for segment in segments {
+        nodes.extend(segment.nodes.iter().cloned());
+    }
+    nodes.append(&mut tail.nodes);
+    join(nodes, missing, tail.panicked)
+}
+
+/// The tree of `segments` followed by `tail`, the text of the reply from where the last of them
+/// ends: what the reveal draws of a reply that is still arriving. `tail` is built as a part of
+/// that reply, as the stream builds its own (its source offsets counted from the reply, its block
+/// HTML nested to what the deepest Markdown of the segments leaves), and the segments are taken as
+/// they stand, so the cost is the tail's.
+pub(crate) fn with_tail(segments: &[Segment], tail: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
+    let offset = segments.last().map_or(0, |segment| segment.range.end);
+    let deepest = segments.iter().map(|segment| segment.deepest).max().unwrap_or(0);
+    join_segments(
+        segments,
+        parts(tail, policy, Within { deepest, offset }, false),
+    )
 }
 
 #[cfg(test)]

@@ -97,6 +97,9 @@ pub(super) struct TranscriptRowContext<'a> {
     pub day_heading: Option<&'a str>,
     pub agent_id: Option<&'a str>,
     pub agent_name: &'a str,
+    /// What a live reply draws on this frame instead of its `document`: the blocks its reveal has
+    /// come to (`reveal.rs`). `None` draws the document.
+    pub drawn: Option<MarkdownBlocks>,
 }
 impl Chat {
     pub(crate) fn row_id(&self, index: usize, cx: &Context<Self>) -> ElementId {
@@ -130,6 +133,7 @@ impl Chat {
             day_heading,
             agent_id,
             agent_name,
+            drawn,
         } = row;
         let _perf = sirio_perf::span("Chat.render_entry", entry_index as u64);
         let typography = theme.typography;
@@ -261,7 +265,7 @@ impl Chat {
                                         format!("assistant-response-{entry_index}")
                                     })
                                     .child(super::reply_body(
-                                        &document,
+                                        drawn.as_ref().unwrap_or(&document),
                                         interaction.clone(),
                                         source_start,
                                     )),

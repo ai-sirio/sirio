@@ -66,6 +66,7 @@ mod mode_cycle;
 mod prompt_history;
 pub use prompt_history::PromptRecord;
 mod question_dock;
+mod reveal;
 mod visible_text;
 mod session_panel;
 mod usage_card;
@@ -2005,6 +2006,9 @@ pub struct Chat {
     /// and none of it touches the composer's draft.
     model_search_field: Entity<TextInput>,
     streaming: bool,
+    /// How far the one live reply has been revealed (`reveal.rs`). `Some` from the reply's first
+    /// chunk, while its entry holds a stream, to the turn's end: `finish_reply` clears it.
+    reveal: Option<reveal::Reveal>,
     /// Retired with the rotating streaming border: Sirio's `crate::motion`
     /// clock drives the reasoning header now, so this stays permanently `false`.
     /// Kept as a regression guard — a repaint timer reappearing here would
@@ -2534,6 +2538,7 @@ impl Chat {
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
+            reveal: None,
             streaming_border_timer_pending: false,
             queue: VecDeque::new(),
             queue_expanded: true,
@@ -2669,7 +2674,8 @@ impl Chat {
     }
 
     /// Ends the streaming build of every reply that still has one: its tree is built whole from
-    /// its text, and the streaming state is dropped. Called wherever a turn ends or the client
+    /// its text, the streaming state is dropped, and so is the reveal (the reply is drawn whole,
+    /// with no caret, from the next frame). Called wherever a turn ends or the client
     /// goes while a reply streams, and when the next reply of the turn begins. Safe to call when
     /// nothing streams: it does nothing then.
     ///
@@ -2677,6 +2683,8 @@ impl Chat {
     /// would have got wrong does not outlive the turn, and what is stored or restored is built
     /// whole. A row is remeasured and the selection kept in bounds, as after a chunk.
     fn finish_reply(&mut self) {
+        // The reveal ends with the stream: what is shown next is `document`, whole.
+        self.reveal = None;
         let mut finished = Vec::new();
         for (index, entry) in self.entries.iter_mut().enumerate() {
             if let Entry::Assistant {
@@ -3457,6 +3465,10 @@ impl Chat {
                     // when none is (after Stop, or from a turn the CLI started on its own) is
                     // built whole.
                     let mut stream = self.streaming.then(Box::<StreamingDoc>::default);
+                    // A live reply is revealed from its first frame (`reveal.rs`).
+                    self.reveal = stream
+                        .is_some()
+                        .then(|| reveal::Reveal::new(cx.background_executor().now()));
                     let document = match &mut stream {
                         Some(stream) => stream_linked_markdown(
                             stream,
@@ -4714,7 +4726,20 @@ impl Chat {
             composer_text: self.draft.to_string(),
             queued_text: self.queue.front().cloned().unwrap_or_default(),
             queued: self.queue.iter().cloned().collect(),
-            transcript: self.entries.iter().map(control_entry_row).collect(),
+            transcript: self
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    #[allow(unused_mut)]
+                    let mut row = control_entry_row(entry);
+                    #[cfg(debug_assertions)]
+                    self.reveal_columns(index, &mut row);
+                    #[cfg(not(debug_assertions))]
+                    let _ = index;
+                    row
+                })
+                .collect(),
             session_panel: self.session_panel_snapshot(),
             composer: self.composer_snapshot(),
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
@@ -8184,6 +8209,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
     edit_summary: None, thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
     day_heading: None, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+    drawn: None,
 }, &transcript_theme, &mut *window, &mut *cx)
                                                             },
                                                         ),
@@ -8251,6 +8277,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                     .get(entry_index)
                                     .map(|range| range.start)
                                     .unwrap_or(0);
+                                // A live reply draws what its reveal has come to, and asks for
+                                // the next frame while it is behind: `None` draws `document`.
+                                let drawn = this.reveal_row(entry_index, window, cx);
                                 this.entries
                                     .get(entry_index)
                                     .cloned()
@@ -8277,6 +8306,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
     edit_summary: this.edit_summaries.get(&entry_index).cloned(), thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
     day_heading: day_heading.as_deref(), agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+    drawn,
 }, &transcript_theme, &mut *window, &mut *cx)
                                         .into_any_element();
                                         div()
