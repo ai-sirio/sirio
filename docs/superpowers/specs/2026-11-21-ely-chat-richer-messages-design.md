@@ -155,6 +155,13 @@ So a table of contents, heading ordinals and slug de-duplication stay global wit
 
 So this PR reduces #831 and does not close it: the body says "refs #831". The shared segments are the next step, and t2s records that on #831 after the merge. A chunk that rewinds must still cost no more than a full build of the text so far (t2s).
 
+**Rewinds, as measured (Task 3 fix round 1, release, 3 rounds).**
+- **On SHOWCASE×8:** a rewinding chunk costs 0.94–1.03× a full build of the text so far. It cost 3.7–5.7× before the fix, and the worst chunk was 22.7 ms.
+- **Where the cost was:** a scan for `$$` runs that looked up the held ranges once per byte, so it grew with the square of the text (15.8 ms against 0.41 ms at 37 KB). The fix also reads the tail before it builds it, so whatever freezes is parsed once.
+- **A rewind that leaves more than half the reply to parse** is a plain full build.
+- **The chunk right after a rewind** costs 1.1–1.33× a full build. It parses the region it froze once, as the segment it freezes. That happens once per late definition, not on every chunk. Accepted by t2s on 2026-11-22.
+- **The late-definitions fixture:** median 278 µs and p95 493 µs. Its rewinding chunks cost at most 0.17× a full build.
+
 The open `rust` fence of the bench is a single last block that never freezes. Its tail is the whole fence, so the
 parse stays O(fence). That is accepted: a fence is one block, and the highlight memo already holds its closed
 predecessors. It is reported as measured.
