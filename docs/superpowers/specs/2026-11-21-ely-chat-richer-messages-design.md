@@ -125,6 +125,15 @@ So a table of contents, heading ordinals and slug de-duplication stay global wit
 - **Block HTML room:** `room = MAX_NESTING - deepest` is global (`markdown/mod.rs:182-184`). When the reply's deepest Markdown grows, rewind to the first frozen block holding block HTML.
 - **The nesting guard refusing a part:** `whole`, as above.
 
+**As built (deviation recorded 2026-11-22, Task 2 and its review).** The rules above are not enough for equivalence; the oracle and a review probe found counterexamples. The code keeps the model (freeze, hold, rewind) and changes these points:
+- **Where a cut may fall.** Only before a top-level block that follows a blank line, that does not start on the line still being written, that is not inside a `$$` pair or after a run with no partner yet, and that does not begin with U+FEFF. Setext underlines, a table's delimiter row, a definition's title and lazy lines reach back only across lines with no blank between, so they never cross a cut. Blocks stacked without a blank line freeze together, and a reply with no blank line never freezes: those cost what they cost before this delivery.
+- **`$$` pairing.** It is Ely's (`flow::paired`): every run of two or more dollars outside code pairs with the next one of the same length, from the top, prose included. So a stray `$$` moves the pairing, and the cut stays out of every pair, not only out of an unmatched line.
+- **Labels and footnotes.** A frozen part cannot see a definition elsewhere, and footnotes are numbered by first reference across the reply. So, beside the late-definition rewind: there is no cut between the first and last mention of a label defined in the tail, or between the first and last footnote reference; and a later mention of a label already in a frozen segment rewinds to that segment. Segments may span several blocks. Labels are matched after the padding inside `[ ]` and with case folding; a non-ASCII label matches any bracket. Over-matching only keeps more in the tail, so a long reply that reuses a footnote re-parses from its first use.
+- **Block HTML room.** Each part is built with the deepest Markdown of the rest of the reply as its floor. A segment is rebuilt when that depth changes in either direction, not only when it grows.
+- **Source offsets** in the nodes (code, pictures, inline sources) are moved by the part's offset into the reply.
+- **`\(`** pairs only within one paragraph, heading or table cell (`tex.rs`), so it needs no hold. A swap round the guard refuses after the first one turns the stream `whole`.
+- **A text that does not continue the frozen bytes** starts over.
+
 **At turn end** (`TurnEnded`, a failure, Stop, or the client lost mid-reply): one full `markdown::build` of the reply replaces `document`, and the streaming state is dropped. A stored or restored reply is always a full build.
 
 **Equivalence oracle** (written first, §7.1):
