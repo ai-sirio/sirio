@@ -1106,11 +1106,18 @@ fn run_connection(
                                             // `child_exit_report` found no exit within its own
                                             // short probe (it is empty exactly then, and this arm
                                             // waits no longer for one), and Sirio's watchdog did
-                                            // not reap it (`cause`). Then only the turn failed,
-                                            // and the client stays, so a surface can send the
-                                            // prompt again. Otherwise there is no client to keep,
-                                            // and the error is the transport's, as it always was.
-                                            let agent_is_up = exit.is_empty() && cause.is_empty();
+                                            // not reap it (`cause`). And the connection is open:
+                                            // an `Incoming transport closed` error means the
+                                            // agent's stdout is gone, so the client takes no
+                                            // second prompt, whether or not its process has been
+                                            // seen to exit yet. Then only the turn failed, and
+                                            // the client stays, so a surface can send
+                                            // the prompt again. Otherwise there is no client to
+                                            // keep, and the error is the transport's, as it
+                                            // always was.
+                                            let agent_is_up = exit.is_empty()
+                                                && cause.is_empty()
+                                                && !is_incoming_transport_closed(&error);
                                             let event = if agent_is_up {
                                                 ChatEvent::TurnFailed {
                                                     message,

@@ -100,6 +100,9 @@ pub(crate) struct Fold {
     /// `content_block_stop` has closed, by block index. A stop does not say what it closed,
     /// and indexes restart in every message, so a message's start and end empty it.
     open_blocks: HashMap<u64, String>,
+    /// The worker sent an `interrupt` since the turn began, and no `result` has closed that
+    /// turn yet: the result that does is a stopped turn's, whatever it says.
+    interrupted: bool,
     /// A text delta arrived while no message was open. The real CLI never
     /// does this; the fixture's `state_text` does, and its `assistant` line
     /// repeats the text. Cleared by every main-thread `assistant` line.
@@ -125,6 +128,21 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 impl Fold {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// The worker wrote an `interrupt` (a Stop). The `result` that closes the turn is then a
+    /// stopped turn's: it keeps the events of a turn that ended (`TurnEnded`, and its text as a
+    /// reply), not a failure's, whatever its subtype and text say. The real CLI answers an
+    /// interrupt with `error_during_execution`, `is_error` and no text, so no string in the
+    /// result tells a Stop from a failure; only the worker knows it asked.
+    pub(crate) fn interrupt_sent(&mut self) {
+        self.interrupted = true;
+    }
+
+    /// The worker sent a prompt: a new turn begins, and a Stop sent before it (with nothing
+    /// to interrupt, or whose result never came) is not this turn's.
+    pub(crate) fn turn_started(&mut self) {
+        self.interrupted = false;
     }
 
     /// Turns the MCP tool notices on or off. The worker sets it from `system/init`.
@@ -925,6 +943,8 @@ impl Fold {
         let mut events = Vec::new();
         let local_command_text = self.local_command_text.take();
         let stop_reason = stop_reason_label(&result);
+        // A Stop's result closes the turn it interrupted, once.
+        let stopped = std::mem::take(&mut self.interrupted);
         // The sentence of a turn that failed, which ends it in place of `TurnEnded`.
         let mut failure = None;
         if result.is_error
@@ -934,7 +954,7 @@ impl Fold {
             // The user must see why a turn failed. The alternative — a bare
             // footer saying "ended" — is the exact silent failure this
             // transcript is responsible for not producing.
-            if fails_the_turn(&result.subtype, &stop_reason) {
+            if !stopped && fails_the_turn(&result.subtype) {
                 failure = Some(text);
             } else {
                 events.push(ChatEvent::AgentMessageChunk(text));
@@ -1005,10 +1025,10 @@ impl Fold {
 /// a turn that failed (`ChatEvent::TurnFailed`), as against one that ended on a limit.
 ///
 /// The turn and budget limits keep the sentence as a reply and the turn's end: a resend would
-/// meet the same limit. So does a turn the user stopped, which the CLI reports as cancelled:
-/// stopping it is not a failure to offer a retry for.
-fn fails_the_turn(subtype: &str, stop_reason: &str) -> bool {
-    !matches!(subtype, "error_max_turns" | "error_max_budget_usd") && stop_reason != "Cancelled"
+/// meet the same limit. (A turn the user stopped is not a failure either, but the result does
+/// not say so: `Fold::interrupt_sent` does.)
+fn fails_the_turn(subtype: &str) -> bool {
+    !matches!(subtype, "error_max_turns" | "error_max_budget_usd")
 }
 
 /// The stop reason, spelled the way `sirio_ui::chat::turn_end_label` reads
@@ -2043,6 +2063,53 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, ChatEvent::TurnFailed { message, .. } if message == "a real failure")
         ));
+    }
+
+    // What a Stop's result is, and what it is not: the real CLI answers an interrupt with
+    // `error_during_execution`, `is_error` and no stop reason; only the worker knows it asked.
+    fn interrupted_result() -> CliMessage {
+        parse(json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+            "result": "Interrupted by user", "stop_reason": null
+        }))
+    }
+
+    fn is_failure(events: &[ChatEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, ChatEvent::TurnFailed { .. }))
+    }
+
+    #[test]
+    fn a_stopped_turns_result_keeps_the_events_of_a_turn_that_ended() {
+        let mut fold = Fold::new();
+        fold.interrupt_sent();
+        let events = fold.apply(interrupted_result());
+        assert!(!is_failure(&events), "a Stop is not a failure: {events:?}");
+        assert!(events.contains(&ChatEvent::AgentMessageChunk("Interrupted by user".into())));
+        assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
+    }
+
+    #[test]
+    fn the_same_result_with_no_stop_behind_it_fails_the_turn() {
+        let mut fold = Fold::new();
+        let events = fold.apply(interrupted_result());
+        assert!(is_failure(&events), "nobody asked for it: {events:?}");
+    }
+
+    #[test]
+    fn a_stop_excuses_the_turn_it_interrupted_and_no_other() {
+        // Consumed by its turn's result.
+        let mut fold = Fold::new();
+        fold.interrupt_sent();
+        assert!(!is_failure(&fold.apply(interrupted_result())));
+        assert!(is_failure(&fold.apply(interrupted_result())));
+
+        // A Stop whose result never came is not the next turn's.
+        let mut fold = Fold::new();
+        fold.interrupt_sent();
+        fold.turn_started();
+        assert!(is_failure(&fold.apply(interrupted_result())));
     }
 
     // Failure list for the MCP tool notices:

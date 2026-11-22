@@ -85,6 +85,7 @@ fn real_claude_streams_tool_permission_and_writes_nonce() -> Result<()> {
                 break;
             }
             ChatEvent::TransportError(error) => bail!("Claude ACP transport failed: {error}"),
+            ChatEvent::TurnFailed { message, .. } => bail!("Claude turn failed: {message}"),
             ChatEvent::Timeout {
                 operation,
                 duration,

@@ -503,6 +503,13 @@ def main():
                     error(request["id"], code=-32603, message="fixture could not run this turn")
                 else:
                     blocks_prompt(request)
+            if MODE == "closed_stdout":
+                # The transport closes under the prompt while the process stays up, far
+                # longer than the host waits for an exit to show. `os.close`, not
+                # `sys.stdout.close()`: Python's `sys.stdout` does not own fd 1.
+                os.close(1)
+                time.sleep(30)
+                return
             if MODE == "malformed":
                 sys.stdout.write("not-json\n")
                 sys.stdout.flush()

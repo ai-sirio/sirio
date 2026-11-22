@@ -1689,6 +1689,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         // reports is a turn that lives, however long it takes.
                         touch_activity(&activity);
                         turn_in_flight = true;
+                        fold.turn_started();
                         let at = std::time::Instant::now();
                         if write_line(&mut stdin, &line).await.is_err() {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
@@ -1778,6 +1779,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             return SessionOutcome::Died(": could not write the interrupt".into());
                         }
                         trace.interrupt_sent();
+                        fold.interrupt_sent();
                     }
                     Ok(Command::RespondPermission { request_id, choice }) => {
                         let Some(pending) = pending_permissions.remove(&request_id) else {

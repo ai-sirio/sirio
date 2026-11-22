@@ -676,8 +676,10 @@ fn apply_event(state: &mut ChatState, event: ChatEvent) -> EventFold {
                 next_prompt,
             }
         }
-        // A failed turn is what a refused ACP prompt always was here: an error row and
-        // `ChatStatus::Error`, with the queued text left queued, not sent.
+        // A failed turn is folded as a transport error is: an error row and
+        // `ChatStatus::Error`, with the queued text left queued, not sent. A refused ACP
+        // prompt already ended this way; for Claude it replaces the reply and the
+        // `Completed` turn, queue drained, that an error result used to make.
         ChatEvent::TurnFailed { message, .. } | ChatEvent::TransportError(message) => EventFold {
             persisted: state.mark_error(message),
             next_prompt: None,

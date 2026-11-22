@@ -101,7 +101,7 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   notice_midstream   a reply cut by an error is not glued to the answer that follows
 #   limit_notice       (SIRIO_FIXTURE_LIMITS, SIRIO_E2E_TZ=UTC) the rate-limit rows say which window, how full and when
 #                      it resets: a warning once (not again, but again after an allowed), then the refusal, then the
-#                      overage refusal with its scope; the CLI's own refusal text is still one assistant row
+#                      overage refusal with its scope; the CLI's own refusal text is one error row (a failed turn)
 #   usage_text         (SIRIO_FIXTURE_USAGE) a local command's answer (`/usage`, `/context`) is one command-output row
 #                      holding the CLI's text, never an assistant row, also when the command's `result` fails and
 #                      repeats the text, and a control or bidi character in the plain text is shown as text
@@ -5428,9 +5428,10 @@ PY
   done
   check_panel "the warnings, once per change, then the refusals, each saying which and when" \
     "[r['text'] for r in c['transcript'] if r['kind'] == 'warning'] == ['Approaching the 5-hour usage limit: 92% used, resets at $ts.', 'Approaching the 5-hour usage limit: 92% used, resets at $ts.', '5-hour usage limit reached, resets at $ts.', \"Extra usage limit reached (your team's pooled budget), resets at $tl.\"]"
-  # Guard: true before A9.
-  check_panel "Guard: the CLI's refusal text is one assistant row" \
-    "len([r for r in c['transcript'] if r['kind'] == 'assistant' and r.get('text') == \"You've hit your limit · resets 3:15pm (UTC)\"]) == 1"
+  # The refusal is a failed turn, so its text is an error row, still drawn once (it was an assistant row
+  # before a failed result became `TurnFailed`).
+  check_panel "the CLI's refusal text is one error row" \
+    "len([r for r in c['transcript'] if r['kind'] == 'error' and r.get('text') == \"You've hit your limit · resets 3:15pm (UTC)\"]) == 1"
   echo "OK: limit_notice: the rate-limit rows name the window, the fill, the scope and the reset"
   stop_app
 }

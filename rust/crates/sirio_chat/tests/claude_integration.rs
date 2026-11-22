@@ -82,33 +82,32 @@ fn first_signal(
     }
 }
 
-fn drain_until_turn_end(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
+/// Everything up to and including the first event `last` accepts.
+fn drain_until(
+    events: &sirio_chat::EventStream,
+    last: impl Fn(&ChatEvent) -> bool,
+) -> Vec<ChatEvent> {
     let mut seen = Vec::new();
     loop {
         let event = next_event(events);
-        let ended = matches!(event, ChatEvent::TurnEnded { .. });
+        let done = last(&event);
         seen.push(event);
-        if ended {
+        if done {
             return seen;
         }
     }
 }
 
-/// Everything up to and including the event that ends the turn, whichever way
-/// it ends: `TurnEnded`, or `TurnFailed` for a turn that failed.
-fn drain_until_turn_over(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
-    let mut seen = Vec::new();
-    loop {
-        let event = next_event(events);
-        let over = matches!(
-            event,
-            ChatEvent::TurnEnded { .. } | ChatEvent::TurnFailed { .. }
-        );
-        seen.push(event);
-        if over {
-            return seen;
-        }
-    }
+fn drain_until_turn_end(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
+    drain_until(events, |event| matches!(event, ChatEvent::TurnEnded { .. }))
+}
+
+/// A turn is over when it ended or when it failed (`TurnFailed` ends it in place of `TurnEnded`).
+fn ends_the_turn(event: &ChatEvent) -> bool {
+    matches!(
+        event,
+        ChatEvent::TurnEnded { .. } | ChatEvent::TurnFailed { .. }
+    )
 }
 
 #[test]
@@ -496,7 +495,7 @@ fn a_failed_result_is_a_turn_failure() {
     let (mut client, events) = launch("failed_turns");
     let sentence = "API Error: 529 overloaded";
     client.prompt("overloaded").expect("prompt is accepted");
-    let seen = drain_until_turn_over(&events);
+    let seen = drain_until(&events, ends_the_turn);
     assert!(
         seen.iter().any(|event| matches!(
             event,
@@ -540,7 +539,7 @@ fn a_turn_limit_result_keeps_todays_events() {
         ("budget limit", "Reached the budget limit"),
     ] {
         client.prompt(prompt).expect("prompt is accepted");
-        let seen = drain_until_turn_over(&events);
+        let seen = drain_until(&events, ends_the_turn);
         assert!(
             seen.contains(&ChatEvent::AgentMessageChunk(sentence.into())),
             "{prompt}: the sentence is still drawn as a reply: {seen:?}"
@@ -550,6 +549,60 @@ fn a_turn_limit_result_keeps_todays_events() {
             "{prompt}: the turn still ends with TurnEnded: {seen:?}"
         );
     }
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_stop_is_not_a_failure() {
+    // The CLI answers an interrupt with `error_during_execution`, `is_error`, no stop
+    // reason and (in this fixture) the words "Interrupted by user". The worker sent the
+    // interrupt, so that result closes a stopped turn with `TurnEnded`, as before: no string
+    // of the result decides it.
+    let (mut client, events) = launch("trace");
+    client.prompt("cancel").expect("prompt is accepted");
+    loop {
+        if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
+            break;
+        }
+    }
+    client.cancel().expect("cancel is accepted");
+    let seen = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
+        "a stopped turn ends with TurnEnded, not TurnFailed: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_stop_excuses_only_its_own_turn() {
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("hold").expect("prompt is accepted");
+    loop {
+        if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
+            break;
+        }
+    }
+    client.cancel().expect("cancel is accepted");
+    let seen = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the turn the worker interrupted ends with TurnEnded: {seen:?}"
+    );
+
+    // The same words with no Stop behind them are a failure: the next turn's result is
+    // judged on its own, whatever it says.
+    client
+        .prompt("unasked interrupt")
+        .expect("second prompt accepted");
+    let seen = drain_until(&events, ends_the_turn);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "Interrupted by user"
+        )),
+        "a result nobody asked for is a failure, even when it reads like a Stop: {seen:?}"
+    );
     client.shutdown().expect("clean shutdown");
 }
 
@@ -566,9 +619,9 @@ fn a_thinking_block_stop_ends_the_thought() {
         })
         .collect();
     assert_eq!(thoughts, ["weighing ", "the options"]);
-    // The turn holds two text-block stops and one thinking-block stop (the
-    // second message even reuses the thinking block's index), so exactly one
-    // thought end, and only a thinking block's.
+    // The turn holds two text-block stops, one thinking-block stop, and the stops of two
+    // thinking blocks whose messages are over (one ended, one cut off by the next message's
+    // start): exactly one thought end, and only the one for a block that is still open.
     let ends: Vec<usize> = seen
         .iter()
         .enumerate()
@@ -1384,41 +1437,39 @@ fn the_cli_notices_reach_the_client_in_order() {
 #[test]
 fn an_answer_no_stream_carried_is_drawn_once() {
     let (mut client, events) = launch("cli_notices");
-    let exhaustion = "API Error: Repeated 529 Overloaded errors.";
-    let cases: [(&str, &str); 15] = [
+    // (prompt, the reply drawn, the failure the turn ends in: `None` for a turn that ends)
+    let cases: [(&str, &str, Option<&str>); 15] = [
         // First of a fresh launch: nothing to run on from.
-        ("unstreamed", "ok"),
-        ("midstream", "partial-before-error\n\nok"),
-        ("midstream drop", "partial-before-error\n\nok"),
+        ("unstreamed", "ok", None),
+        ("midstream", "partial-before-error\n\nok", None),
+        ("midstream drop", "partial-before-error\n\nok", None),
         // The exhaustion sentence is the turn's failure, not a reply: nothing is drawn.
-        ("retry out", ""),
+        ("retry out", "", Some("API Error: Repeated 529 Overloaded errors.")),
         // The error result of the turn before left no separator behind.
-        ("unstreamed", "ok"),
-        ("subagent text", "ok"),
-        ("retry twice", "ok"),
-        ("retry kinds", "ok"),
-        ("notify", "ok"),
-        ("notify short", "ok"),
-        ("notify short again", "ok"),
-        ("refuse fallback", "refused-partialok"),
-        ("refuse none", "refused-partial"),
-        ("inform levels", "ok"),
-        ("anything else", "ok"),
+        ("unstreamed", "ok", None),
+        ("subagent text", "ok", None),
+        ("retry twice", "ok", None),
+        ("retry kinds", "ok", None),
+        ("notify", "ok", None),
+        ("notify short", "ok", None),
+        ("notify short again", "ok", None),
+        ("refuse fallback", "refused-partialok", None),
+        ("refuse none", "refused-partial", None),
+        ("inform levels", "ok", None),
+        ("anything else", "ok", None),
     ];
-    for (prompt, expected) in cases {
+    for (prompt, expected, failure) in cases {
         let seen = cli_notices_turn(&mut client, &events, prompt);
         assert_eq!(
             reply_of(&seen),
             expected,
             "the reply text of one turn, drawn once"
         );
-        if prompt == "retry out" {
-            assert_eq!(
-                seen.last(),
-                Some(&Seen::Failed(exhaustion.into())),
-                "the sentence is the failure the turn ends in"
-            );
-        }
+        let failed_with = seen.iter().find_map(|item| match item {
+            Seen::Failed(message) => Some(message.as_str()),
+            _ => None,
+        });
+        assert_eq!(failed_with, failure, "{prompt}: how the turn ended");
     }
     // Both halves were streamed, so no separator is added, and the notice
     // sits between them.

@@ -2681,21 +2681,36 @@ def cli_notices_prompt(message):
 # `failed_turns`: a turn the CLI ends with an `is_error` result, chosen by the
 # prompt: `overloaded` is a `success` subtype that says it failed (the API gave
 # up), `turn limit` and `budget limit` are the two limits a resend would hit
-# again. Any other prompt is an ordinary answer, so a test can tell the client
-# is still usable after a failure. The results carry no `stop_reason`, as the
-# CLI's own failures do.
+# again. `unasked interrupt` is a result that reads like a Stop's (`error_during_execution`,
+# "Interrupted by user") that nobody asked for. `hold` streams a word and waits for the
+# `interrupt` request, then answers it the way the real CLI does: `error_during_execution`,
+# `is_error`, no stop reason. Any other prompt is an ordinary answer, so a test can tell the
+# client is still usable after a failure. The results carry no `stop_reason`, as the CLI's own
+# failures do.
 # ---------------------------------------------------------------------------
 
 FAILED_TURNS = {
     "overloaded": ("success", "API Error: 529 overloaded"),
     "turn limit": ("error_max_turns", "Reached the turn limit"),
     "budget limit": ("error_max_budget_usd", "Reached the budget limit"),
+    "unasked interrupt": ("error_during_execution", "Interrupted by user"),
 }
+HOLDING = threading.Event()
+
+
+def interrupted_result():
+    send({"type": "result", "subtype": "error_during_execution", "is_error": True,
+          "result": "Interrupted by user", "stop_reason": None,
+          "session_id": SESSION_ID, "uuid": trace_uuid()})
 
 
 def failed_turn(prompt):
     if not INIT_PRINTED:
         init_line()
+    if prompt == "hold":
+        text("working")
+        HOLDING.set()
+        return
     if prompt not in FAILED_TURNS:
         text("ok")
         result()
@@ -2707,9 +2722,11 @@ def failed_turn(prompt):
 
 # ---------------------------------------------------------------------------
 # `thinking_blocks`: a reply streamed block by block, as the Messages API does:
-# a thinking block (index 0) and a text block (index 1) of the first message,
-# then a second message whose text block reuses index 0, the index a stale map
-# would still call a thinking block.
+# a thinking block (index 0) and a text block (index 1) of the first message, then a second
+# message whose text block reuses index 0. Then two messages that leave a thinking block open
+# (index 2 in one that ends, index 3 in one that is cut off by the next message's start) and
+# stops that index outside them: a stop whose block belongs to a message that is over is not
+# a thought's end. That is what emptying the map at a message's end and start is for.
 # ---------------------------------------------------------------------------
 
 
@@ -2737,6 +2754,17 @@ def thinking_blocks_turn():
     block_event("content_block_delta", 0, delta={"type": "text_delta", "text": " second answer"})
     block_event("content_block_stop", 0)
     trace_assistant("msg_second", {"type": "text", "text": " second answer"})
+    message_end()
+    message_start("msg_left_ended")
+    block_event("content_block_start", 2,
+                content_block={"type": "thinking", "thinking": "", "signature": ""})
+    message_end()
+    block_event("content_block_stop", 2)
+    message_start("msg_left_cut_off")
+    block_event("content_block_start", 3,
+                content_block={"type": "thinking", "thinking": "", "signature": ""})
+    message_start("msg_after_cut_off")
+    block_event("content_block_stop", 3)
     message_end()
     result()
 
@@ -2910,6 +2938,9 @@ def main():
                     })
             elif subtype == "interrupt":
                 control_response(request_id, {"still_queued": 0})
+                if MODE == "failed_turns" and HOLDING.is_set():
+                    HOLDING.clear()
+                    interrupted_result()
                 if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):
                     result(subtype="error_during_execution", is_error=True,
                            text_body="Interrupted by user")

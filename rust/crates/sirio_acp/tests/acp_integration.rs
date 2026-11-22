@@ -305,33 +305,25 @@ fn a_failed_prompt_keeps_the_session() {
 }
 
 #[test]
-fn a_dead_agent_is_still_a_transport_error() {
-    // The agent exits during the prompt and never answers it, so there is no
-    // client left to retry on: `TransportError`, with the exit report, and no
-    // `TurnFailed` that would invite a resend into the void. The same death as
-    // `agent_death_is_transport_error`, asked about the one thing a failed
-    // prompt now has two answers for.
-    let (mut client, events) = launch_fixture("death");
-    client
-        .prompt("die during this turn")
-        .expect("prompt accepted");
+fn a_closed_transport_is_not_a_failed_turn() {
+    // The agent's stdout closes under the prompt and the process stays up, so no exit
+    // is seen inside the host's short probe. The connection is closed all the same: it
+    // takes no second prompt, so this is the transport's error, never a failed turn that
+    // invites a resend. (A process that exits is `agent_death_is_transport_error`'s.)
+    let (mut client, events) = launch_fixture("closed_stdout");
+    client.prompt("lose the pipe").expect("prompt accepted");
     let message = loop {
         match next_event(&events) {
-            ChatEvent::AgentMessageChunk(_) => {}
             ChatEvent::TransportError(message) => break message,
             ChatEvent::TurnFailed { message, .. } => {
-                panic!("a dead agent must not report a failed turn: {message}")
+                panic!("a closed transport must not report a failed turn: {message}")
             }
-            ChatEvent::Timeout {
-                operation,
-                duration,
-            } => panic!("unexpected {operation:?} timeout after {duration:?}"),
-            other => panic!("unexpected event for a dead agent: {other:?}"),
+            other => panic!("unexpected event for a closed transport: {other:?}"),
         }
     };
     assert!(
-        message.contains("exited with code 17"),
-        "the report dropped the agent's exit status: {message}"
+        message.to_ascii_lowercase().contains("transport closed"),
+        "the report should name the closed transport: {message}"
     );
     let _ = client.shutdown();
 }
