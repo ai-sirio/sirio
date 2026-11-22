@@ -350,3 +350,82 @@ async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
     stats("parse per chunk", built);
     stats("parse + frame per chunk", drawn);
 }
+
+// ---- a reply Ely's reader panics on -------------------------------------------------------
+
+fn say(chat: &Entity<Chat>, cx: &mut VisualTestContext, text: &str) {
+    chat.update(cx, |chat, cx| {
+        chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk(text.into()), cx);
+    });
+}
+
+fn end_turn(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+    chat.update(cx, |chat, cx| {
+        chat.handle_event(
+            sirio_chat::ChatEvent::TurnEnded {
+                stop_reason: "EndTurn".into(),
+            },
+            cx,
+        );
+    });
+}
+
+/// The document of the one reply the chat holds.
+fn the_reply(chat: &Entity<Chat>, cx: &VisualTestContext) -> MarkdownBlocks {
+    chat.read_with(&cx.cx, |chat, _| {
+        let replies: Vec<_> = (chat.entries.iter())
+            .filter_map(|entry| match entry {
+                Entry::Assistant { document, .. } => Some(document.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies.len(), 1, "one reply grown in place");
+        replies[0].clone()
+    })
+}
+
+/// A reply whose reader panicked is plain text for the rest of its turn: a later chunk that
+/// would make structure does not, since the reader is not asked again, and the full text is
+/// read once when the turn ends.
+#[gpui::test]
+async fn a_reply_the_reader_panicked_on_stays_plain_text_until_its_turn_ends(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = offline_chat_view(cx);
+    chat.update(cx, |chat, _| chat.streaming = true);
+
+    let fault = crate::markdown::reader_fault::on();
+    say(&chat, cx, "first ");
+    drop(fault);
+    let reply = the_reply(&chat, cx);
+    assert!(reply.reader_panicked);
+    assert_eq!(reply.text.text, "first ");
+    assert_eq!(reply.nodes.len(), 1);
+
+    // The fault is gone, and the reader would read a heading here.
+    say(&chat, cx, "**bold**\n\n# Title");
+    let reply = the_reply(&chat, cx);
+    assert!(reply.reader_panicked, "the reader was not asked again");
+    assert_eq!(reply.text.text, "first **bold**\n\n# Title");
+    assert_eq!((reply.nodes.len(), reply.headings.len()), (1, 0));
+
+    end_turn(&chat, cx);
+    let reply = the_reply(&chat, cx);
+    assert!(!reply.reader_panicked, "the turn's end read the whole reply");
+    assert_eq!(reply.headings.len(), 1);
+}
+
+/// The read at the turn's end is one try: a reader that panics again leaves the text plain.
+#[gpui::test]
+async fn a_reply_the_reader_panics_on_at_its_turn_end_stays_plain_text(cx: &mut TestAppContext) {
+    let (chat, cx) = offline_chat_view(cx);
+    chat.update(cx, |chat, _| chat.streaming = true);
+    let _fault = crate::markdown::reader_fault::on();
+    say(&chat, cx, "first ");
+    say(&chat, cx, "**bold**\n\n# Title");
+    end_turn(&chat, cx);
+    let reply = the_reply(&chat, cx);
+    assert!(reply.reader_panicked);
+    assert_eq!(reply.text.text, "first **bold**\n\n# Title");
+    assert_eq!((reply.nodes.len(), reply.headings.len()), (1, 0));
+}

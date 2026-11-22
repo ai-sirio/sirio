@@ -1562,3 +1562,32 @@ fn a_cached_diagram_and_a_folder_that_are_not_utf8_are_not_loaded() {
     assert!(images(&built.nodes).is_empty());
     assert!(built.nodes.iter().any(is_mermaid), "the fence stays");
 }
+
+// ---- a panic inside Ely's reader -------------------------------------------------------
+
+const STRUCTURED: &str = "# Title\n\nsee [a link](https://example.com) and **bold**\n";
+
+#[test]
+fn a_panic_inside_the_reader_leaves_the_source_as_plain_text() {
+    let fault = reader_fault::on();
+    let built = build(STRUCTURED, &mut plain(Surface::Chat));
+    drop(fault);
+    assert_eq!(built.nodes.to_vec(), vec![paragraph(STRUCTURED)]);
+    assert_eq!(built.text.text, STRUCTURED);
+    assert!(built.headings.is_empty());
+    assert!(built.reader_panicked);
+
+    // Read as usual, the same source keeps its structure and is not marked.
+    let read = build(STRUCTURED, &mut plain(Surface::Chat));
+    assert!(!read.reader_panicked);
+    assert_eq!(read.headings.len(), 1);
+    assert!(inlines(&read.nodes).iter().any(|inline| !inline.links.is_empty()));
+}
+
+#[test]
+fn a_source_nested_too_deep_is_plain_text_and_not_a_panic() {
+    let source = format!("{}x\n", "> ".repeat(MAX_NESTING + 1));
+    let built = build(&source, &mut plain(Surface::Chat));
+    assert_eq!(built.nodes.to_vec(), vec![paragraph(&source)]);
+    assert!(!built.reader_panicked);
+}
