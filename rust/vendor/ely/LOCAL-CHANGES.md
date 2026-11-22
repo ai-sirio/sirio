@@ -77,6 +77,7 @@ describes is a review by hand.
 - `crates/ely-documents/src/markdown/build.rs`
 - `crates/ely-documents/src/markdown/build/node.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
+- `crates/ely-documents/src/markdown/flow.rs`
 - `crates/ely-documents/src/markdown/mdast.rs`
 - `crates/ely-documents/src/markdown/shape.rs`
 - `crates/ely-documents/src/markdown/tex.rs`
@@ -919,6 +920,39 @@ changed, and upstream's own callers see the same behaviour. Paths: `ely-chat` `s
   `list::tests::days_read_as_today_yesterday_or_a_date`.
 - Facade: none. `ely-gpui-component` already re-exports `ely_chat` as `chat` (the facade is outside
   `check-vendor.sh`).
+
+## ely-documents `next_run` (L12)
+
+`crates/ely-documents/src/markdown/flow.rs`, `next_run`. Pairing the `$$` runs of a text walks its bytes
+outside the ranges `not_prose` holds back (the code, and the markup between two texts), and it looked for
+the range that holds each byte with `held.iter().find(..)`, from the top, once per byte. `held` has a range
+for every stretch of markup between two texts (an inline code span makes two, emphasis and a link make
+more), so that walk was quadratic in the text for a document with many of them. Now a pointer walks `held`
+forward (`partition_point` once, then only on), as `outside_code` just below it already did: `held` comes
+from `not_prose`, in order and without overlap, so the one range that can hold a byte is the first that ends
+after it. Same function, same results. A text with no `$$` never builds `held` and is unchanged.
+
+Why: every full build of a Sirio chat reply pays it, and a reply that is restored, finished, or cannot be
+answered by parts is built whole; `markdown/stream.rs` had the same defect in its own copy of the function
+(fixed in 61bd67501).
+
+Measure (release; `cd rust && cargo nextest run -p sirio_ui --release --run-ignored only --no-capture
+building_a_whole_reply_costs`, `parse_linked_markdown` of the document, median of thirty builds, three runs
+each, in the order run; the machine's load at the start of each run is in the logs
+`.superpowers/sdd/2026-11-21-ely-chat-richer-messages/task-3-fix2-v-before2.log` (0.9, 14.6, 14.6) and
+`task-3-fix2-v-after2.log` (1.1, 1.1, 1.1)):
+
+| document (40 KiB) | before | after |
+|---|---|---|
+| the showcase repeated (41,888 bytes) | 4.51, 3.97, 4.10 ms | 3.53, 3.58, 3.24 ms |
+| the fixed open fence (40,935 bytes: one `rust` fence, one `$$` pair) | 0.259, 0.222, 0.240 ms | 0.198, 0.200, 0.191 ms |
+| fences and inline code spans (40,969 bytes: six code spans, emphasis and a fence a section, a `$$` pair at the head) | 27.6, 23.0, 26.8 ms | 7.01, 6.90, 6.43 ms |
+
+Proof: no behaviour changed, so the tests of `$$` fences cover it: `cargo nextest run -p ely-documents`
+(162 passed, the 8 `flow::tests` among them) and Sirio's `markdown::` tests, whose stream oracle holds `$$`
+fixtures (`a_dollar_pair_across_blocks_is_not_cut`, `a_stray_dollar_run_shifts_which_fences_pair`, ...). The
+path is listed under "Differing paths" and `check-vendor.sh` prints `VENDOR CHECK OK` (run against a partial
+clone of upstream at `8d7723ec`).
 
 ## ely-documents reference labels (L13)
 

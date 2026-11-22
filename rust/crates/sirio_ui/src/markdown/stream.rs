@@ -34,6 +34,7 @@
 //! `\(` pairs read inside one paragraph, heading or table cell, so they cross no block.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -72,11 +73,10 @@ struct Label {
     note: bool,
 }
 
+/// The reference the index of brackets is held to: a pass over `text` for one label.
+#[cfg(test)]
 impl Label {
-    /// The first and the last place `text` writes `[` and this label, if it does. Case does not
-    /// tell labels apart, nor does the width of a run of white space; the labels of other
-    /// scripts fold by rules that are not ours, so any bracket may name one. Whatever follows
-    /// the label is not looked at: a longer word over-matches, which only keeps parts together.
+    /// The first and the last place `text` writes `[` and this label, if it does.
     fn mentions(&self, text: &str) -> Option<(usize, usize)> {
         let mut found: Option<(usize, usize)> = None;
         for (at, _) in text.match_indices('[') {
@@ -87,42 +87,150 @@ impl Label {
         found
     }
 
-    /// Whether `rest`, what follows a `[`, starts with this label.
+    /// Whether `rest`, what follows a `[`, is this label written out and closed by its `]`.
     fn names(&self, rest: &str) -> bool {
         let rest = match (self.note, rest.strip_prefix('^')) {
             (false, _) => rest,
             (true, Some(rest)) => rest,
             (true, None) => return false,
         };
-        // A reference may pad its label: the white space at both ends is not part of it.
-        let rest = rest.trim_start_matches(char::is_whitespace);
         if !self.name.is_ascii() {
             return true;
         }
-        let mut text = rest.chars().peekable();
-        let mut label = self.name.chars().peekable();
-        while let Some(wanted) = label.next() {
-            if wanted.is_whitespace() {
-                while label.peek().is_some_and(|next| next.is_whitespace()) {
-                    label.next();
-                }
-                if !text.next().is_some_and(char::is_whitespace) {
-                    return false;
-                }
-                while text.peek().is_some_and(|next| next.is_whitespace()) {
-                    text.next();
-                }
-            } else {
-                match text.next() {
-                    None => return false,
-                    // Case folding writes some ASCII letters in other scripts (`ß` is `ss`).
-                    Some(found) if !found.is_ascii() => return true,
-                    Some(found) if !found.eq_ignore_ascii_case(&wanted) => return false,
-                    Some(_) => {}
-                }
+        let Some(written) = label_written(rest) else {
+            return false;
+        };
+        if !written.is_ascii() {
+            return true;
+        }
+        same_label(written, &self.name)
+            || (written.contains("\\|") && same_label(&written.replace("\\|", "|"), &self.name))
+    }
+}
+
+/// What the brackets of a text write, found in one pass, so that asking whether a label is
+/// mentioned is a lookup, and not a pass over the text for each label. A mention is the whole
+/// label (`[10]` is no mention of label `1`), under the rules pulldown matches by: case does not
+/// tell labels apart, runs of white space are one space, and none counts at the ends. What is not
+/// ours to decide is taken for a mention, which only keeps parts together: the labels of other
+/// scripts fold by rules we do not have, so any bracket may name one. A bracket that is not
+/// closed yet (the text so far ends in it) is no reference to anything, whatever follows: it reads
+/// as text until its `]` arrives, and the chunk it arrives in looks again.
+#[derive(Clone, Debug, Default)]
+struct Brackets {
+    /// By label (see [`label_key`]): the first and the last `[` that write it as a link reference,
+    /// `[label]`, and as a footnote reference, `[^label]`.
+    links: HashMap<String, (usize, usize)>,
+    notes: HashMap<String, (usize, usize)>,
+    /// The first and the last `[` whose label is not ASCII: it may be any ASCII label.
+    foreign_links: Option<(usize, usize)>,
+    foreign_notes: Option<(usize, usize)>,
+    /// The first and the last `[` of the text, and of the `[^` ones: where a label that is not
+    /// ASCII is mentioned, since any of them may name it.
+    any_link: Option<(usize, usize)>,
+    any_note: Option<(usize, usize)>,
+}
+
+/// `range` taking in the place `at`.
+fn widen(range: &mut Option<(usize, usize)>, at: usize) {
+    *range = Some(range.map_or((at, at), |(first, _)| (first, at)));
+}
+
+/// The two ranges as one.
+fn merged(a: Option<(usize, usize)>, b: Option<(usize, usize)>) -> Option<(usize, usize)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1))),
+        (a, b) => a.or(b),
+    }
+}
+
+/// A label as labels are told apart: its words in lower case, one space between them.
+fn label_key(label: &str) -> String {
+    let words: Vec<String> = label.split_whitespace().map(str::to_ascii_lowercase).collect();
+    words.join(" ")
+}
+
+impl Brackets {
+    fn of(text: &str) -> Self {
+        let mut found = Self::default();
+        for (at, _) in text.match_indices('[') {
+            let rest = &text[at + 1..];
+            widen(&mut found.any_link, at);
+            found.write(rest, at, false);
+            if let Some(rest) = rest.strip_prefix('^') {
+                widen(&mut found.any_note, at);
+                found.write(rest, at, true);
             }
         }
-        true
+        found
+    }
+
+    /// The label that `rest`, what follows the `[` at `at`, writes as a link or as a footnote.
+    fn write(&mut self, rest: &str, at: usize, note: bool) {
+        let Some(written) = label_written(rest) else {
+            return;
+        };
+        let (labels, foreign) = match note {
+            true => (&mut self.notes, &mut self.foreign_notes),
+            false => (&mut self.links, &mut self.foreign_links),
+        };
+        // Case folding writes some ASCII letters in other scripts (`ß` is `ss`).
+        if !written.is_ascii() {
+            widen(foreign, at);
+            return;
+        }
+        let mut keys = vec![label_key(written)];
+        // A table reads `\|` as `|` before it reads a label.
+        if written.contains("\\|") {
+            keys.push(label_key(&written.replace("\\|", "|")));
+        }
+        for key in keys {
+            let range = labels.entry(key).or_insert((at, at));
+            range.1 = at;
+        }
+    }
+
+    /// The first and the last place the text writes `[` and `label`, if it does.
+    fn mentions(&self, label: &Label) -> Option<(usize, usize)> {
+        let (labels, foreign, any) = match label.note {
+            true => (&self.notes, self.foreign_notes, self.any_note),
+            false => (&self.links, self.foreign_links, self.any_link),
+        };
+        if !label.name.is_ascii() {
+            return any;
+        }
+        merged(labels.get(&label_key(&label.name)).copied(), foreign)
+    }
+}
+
+/// What a label is written as, in `rest` (the text after its `[`): up to the first `]` that is not
+/// escaped. None when a `[` that is not escaped comes first (a label holds none), when no `]` does,
+/// or when the label would be longer than pulldown reads (a thousand characters).
+fn label_written(rest: &str) -> Option<&str> {
+    let bytes = rest.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() && at < 4096 {
+        match bytes[at] {
+            b']' => return Some(&rest[..at]),
+            b'[' => return None,
+            b'\\' if bytes.get(at + 1).is_some_and(u8::is_ascii_punctuation) => at += 2,
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Whether two labels are the same one: the same words, whatever their case and the white space
+/// between them.
+#[cfg(test)]
+fn same_label(written: &str, name: &str) -> bool {
+    let (mut written, mut name) = (written.split_whitespace(), name.split_whitespace());
+    loop {
+        match (written.next(), name.next()) {
+            (None, None) => return true,
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => {}
+            _ => return false,
+        }
     }
 }
 
@@ -137,6 +245,8 @@ struct Scan {
     notes: Vec<usize>,
     /// How deep it nests: `markdown_depth` of the text, from the same events.
     deepest: usize,
+    /// Whether it holds HTML, block or inline: what Ely hands to the host to rewrite.
+    html: bool,
 }
 
 impl Scan {
@@ -162,6 +272,7 @@ impl Scan {
                 Event::End(_) => depth = depth.saturating_sub(1),
                 Event::Rule if depth == 0 => found.starts.push(range.start),
                 Event::FootnoteReference(_) => found.notes.push(range.start),
+                Event::Html(_) | Event::InlineHtml(_) => found.html = true,
                 _ => {}
             }
         }
@@ -377,6 +488,8 @@ pub(crate) struct Segment {
     labels: Vec<Label>,
     /// Whether it writes a footnote reference.
     notes: bool,
+    /// What its brackets write: which labels it mentions.
+    brackets: Brackets,
 }
 
 /// A reply that streams in, built part by part. `text` only grows between two calls of
@@ -391,7 +504,18 @@ pub(crate) struct StreamingDoc {
     frozen: String,
     /// The nesting guard refused a part: every build is a build of the whole reply.
     whole: bool,
+    /// Until the reply is this long the stream does not look at it again: a chunk is the build of
+    /// its text (see [`HOLD_FROM`]).
+    hold_until: usize,
 }
+
+/// A reply from this length on, whose stream looked at it and froze nothing with most of the
+/// reply still in the tail, is not looked at again until it has grown by a quarter. Looking is
+/// reading the tail, scanning it and matching its labels, on top of the parse of it: where nothing
+/// can freeze (one long fence, a reply with no blank line, a reply whose labels are cited from
+/// its first block to its last) that is paid on every chunk and gains nothing. Under it a build is
+/// too short for that to matter.
+const HOLD_FROM: usize = 4096;
 
 impl StreamingDoc {
     pub(crate) fn new() -> Self {
@@ -422,28 +546,36 @@ impl StreamingDoc {
     /// So a rewind costs a pass over the text, not a parse of it, and what freezes is parsed once,
     /// as a segment, and not again as part of the tail: after the cut moves a long way (a rewound
     /// stream freezing everything it held) only the new tail is parsed besides.
+    ///
+    /// `build(text)` is what this must equal, so it is always an answer, and the stream gives it
+    /// where looking at the reply would cost more than it saves: a rewind that leaves most of the
+    /// reply to parse, and the wait that follows an analysis that froze nothing (`hold_until`).
+    /// The segments and the cut are left as they were then, which is a state the next look
+    /// starts from: the segments tile the text up to the cut.
     pub(crate) fn update(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
         if !text.starts_with(&self.frozen) {
             *self = Self::new();
         }
-        if self.whole {
+        if self.whole || text.len() < self.hold_until {
             return build(text, policy);
         }
-        let (read, scan, depth) = loop {
+        let (read, scan, brackets, depth, math) = loop {
             let tail = &text[self.cut..];
-            // Ely reads `\(` pairs in a second pass, over a text it swaps itself and that only it can
-            // tell the depth of, and refuses a text that nests past the cap: those parse the tail
-            // first, as it was done before.
-            if tail.contains("\\(") || tail.contains("\\[") {
-                return self.update_by_parsing_the_tail(text, policy);
-            }
             let read = read_of(tail);
             let scan = Scan::of(&read);
+            let brackets = Brackets::of(tail);
             let depth = scan.deepest;
-            if depth > MAX_NESTING {
+            // Ely reads `\(` and `\[` pairs in a second pass, over a text it swaps itself, and the
+            // depth of that text, which block HTML takes its room from, only a parse of the tail
+            // tells: a reply with both is read the way that parses the tail first. A tail nested
+            // past the cap is refused there too.
+            let math = tail.contains("\\(") || tail.contains("\\[");
+            if depth > MAX_NESTING
+                || (math && (scan.html || self.segments.iter().any(|s| s.has_block_html)))
+            {
                 return self.update_by_parsing_the_tail(text, policy);
             }
-            match self.rewind_from(text, depth, &scan) {
+            match self.rewind_from(depth, &scan, &brackets) {
                 Some(index) => {
                     self.truncate(index);
                     // A rewind that leaves most of the reply to parse costs no more as a build,
@@ -453,11 +585,12 @@ impl StreamingDoc {
                         return build(text, policy);
                     }
                 }
-                None => break (read, scan, depth),
+                None => break (read, scan, brackets, depth, math),
             }
         };
         let deepest = self.deepest().max(depth);
-        self.freeze(text, &read, &scan, deepest, policy);
+        let cut_before = self.cut;
+        self.freeze(text, &read, &scan, &brackets, deepest, policy);
         if self.whole {
             return build(text, policy);
         }
@@ -474,13 +607,20 @@ impl StreamingDoc {
             self.whole = true;
             return build(text, policy);
         }
+        // That a reply with `\(` pairs has no block HTML was the scan's word: if the parse says
+        // otherwise, the rooms were not right, and the reply is built whole from here on.
+        if math && (tail.block_html || self.segments.iter().any(|s| s.has_block_html)) {
+            self.whole = true;
+            return build(text, policy);
+        }
+        self.wait_if_nothing_froze(text.len(), cut_before);
         self.joined(tail)
     }
 
     /// [`update`](Self::update) for a tail that cannot be read before it is built: the tail is
     /// parsed, then the segments are looked at, then what can freeze does.
     fn update_by_parsing_the_tail(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
-        let (tail, read, scan) = loop {
+        let (tail, read, scan, brackets) = loop {
             let mut tail = parts(
                 &text[self.cut..],
                 policy,
@@ -496,15 +636,33 @@ impl StreamingDoc {
             }
             let read = tail.read.take().unwrap_or_default();
             let scan = Scan::of(&read);
-            match self.rewind_from(text, tail.deepest, &scan) {
-                Some(index) => self.truncate(index),
-                None => break (tail, read, scan),
+            let brackets = Brackets::of(&text[self.cut..]);
+            match self.rewind_from(tail.deepest, &scan, &brackets) {
+                Some(index) => {
+                    self.truncate(index);
+                    // As in `update`: a rewind that leaves most of the reply to parse is a build.
+                    if self.cut < text.len() - self.cut {
+                        return build(text, policy);
+                    }
+                }
+                None => break (tail, read, scan, brackets),
             }
         };
         let deepest = self.deepest().max(tail.deepest);
         let document = self.joined(tail);
-        self.freeze(text, &read, &scan, deepest, policy);
+        let cut_before = self.cut;
+        self.freeze(text, &read, &scan, &brackets, deepest, policy);
+        self.wait_if_nothing_froze(text.len(), cut_before);
         document
+    }
+
+    /// After a look that froze nothing, with most of the reply still in the tail and the reply
+    /// long enough for it to matter, the stream does not look again until the reply has grown by
+    /// a quarter ([`HOLD_FROM`]).
+    fn wait_if_nothing_froze(&mut self, length: usize, cut_before: usize) {
+        if length >= HOLD_FROM && self.cut == cut_before && (length - self.cut) * 2 >= length {
+            self.hold_until = length + length / 4;
+        }
     }
 
     /// The tree of the frozen segments followed by the nodes of `tail`.
@@ -540,10 +698,14 @@ impl StreamingDoc {
     }
 
     /// The first frozen segment the tail makes wrong, if there is one.
-    fn rewind_from(&self, text: &str, tail_deepest: usize, scan: &Scan) -> Option<usize> {
+    fn rewind_from(
+        &self,
+        tail_deepest: usize,
+        scan: &Scan,
+        brackets: &Brackets,
+    ) -> Option<usize> {
         let mut first: Option<usize> = None;
         let mut note = |index: usize| first = Some(first.map_or(index, |known| known.min(index)));
-        let source = |segment: &Segment| &text[segment.range.clone()];
 
         // Block HTML took its room from another depth than the reply has now.
         let reply = self.deepest().max(tail_deepest);
@@ -555,14 +717,13 @@ impl StreamingDoc {
 
         // A label written in the tail, and in a frozen part too: one parse, or the reference
         // and the definition may not meet.
-        let tail_source = &text[self.cut..];
         let frozen = self.segments.iter().flat_map(|segment| segment.labels.iter());
         for label in frozen.chain(scan.labels.iter()) {
-            if label.mentions(tail_source).is_none() {
+            if brackets.mentions(label).is_none() {
                 continue;
             }
             if let Some(index) = (self.segments.iter())
-                .position(|segment| label.mentions(source(segment)).is_some())
+                .position(|segment| segment.brackets.mentions(label).is_some())
             {
                 note(index);
             }
@@ -583,6 +744,7 @@ impl StreamingDoc {
         text: &str,
         read: &str,
         scan: &Scan,
+        brackets: &Brackets,
         deepest: usize,
         policy: &mut Policy<'_>,
     ) {
@@ -600,9 +762,8 @@ impl StreamingDoc {
         // reference from its definition. Between two footnote references it would number the
         // second from one. Inside a `$$` pair, or past a run that waits for a partner, it would
         // pair the runs after it elsewhere.
-        let mut spans: Vec<(usize, usize)> = (scan.labels.iter())
-            .filter_map(|label| label.mentions(tail))
-            .collect();
+        let mut spans: Vec<(usize, usize)> =
+            (scan.labels.iter()).filter_map(|label| brackets.mentions(label)).collect();
         let notes: Vec<usize> = (scan.notes.iter())
             .map(|at| alignment.map(*at).unwrap_or(usize::MAX))
             .collect();
@@ -639,6 +800,7 @@ impl StreamingDoc {
                 break;
             }
             let own = Scan::of(made.read.as_deref().unwrap_or_default());
+            let brackets = Brackets::of(&text[range.clone()]);
             self.segments.push(Segment {
                 range,
                 nodes: Rc::from(made.nodes),
@@ -648,6 +810,7 @@ impl StreamingDoc {
                 room: deepest.max(made.deepest),
                 labels: own.labels,
                 notes: !own.notes.is_empty(),
+                brackets,
             });
             from = at;
         }

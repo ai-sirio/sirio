@@ -651,3 +651,210 @@ fn a_rewind_is_followed_by_chunks_that_freeze_again() {
     );
     assert!(!stream.is_whole());
 }
+
+// ---- Labels match whole, a rewind meets `\(`, a shallow rewind (fix round 2) ----
+
+/// A label that only begins another is no mention of it: `[10]` does not name label `1`. With
+/// only `[1]` defined, the blocks that cite `[10]` after its definition hold nothing back, and
+/// the cut gets to the last block, which cites it too. (Matching the front of a label made `[1]` take every `[10]`
+/// for a mention: the span of its mentions then ran to the last of them, no cut fell inside it,
+/// and each later `[10]` rewound the stream to the first block that cited `[1]`.)
+#[test]
+fn a_label_that_starts_another_is_no_mention_of_it() {
+    let text = "ref [a][1]\n\n[1]: https://one.example\n\nb1\n\nb2 see [x][10]\n\nb3\n\n\
+        b4 see [y][10]\n";
+    for chunk in [1, 4, 9] {
+        assert_equivalent_at_every_cut(text, chunk);
+    }
+    let (cuts, stream) = cuts_by_step(text, 4);
+    assert!(
+        text[stream.cut()..].starts_with("b4"),
+        "the tail starts at {:?}, after {} rewinds",
+        &text[stream.cut()..],
+        rewinds(&cuts).len()
+    );
+    assert_tiles(&stream, text);
+}
+
+/// Labels that start one another are told apart, whichever is defined first, and the same
+/// in words: the stream equals the build at every cut.
+#[test]
+fn labels_that_start_one_another_match_in_either_order() {
+    for text in [
+        "[a][1] and [b][10]\n\nx\n\n[1]: https://one.example\n\ny\n\n[10]: https://ten.example\n\nz\n\nend\n",
+        "[a][1] and [b][10]\n\nx\n\n[10]: https://ten.example\n\ny\n\n[1]: https://one.example\n\nz\n\nend\n",
+        "see [a][topic-1] and [b][topic-10]\n\nx\n\n[topic-10]: https://ten.example\n\ny\n\n\
+         see [topic-1] again\n\n[topic-1]: https://one.example\n\nz\n\nend\n",
+        "see [a][topic-10] and [b][topic-1]\n\nx\n\n[topic-1]: https://one.example\n\ny\n\n\
+         [topic-10]: https://ten.example\n\nz\n\nend\n",
+    ] {
+        for chunk in [1, 6] {
+            assert_equivalent_at_every_cut(text, chunk);
+        }
+        let (_, stream) = cuts_by_step(text, 3);
+        assert_tiles(&stream, text);
+    }
+}
+
+/// A definition that arrives late rewinds to a block that wrote its label in another case: the
+/// mention is matched as pulldown matches the label, not letter by letter.
+#[test]
+fn a_late_definition_rewinds_for_every_spelling_of_its_label() {
+    let text = "see [a][foo], [b][FOO] and [c][fOo ]\n\npara\n\nmore\n\n[Foo]: https://f.example\n\n\
+        last one\n\nlast two\n";
+    for chunk in [1, 5] {
+        assert_equivalent_at_every_cut(text, chunk);
+    }
+    let (cuts, _) = cuts_by_step(text, 3);
+    assert!(!rewinds(&cuts).is_empty(), "no spelling of the label rewound anything: {cuts:?}");
+}
+
+/// White space inside a label is one space, at its ends none, a line end among it too: a
+/// definition that writes it otherwise still rewinds to the block that cites it.
+#[test]
+fn white_space_in_a_label_is_one_space() {
+    for text in [
+        "see [a][my  label]\n\nmid\n\n[My Label]: https://m.example\n\nafter\n\nlast\n",
+        "see [a][ my label ]\n\nmid\n\n[my\tlabel]: https://m.example\n\nafter\n\nlast\n",
+        "see [a][one\ntwo]\n\nmid\n\n[ONE TWO]: https://o.example\n\nafter\n\nlast\n",
+    ] {
+        for chunk in [1, 5] {
+            assert_equivalent_at_every_cut(text, chunk);
+        }
+        let (cuts, _) = cuts_by_step(text, 3);
+        assert!(!rewinds(&cuts).is_empty(), "{text:?}: nothing rewound: {cuts:?}");
+    }
+}
+
+/// An escaped bracket is part of a label: the mention ends at the first bracket that is not.
+#[test]
+fn an_escaped_bracket_belongs_to_its_label() {
+    let text = "see [a][x\\]y]\n\nmid\n\n[X\\]Y]: https://x.example\n\nlast\n\nend\n";
+    for chunk in [1, 5] {
+        assert_equivalent_at_every_cut(text, chunk);
+    }
+    let (cuts, _) = cuts_by_step(text, 3);
+    assert!(!rewinds(&cuts).is_empty(), "nothing rewound: {cuts:?}");
+}
+
+/// A rewind in a reply that holds `\(` and `\[` pairs: they are read in a second pass, and the
+/// rewound stream is still the build at every cut.
+#[test]
+fn a_rewind_with_parenthesised_math_matches() {
+    let text = "Euler \\(e^{i\\pi}\\) and [a][x].\n\nmid \\[ y \\]\n\n[x]: https://e.example\n\n\
+        after \\(z\\)\n\nend\n";
+    for chunk in [1, 5] {
+        assert_equivalent_at_every_cut(text, chunk);
+    }
+    let (cuts, stream) = cuts_by_step(text, 3);
+    assert!(!rewinds(&cuts).is_empty(), "the definition rewound nothing: {cuts:?}");
+    assert_tiles(&stream, text);
+}
+
+/// The same with a block of HTML in it: the room of block HTML is the depth of the whole reply,
+/// the second pass included, which only a parse of the tail tells, so this reply is read the way
+/// that parses the tail first.
+#[test]
+fn a_rewind_with_parenthesised_math_and_block_html_matches() {
+    let text = "<div>\nblock html\n</div>\n\nEuler \\(e\\) and [a][x].\n\nmid\n\n\
+        [x]: https://e.example\n\nafter \\(z\\)\n\nend\n";
+    for chunk in [1, 5] {
+        assert_equivalent_at_every_cut(text, chunk);
+    }
+    let (cuts, stream) = cuts_by_step(text, 3);
+    assert!(!rewinds(&cuts).is_empty(), "the definition rewound nothing: {cuts:?}");
+    assert_tiles(&stream, text);
+}
+
+/// A rewind that only reaches back to a late segment leaves most of the reply frozen: the cut
+/// moves back and is still in the second half of what has arrived. (Deeper than that the
+/// chunk is answered by a plain build and nothing is frozen in it; this is the other branch,
+/// where the rewound tail is parsed and what can freeze does.)
+#[test]
+fn a_late_definition_rewinds_only_a_late_segment() {
+    let mut text = String::new();
+    for n in 0..10 {
+        text.push_str(&format!("Filler paragraph number {n}, long enough to weigh a little.\n\n"));
+    }
+    text.push_str(
+        "A reference [a][late] in a block near the end.\n\nafter one\n\nafter two\n\n\
+         [late]: https://late.example\n\nlast\n",
+    );
+    for chunk in [1, 7] {
+        assert_equivalent_at_every_cut(&text, chunk);
+    }
+    let chunk = 3;
+    let (cuts, stream) = cuts_by_step(&text, chunk);
+    let shallow = rewinds(&cuts).into_iter().any(|step| {
+        let fed = ((step + 1) * chunk).min(text.len());
+        cuts[step] * 2 >= fed
+    });
+    assert!(shallow, "no rewind stayed in the second half of the reply: {cuts:?}");
+    assert_tiles(&stream, &text);
+}
+
+/// A reply that starts with a long fence: nothing can freeze, and reading the tail and scanning
+/// it would be paid on every chunk for nothing, on top of the parse. So an analysis that froze
+/// nothing, with most of the reply still in the tail, makes the stream wait until the reply has
+/// grown by a quarter before it looks again; the chunks in between are the build of the text.
+/// The stream still equals the build at every chunk end, the cut stays where it was while it
+/// waits, and it gets to the last block once the reply has grown.
+#[test]
+fn an_analysis_that_froze_nothing_waits_for_the_reply_to_grow() {
+    let mut text = String::from("```text\n");
+    while text.len() < 5000 {
+        text.push_str("a line of the fence, as long as a line of code goes\n");
+    }
+    text.push_str("```\n\n");
+    for n in 0..24 {
+        text.push_str(&format!("A paragraph after the fence, number {n}, with a few words in it.\n\n"));
+    }
+    text.push_str("last block\n");
+    let mut policy = chat();
+    let mut stream = StreamingDoc::new();
+    let (mut at, mut waited) = (0, 0);
+    while at < text.len() {
+        at = floor(&text, (at + 61).min(text.len()));
+        let streamed = stream.update(&text[..at], &mut policy);
+        assert_same(&streamed, &build(&text[..at], &mut chat()), &format!("chunk end {at}"));
+        assert_tiles(&stream, &text[..at]);
+        if at < stream.hold_until {
+            waited += 1;
+            assert_eq!(stream.cut(), 0, "the stream looked again at {at}, inside its wait");
+        }
+    }
+    assert!(waited > 5, "the stream waited for {waited} chunks");
+    assert!(
+        text[stream.cut()..].starts_with("last block"),
+        "the tail starts at {:?}",
+        &text[stream.cut()..][..20.min(text.len() - stream.cut())]
+    );
+}
+
+/// The brackets of a text, indexed once, answer for every label as a pass over the text for that
+/// label does (what the stream did before, `Label::mentions`, which now lives here as the
+/// reference): the first and the last place that writes it, as a link and as a footnote, for
+/// labels in the ASCII and for labels in other scripts, and for brackets that are not closed,
+/// escaped, padded, nested or in other scripts.
+#[test]
+fn the_index_of_brackets_answers_as_a_pass_over_the_text_does() {
+    let weird = "[a][1] [10] [1]: u [ 1 ] [x\\]y] [^n] [^ n] [^N]: t [é] [\u{212a}] [A  b] [a\tb]\n\
+        [one\ntwo] [a [b] c][b] \\[x\\] [[x]] [a\\|b] [^é] [] [ ] [^] [unfinished";
+    let texts = [SHOWCASE, weird, "[1", "x [", "[^1] and [1] and [^1]: n\n[1]: u\n", ""];
+    let named = |name: &str, note: bool| Label { name: name.to_owned(), note };
+    let mut labels: Vec<Label> = (Scan::of(&read_of(SHOWCASE)).labels).into_iter().collect();
+    for name in ["1", "10", "x\\]y", "x", "a b", "A B", "b", "n", "N", "é", "k", "K", "a|b", "a\\|b", "one two", "topic-1"] {
+        labels.push(named(name, false));
+        labels.push(named(name, true));
+    }
+    for text in texts {
+        let brackets = Brackets::of(text);
+        for label in &labels {
+            assert_eq!(
+                brackets.mentions(label),
+                label.mentions(text),
+                "label {label:?} in {text:?}"
+            );
+        }
+    }
+}

@@ -460,23 +460,38 @@ async fn a_drag_from_the_users_prose_into_a_reply_is_one_selection(cx: &mut Test
     assert!(selected.contains("ask\n\nan a"), "{selected:?}");
 }
 
-/// The cost of a reply of `source` arriving in 200 chunks: each chunk costs one parse
-/// (`handle_event`) and one drawn frame. The numbers are printed, nothing is asserted: a wall
-/// clock in a test is a flake, and the baseline (bezel) is gone.
-///
-/// Beside them it prints what a full build of the reply so far costs (`full build per chunk`:
-/// what `handle_event` did before the reply streamed in parts), timed in the same loop, so the
-/// ratio is of one machine load. And how much of the reply is still tail (parsed again on
-/// each chunk) after the 20th, the 100th and the last chunk.
-async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
+/// One reply arriving in 200 chunks, as `bench_streaming` times it.
+struct Run {
+    /// `handle_event` per chunk.
+    handles: Vec<std::time::Duration>,
+    /// The `update` closure per chunk: `handle_event` and the draw its return flushes.
+    built: Vec<std::time::Duration>,
+    /// The same and one more frame.
+    drawn: Vec<std::time::Duration>,
+    /// A full build (`parse_linked_markdown`) of the text so far, timed after the chunk.
+    before: Vec<std::time::Duration>,
+    /// What the stream holds after each chunk: its cut and its number of segments. Empty when
+    /// the chat was not streaming.
+    states: Vec<(usize, usize)>,
+    /// How many bytes of the reply the chat had after each chunk.
+    lengths: Vec<usize>,
+}
+
+/// `source` arrives in 200 chunks, as a chat that is `streaming` (or not: then every chunk is
+/// built whole, which is what the chat did before a reply was built in parts).
+async fn run_reply(cx: &mut TestAppContext, source: &str, streaming: bool) -> Run {
     let (chat, cx) = chat_with(cx, &[]);
-    chat.update(cx, |chat, _| chat.streaming = true);
+    chat.update(cx, |chat, _| chat.streaming = streaming);
     let cwd = std::env::temp_dir();
-    let (mut from, mut handles, mut built, mut drawn, mut before) =
-        (0, Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    // After each chunk: how much of the reply the stream still parses again (its tail), and how
-    // many segments it holds frozen.
-    let mut tails: Vec<(usize, usize)> = Vec::new();
+    let mut run = Run {
+        handles: Vec::new(),
+        built: Vec::new(),
+        drawn: Vec::new(),
+        before: Vec::new(),
+        states: Vec::new(),
+        lengths: Vec::new(),
+    };
+    let mut from = 0;
     for step in 1..=200usize {
         let mut cut = (source.len() * step / 200).min(source.len());
         while !source.is_char_boundary(cut) {
@@ -496,23 +511,88 @@ async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
         // holds a whole draw besides the parse; `handled` is the parse alone.
         let parsed = started.elapsed();
         refresh_frame(cx);
-        handles.push(handled);
-        built.push(parsed);
-        drawn.push(started.elapsed());
+        run.handles.push(handled);
+        run.built.push(parsed);
+        run.drawn.push(started.elapsed());
         let full = std::time::Instant::now();
         let _ = parse_linked_markdown(&source[..cut], &cwd, &mut Default::default());
-        before.push(full.elapsed());
+        run.before.push(full.elapsed());
         chat.read_with(&cx.cx, |chat, _| {
             if let Some(Entry::Assistant {
                 stream: Some(stream),
                 ..
             }) = chat.entries.last()
             {
-                tails.push((cut - stream.cut(), stream.segments().len()));
+                run.states.push((stream.cut(), stream.segments().len()));
             }
         });
+        run.lengths.push(cut);
         from = cut;
     }
+    run
+}
+
+/// The ratio of `ours` to `base`, chunk by chunk, over the chunks whose `base` takes `floor` or
+/// more (under it the row's own cost, the list and the layout, is most of both): the median, the
+/// worst, how many chunks are above 1.15, and the longest run of consecutive chunks above it.
+fn print_ratios(
+    fixture: &str,
+    what: &str,
+    ours: &[std::time::Duration],
+    base: &[std::time::Duration],
+    floor: std::time::Duration,
+) {
+    let considered: Vec<Option<f64>> = (ours.iter().zip(base))
+        .map(|(ours, base)| (*base >= floor).then(|| ours.as_secs_f64() / base.as_secs_f64()))
+        .collect();
+    let mut ratios: Vec<(usize, f64)> = considered
+        .iter()
+        .enumerate()
+        .filter_map(|(index, ratio)| ratio.map(|ratio| (index, ratio)))
+        .collect();
+    if ratios.is_empty() {
+        eprintln!("BENCH {fixture} {what}: no chunk has a base of {floor:?} or more");
+        return;
+    }
+    let (mut run, mut longest) = (0, 0);
+    for ratio in &considered {
+        run = if ratio.is_some_and(|ratio| ratio > 1.15) { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let above = ratios.iter().filter(|(_, ratio)| *ratio > 1.15).count();
+    let worst = *ratios.iter().max_by(|a, b| a.1.total_cmp(&b.1)).expect("a chunk");
+    ratios.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let median = ratios[ratios.len() / 2].1;
+    eprintln!(
+        "BENCH {fixture} ratio to {what}, over {} chunks that take {floor:?} or more: median {median:.2}, worst {:.2} at chunk {}, above 1.15 in {above} chunks, longest run above 1.15: {longest}",
+        ratios.len(),
+        worst.1,
+        worst.0
+    );
+}
+
+/// The cost of a reply of `source` arriving in 200 chunks: each chunk costs one parse
+/// (`handle_event`) and one drawn frame. The numbers are printed, nothing is asserted: a wall
+/// clock in a test is a flake, and the baseline (bezel) is gone.
+///
+/// The reply arrives twice: once to a chat that is not streaming (every chunk built whole, what
+/// the chat did before) and once to one that is. Beside the times it prints the ratio of
+/// `handle_event` to a full build of the same text, timed in the same loop after the chunk, and to
+/// the whole build the chat does when it is not streaming (that one has the row's own cost in it,
+/// so it is the fair base where a build is short); the number of chunks above 1.15 times a build
+/// and the longest run of them; the chunks that rewind (the cut of the stream moved back), the
+/// slowest chunks, and how much of the reply is still tail (parsed again on each chunk) after the
+/// 20th, the 100th and the last chunk.
+async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
+    let plain = run_reply(cx, source, false).await;
+    let Run {
+        handles,
+        built,
+        drawn,
+        before,
+        states,
+        lengths,
+    } = run_reply(cx, source, true).await;
     let stats = |label: &str, mut times: Vec<std::time::Duration>| {
         let total: std::time::Duration = times.iter().sum();
         times.sort();
@@ -539,57 +619,47 @@ async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
         );
     }
     for step in [20usize, 100, 200] {
-        if let Some((tail, segments)) = tails.get(step - 1) {
+        if let (Some((cut, segments)), Some(length)) = (states.get(step - 1), lengths.get(step - 1)) {
             eprintln!(
-                "BENCH {fixture} tail after chunk {step}: {tail} bytes still parsed again, {segments} frozen segments"
+                "BENCH {fixture} tail after chunk {step}: {} bytes still parsed again, {segments} frozen segments (cut {cut} of {length})",
+                length - cut
             );
         }
     }
+    let millisecond = std::time::Duration::from_millis(1);
+    let tenth = std::time::Duration::from_micros(100);
+    print_ratios(fixture, "a full build", &handles, &before, millisecond);
+    print_ratios(fixture, "a full build", &handles, &before, tenth);
+    print_ratios(fixture, "the plain handle_event (streaming off)", &handles, &plain.handles, tenth);
     // A rewind (a reply that reuses a footnote or a link label parses again from its first
-    // mention) is a slow chunk among fast ones: the median hides it. A chunk rewinds when the
-    // tail grows by more than the chunk brought. Each of the slowest chunks is printed next to
-    // the full build of the same text, and so is the worst ratio over every chunk.
+    // mention) is a slow chunk among fast ones: the median hides it. A chunk rewinds when the cut
+    // of the stream moved back, as the tests count them.
     let ratio = |index: usize| handles[index].as_secs_f64() / before[index].as_secs_f64();
-    let chunk_bytes = source.len() / 200 + 8;
-    let rewinding = |index: usize| {
-        index > 0 && tails.get(index).zip(tails.get(index - 1)).is_some_and(|(now, last)| now.0 > last.0 + chunk_bytes)
-    };
+    let rewinding = |index: usize| index > 0 && states.get(index).zip(states.get(index - 1)).is_some_and(|(now, last)| now.0 < last.0);
+    let rewinds: Vec<usize> = (0..handles.len()).filter(|index| rewinding(*index)).collect();
+    let worst_rewind = rewinds.iter().copied().filter(|index| before[*index] >= tenth).max_by(|a, b| ratio(*a).total_cmp(&ratio(*b)));
+    match worst_rewind {
+        Some(index) => eprintln!(
+            "BENCH {fixture} {} chunks rewind (the cut moved back); worst ratio to a full build among those that take 0.1 ms or more: {:.2} at chunk {index}",
+            rewinds.len(),
+            ratio(index)
+        ),
+        None => eprintln!("BENCH {fixture} {} chunks rewind (the cut moved back)", rewinds.len()),
+    }
     let mut slowest: Vec<usize> = (0..handles.len()).collect();
     slowest.sort_by(|a, b| handles[*b].cmp(&handles[*a]));
     for index in slowest.iter().take(8) {
         eprintln!(
-            "BENCH {fixture} slow chunk {index}: handle_event {:?}, full build {:?}, ratio {:.2}{}",
+            "BENCH {fixture} slow chunk {index}: handle_event {:?}, full build {:?}, ratio {:.2}; streaming off {:?}{}",
             handles[*index],
             before[*index],
             ratio(*index),
-            if rewinding(*index) { ", rewinds (the tail grew)" } else { "" }
+            plain.handles[*index],
+            if rewinding(*index) { "; rewinds" } else { "" }
         );
     }
-    // A chunk whose full build takes under a millisecond is the row's own cost (the list, the
-    // layout) more than the parse: the ratio of those says nothing.
-    let sizeable: Vec<usize> = (0..handles.len())
-        .filter(|index| before[*index] >= std::time::Duration::from_millis(1))
-        .collect();
-    match sizeable.iter().copied().max_by(|a, b| ratio(*a).total_cmp(&ratio(*b))) {
-        Some(worst) => eprintln!(
-            "BENCH {fixture} worst ratio handle_event / full build over the {} chunks whose full build takes 1 ms or more: {:.2} at chunk {worst} ({:?} against {:?})",
-            sizeable.len(),
-            ratio(worst),
-            handles[worst],
-            before[worst]
-        ),
-        None => eprintln!("BENCH {fixture} no chunk has a full build of 1 ms or more"),
-    }
-    let worst_rewind = (0..handles.len()).filter(|index| rewinding(*index)).max_by(|a, b| ratio(*a).total_cmp(&ratio(*b)));
-    match worst_rewind {
-        Some(index) => eprintln!(
-            "BENCH {fixture} worst ratio over the {} chunks that rewind: {:.2} at chunk {index}",
-            (0..handles.len()).filter(|index| rewinding(*index)).count(),
-            ratio(index)
-        ),
-        None => eprintln!("BENCH {fixture} no chunk rewinds"),
-    }
     stats("handle_event per chunk", handles);
+    stats("handle_event per chunk, streaming off", plain.handles);
     stats("full build per chunk", before);
     stats("parse per chunk", built);
     stats("parse + frame per chunk", drawn);
@@ -665,6 +735,190 @@ async fn streaming_a_compact_reply_costs(cx: &mut TestAppContext) {
         ));
     }
     bench_streaming(cx, "compact", &source).await;
+}
+
+/// What a whole build costs, three 40 KiB documents with display math in them, built thirty times
+/// each (release, by hand: `cargo nextest run -p sirio_ui --release --run-ignored only
+/// --no-capture building_a_whole_reply_costs`). Ely pairs the `$$` runs of a text by walking its
+/// bytes outside the code and the markup between its texts, so the cost of that walk shows here.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn building_a_whole_reply_costs(_cx: &mut TestAppContext) {
+    const CODE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../Scripts/Tests/fixtures/markdown-documents/open-fence-code.txt"
+    ));
+    let mut showcase = String::new();
+    while showcase.len() < 40 * 1024 {
+        showcase.push_str(SHOWCASE);
+        showcase.push_str("\n\n");
+    }
+    let fence = format!("```rust\n{CODE}```\n\n$$\nx = 1\n$$\n");
+    let mut spans = String::from("$$\ny = 2\n$$\n\n");
+    let mut step = 0;
+    while spans.len() < 40 * 1024 {
+        step += 1;
+        spans.push_str(&format!(
+            "## Part {step}\n\nSet `a{step}` to `b{step}`, call `run({step})` and `stop()`, then read `x.y` and `z[{step}]` with *care*.\n\n\
+             ```sh\ncargo build -p part_{step}\ncargo test -p part_{step}\necho done\n```\n\n"
+        ));
+    }
+    let cwd = std::env::temp_dir();
+    for (name, source) in [("SHOWCASE", &showcase), ("open fence", &fence), ("fences and code spans", &spans)] {
+        let mut times: Vec<std::time::Duration> = (0..30)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let _ = parse_linked_markdown(source, &cwd, &mut Default::default());
+                started.elapsed()
+            })
+            .collect();
+        times.sort();
+        eprintln!(
+            "BENCH whole build {name} ({} bytes): median {:?}, min {:?}, max {:?}",
+            source.len(),
+            times[times.len() / 2],
+            times[0],
+            times[times.len() - 1]
+        );
+    }
+}
+
+/// 40 KiB of prose in the shapes of a long answer (a heading, a paragraph with emphasis, code and
+/// two `[the text][7]` references, a list, a fence, a table, a quote) that cites twenty numbered
+/// references and twelve footnotes, `[^3]`. `late`: each definition follows the section after
+/// the one that first used it; else every definition is at the very end.
+fn numbered_references_source(late: bool) -> String {
+    let mut source = String::new();
+    let mut seen_links = [false; 21];
+    let mut pending: Vec<String> = Vec::new();
+    let mut next_note = 1;
+    let mut step = 0;
+    let budget = if late { 40 * 1024 } else { 40 * 1024 - 2200 };
+    while source.len() < budget {
+        step += 1;
+        let (a, b, c) = ((step * 7) % 20 + 1, (step * 3 + 5) % 20 + 1, (step * 11 + 2) % 20 + 1);
+        let note = if step % 5 == 0 && next_note <= 12 {
+            next_note += 1;
+            Some(next_note - 1)
+        } else {
+            None
+        };
+        let note_ref = note.map(|k| format!("[^{k}]")).unwrap_or_default();
+        // What the step before it used is defined after this step's blocks.
+        let due: Vec<String> = std::mem::take(&mut pending);
+        source.push_str(&format!(
+            "## Section {step}\n\n\
+             This section reads [the first source][{a}] against **{step} claims**, with *some* emphasis and `inline_code({step})`, and then [the specification][{b}]{note_ref} before it goes on to say what follows from it.\n\n\
+             - a point that cites [a benchmark][{c}]\n- a second point, with a longer line that wraps because it keeps going for a while\n- a third point\n\n\
+             ```rust\nfn step_{step}(input: &str) -> usize {{\n    input.len() + {step}\n}}\n```\n\n\
+             | name | value |\n| --- | --- |\n| step | {step} |\n| refs | {a}, {b}, {c} |\n\n\
+             > A closing remark for section {step}, in a quote, so that the reply has more than one kind of block.\n\n"
+        ));
+        for definition in due {
+            source.push_str(&definition);
+        }
+        if late {
+            for label in [a, b, c] {
+                if !seen_links[label] {
+                    seen_links[label] = true;
+                    pending.push(format!("[{label}]: https://example.com/ref/{label}\n\n"));
+                }
+            }
+            if let Some(k) = note {
+                pending.push(format!("[^{k}]: The note {k}, which says a little more than the line did.\n\n"));
+            }
+        }
+    }
+    if late {
+        for definition in pending {
+            source.push_str(&definition);
+        }
+    } else {
+        for label in 1..=20 {
+            source.push_str(&format!("[{label}]: https://example.com/ref/{label}\n"));
+        }
+        source.push('\n');
+        for k in 1..=12 {
+            source.push_str(&format!("[^{k}]: The note {k}, which says a little more than the line did.\n\n"));
+        }
+    }
+    source
+}
+
+/// Shape A of the label-heavy replies: `[1]` .. `[20]` and `[^1]` .. `[^12]`, all defined at the end.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_numbered_references_at_the_end_cost(cx: &mut TestAppContext) {
+    let source = numbered_references_source(false);
+    bench_streaming(cx, "numbered refs, definitions at the end", &source).await;
+}
+
+/// Shape B: the same prose, each definition after the section that first used it.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_numbered_references_late_cost(cx: &mut TestAppContext) {
+    let source = numbered_references_source(true);
+    bench_streaming(cx, "numbered refs, definitions late", &source).await;
+}
+
+/// Shape C: 130 labels `topic-1` .. `topic-130`, each used once and defined three blocks later,
+/// numbered without padding, so that some begin others (`topic-1` and `topic-10`).
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_unpadded_labels_cost(cx: &mut TestAppContext) {
+    let mut source = String::new();
+    let mut step = 0;
+    while source.len() < 40 * 1024 {
+        step += 1;
+        source.push_str(&format!(
+            "Step {step} reads [the notes on topic {step}][topic-{step}] before it goes on, with some \
+             `code` and **emphasis** to give the line a few runs.\n\n\
+             A second paragraph of step {step}, longer than the first, so that the blocks have a size \
+             worth parsing.\n\n\
+             - a list item of step {step}\n- and another\n\n\
+             [topic-{step}]: https://example.com/topics/{step}\n\n"
+        ));
+    }
+    bench_streaming(cx, "unpadded labels", &source).await;
+}
+
+/// A reply with `\(` and `\[` math in it and a footnote that is cited again every fifteenth
+/// section, so the stream rewinds on the way, deep. `html`: with a block of HTML at its head,
+/// which makes the reply one that is read by parsing the tail first.
+fn math_with_rewinds_source(html: bool) -> String {
+    let mut source = String::new();
+    if html {
+        source.push_str("<div>\nA block of HTML at the head of the reply.\n</div>\n\n");
+    }
+    source.push_str("A first note[^n] to define.\n\n[^n]: The note, defined at once.\n\n");
+    let mut step = 0;
+    while source.len() < 40 * 1024 {
+        step += 1;
+        let note = if step % 15 == 0 { "[^n]" } else { "" };
+        source.push_str(&format!(
+            "## Section {step}\n\nEuler \\(e^{{i\\pi}}\\) says that step {step} is **linear**, see the note{note} and `inline_code({step})`.\n\n\
+             - a point with \\(x_{{{step}}}\\) in it\n- another point of section {step}\n\n\
+             ```rust\nfn step_{step}() -> usize {{ {step} }}\n```\n\n\
+             \\[ y_{step} = \\sum_k a_k \\]\n\n"
+        ));
+    }
+    source
+}
+
+/// `\(` math and rewinds, no HTML: read by the stream without parsing the tail first.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_math_with_rewinds_cost(cx: &mut TestAppContext) {
+    let source = math_with_rewinds_source(false);
+    bench_streaming(cx, "math and rewinds", &source).await;
+}
+
+/// `\(` math and rewinds and a block of HTML: the one kind of reply that parses its tail first.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_math_and_html_with_rewinds_cost(cx: &mut TestAppContext) {
+    let source = math_with_rewinds_source(true);
+    bench_streaming(cx, "math, html and rewinds", &source).await;
 }
 
 // ---- a reply Ely's reader panics on -------------------------------------------------------
