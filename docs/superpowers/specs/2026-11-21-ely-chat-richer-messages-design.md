@@ -191,6 +191,8 @@ That build is small by construction: at most the blocks that are not yet frozen,
 the parts half, then the join half over the drawn list. It runs on each animation frame while the reveal is behind,
 and it does not touch `document`.
 
+**The tail's budget (ruled 2026-11-22, after Task 3 as built).** The tail is not always small. A reply with no blank lines never freezes. Labels cited from the first section to the last hold the whole body. The wait after a fruitless look, and a deep rewind, leave the frozen blocks short. In those cases the tail can be the whole reply, about 3 ms per frame at 40 KiB. So when `revealed - from` exceeds 8 KiB, the reply stops revealing for the rest of its turn. It then draws `document` as it arrives, with no caret and no pacing, the way every reply was drawn before this delivery. A reply of a turn the CLI started on its own has no stream, and it never reveals.
+
 A reply gone `whole` has no frozen blocks. It reveals as plain text: it is one plain paragraph by then. The caret sits inline after the
 text, as in Ely, including inside an open fence.
 
