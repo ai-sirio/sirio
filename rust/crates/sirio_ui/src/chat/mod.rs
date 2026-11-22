@@ -1455,8 +1455,9 @@ struct TranscriptSelection {
     /// (`reveal.rs`): its offset is then a place in the text drawn for the reply, a text that
     /// changes under it, which the entries below the reply, placed by the document's lengths, do
     /// not measure. So an end is told to belong to the reply by its entry and never by its offset,
-    /// and the ends are put in order by their entries first. When the reply ends, a selection with
-    /// an end in it goes (`finish_reply`): its drawn offsets do not map onto the document.
+    /// and the ends are put in order by their entries first. When the reply stops being revealed
+    /// (it ends, or it goes on as its document: `drop_selection_in`), a selection with an end in it
+    /// goes: its drawn offsets do not map onto the document.
     anchor_entry: Option<usize>,
     head_entry: Option<usize>,
 }
@@ -1618,12 +1619,31 @@ impl TranscriptSelection {
             self.head..self.anchor
         }
     }
+
+    /// Whether the two ends are one place, so that nothing is selected. Ends placed in two entries
+    /// are two places whatever their offsets, the comparison that puts them in order (`ends`, in
+    /// `reveal.rs`): an offset in the live reply is a place in its drawn text, which can run past
+    /// the document's row into the numbers of the rows below.
+    fn is_empty(&self) -> bool {
+        match (self.anchor_entry, self.head_entry) {
+            (Some(anchor), Some(head)) if anchor != head => false,
+            _ => self.anchor == self.head,
+        }
+    }
 }
 
+/// What the bodies of one entry's row share to take part in the transcript's selection.
 #[derive(Clone)]
 pub(crate) struct TranscriptInteraction {
     chat: Entity<Chat>,
     focus: FocusHandle,
+    /// The entry the row was painted for, and where its row started in the transcript's offset
+    /// space on that frame. A mouse event goes to the listeners of the frame already drawn, and
+    /// the transcript may have changed since (a chunk grew the reply above): the entry an end is
+    /// placed in is the painted one, never one looked up by an offset of that frame in the rows
+    /// as they are now, and the offset moves with its row (`place`).
+    entry: usize,
+    painted: usize,
 }
 
 impl TranscriptInteraction {
@@ -1632,23 +1652,16 @@ impl TranscriptInteraction {
     /// Focus taken at the press does not hold: the pane's own press handler
     /// runs after it and hands focus to the composer (`select_pane`), which is
     /// where a plain click on the transcript is meant to leave it.
-    /// `row` is where the body the pointer is over starts in the transcript's offset space: the
-    /// head is placed in the entry that holds it.
-    pub(crate) fn extend_selection(
-        &self,
-        head: usize,
-        row: usize,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    /// `head` is an offset of the frame this row was painted on, placed in this row's entry.
+    pub(crate) fn extend_selection(&self, head: usize, window: &mut Window, cx: &mut App) {
         let selecting = self.chat.update(cx, |chat, cx| {
             cx.notify();
-            let entry = chat.entry_at(row);
+            let ([head], entry) = self.place([head], chat);
             chat.transcript_selection.as_mut().is_some_and(|selection| {
                 selection.head = head;
                 selection.head_entry = entry;
                 selection.whole = false;
-                selection.anchor != selection.head
+                !selection.is_empty()
             })
         });
         if selecting && !self.focus.is_focused(window) {
@@ -1658,36 +1671,39 @@ impl TranscriptInteraction {
 }
 
 impl TranscriptInteraction {
+    /// Where the ends the pointer put at `at`, offsets of the frame this row was painted on, are
+    /// in the transcript as it is now, and the entry they are in: this row's. An offset moves by
+    /// as much as the row has since that frame (a chunk that grew the reply above a notice moved
+    /// the notice), so an end stays on the character under the pointer. A row whose entry is gone
+    /// (a new conversation since the frame) places an end in no entry.
+    fn place<const N: usize>(&self, at: [usize; N], chat: &Chat) -> ([usize; N], Option<usize>) {
+        match chat.transcript_entry_ranges().get(self.entry) {
+            Some(row) => (
+                at.map(|at| at.saturating_sub(self.painted) + row.start),
+                Some(self.entry),
+            ),
+            None => (at, None),
+        }
+    }
+
     /// The part of the selection a body of `len` bytes that starts at `start` in the transcript's
     /// offset space holds, as the body's own bytes: what it highlights, and what its menu copies.
     pub(crate) fn selected_in(&self, start: usize, len: usize, cx: &App) -> Option<Range<usize>> {
         self.chat.read(cx).selection_in_body(start, len)
     }
 
-    /// The selected span of the whole transcript, while it is not empty.
-    pub(crate) fn selected_span(&self, cx: &App) -> Option<Range<usize>> {
-        let range = self
-            .chat
-            .read(cx)
-            .transcript_selection
-            .as_ref()
-            .map(TranscriptSelection::range)?;
-        (!range.is_empty()).then_some(range)
-    }
-
-    /// Starts a selection at `anchor..head`. The focus goes into the transcript only when the
-    /// press selected something (a double or triple click): a caret is not a selection, and a
-    /// plain click leaves the composer focused (`extend_selection` takes it when a drag
-    /// selects).
+    /// Starts a selection at `anchor..head`, offsets of the frame this row was painted on, in
+    /// this row's entry. The focus goes into the transcript only when the press selected
+    /// something (a double or triple click): a caret is not a selection, and a plain click leaves
+    /// the composer focused (`extend_selection` takes it when a drag selects).
     pub(crate) fn begin_selection(
         &self,
         (anchor, head): (usize, usize),
-        row: usize,
         window: &mut Window,
         cx: &mut App,
     ) {
         self.chat.update(cx, |chat, cx| {
-            let entry = chat.entry_at(row);
+            let ([anchor, head], entry) = self.place([anchor, head], chat);
             chat.transcript_selection = Some(TranscriptSelection {
                 anchor,
                 head,
@@ -1717,7 +1733,8 @@ impl TranscriptInteraction {
                 cx.notify();
             });
         }
-        self.selected_span(cx).is_some()
+        (self.chat.read(cx).transcript_selection.as_ref())
+            .is_some_and(|selection| !selection.is_empty())
     }
 }
 
@@ -1905,8 +1922,8 @@ impl Element for TranscriptSelectableText {
                 };
                 pressed_index.set(Some(index));
                 interaction.chat.update(cx, |chat, cx| {
-                    let position = source_range.start + index;
-                    let entry = chat.entry_at(source_range.start);
+                    let ([position], entry) =
+                        interaction.place([source_range.start + index], chat);
                     chat.transcript_selection = Some(TranscriptSelection {
                         anchor: position,
                         head: position,
@@ -1935,12 +1952,7 @@ impl Element for TranscriptSelectableText {
                 let index = match layout_for_move.index_for_position(event.position) {
                     Ok(index) | Err(index) => index.min(source_range.len()),
                 };
-                interaction.extend_selection(
-                    source_range.start + index,
-                    source_range.start,
-                    window,
-                    cx,
-                );
+                interaction.extend_selection(source_range.start + index, window, cx);
             }
         });
 
@@ -2739,6 +2751,13 @@ impl Chat {
     /// would have got wrong does not outlive the turn, and what is stored or restored is built
     /// whole. A row is remeasured and the selection kept in bounds, as after a chunk.
     fn finish_reply(&mut self) {
+        // A drag with an end in the reply being revealed goes with the reveal: that end is a
+        // place in the text drawn for the reply (`reveal.rs`). A reply that had stopped being
+        // revealed lost such drags when it did (`stop_revealing`), so an end placed in it since
+        // is a place in its document, which this rebuilds the same: that drag stays.
+        if let Some(revealed) = self.live_entry() {
+            self.drop_selection_in(revealed);
+        }
         // The reveal ends with the stream: what is shown next is `document`, whole.
         self.reveal = None;
         let mut finished = Vec::new();
@@ -2758,8 +2777,6 @@ impl Chat {
             return;
         }
         for index in finished {
-            // A drag with an end in a reply that ends here goes with it (`reveal.rs`).
-            self.drop_selection_in(index);
             self.remeasure_entry(index);
         }
         self.clamp_transcript_selection();
@@ -4372,13 +4389,6 @@ impl Chat {
             .collect()
     }
 
-    /// The entry whose row holds the offset `at` of the transcript's text: the one a body that
-    /// starts there belongs to. The live reply's body starts where its document's row does.
-    fn entry_at(&self, at: usize) -> Option<usize> {
-        let ranges = self.transcript_entry_ranges();
-        ranges.partition_point(|range| range.start <= at).checked_sub(1)
-    }
-
     fn transcript_text(&self) -> String {
         self.entries
             .iter()
@@ -5197,15 +5207,15 @@ impl Chat {
 
     fn selected_transcript_text(&self) -> Option<String> {
         let made = self.transcript_selection.as_ref()?;
-        let selection = made.range();
-        if selection.start >= selection.end {
+        if made.is_empty() {
             return None;
         }
-        // A drag that ends in the reply being revealed copies what is on the screen.
-        if let Some(on_screen) = self.copy_from_live_reply(made) {
-            return Some(on_screen);
-        }
-        self.transcript_text().get(selection).map(ToOwned::to_owned)
+        let copied = match self.copy_from_live_reply(made) {
+            // A drag that ends in the reply being revealed copies what is on the screen.
+            Some(on_screen) => on_screen,
+            None => self.transcript_text().get(made.range())?.to_owned(),
+        };
+        (!copied.is_empty()).then_some(copied)
     }
 
     fn copy_transcript(&mut self, _: &CopyTranscript, _: &mut Window, cx: &mut Context<Self>) {

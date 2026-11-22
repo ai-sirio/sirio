@@ -414,7 +414,7 @@ impl Chat {
 
     /// The entry of the reply being revealed, if one is. It is the last entry that is not an aside
     /// (`push_entry`), so the walk from the end is short.
-    fn live_entry(&self) -> Option<usize> {
+    pub(super) fn live_entry(&self) -> Option<usize> {
         self.reveal.as_ref()?;
         let entry = (self.entries.iter())
             .rposition(|entry| matches!(entry, Entry::Assistant { stream: Some(_), .. }))?;
@@ -556,7 +556,7 @@ mod tests {
     use super::super::markdown_tests::{
         SHOWCASE, chat_with, last_painted_row, painted_caret, painted_text, revealed, tick,
     };
-    use super::super::tests::refresh_frame;
+    use super::super::tests::{focus_composer, refresh_frame};
     use super::super::NoticeKind;
     use super::*;
     use crate::markdown::{Policy, StreamingDoc, Surface};
@@ -1421,6 +1421,224 @@ mod tests {
         let expected = format!("{}\n\n{}", &line[pressed..], &notice_text[..reached]);
         assert_eq!(copy_keys(cx), Some(expected), "the reply's tail, the separator once, the notice's start");
         assert_eq!(highlighted(&chat, cx), vec![pressed..line.len()], "the reply is lit from the press to its end");
+    }
+
+    /// gpui sends a press to the listeners of the frame already drawn, and a chunk can grow the
+    /// live reply between that frame and the press: the notice below it has moved in the
+    /// transcript's offsets, and the frame's listeners hold where it was. The press is on the
+    /// notice all the same, on the character under the pointer: the drag it starts copies the
+    /// notice's text and nothing of the reply, and it is still there when the reply ends.
+    #[gpui::test]
+    async fn a_press_on_a_notice_that_a_chunk_moved_since_the_last_frame_is_in_the_notice(
+        cx: &mut TestAppContext,
+    ) {
+        let notice_text = "a background task finished, and said so at some length";
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk("Hello there."), cx);
+            chat.push_entry(Entry::Notice {
+                text: notice_text.into(),
+                kind: NoticeKind::BackgroundTask,
+            });
+        });
+        tick(cx, Duration::from_millis(400));
+        let notice_start = |cx: &mut gpui::VisualTestContext| {
+            chat.read_with(&cx.cx, |chat, _| chat.transcript_entry_ranges()[1].start)
+        };
+        let notice = cx.debug_bounds("notice-task-text").expect("the notice is drawn");
+        let (press, release) = (
+            gpui::point(notice.left() + px(40.0), notice.center().y),
+            gpui::point(notice.left() + px(120.0), notice.center().y),
+        );
+
+        // On a frame that is current: which characters of the notice the two points are on.
+        drag(cx, press, release);
+        let before = notice_start(cx);
+        let (from, to) = chat.read_with(&cx.cx, |chat, _| {
+            let selection = chat.transcript_selection.as_ref().expect("a selection");
+            (selection.anchor - before, selection.head - before)
+        });
+        assert!(0 < from && from < to && to < notice_text.len(), "the drag is inside the notice: {from}..{to}");
+        assert_eq!(copy_keys(cx).as_deref(), Some(&notice_text[from..to]));
+        chat.update(cx, |chat, cx| {
+            chat.transcript_selection = None;
+            cx.notify();
+        });
+
+        // A chunk, and the press before the next frame: one update, which draws no frame between
+        // the two, so the press goes to the listeners of the frame drawn before the chunk.
+        let more = " And some more words.";
+        let placed = cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| chat.handle_event(chunk(more), cx));
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position: press,
+                    modifiers: gpui::Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            let selection = chat.read(cx).transcript_selection.clone().expect("the press placed an anchor");
+            (selection.anchor, selection.anchor_entry)
+        });
+        let after = notice_start(cx);
+        assert_eq!(after, before + more.len(), "the chunk moved the notice");
+        cx.simulate_mouse_move(release, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(release, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            (placed, copy_keys(cx).as_deref()),
+            ((after + from, Some(1)), Some(&notice_text[from..to])),
+            "(where the press was placed and in which entry, what Ctrl+C writes after the drag)"
+        );
+
+        // The reply ends: the selection is the notice's, and stays.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(sirio_chat::ChatEvent::TurnEnded { stop_reason: "EndTurn".into() }, cx)
+        });
+        refresh_frame(cx);
+        assert_eq!(copy_keys(cx).as_deref(), Some(&notice_text[from..to]), "after the turn's end");
+    }
+
+    /// A reply that has stopped revealing (here its tail went past the budget) is drawn from its
+    /// document, and a drag made in it from then on is in the document's offsets. When the turn
+    /// ends the reply is the same document, and the drag covers the same text: it stays, and
+    /// copies what it copied.
+    #[gpui::test]
+    async fn a_drag_made_after_a_reply_stopped_revealing_stays_when_its_turn_ends(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        // Lines with no blank one between them never freeze: the tail grows past 7 KiB.
+        let mut reply = String::new();
+        let mut line = 0;
+        while reply.len() < 8 * 1024 {
+            line += 1;
+            reply.push_str(&format!("Line {line} of a compact reply, with `code` and **emphasis**.\n"));
+        }
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(&reply), cx);
+        });
+        for _ in 0..40 {
+            tick(cx, Duration::from_millis(100));
+            if !chat.read_with(&cx.cx, |chat, _| chat.revealing(0)) {
+                break;
+            }
+        }
+        let (streams, revealing, document) = chat.read_with(&cx.cx, |chat, _| {
+            let Some(Entry::Assistant { stream, document, .. }) = chat.entries.first() else {
+                panic!("a reply")
+            };
+            (stream.is_some(), chat.revealing(0), document.text.text.clone())
+        });
+        assert!(streams && !revealing, "the reply still streams, and is no longer revealed");
+        refresh_frame(cx);
+
+        // A drag along a line of it that the window shows.
+        let shown = chat.read_with(&cx.cx, |chat, _| {
+            let viewport = chat.list_state.viewport_bounds();
+            let painted = chat.transcript_links.borrow();
+            let (last, _) = (painted.iter().flat_map(|layouts| layouts.text_rows()))
+                .filter(|(bounds, _)| bounds.intersects(&viewport))
+                .last()
+                .expect("the window shows a text of the reply");
+            last.intersect(&viewport)
+        });
+        drag(
+            cx,
+            gpui::point(shown.left() + px(1.0), shown.center().y),
+            gpui::point(shown.right() - px(10.0), shown.center().y),
+        );
+        let copied = copy_keys(cx).expect("the drag selected a line of the reply");
+        assert!(copied.len() > 20 && document.contains(&copied), "a piece of the document: {copied:?}");
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(sirio_chat::ChatEvent::TurnEnded { stop_reason: "EndTurn".into() }, cx)
+        });
+        refresh_frame(cx);
+        assert_eq!(copy_keys(cx), Some(copied), "after the turn's end");
+    }
+
+    /// A drag pressed in the live reply and let go in the notice below it, at offsets that are the
+    /// same number: the press at the 20th byte of the reply's drawn text, the end at the 20th byte
+    /// of the transcript's text, which is the notice's 6th. They are two places, in two rows, and
+    /// what lies between them is selected: it is lit, Ctrl+C writes it, and the transcript takes
+    /// the focus, as it does for any drag that selects.
+    #[gpui::test]
+    async fn a_drag_from_a_live_reply_to_the_same_offset_in_a_notice_selects_what_it_lights(
+        cx: &mut TestAppContext,
+    ) {
+        let line = "See [a][1] and [b][2].";
+        let reply = format!("{line}\n\n[1]: https://example.com/1\n[2]: https://example.com/2\n");
+        let notice_text = "done, and said so at some length";
+        let same = 20;
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(&reply), cx);
+            chat.push_entry(Entry::Notice {
+                text: notice_text.into(),
+                kind: NoticeKind::BackgroundTask,
+            });
+            chat.reveal.as_mut().expect("live").show(line.len());
+        });
+        refresh_frame(cx);
+        let (row, on_screen) = last_painted_row(&chat, cx);
+        assert_eq!(on_screen, line, "22 bytes drawn");
+        let rows = chat.read_with(&cx.cx, |chat, _| chat.transcript_entry_ranges());
+        assert_eq!(rows, vec![0..12, 14..14 + notice_text.len()], "12 in the document, the notice from 14");
+
+        // Where the 20th byte of the drawn line is.
+        let press = chat.read_with(&cx.cx, |chat, _| {
+            let layouts = chat.transcript_links.borrow();
+            let reply = layouts.first().expect("the reply's layouts");
+            let mut x = row.left();
+            while reply.offset_at(gpui::point(x, row.center().y)).is_some_and(|at| at < same) {
+                x += px(1.0);
+            }
+            gpui::point(x, row.center().y)
+        });
+        // Where the same offset is in the notice: a drag inside the notice finds it, a pixel at a
+        // time. It is then undone, and the focus put back in the composer.
+        let notice = cx.debug_bounds("notice-task-text").expect("the notice is drawn");
+        let mut end = gpui::point(notice.left() + px(1.0), notice.center().y);
+        cx.simulate_mouse_down(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        let head = |cx: &mut gpui::VisualTestContext| {
+            chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.as_ref().expect("a selection").head)
+        };
+        while head(cx) < same {
+            end.x += px(1.0);
+            assert!(end.x < notice.right(), "the notice has a 6th byte");
+            cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        }
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        chat.update(cx, |chat, cx| {
+            chat.transcript_selection = None;
+            cx.notify();
+        });
+        focus_composer(&chat, cx);
+        let transcript_focused = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| chat.read(cx).transcript_focus.is_focused(window))
+        };
+        assert!(!transcript_focused(cx), "the focus is in the composer before the drag");
+
+        // The drag, in one move: no step of it has two different offsets.
+        drag(cx, press, end);
+        let ends = chat.read_with(&cx.cx, |chat, _| {
+            let selection = chat.transcript_selection.as_ref().expect("the drag left a selection");
+            (selection.anchor, selection.anchor_entry, selection.head, selection.head_entry)
+        });
+        assert_eq!(ends, (same, Some(0), same, Some(1)), "the same offset, in the reply and in the notice");
+        let focused = transcript_focused(cx);
+        let copied = copy_keys(cx);
+        refresh_frame(cx);
+        assert_eq!(
+            (focused, copied.as_deref(), highlighted(&chat, cx)),
+            (true, Some("].\n\ndone, "), vec![same..line.len()]),
+            "(the transcript has the focus, what Ctrl+C writes, what the reply lights)"
+        );
     }
 
     /// A reply whose stream went whole without being refused (the guard declined a later text, or

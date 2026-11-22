@@ -141,6 +141,8 @@ impl Chat {
         let interaction = TranscriptInteraction {
             chat: entity.clone(),
             focus: transcript_focus,
+            entry: entry_index,
+            painted: source_start,
         };
         let presentation = match &entry {
             Entry::Error { kind, .. } => Some(
