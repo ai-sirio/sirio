@@ -72,7 +72,9 @@ describes is a review by hand.
 - `crates/ely-documents/src/lib.rs`
 - `crates/ely-documents/src/markdown.rs`
 - `crates/ely-documents/src/markdown/build.rs`
+- `crates/ely-documents/src/markdown/build/node.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
+- `crates/ely-documents/src/markdown/shape.rs`
 - `crates/ely-documents/src/markdown/tex.rs`
 - `crates/ely-documents/src/math.rs`
 - `crates/ely-documents/src/modes.rs`
@@ -892,6 +894,47 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
   `the_renderer_reads_the_address_it_is_handed_under_a_verbatim_folder_whole`.
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
+
+## ely-documents reference labels (L13)
+
+Numbered after L11 (`ely-chat` host seams) and L12 (`ely-documents` `next_run`) of the chat delivery, which may
+land after it, so the three do not collide.
+
+Paths: `ely-documents` `src/markdown/build.rs`, `src/markdown/build/node.rs`, `src/markdown/shape.rs` and
+`src/tree/mod.rs` (tests in `src/tree/tests.rs`). Issue #839: a Markdown build panicked
+(`a reference names a definition`, `Reader::url`) on a reference whose label breaks across lines inside a
+block quote, `> see [x][one\n> two]` over `[one two]: https://d.example`.
+
+Why: the builder cut a reference's identifier from the label as written in the source (`shape::reference`),
+while a definition's identifier comes from the label pulldown-cmark keeps. pulldown-cmark cuts text from a
+label before it matches it, which the written label still carries: the `> ` a label that goes on to the next
+line crosses, the `\` of a `\|` in a table cell, and a vertical tab or form
+feed, which it folds to one space and `mdast::identifier` does not split on. The reference read as `one > two`,
+pulldown-cmark matched it to the definition `one two` and emitted a link, and the lookup missed.
+
+What: `Tag::Link` and `Tag::Image` carry `id`, the label pulldown-cmark matched the reference by (full,
+collapsed and shortcut forms alike). `Kind::Link` and `Kind::Image` keep it, and `shape::reference(link, id)`
+passes it through `mdast::identifier`, as the definition's label is, so the two sides read one label. The
+slicing of the written label and its `escaped` helper are gone; `mdast::identifier` is unchanged. Also
+`Reader::url` returns an `Option` and no longer panics: a picture whose definition is missing draws its alt
+text, a link its text without a target. No input from `parse` reaches that branch, by reading: pulldown-cmark
+emits a reference only for a definition it matched, both sides now read one label, and every `Reader` is built
+over the tree of the text it reads. So it has no test of its own, which would need a call no source produces.
+
+Proof: eight tests in `tree/tests.rs`, 31 sources: `a_reference_label_that_breaks_inside_a_quote_resolves` (the
+issue's input, drawn exactly, then a deeper marker, a marker with no space and a label after a line of the
+quote), `a_shortcut_or_collapsed_reference_that_breaks_inside_a_quote_resolves`,
+`a_definition_label_that_breaks_inside_a_quote_resolves`,
+`a_picture_reference_label_that_breaks_inside_a_quote_resolves`,
+`a_reference_label_that_breaks_inside_a_list_item_resolves` (a quote marker around or inside a list item is cut;
+a plain list's indent is only blanks, which `identifier` always collapsed, so its two sources are guards),
+`a_reference_label_in_a_table_cell_reads_its_pipe_as_pulldown_does`,
+`a_vertical_tab_or_form_feed_in_a_label_is_a_blank_as_pulldown_reads_it` and
+`a_reference_finds_its_definition_by_case_and_spacing_as_pulldown_does` (case, runs of blanks, a tab, `Straße`
+against `STRASSE`). Before the change all eight panic at `tree/mod.rs:261`. 24 of their 31 sources panic before
+and none after; the seven that already resolved are a definition alone split over quote lines, a label split
+inside a plain list item (two sources), a definition label with a form feed, and three case and spacing
+sources.
 
 ## Featureless test build
 

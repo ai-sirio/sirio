@@ -253,12 +253,9 @@ impl<'a> Reader<'a> {
         out
     }
 
-    /// A reference's address; the parser checked its definition.
-    fn url(&self, identifier: &str) -> String {
-        self.urls
-            .get(identifier)
-            .cloned()
-            .expect("a reference names a definition")
+    /// A reference's address; none when no definition is called `identifier`.
+    fn url(&self, identifier: &str) -> Option<String> {
+        self.urls.get(identifier).cloned()
     }
 
     /// `node`'s blocks, as the drawing reads them.
@@ -431,15 +428,17 @@ impl<'a> Reader<'a> {
             }
             mdast::Node::Image(_) | mdast::Node::ImageReference(_) => {
                 let (alt_text, url) = match node {
-                    mdast::Node::Image(image) => (image.alt.clone(), image.url.clone()),
+                    mdast::Node::Image(image) => (image.alt.clone(), Some(image.url.clone())),
                     mdast::Node::ImageReference(image) => {
                         (image.alt.clone(), self.url(&image.identifier))
                     }
                     _ => unreachable!("matched as an image"),
                 };
-                if alt {
-                    return out.text(&alt_text);
-                }
+                // A picture whose definition is missing is its alt text.
+                let url = match url {
+                    Some(url) if !alt => url,
+                    _ => return out.text(&alt_text),
+                };
                 let index = images.len();
                 images.push(Picture {
                     alt: alt_text,
@@ -465,10 +464,16 @@ impl<'a> Reader<'a> {
                     format!(" href=\"{}\"{tail}", quoted(&link.url)),
                 )
             }
-            mdast::Node::LinkReference(link) => {
-                let url = quoted(&self.url(&link.identifier));
-                (&link.children, "a", format!(" href=\"{url}\""))
-            }
+            mdast::Node::LinkReference(link) => match self.url(&link.identifier) {
+                Some(url) => (&link.children, "a", format!(" href=\"{}\"", quoted(&url))),
+                // No definition: the text stands without its link.
+                None => {
+                    for child in &link.children {
+                        self.write_into(child, out, images, (verbatim, table, alt));
+                    }
+                    return;
+                }
+            },
             other => unreachable!("{other:?} is no inline outside MDX"),
         };
         // A container is the element GitHub writes.

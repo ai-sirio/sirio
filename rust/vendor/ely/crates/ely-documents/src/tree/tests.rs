@@ -128,6 +128,166 @@ fn definitions_nested_in_quotes_and_lists_resolve() {
     }
 }
 
+/// Every link address in `nodes`, in order; a picture counts by its own address.
+fn addresses(nodes: &[Node]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Paragraph(text) | Node::Heading(_, text) => {
+                out.extend(text.links.iter().map(|(_, url)| url.clone()));
+            }
+            Node::Image { url, .. } => out.push(url.clone()),
+            Node::Quote(inner)
+            | Node::Alert { body: inner, .. }
+            | Node::Footnote { body: inner, .. } => out.extend(addresses(inner)),
+            Node::List { items, .. } => {
+                for (_, inner) in items {
+                    out.extend(addresses(inner));
+                }
+            }
+            Node::Table { head, rows, .. } => {
+                let cells = head.iter().chain(rows.iter().flatten());
+                for cell in cells {
+                    out.extend(addresses(cell));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Each source must give exactly the one address `want`.
+fn resolve_to(want: &str, sources: &[&str]) {
+    for source in sources {
+        assert_eq!(addresses(&parse(source)), [want], "{source:?}");
+    }
+}
+
+#[test]
+fn a_reference_label_that_breaks_inside_a_quote_resolves() {
+    // pulldown-cmark drops the quote marker from a label that goes on past a line end, and matches
+    // it to a definition as `one two`; the label as written still has the `> ` in it.
+    let nodes = parse("> see [x][one\n> two]\n\n[one two]: https://d.example\n");
+    let Node::Quote(inner) = &nodes[0] else {
+        panic!("a quote, not {:?}", nodes[0])
+    };
+    let Node::Paragraph(text) = &inner[0] else {
+        panic!("a paragraph, not {:?}", inner[0])
+    };
+    assert_eq!(text.text, "see x");
+    assert_eq!(text.links, [(4..5, "https://d.example".to_string())]);
+    assert_eq!(nodes.len(), 1, "the definition draws nothing: {nodes:?}");
+    resolve_to(
+        "https://d.example",
+        &[
+            // The marker is deeper, or has no space after it.
+            ">> see [x][one\n>> two]\n\n[one two]: https://d.example\n",
+            "> see [x][one\n>two]\n\n[one two]: https://d.example\n",
+            "> > see [x][one\n> > two]\n\n[one two]: https://d.example\n",
+            // The reference follows a line of the quote.
+            "> first line\n> see [x][one\n> two] after\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_shortcut_or_collapsed_reference_that_breaks_inside_a_quote_resolves() {
+    resolve_to(
+        "https://d.example",
+        &[
+            "> see [one\n> two]\n\n[one two]: https://d.example\n",
+            "> see [one\n> two][]\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_definition_label_that_breaks_inside_a_quote_resolves() {
+    resolve_to(
+        "https://d.example",
+        &[
+            // Only the definition breaks.
+            "see [x][one two]\n\n> [one\n> two]: https://d.example\n",
+            // Both do.
+            "> see [x][one\n> two]\n>\n> [one\n> two]: https://d.example\n",
+            "> see [one\n> two]\n>\n> [one\n> two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_picture_reference_label_that_breaks_inside_a_quote_resolves() {
+    resolve_to(
+        "a.png",
+        &[
+            "> ![a][one\n> two]\n\n[one two]: a.png\n",
+            "> ![one\n> two]\n\n[one two]: a.png\n",
+            "> ![one\n> two][]\n\n[one two]: a.png\n",
+        ],
+    );
+}
+
+#[test]
+fn a_reference_label_that_breaks_inside_a_list_item_resolves() {
+    resolve_to(
+        "https://d.example",
+        &[
+            // A plain list's indent is only blanks, which `identifier` always collapsed: these two
+            // passed before the change and only guard it.
+            "- see [x][one\n  two]\n\n[one two]: https://d.example\n",
+            "1. see [x][one\n   two]\n\n[one two]: https://d.example\n",
+            // A quote marker around or inside the item leads the continuation line, and is cut.
+            "> - see [x][one\n>   two]\n\n[one two]: https://d.example\n",
+            "> 1. see [x][one\n>    two]\n\n[one two]: https://d.example\n",
+            "- > see [x][one\n  > two]\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_reference_label_in_a_table_cell_reads_its_pipe_as_pulldown_does() {
+    // pulldown-cmark reads `\|` in a cell as `|` before it matches the label.
+    resolve_to(
+        "https://d.example",
+        &[
+            "| head |\n| --- |\n| [x][a\\|b] |\n\n[a|b]: https://d.example\n",
+            "| head |\n| --- |\n| [a\\|b] |\n\n[a|b]: https://d.example\n",
+            "| head |\n| --- |\n| ![a\\|b] |\n\n[a|b]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_vertical_tab_or_form_feed_in_a_label_is_a_blank_as_pulldown_reads_it() {
+    // pulldown-cmark folds every ASCII blank, \x0b and \x0c too, to one space in a label.
+    resolve_to(
+        "https://d.example",
+        &[
+            "[x][one\x0btwo]\n\n[one two]: https://d.example\n",
+            "[x][one\x0ctwo]\n\n[one two]: https://d.example\n",
+            "[one\x0b\x0c two]\n\n[one two]: https://d.example\n",
+            "[one two]\n\n[one\x0ctwo]: https://d.example\n",
+            "[x][ONE\x0btwo]\n\n[one\x0ctwo]: https://d.example\n",
+            "> see [x][one\x0b\n> two]\n\n[one two]: https://d.example\n",
+        ],
+    );
+}
+
+#[test]
+fn a_reference_finds_its_definition_by_case_and_spacing_as_pulldown_does() {
+    resolve_to(
+        "https://d.example",
+        &[
+            "[x][ONE   Two]\n\n[one\ttwo]: https://d.example\n",
+            "[one two]\n\n[ONE\n  TWO]: https://d.example\n",
+            "[Straße]\n\n[STRASSE]: https://d.example\n",
+            // Both at once, over a quote's line break.
+            "> see [x][ONE\n> Two]\n\n[one   two]: https://d.example\n",
+        ],
+    );
+}
+
 #[test]
 fn an_image_inside_styles_and_links_stays_an_image() {
     let nodes = parse("*a ![x](x.png) b* [![y](y.png)](https://ely.dev)");
