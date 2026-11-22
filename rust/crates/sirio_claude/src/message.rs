@@ -826,6 +826,11 @@ pub struct ResultPayload {
     pub model_usage: BTreeMap<String, ModelUsage>,
     pub session_id: Option<String>,
     pub uuid: Option<String>,
+    /// How many turns the CLI still has queued behind this one, when the result says. The CLI can
+    /// fold a queued prompt into the running turn and answer both with one result, so this, and
+    /// not a count of results, is what says how many prompts are still waiting.
+    #[serde(deserialize_with = "lenient")]
+    pub queued_turn_count: Option<u64>,
     /// Why the CLI could not start, on a result written in place of the
     /// session. A few reasons are always written (`config_file_invalid`,
     /// `org_config_required_unavailable`, `org_config_refused`);
@@ -1343,8 +1348,24 @@ mod tests {
         assert_eq!(result.subtype, "error_during_execution");
         assert!(result.is_error);
         assert_eq!(result.stop_reason, None);
+        assert_eq!(result.queued_turn_count, Some(0));
         assert_eq!(result.duration_ms, Some(6_002));
         assert_eq!(result.total_cost_usd, Some(0.008_954_355));
+    }
+
+    #[test]
+    fn a_results_queued_turn_count_is_a_count_or_absent() {
+        let read = |line: &str| match CliMessage::parse(line) {
+            Some(CliMessage::Result(result)) => result.queued_turn_count,
+            other => panic!("not a result: {other:?}"),
+        };
+        assert_eq!(read(r#"{"type":"result","subtype":"success","queued_turn_count":2}"#), Some(2));
+        assert_eq!(read(r#"{"type":"result","subtype":"success"}"#), None);
+        // Wrongly typed: only the field is lost, never the result.
+        assert_eq!(
+            read(r#"{"type":"result","subtype":"success","queued_turn_count":"two"}"#),
+            None
+        );
     }
 
     #[test]

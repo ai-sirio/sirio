@@ -270,8 +270,9 @@ def text(chunk):
     })
 
 
-def result(subtype="success", is_error=False, text_body="Done."):
+def result(subtype="success", is_error=False, text_body="Done.", **extra):
     send({
+        **extra,
         "type": "result",
         "subtype": subtype,
         "is_error": is_error,
@@ -2689,6 +2690,10 @@ def cli_notices_prompt(message):
 # when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
 # ordinary answer, so a test can tell the client is still usable after a failure. The results
 # carry no `stop_reason`, as the CLI's own failures do.
+# `fold first` is answered by nothing and `fold second` by one result that closes both
+# prompts (`queued_turn_count: 0`): the CLI folds a queued prompt into the running turn.
+# `then wake` is answered, and then the CLI starts a turn of its own (no prompt of Sirio's
+# behind it, as after a background agent ends) that fails.
 # ---------------------------------------------------------------------------
 
 FAILED_TURNS = {
@@ -2708,6 +2713,11 @@ def interrupted_result():
           "session_id": SESSION_ID, "uuid": trace_uuid()})
 
 
+def failure_result(subtype, body):
+    send({"type": "result", "subtype": subtype, "is_error": True, "result": body,
+          "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
 def failed_turn(prompt):
     if not INIT_PRINTED:
         init_line()
@@ -2718,13 +2728,24 @@ def failed_turn(prompt):
         text("working")
         (HOLDING_LATE if prompt == "hold late" else HOLDING).set()
         return
+    if prompt == "fold first":
+        text("first ")
+        return
+    if prompt == "fold second":
+        text("second")
+        result(queued_turn_count=0)
+        return
+    if prompt == "then wake":
+        text("ok")
+        result()
+        text("The agent finished. ")
+        failure_result(*FAILED_TURNS["overloaded"])
+        return
     if prompt not in FAILED_TURNS:
         text("ok")
         result()
         return
-    subtype, body = FAILED_TURNS[prompt]
-    send({"type": "result", "subtype": subtype, "is_error": True, "result": body,
-          "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+    failure_result(*FAILED_TURNS[prompt])
 
 
 # ---------------------------------------------------------------------------

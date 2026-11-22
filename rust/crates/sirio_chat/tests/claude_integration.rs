@@ -638,6 +638,57 @@ fn a_stop_still_excuses_its_turn_when_the_next_prompt_is_written_first() {
 }
 
 #[test]
+fn one_result_for_two_prompts_leaves_no_turn_open() {
+    // The CLI folds the second prompt into the running turn and answers both with one result
+    // that says nothing is queued. A Stop pressed then interrupts nothing, so the next prompt's
+    // failure (a 529, not a Stop's result) is still a failure.
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("fold first").expect("first prompt is accepted");
+    client.prompt("fold second").expect("second prompt is accepted");
+    let folded = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(folded.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the one result ends the turn: {folded:?}"
+    );
+
+    client.cancel().expect("cancel is accepted");
+    client.prompt("overloaded").expect("third prompt is accepted");
+    let third = drain_until(&events, ends_the_turn);
+    assert!(
+        third.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "API Error: 529 overloaded"
+        )),
+        "a Stop with nothing open excuses nothing: {third:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_the_cli_started_is_not_a_failed_turn() {
+    // The answer to the prompt, then a turn the CLI starts on its own (as after a background
+    // agent ends) that fails. No prompt of Sirio's is behind it, so there is nothing to retry:
+    // today's events, the sentence as a reply and the turn's end.
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("then wake").expect("prompt is accepted");
+    let answered = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(answered.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the prompt's own turn ends normally: {answered:?}"
+    );
+    let woken = drain_until(&events, ends_the_turn);
+    assert!(
+        woken.contains(&ChatEvent::AgentMessageChunk("API Error: 529 overloaded".into())),
+        "the sentence is drawn as a reply: {woken:?}"
+    );
+    assert!(
+        matches!(woken.last(), Some(ChatEvent::TurnEnded { .. })),
+        "a turn nobody prompted ends, it does not fail: {woken:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
 fn a_thinking_block_stop_ends_the_thought() {
     let (mut client, events) = launch("thinking_blocks");
     client.prompt("think first").expect("prompt is accepted");
