@@ -1047,6 +1047,49 @@ directory (`node.rs`, `tests.rs`, `text.rs`) from git, so it was on disk and not
 `.gitignore` now un-ignores `rust/vendor/ely/crates/ely-documents/src/markdown/build/`, and the three
 files are committed.
 
+## ely-documents definitions after a list (L14)
+
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
+the entries do not collide.
+
+Path: `ely-documents` `src/markdown/shape.rs`, `place` (tests in `src/tree/tests.rs` and
+`src/markdown/build/tests.rs`). Issue #840: a Markdown build panicked (`a list holds items, not Definition`, in
+`Reader::block`, `tree/mod.rs:302` on main and 299 after L13) on a list followed by a link reference definition
+with text on the next line, `- a`, a blank line, `[a]: u`, `x`; also an empty item (`- ` then `[a]: u`, `x`), an
+ordered or nested list, and definitions with nothing after them but more definitions (`- a`, blank, `[a]: u`,
+`[b]: v`).
+
+Why: pulldown-cmark ends a list at the first line of the paragraph a definition opens, so the list's span runs on
+over the definition (`- a\n\n[a]: u\nx`: list 0..12, item 0..5, definition 5..11, as pulldown-cmark gives
+them). `place` took a list that covers a definition as its container; no item held it, so it went among the
+list's children, and `Reader::block`'s list arm, which holds items alone, stopped at `unreachable!`. A definition
+set off by a blank line, at the end, or after a block quote never reached that: the container's span ended
+before it.
+
+What: `place` takes a list as the container of a definition only when the last item that starts by it also
+covers it (a binary search over the items, as the container itself is found, run after the check that the
+container's span covers the definition, so `place` stays linear in the definitions). Otherwise the definition
+stays among the parent's children, laid in by start, beside the list: where it already sat for a definition after
+a blank line or at the end of the text. An item still takes the definitions it holds, at any depth: after a
+nested list, inside the outer item; after the outer list, in the parent. `tighten` then ends the list at its last
+item. Definitions draw nothing, so no drawn output changes: a list that held items only reads as before.
+`Reader::block`'s list arm is not changed and stays strict: the invariant now holds where the tree is built, and
+the editor's readers of a list (`document/block.rs`, `document/block/list.rs`) count its children as items too,
+which a skip in the one reader would leave broken for them.
+
+Proof, in `tree/tests.rs`: `a_definition_right_after_a_list_builds_as_the_events_say` (an ordered list among its
+sources) and `a_definition_right_after_a_nested_list_builds_as_the_events_say` (each source's blocks as
+pulldown-cmark's events give them: the list, then the paragraph, nothing for the definition), and
+`a_definition_right_after_a_list_still_resolves_its_references` (from the paragraph, the list, a nested list and
+a quote). In `markdown/build/tests.rs`: `a_definition_after_a_list_sits_beside_it` (the tree, definitions
+included, for eight sources), `a_definition_that_does_not_touch_a_list_stays_where_it_was` (the forms that
+never panicked) and `a_definition_in_every_item_of_a_long_list_stays_in_its_item` (64 items with a definition
+each and one after the list: the tree, not the time); the existing `a_definition_in_an_item_stays_in_the_item`
+covers an item too. On `ee59579e1` five of these seven fail (the three in `tree/tests.rs` at `tree/mod.rs:302`,
+two of the build tests on their assertions) and the other two, which are guards, pass. A rule that never makes a
+list a container turns four of the build tests red, the guards among them; the old rule (every list that covers
+the definition) turns the same five red as before.
+
 ## The facade and the switch (Task 8)
 
 `rust/vendor/ely-gpui-component` is now two files, `Cargo.toml` and `src/lib.rs`, a facade over the

@@ -172,14 +172,20 @@ pub(super) fn place(parent: &mut Node, mut definitions: Vec<Node>, source: &str)
         let ix = children.partition_point(|child| child.position().start <= at.start);
         let holder = ix.checked_sub(1).filter(|ix| {
             let child = &children[*ix];
-            let holds = matches!(
-                child,
-                Node::Blockquote(_)
-                    | Node::List(_)
-                    | Node::ListItem(_)
-                    | Node::FootnoteDefinition(_)
-            );
-            holds && at.end <= child.position().end
+            at.end <= child.position().end
+                && match child {
+                    // A list holds a definition only in one of its items, the last that starts
+                    // by it. pulldown-cmark ends a list at the first line of the paragraph a
+                    // definition opens, so its span can run on over a definition after it, which
+                    // then sits beside the list.
+                    Node::List(list) => {
+                        let k = (list.children)
+                            .partition_point(|item| item.position().start <= at.start);
+                        k > 0 && at.end <= list.children[k - 1].position().end
+                    }
+                    Node::Blockquote(_) | Node::ListItem(_) | Node::FootnoteDefinition(_) => true,
+                    _ => false,
+                }
         });
         match (holder, inner.last_mut()) {
             (Some(ix), Some((last, group))) if *last == ix => group.push(definition),

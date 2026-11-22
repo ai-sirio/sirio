@@ -335,6 +335,101 @@ fn a_heading_keeps_its_images_after_it() {
     assert!(matches!(&nodes[1], Node::Image { url, .. } if url == "x.png"));
 }
 
+/// Lists, quotes and paragraphs as a line, for what pulldown-cmark's events say: `ul[item[p(a)]]`,
+/// `ol3[..]`, `quote[..]`, blocks side by side after a space.
+fn outline(nodes: &[Node]) -> String {
+    let lines: Vec<String> = nodes
+        .iter()
+        .map(|node| match node {
+            Node::Paragraph(text) => format!("p({})", text.text),
+            Node::Quote(inner) => format!("quote[{}]", outline(inner)),
+            Node::List { start, items } => {
+                let items: String = (items.iter())
+                    .map(|(_, inner)| format!("item[{}]", outline(inner)))
+                    .collect();
+                match start {
+                    Some(number) => format!("ol{number}[{items}]"),
+                    None => format!("ul[{items}]"),
+                }
+            }
+            other => panic!("not read here: {other:?}"),
+        })
+        .collect();
+    lines.join(" ")
+}
+
+/// Every link address in `nodes`, in order.
+fn links(nodes: &[Node]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Paragraph(text) => out.extend(text.links.iter().map(|(_, url)| url.clone())),
+            Node::Quote(inner) => out.extend(links(inner)),
+            Node::List { items, .. } => {
+                for (_, inner) in items {
+                    out.extend(links(inner));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn a_definition_right_after_a_list_builds_as_the_events_say() {
+    // pulldown-cmark ends the list at the first line of the paragraph the definition opens, so
+    // the list's span covers the definition; its events are the list, then the paragraph.
+    for (source, outlined) in [
+        ("- a\n\n[a]: https://e.example\nx", "ul[item[p(a)]] p(x)"),
+        ("- \n[a]: u\nx", "ul[item[]] p(x)"),
+        ("- a\n- b\n\n[a]: u\nx", "ul[item[p(a)]item[p(b)]] p(x)"),
+        // The definitions are all there is after the list.
+        ("- a\n\n[a]: u\n[b]: v", "ul[item[p(a)]]"),
+        ("- a\n\n[a]: u\n[b]: v\nx", "ul[item[p(a)]] p(x)"),
+        // An ordered list keeps its first number.
+        ("3. a\n\n[a]: u\nx", "ol3[item[p(a)]] p(x)"),
+    ] {
+        assert_eq!(outline(&parse(source)), outlined, "{source:?}");
+    }
+}
+
+#[test]
+fn a_definition_right_after_a_nested_list_builds_as_the_events_say() {
+    for (source, outlined) in [
+        // The definition ends both lists: it follows the outer one.
+        ("- a\n  - b\n\n[a]: u\nx", "ul[item[p(a) ul[item[p(b)]]]] p(x)"),
+        // It sits in the outer item, after the inner list.
+        (
+            "- a\n  - b\n\n  [a]: u\n  x",
+            "ul[item[p(a) ul[item[p(b)]] p(x)]]",
+        ),
+        // The same, in a quote.
+        ("> - a\n>\n> [a]: u\n> x", "quote[ul[item[p(a)]] p(x)]"),
+        ("> - a\n>   - b\n>\n> [a]: u\n> x", "quote[ul[item[p(a) ul[item[p(b)]]]] p(x)]"),
+    ] {
+        assert_eq!(outline(&parse(source)), outlined, "{source:?}");
+    }
+}
+
+#[test]
+fn a_definition_right_after_a_list_still_resolves_its_references() {
+    // The definition stays in the tree: the paragraph it opened, the list before it, a list inside
+    // it and a quote all reach it.
+    for source in [
+        "- a\n\n[a]: https://e.example\nsee [a]",
+        "- see [a]\n\n[a]: https://e.example\nx",
+        "- a\n  - b\n\n  [a]: https://e.example\n  see [a]",
+        "> - see [a]\n>\n> [a]: https://e.example\n> x",
+    ] {
+        assert_eq!(
+            links(&parse(source)),
+            ["https://e.example".to_string()],
+            "{source:?}"
+        );
+    }
+}
+
 #[test]
 fn display_math_stands_alone() {
     assert_eq!(parse("$$c = 1$$"), [Node::Math("c = 1".into())]);
