@@ -697,16 +697,20 @@ fn labels_that_start_one_another_match_in_either_order() {
 }
 
 /// A definition that arrives late rewinds to a block that wrote its label in another case: the
-/// mention is matched as pulldown matches the label, not letter by letter.
+/// mention is matched as pulldown matches the label, not letter by letter. Each spelling is a
+/// reply of its own, so that one that fails alone fails the test.
 #[test]
 fn a_late_definition_rewinds_for_every_spelling_of_its_label() {
-    let text = "see [a][foo], [b][FOO] and [c][fOo ]\n\npara\n\nmore\n\n[Foo]: https://f.example\n\n\
-        last one\n\nlast two\n";
-    for chunk in [1, 5] {
-        assert_equivalent_at_every_cut(text, chunk);
+    for spelling in ["foo", "FOO", "fOo ", " Foo"] {
+        let text = format!(
+            "see [a][{spelling}]\n\npara\n\nmore\n\n[Foo]: https://f.example\n\nlast one\n\nlast two\n"
+        );
+        for chunk in [1, 5] {
+            assert_equivalent_at_every_cut(&text, chunk);
+        }
+        let (cuts, _) = cuts_by_step(&text, 3);
+        assert!(!rewinds(&cuts).is_empty(), "the spelling {spelling:?} rewound nothing: {cuts:?}");
     }
-    let (cuts, _) = cuts_by_step(text, 3);
-    assert!(!rewinds(&cuts).is_empty(), "no spelling of the label rewound anything: {cuts:?}");
 }
 
 /// White space inside a label is one space, at its ends none, a line end among it too: a
@@ -793,68 +797,137 @@ fn a_late_definition_rewinds_only_a_late_segment() {
     assert_tiles(&stream, &text);
 }
 
-/// A reply that starts with a long fence: nothing can freeze, and reading the tail and scanning
-/// it would be paid on every chunk for nothing, on top of the parse. So an analysis that froze
-/// nothing, with most of the reply still in the tail, makes the stream wait until the reply has
-/// grown by a quarter before it looks again; the chunks in between are the build of the text.
-/// The stream still equals the build at every chunk end, the cut stays where it was while it
-/// waits, and it gets to the last block once the reply has grown.
+/// A reply that starts with a long fence: nothing can freeze while the fence is open, and the
+/// stream does not look at the reply on every chunk for it (it looks again once the reply has
+/// grown). It is still the build at every chunk end, its segments tile the text, and once the
+/// fence is closed and the text goes on it freezes again, before the end.
 #[test]
-fn an_analysis_that_froze_nothing_waits_for_the_reply_to_grow() {
+fn a_stream_that_could_freeze_nothing_freezes_again_when_the_text_allows_it() {
     let mut text = String::from("```text\n");
     while text.len() < 5000 {
         text.push_str("a line of the fence, as long as a line of code goes\n");
     }
     text.push_str("```\n\n");
-    for n in 0..24 {
+    for n in 0..100 {
         text.push_str(&format!("A paragraph after the fence, number {n}, with a few words in it.\n\n"));
     }
-    text.push_str("last block\n");
     let mut policy = chat();
     let mut stream = StreamingDoc::new();
-    let (mut at, mut waited) = (0, 0);
+    let (mut at, mut froze_at) = (0, None);
     while at < text.len() {
         at = floor(&text, (at + 61).min(text.len()));
         let streamed = stream.update(&text[..at], &mut policy);
         assert_same(&streamed, &build(&text[..at], &mut chat()), &format!("chunk end {at}"));
         assert_tiles(&stream, &text[..at]);
-        if at < stream.hold_until {
-            waited += 1;
-            assert_eq!(stream.cut(), 0, "the stream looked again at {at}, inside its wait");
+        if stream.cut() > 0 && froze_at.is_none() {
+            froze_at = Some(at);
         }
     }
-    assert!(waited > 5, "the stream waited for {waited} chunks");
-    assert!(
-        text[stream.cut()..].starts_with("last block"),
-        "the tail starts at {:?}",
-        &text[stream.cut()..][..20.min(text.len() - stream.cut())]
-    );
+    let froze_at = froze_at.expect("the stream never froze anything");
+    assert!(froze_at < text.len(), "it froze only at the end of the reply");
 }
 
-/// The brackets of a text, indexed once, answer for every label as a pass over the text for that
-/// label does (what the stream did before, `Label::mentions`, which now lives here as the
-/// reference): the first and the last place that writes it, as a link and as a footnote, for
-/// labels in the ASCII and for labels in other scripts, and for brackets that are not closed,
-/// escaped, padded, nested or in other scripts.
+/// The index of a text's brackets holds every reference that pulldown resolves: for each case,
+/// pulldown resolves the reference to a definition appended after the text (a link whose address
+/// is the definition's, a footnote reference), and the index must say that the label is mentioned
+/// where it is. (Whatever the index says beyond that only keeps parts together.) A label that
+/// only begins another is no mention.
 #[test]
-fn the_index_of_brackets_answers_as_a_pass_over_the_text_does() {
-    let weird = "[a][1] [10] [1]: u [ 1 ] [x\\]y] [^n] [^ n] [^N]: t [é] [\u{212a}] [A  b] [a\tb]\n\
-        [one\ntwo] [a [b] c][b] \\[x\\] [[x]] [a\\|b] [^é] [] [ ] [^] [unfinished";
-    let texts = [SHOWCASE, weird, "[1", "x [", "[^1] and [1] and [^1]: n\n[1]: u\n", ""];
-    let named = |name: &str, note: bool| Label { name: name.to_owned(), note };
-    let mut labels: Vec<Label> = (Scan::of(&read_of(SHOWCASE)).labels).into_iter().collect();
-    for name in ["1", "10", "x\\]y", "x", "a b", "A B", "b", "n", "N", "é", "k", "K", "a|b", "a\\|b", "one two", "topic-1"] {
-        labels.push(named(name, false));
-        labels.push(named(name, true));
-    }
-    for text in texts {
-        let brackets = Brackets::of(text);
-        for label in &labels {
-            assert_eq!(
-                brackets.mentions(label),
-                label.mentions(text),
-                "label {label:?} in {text:?}"
+fn every_reference_pulldown_resolves_is_a_mention_in_the_index() {
+    let long = "abcdefghij".repeat(500);
+    let long_text = format!("see [a][{long}] there\n");
+    let cases: Vec<(&str, &str, bool)> = vec![
+        ("see [a][foo] here\n", "foo", false),
+        ("[foo]\n", "foo", false),
+        ("[foo][]\n", "foo", false),
+        ("see [a][FOO]\n", "foo", false),
+        ("see [a][ foo  bar ]\n", "foo bar", false),
+        ("see [a][foo\nbar]\n", "foo bar", false),
+        ("> see [x][one\n> two]\n", "one two", false),
+        ("> [one\n> two]\n", "one two", false),
+        ("> > [one\n> > two]\n", "one two", false),
+        ("- an item [x][one\n  two]\n", "one two", false),
+        ("see [a][x\\]y]\n", "x\\]y", false),
+        ("see [a][\u{c9}COLE]\n", "\u{e9}cole", false),
+        (&long_text, &long, false),
+        ("note[^n]\n", "n", true),
+        ("note[^N]\n", "n", true),
+    ];
+    for (text, label, note) in cases {
+        let probe = match note {
+            true => format!("{text}\n[^{label}]: a note\n"),
+            false => format!("{text}\n[{label}]: https://probe.example/x\n"),
+        };
+        let mut resolved = Vec::new();
+        for (event, range) in Parser::new_ext(&probe, markdown_options()).into_offset_iter() {
+            match event {
+                Event::Start(Tag::Link { dest_url, .. })
+                    if !note && &*dest_url == "https://probe.example/x" && range.end <= text.len() =>
+                {
+                    resolved.push(range);
+                }
+                Event::FootnoteReference(_) if note && range.end <= text.len() => resolved.push(range),
+                _ => {}
+            }
+        }
+        let shown = &text[..text.len().min(60)];
+        assert!(!resolved.is_empty(), "pulldown resolves no reference in {shown:?}");
+        let found = Brackets::of(text).mentions(&Label { name: label.to_owned(), note });
+        for range in resolved {
+            let (first, last) = found.unwrap_or_else(|| panic!("{shown:?}: pulldown resolves it, the index finds no mention"));
+            assert!(
+                first < range.end && range.start <= last,
+                "{shown:?}: the reference is at {range:?}, the index puts the label at {first}..={last}"
             );
         }
     }
+    for (text, label) in [("see [a][10]\n", "1"), ("see [10]\n", "1"), ("see [x][topic-10]\n", "topic-1")] {
+        let found = Brackets::of(text).mentions(&Label { name: label.to_owned(), note: false });
+        assert!(found.is_none(), "{label:?} is no mention of {text:?}: {found:?}");
+    }
+}
+
+/// A label longer than the index scans for is still a mention: pulldown counts only white space,
+/// escapes and non-ASCII bytes against its limit of a thousand, so it resolves an ASCII label of
+/// any length. A definition early and a reference late, the definition frozen by then: the
+/// reference must rewind the stream to it.
+#[test]
+fn a_label_longer_than_the_scan_reaches_is_still_a_mention() {
+    let label = "abcdefghij".repeat(500);
+    let mut text = format!("[{label}]: https://long.example\n\n");
+    for n in 0..40 {
+        text.push_str(&format!("A paragraph between, number {n}, with a few words in it.\n\n"));
+    }
+    text.push_str(&format!("see [a][{label}] late\n\n"));
+    for n in 0..40 {
+        text.push_str(&format!("A paragraph after, number {n}, with a few words in it.\n\n"));
+    }
+    for chunk in [97, 211] {
+        let mut policy = chat();
+        let mut stream = StreamingDoc::new();
+        let mut at = 0;
+        while at < text.len() {
+            at = floor(&text, (at + chunk).min(text.len()));
+            let streamed = stream.update(&text[..at], &mut policy);
+            assert_tiles(&stream, &text[..at]);
+            assert_same(&streamed, &build(&text[..at], &mut chat()), &format!("chunk {chunk}, end {at}"));
+        }
+    }
+}
+
+/// A label that goes on over a block quote's lines: pulldown drops the `>` of each line from it
+/// and reads "one two", so the stream, which compares the label as written ("one > two"), must
+/// not tell the two apart. Written in a definition here: the definition arrives late, in a quote,
+/// and a reference to it was frozen long before. (In a reference, `[x][one\n> two]`, and in a
+/// shortcut reference, the build itself panics once the definition is there, in Ely's reader
+/// ("a reference names a definition"): they can only be held to pulldown, which the next test
+/// does, and not to a build.)
+#[test]
+fn a_definition_continued_on_a_quote_line_is_still_a_mention() {
+    let text = "see [one two]\n\nmid\n\n> [one\n> two]: https://d.example\n\nlast\n\nend\n";
+    for chunk in [1, 5] {
+        assert_equivalent_at_every_cut(text, chunk);
+    }
+    let (cuts, _) = cuts_by_step(text, 3);
+    assert!(!rewinds(&cuts).is_empty(), "the definition rewound nothing: {cuts:?}");
 }

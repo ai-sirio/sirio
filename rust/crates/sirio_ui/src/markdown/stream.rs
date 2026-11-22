@@ -73,47 +73,13 @@ struct Label {
     note: bool,
 }
 
-/// The reference the index of brackets is held to: a pass over `text` for one label.
-#[cfg(test)]
-impl Label {
-    /// The first and the last place `text` writes `[` and this label, if it does.
-    fn mentions(&self, text: &str) -> Option<(usize, usize)> {
-        let mut found: Option<(usize, usize)> = None;
-        for (at, _) in text.match_indices('[') {
-            if self.names(&text[at + 1..]) {
-                found = Some(found.map_or((at, at), |(first, _)| (first, at)));
-            }
-        }
-        found
-    }
-
-    /// Whether `rest`, what follows a `[`, is this label written out and closed by its `]`.
-    fn names(&self, rest: &str) -> bool {
-        let rest = match (self.note, rest.strip_prefix('^')) {
-            (false, _) => rest,
-            (true, Some(rest)) => rest,
-            (true, None) => return false,
-        };
-        if !self.name.is_ascii() {
-            return true;
-        }
-        let Some(written) = label_written(rest) else {
-            return false;
-        };
-        if !written.is_ascii() {
-            return true;
-        }
-        same_label(written, &self.name)
-            || (written.contains("\\|") && same_label(&written.replace("\\|", "|"), &self.name))
-    }
-}
-
 /// What the brackets of a text write, found in one pass, so that asking whether a label is
 /// mentioned is a lookup, and not a pass over the text for each label. A mention is the whole
 /// label (`[10]` is no mention of label `1`), under the rules pulldown matches by: case does not
 /// tell labels apart, runs of white space are one space, and none counts at the ends. What is not
 /// ours to decide is taken for a mention, which only keeps parts together: the labels of other
-/// scripts fold by rules we do not have, so any bracket may name one. A bracket that is not
+/// scripts fold by rules we do not have, so any bracket may name one, and so may a label too long
+/// to scan or broken over lines. A bracket that is not
 /// closed yet (the text so far ends in it) is no reference to anything, whatever follows: it reads
 /// as text until its `]` arrives, and the chunk it arrives in looks again.
 #[derive(Clone, Debug, Default)]
@@ -122,7 +88,8 @@ struct Brackets {
     /// `[label]`, and as a footnote reference, `[^label]`.
     links: HashMap<String, (usize, usize)>,
     notes: HashMap<String, (usize, usize)>,
-    /// The first and the last `[` whose label is not ASCII: it may be any ASCII label.
+    /// The first and the last `[` whose label is not ASCII, or not ours to read (see
+    /// [`Written::Anything`]): it may be any ASCII label.
     foreign_links: Option<(usize, usize)>,
     foreign_notes: Option<(usize, usize)>,
     /// The first and the last `[` of the text, and of the `[^` ones: where a label that is not
@@ -167,12 +134,17 @@ impl Brackets {
 
     /// The label that `rest`, what follows the `[` at `at`, writes as a link or as a footnote.
     fn write(&mut self, rest: &str, at: usize, note: bool) {
-        let Some(written) = label_written(rest) else {
-            return;
-        };
         let (labels, foreign) = match note {
             true => (&mut self.notes, &mut self.foreign_notes),
             false => (&mut self.links, &mut self.foreign_links),
+        };
+        let written = match label_written(rest) {
+            Written::Nothing => return,
+            Written::Anything => {
+                widen(foreign, at);
+                return;
+            }
+            Written::Label(written) => written,
         };
         // Case folding writes some ASCII letters in other scripts (`ß` is `ss`).
         if !written.is_ascii() {
@@ -203,34 +175,43 @@ impl Brackets {
     }
 }
 
-/// What a label is written as, in `rest` (the text after its `[`): up to the first `]` that is not
-/// escaped. None when a `[` that is not escaped comes first (a label holds none), when no `]` does,
-/// or when the label would be longer than pulldown reads (a thousand characters).
-fn label_written(rest: &str) -> Option<&str> {
+/// What the bytes after a `[` write.
+enum Written<'a> {
+    /// A label, as far as the text shows it: up to the first `]` that is not backslash-escaped.
+    Label(&'a str),
+    /// No label: a `[` that is not escaped comes first (a label holds none), or no `]` does yet.
+    Nothing,
+    /// A label that is not ours to read, so any label may be it: one too long to scan (pulldown
+    /// limits only what counts white space, escapes and bytes that are not ASCII against its
+    /// thousand, so it takes an ASCII label of any length), or one that goes over a line end (the
+    /// `>` of a block quote, and what else a container writes at the start of a line, is dropped
+    /// from a label by pulldown, which then reads "one two" where the text has "one > two").
+    Anything,
+}
+
+/// What `rest`, the text after a `[`, writes.
+fn label_written(rest: &str) -> Written<'_> {
+    const SCANNED: usize = 4096;
     let bytes = rest.as_bytes();
     let mut at = 0;
-    while at < bytes.len() && at < 4096 {
+    while at < bytes.len() && at < SCANNED {
         match bytes[at] {
-            b']' => return Some(&rest[..at]),
-            b'[' => return None,
+            b']' => {
+                let written = &rest[..at];
+                return match written.contains(['\n', '\r']) {
+                    true => Written::Anything,
+                    false => Written::Label(written),
+                };
+            }
+            b'[' => return Written::Nothing,
             b'\\' if bytes.get(at + 1).is_some_and(u8::is_ascii_punctuation) => at += 2,
             _ => at += 1,
         }
     }
-    None
-}
-
-/// Whether two labels are the same one: the same words, whatever their case and the white space
-/// between them.
-#[cfg(test)]
-fn same_label(written: &str, name: &str) -> bool {
-    let (mut written, mut name) = (written.split_whitespace(), name.split_whitespace());
-    loop {
-        match (written.next(), name.next()) {
-            (None, None) => return true,
-            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => {}
-            _ => return false,
-        }
+    // Neither a closing bracket nor an opening one in all that was scanned, and more text to go.
+    match at < bytes.len() {
+        true => Written::Anything,
+        false => Written::Nothing,
     }
 }
 

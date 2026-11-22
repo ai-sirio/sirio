@@ -584,6 +584,9 @@ fn print_ratios(
 /// slowest chunks, and how much of the reply is still tail (parsed again on each chunk) after the
 /// 20th, the 100th and the last chunk.
 async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
+    eprintln!(
+        "BENCH {fixture}: the rewind counts below are lower bounds (a rewind that freezes again in the same chunk leaves the cut where it was, and is not seen)"
+    );
     let plain = run_reply(cx, source, false).await;
     let Run {
         handles,
