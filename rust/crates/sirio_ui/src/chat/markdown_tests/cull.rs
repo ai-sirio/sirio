@@ -625,6 +625,7 @@ async fn a_rewritten_closed_block_is_laid_out_again_and_the_blocks_after_it_are_
             chat.entries[0] = Entry::Assistant {
                 document: parse_chat_markdown(&text),
                 text: text.into(),
+                stream: None,
             };
         });
         for _ in 0..3 {
@@ -667,7 +668,7 @@ async fn a_link_in_a_block_drawn_again_opens_once_and_offers_its_menu(cx: &mut T
     let (chat, cx) = chat_with(cx, &[]);
     chat.update(cx, |chat, _| {
         let document = parse_linked_markdown(&source, &dir, &mut Default::default());
-        chat.push_entry(Entry::Assistant { text: source.clone().into(), document });
+        chat.push_entry(Entry::Assistant { text: source.clone().into(), document, stream: None });
     });
     refresh_frame(cx);
     let opened = Rc::new(RefCell::new(Vec::new()));

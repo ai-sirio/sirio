@@ -26,9 +26,6 @@ mod menu;
 mod rewrite;
 mod sideways;
 mod slug;
-// The streaming transcript builds a reply with it, wired by a later task of the same delivery:
-// until then only its tests reach it.
-#[allow(dead_code)]
 mod stream;
 mod text;
 mod view;
@@ -42,6 +39,7 @@ pub(crate) use gather::DrawnPart;
 pub(crate) use menu::{MarkdownMenuItem, perform};
 pub(crate) use rewrite::{names_are_plain, picture_address};
 pub(crate) use slug::slug;
+pub(crate) use stream::StreamingDoc;
 pub(crate) use text::{PartKind, PlainText};
 pub(crate) use view::{
     BodyActions, LinkHandler, MarkdownView, MenuHandler, MenuPress, SelectionHost, ViewFlags,
@@ -207,7 +205,6 @@ fn tree_depth(nodes: &[MarkdownBlock]) -> usize {
 
 /// What the per-block half of [`build`] makes of one source: the nodes the surface draws, before
 /// anything that looks across the whole reply (headings, tables of contents, counts, text).
-#[allow(dead_code)] // read by `stream`, which nothing builds yet
 pub(crate) struct Parts {
     pub nodes: Vec<MarkdownBlock>,
     pub missing: Vec<DiagramRequest>,
@@ -235,7 +232,7 @@ pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
 }
 
 /// The per-block half of [`build`]: everything up to and including the chat links.
-#[allow(dead_code)] // `stream` builds its parts with where they stand in the reply
+#[allow(dead_code)] // `stream` calls `parts` with the place of its part; nothing else builds parts
 pub(crate) fn build_parts(source: &str, policy: &mut Policy<'_>) -> Parts {
     parts(source, policy, Within::default(), true)
 }

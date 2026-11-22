@@ -190,7 +190,7 @@ impl Chat {
                     None => bubble,
                 }
             }
-            Entry::Assistant { text, document } => {
+            Entry::Assistant { text, document, .. } => {
                 let target = CopyTarget::Assistant(entry_index);
                 let copied = copied_target.as_ref() == Some(&target);
                 let hover_group = format!("assistant-response-{entry_index}");

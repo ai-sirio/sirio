@@ -27,6 +27,7 @@ fn chat_with<'a>(
             chat.push_entry(Entry::Assistant {
                 text: (*reply).into(),
                 document: parse_chat_markdown(reply),
+                stream: None,
             });
         }
     });
@@ -125,6 +126,75 @@ async fn a_reply_cut_at_every_byte_renders_and_keeps_its_selection_in_bounds(
         "every chunk grew the one reply"
     );
     eprintln!("cut test: {} cuts in {:?}", steps.len(), started.elapsed());
+}
+
+/// A reply that streamed in 200 chunks and then ended is the reply that came in one chunk and
+/// ended: the turn's end drops the streaming state and leaves the tree a full build makes.
+#[gpui::test]
+async fn a_finished_reply_equals_a_one_chunk_reply(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_with(cx, &[]);
+    let end = || sirio_chat::ChatEvent::TurnEnded {
+        stop_reason: "EndTurn".into(),
+    };
+    chat.update(cx, |chat, cx| {
+        chat.streaming = true;
+        let mut from = 0;
+        for step in 1..=200usize {
+            let mut cut = SHOWCASE.len() * step / 200;
+            while !SHOWCASE.is_char_boundary(cut) {
+                cut += 1;
+            }
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk(SHOWCASE[from..cut].into()),
+                cx,
+            );
+            from = cut;
+        }
+        assert!(
+            matches!(
+                chat.entries.last(),
+                Some(Entry::Assistant {
+                    stream: Some(_),
+                    ..
+                })
+            ),
+            "a reply that is still streaming carries its streaming state"
+        );
+        chat.handle_event(end(), cx);
+
+        chat.streaming = true;
+        chat.handle_event(
+            sirio_chat::ChatEvent::AgentMessageChunk(SHOWCASE.into()),
+            cx,
+        );
+        chat.handle_event(end(), cx);
+    });
+    chat.read_with(&cx.cx, |chat, _| {
+        let replies: Vec<_> = (chat.entries.iter())
+            .filter_map(|entry| match entry {
+                Entry::Assistant {
+                    text,
+                    document,
+                    stream,
+                } => Some((text, document, stream)),
+                _ => None,
+            })
+            .collect();
+        let [(text, chunked, chunked_stream), (whole_text, whole, whole_stream)] = &replies[..]
+        else {
+            panic!("two replies, found {}", replies.len());
+        };
+        assert_eq!(text, whole_text);
+        assert!(
+            chunked_stream.is_none() && whole_stream.is_none(),
+            "an ended reply keeps no streaming state"
+        );
+        assert!(
+            chunked.nodes == whole.nodes,
+            "the streamed reply's nodes differ from the one-chunk reply's"
+        );
+        assert_eq!(chunked.text.text, whole.text.text);
+    });
 }
 
 /// The anti-goal of spec §2: a click in a reply moves nothing out of the composer. (A pane
@@ -276,6 +346,7 @@ async fn a_drag_from_the_users_prose_into_a_reply_is_one_selection(cx: &mut Test
         chat.push_entry(Entry::Assistant {
             text: "an answer that follows".into(),
             document: parse_chat_markdown("an answer that follows"),
+            stream: None,
         });
     });
     refresh_frame(cx);
@@ -295,20 +366,20 @@ async fn a_drag_from_the_users_prose_into_a_reply_is_one_selection(cx: &mut Test
     assert!(selected.contains("ask\n\nan a"), "{selected:?}");
 }
 
-/// Spec §7's streaming risk, measured by hand (`cargo nextest run -p sirio_ui --run-ignored
-/// only --no-capture streaming_a_long_reply_costs`): a reply of 40 KiB arriving in 200 chunks,
-/// each chunk costing one parse (`handle_event`) and one drawn frame. The numbers are printed;
-/// nothing is asserted, since a wall clock in a test is a flake (the baseline, bezel, is gone).
-#[gpui::test]
-#[ignore = "a measurement, run by hand"]
-async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
-    let mut source = String::new();
-    while source.len() < 40 * 1024 {
-        source.push_str(SHOWCASE);
-        source.push_str("\n\n");
-    }
+/// The cost of a reply of `source` arriving in 200 chunks: each chunk costs one parse
+/// (`handle_event`) and one drawn frame. The numbers are printed, nothing is asserted: a wall
+/// clock in a test is a flake, and the baseline (bezel) is gone.
+///
+/// Beside them it prints what a full build of the reply so far costs (`full build per chunk`:
+/// what `handle_event` did before the reply streamed in parts), timed in the same loop, so the
+/// ratio is of one machine load. And how much of the reply is still tail (parsed again on
+/// each chunk) after the 20th, the 100th and the last chunk.
+async fn bench_streaming(cx: &mut TestAppContext, fixture: &str, source: &str) {
     let (chat, cx) = chat_with(cx, &[]);
-    let (mut from, mut handles, mut built, mut drawn) = (0, Vec::new(), Vec::new(), Vec::new());
+    let cwd = std::env::temp_dir();
+    let (mut from, mut handles, mut built, mut drawn, mut before) =
+        (0, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut tails = Vec::new();
     for step in 1..=200usize {
         let mut cut = (source.len() * step / 200).min(source.len());
         while !source.is_char_boundary(cut) {
@@ -331,6 +402,20 @@ async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
         handles.push(handled);
         built.push(parsed);
         drawn.push(started.elapsed());
+        let full = std::time::Instant::now();
+        let _ = parse_linked_markdown(&source[..cut], &cwd, &mut Default::default());
+        before.push(full.elapsed());
+        if matches!(step, 20 | 100 | 200) {
+            chat.read_with(&cx.cx, |chat, _| {
+                if let Some(Entry::Assistant {
+                    stream: Some(stream),
+                    ..
+                }) = chat.entries.last()
+                {
+                    tails.push((step, cut - stream.cut(), stream.segments().len()));
+                }
+            });
+        }
         from = cut;
     }
     let stats = |label: &str, mut times: Vec<std::time::Duration>| {
@@ -338,7 +423,7 @@ async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
         times.sort();
         let at = |fraction: f64| times[((times.len() as f64 * fraction) as usize).min(times.len() - 1)];
         eprintln!(
-            "BENCH {label}: {} chunks of a {} byte reply, median {:?}, p95 {:?}, total {:?}",
+            "BENCH {fixture} {label}: {} chunks of a {} byte reply, median {:?}, p95 {:?}, total {:?}",
             times.len(),
             source.len(),
             at(0.5),
@@ -346,9 +431,84 @@ async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
             total
         );
     };
+    let median = |times: &[std::time::Duration]| {
+        let mut times = times.to_vec();
+        times.sort();
+        times[times.len() / 2]
+    };
+    for (label, times) in [("handle_event", &handles), ("full build", &before)] {
+        let (first, last) = (median(&times[..20]), median(&times[times.len() - 20..]));
+        eprintln!(
+            "BENCH {label} first20/last20 ({fixture}): first20 median {first:?}, last20 median {last:?}, last/first {:.2}",
+            last.as_secs_f64() / first.as_secs_f64()
+        );
+    }
+    for (step, tail, segments) in &tails {
+        eprintln!(
+            "BENCH {fixture} tail after chunk {step}: {tail} bytes still parsed again, {segments} frozen segments"
+        );
+    }
+    // A rewind (a reply that reuses a footnote or a link label parses again from its first
+    // mention) is one slow chunk among fast ones: the median hides it, the slowest show it.
+    let mut slowest: Vec<(usize, std::time::Duration)> = handles.iter().copied().enumerate().collect();
+    slowest.sort_by(|a, b| b.1.cmp(&a.1));
+    slowest.truncate(8);
+    eprintln!("BENCH {fixture} slowest handle_event chunks (index, time): {slowest:?}");
     stats("handle_event per chunk", handles);
+    stats("full build per chunk", before);
     stats("parse per chunk", built);
     stats("parse + frame per chunk", drawn);
+}
+
+/// Spec §7's streaming risk, measured by hand (`cargo nextest run -p sirio_ui --release
+/// --run-ignored only --no-capture streaming_a_long_reply_costs`): the showcase document,
+/// repeated to 40 KiB.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_a_long_reply_costs(cx: &mut TestAppContext) {
+    let mut source = String::new();
+    while source.len() < 40 * 1024 {
+        source.push_str(SHOWCASE);
+        source.push_str("\n\n");
+    }
+    bench_streaming(cx, "SHOWCASE", &source).await;
+}
+
+/// One fence that never closes, of 40 KiB of real code (a source file of this crate): its tail
+/// is the whole fence, so a chunk costs what the fence is long. Run it alone, as the one above.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_an_open_fence_costs(cx: &mut TestAppContext) {
+    const CODE: &str = include_str!("../markdown/stream.rs");
+    let mut source = String::from("```rust\n");
+    while source.len() < 40 * 1024 {
+        source.push_str(CODE);
+    }
+    let mut end = 40 * 1024;
+    while !source.is_char_boundary(end) {
+        end += 1;
+    }
+    source.truncate(end);
+    bench_streaming(cx, "open fence", &source).await;
+}
+
+/// A reply with no blank line (headings on their text, `Run:` on its fence), 40 KiB of it. A cut
+/// falls only after a blank line, so nothing freezes: it costs what a full build costs.
+#[gpui::test]
+#[ignore = "a measurement, run by hand"]
+async fn streaming_a_compact_reply_costs(cx: &mut TestAppContext) {
+    let mut source = String::new();
+    let mut step = 0;
+    while source.len() < 40 * 1024 {
+        step += 1;
+        source.push_str(&format!(
+            "## Step {step}\nRead `src/lib.rs` and **check** the [notes](https://example.com/{step}).\n\
+             The second line carries on, with _emphasis_ and a list under it.\n\
+             - the first point of step {step}\n- the second point, with `inline code`\n\
+             Run:\n```sh\ncargo test -p sirio_ui step_{step}\n```\n"
+        ));
+    }
+    bench_streaming(cx, "compact", &source).await;
 }
 
 // ---- a reply Ely's reader panics on -------------------------------------------------------

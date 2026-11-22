@@ -34,7 +34,8 @@ use std::rc::Rc;
 use crate::caret;
 use crate::composer_prefs::ComposerPrefs;
 use crate::markdown::{
-    self, FileLinkInputs, MarkdownBlocks, Policy, SelectionHost, Surface, ViewFlags, markdown_view,
+    self, FileLinkInputs, MarkdownBlocks, Policy, SelectionHost, StreamingDoc, Surface, ViewFlags,
+    markdown_view,
 };
 use crate::popup::{Filter, Popup, reap_popup};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
@@ -266,6 +267,26 @@ fn parse_chat_markdown(source: &str) -> MarkdownBlocks {
     )
 }
 
+/// What a reply in the chat lets through: the files it names are links. The one Policy of a
+/// whole build and of a streamed one, so the two cannot read a reply differently.
+fn with_linked_policy<R>(
+    cwd: &Path,
+    memo: &mut file_links::FileLinkMemo,
+    read: impl FnOnce(&mut Policy<'_>) -> R,
+) -> R {
+    let home = std::env::home_dir();
+    read(&mut Policy {
+        surface: Surface::Chat,
+        base: Some(cwd),
+        diagrams: None,
+        file_links: Some(FileLinkInputs {
+            worktree: cwd,
+            home: home.as_deref(),
+            memo,
+        }),
+    })
+}
+
 /// An assistant response's document with the files it names marked as links.
 /// The disk is asked here, while the document is built, and never while it
 /// paints; `memo` answers a candidate already seen in this response.
@@ -275,20 +296,19 @@ fn parse_linked_markdown(
     memo: &mut file_links::FileLinkMemo,
 ) -> MarkdownBlocks {
     let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
-    let home = std::env::home_dir();
-    markdown::build(
-        source,
-        &mut Policy {
-            surface: Surface::Chat,
-            base: Some(cwd),
-            diagrams: None,
-            file_links: Some(FileLinkInputs {
-                worktree: cwd,
-                home: home.as_deref(),
-                memo,
-            }),
-        },
-    )
+    with_linked_policy(cwd, memo, |policy| markdown::build(source, policy))
+}
+
+/// The same document, for a reply that is still arriving: `source` is the reply so far, and
+/// `stream` parses only the part of it that can still change.
+fn stream_linked_markdown(
+    stream: &mut StreamingDoc,
+    source: &str,
+    cwd: &Path,
+    memo: &mut file_links::FileLinkMemo,
+) -> MarkdownBlocks {
+    let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
+    with_linked_policy(cwd, memo, |policy| stream.update(source, policy))
 }
 
 actions!(
@@ -466,9 +486,13 @@ enum Entry {
     ///
     /// The parsed tree is updated at ingestion time rather than during
     /// rendering, so a redraw never reparses the entire reply.
+    ///
+    /// `stream` is what builds the tree while the reply arrives, and is `Some` only then
+    /// (`Chat::finish_reply` ends it with a full build): a reply restored or made whole has none.
     Assistant {
         text: String,
         document: MarkdownBlocks,
+        stream: Option<Box<StreamingDoc>>,
     },
     /// A streamed reasoning chunk, visually distinct from the reply.
     ///
@@ -1136,6 +1160,7 @@ fn restored_entry_with(
         ChatEntry::AssistantMessage { text } => Entry::Assistant {
             document: parse(&text),
             text,
+            stream: None,
         },
         ChatEntry::Thought { text, duration_ms } => Entry::Thought {
             text,
@@ -2640,6 +2665,37 @@ impl Chat {
         })
     }
 
+    /// Ends the streaming build of every reply that still has one: its tree is built whole from
+    /// its text, and the streaming state is dropped. Called wherever a turn ends or the client
+    /// goes while a reply streams, and when the next reply of the turn begins. Safe to call when
+    /// nothing streams: it does nothing then.
+    ///
+    /// The streamed tree is meant to be the same, so this is the net under it: whatever it
+    /// would have got wrong does not outlive the turn, and what is stored or restored is built
+    /// whole. A row is remeasured and the selection kept in bounds, as after a chunk.
+    fn finish_reply(&mut self) {
+        let mut finished = Vec::new();
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if let Entry::Assistant {
+                text,
+                document,
+                stream,
+            } = entry
+                && stream.take().is_some()
+            {
+                *document = parse_linked_markdown(text, &self.agent_cwd, &mut self.file_link_memo);
+                finished.push(index);
+            }
+        }
+        if finished.is_empty() {
+            return;
+        }
+        for index in finished {
+            self.remeasure_entry(index);
+        }
+        self.clamp_transcript_selection();
+    }
+
     /// The reply of this turn that Ely's reader panicked on while it streamed gets one read of
     /// its whole text now, since the panic may have come of a text cut short. If the reader
     /// panics again it stays plain text. Earlier turns' replies are not asked again.
@@ -2647,9 +2703,16 @@ impl Chat {
         for index in (0..self.entries.len()).rev() {
             match &mut self.entries[index] {
                 Entry::User { .. } | Entry::TurnFooter(_) => break,
-                Entry::Assistant { text, document } if document.reader_panicked => {
+                Entry::Assistant {
+                    text,
+                    document,
+                    stream,
+                } if document.reader_panicked => {
                     self.file_link_memo.clear();
                     *document = parse_linked_markdown(text, &self.agent_cwd, &mut self.file_link_memo);
+                    // Read whole, so no streaming state remains for it, and `finish_reply` has
+                    // nothing left to read again.
+                    *stream = None;
                     self.remeasure_entry(index);
                     self.clamp_transcript_selection();
                 }
@@ -3353,6 +3416,7 @@ impl Chat {
                     && let Some(Entry::Assistant {
                         text: existing,
                         document,
+                        stream,
                     }) = self.entries.get_mut(index)
                 {
                     existing.push_str(&text);
@@ -3361,16 +3425,36 @@ impl Chat {
                         // the turn ends, since each ask prints another panic message.
                         markdown::as_plain_text(existing)
                     } else {
-                        parse_linked_markdown(existing, &self.agent_cwd, &mut self.file_link_memo)
+                        // A reply made whole (restored, or ended by Stop before this late chunk)
+                        // starts its streaming state here, with the text it already has.
+                        let stream = stream.get_or_insert_with(Default::default);
+                        stream_linked_markdown(
+                            stream,
+                            existing,
+                            &self.agent_cwd,
+                            &mut self.file_link_memo,
+                        )
                     };
                     self.remeasure_entry(index);
                     self.clamp_transcript_selection();
                 } else {
-                    // A new response: what the last one found is not this one's.
+                    // A new response ends the replies this turn already streamed (a tool call
+                    // came between), each with what it found; then what the last one found is
+                    // not this one's.
+                    self.finish_reply();
                     self.file_link_memo.clear();
-                    let document =
-                        parse_linked_markdown(&text, &self.agent_cwd, &mut self.file_link_memo);
-                    self.push_entry(Entry::Assistant { document, text });
+                    let mut stream = Box::<StreamingDoc>::default();
+                    let document = stream_linked_markdown(
+                        &mut stream,
+                        &text,
+                        &self.agent_cwd,
+                        &mut self.file_link_memo,
+                    );
+                    self.push_entry(Entry::Assistant {
+                        document,
+                        text,
+                        stream: Some(stream),
+                    });
                 }
             }
             sirio_chat::ChatEvent::ThoughtChunk(text) => {
@@ -3905,6 +3989,7 @@ impl Chat {
             sirio_chat::ChatEvent::TurnEnded { stop_reason } => {
                 self.settle_open_thought();
                 self.reread_plain_replies();
+                self.finish_reply();
                 // The footer must state *why* the turn stopped. A cancelled
                 // or refused turn that ends in a plain timestamp looks like an
                 // ordinary completion, and that is the exact failure class
@@ -4979,6 +5064,7 @@ impl Chat {
             text: transcript.to_string(),
             // Not linked: this flattened text mixes user, thought and tool text (spec §2).
             document: parse_chat_markdown(transcript),
+            stream: None,
         });
         self.has_completed_turn = true;
         cx.notify();
@@ -6498,6 +6584,7 @@ impl Chat {
                 let _ = client.cancel();
             }
             self.streaming = false;
+            self.finish_reply();
             cx.notify();
         }
     }
@@ -6517,6 +6604,7 @@ impl Chat {
         // still open here would never hear of its end.
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
+        self.finish_reply();
         // The widgets belong to the session that is replaced: none is built into the new one.
         self.close_session_widgets(widget_slot::SESSION_RESTARTED, cx);
         // A new process has said nothing yet; retry, a new conversation,
@@ -6632,6 +6720,7 @@ impl Chat {
     /// (`start_connection`) drop the client on their own paths and close the widgets there.
     fn lose_client(&mut self, cx: &mut Context<Self>) {
         self.client.take();
+        self.finish_reply();
         self.expire_unanswered(WidgetAsks::Deny, cx);
         self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
     }
@@ -6647,6 +6736,7 @@ impl Chat {
             return;
         }
         self.client.take();
+        self.finish_reply();
         self.status_line.clear_retry();
         // The CLI is gone, whatever it last said.
         self.cli_state = None;
@@ -8902,6 +8992,7 @@ pub(crate) mod testing {
             chat.push_entry(Entry::Assistant {
                 document: parse_chat_markdown(&text),
                 text,
+                stream: None,
             });
         }
     }
@@ -10146,6 +10237,7 @@ two"
                 chat.push_entry(Entry::Assistant {
                     document: parse_chat_markdown(&body),
                     text: body,
+                    stream: None,
                 });
             }
             cx.notify();
@@ -10211,6 +10303,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 document: parse_chat_markdown("short answer"),
                 text: "short answer".into(),
+                stream: None,
             });
             cx.notify();
         });
@@ -10299,6 +10392,7 @@ two"
                 chat.push_entry(Entry::Assistant {
                     document: parse_chat_markdown(&body),
                     text: body,
+                    stream: None,
                 });
             }
             cx.notify();
@@ -10437,6 +10531,7 @@ two"
             Entry::Assistant {
                 text: "done".into(),
                 document: parse_chat_markdown("done"),
+                stream: None,
             },
             Entry::TurnFooter("12:00".into()),
             Entry::User {
@@ -10953,6 +11048,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "copy this assistant response".into(),
                 document: parse_chat_markdown("copy this assistant response"),
+                stream: None,
             });
             chat
         });
@@ -11000,6 +11096,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "```rust\nlet answer = 42;\n```".into(),
                 document: parse_chat_markdown("```rust\nlet answer = 42;\n```"),
+                stream: None,
             });
             chat
         });
@@ -11098,6 +11195,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "done".into(),
                 document: parse_chat_markdown("done"),
+                stream: None,
             });
             chat.push_entry(Entry::ToolCall {
                 id: "edit-stale".into(),
@@ -13570,6 +13668,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "x".into(),
                 document: parse_chat_markdown("x"),
+                stream: None,
             });
             chat.push_entry(Entry::TurnFooter("t".into()));
             chat.push_entry(Entry::User {
@@ -18161,6 +18260,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "x".into(),
                 document: parse_chat_markdown("x"),
+                stream: None,
             });
             let mut full = test_tool_call("full");
             if let Entry::ToolCall {
@@ -18250,6 +18350,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "done".into(),
                 document: parse_chat_markdown("done"),
+                stream: None,
             });
             chat.push_entry(test_tool_call("e"));
             // Row-level assertions need the rows: the turn streams so the
@@ -18354,6 +18455,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "assistant answer".into(),
                 document: parse_chat_markdown("assistant answer"),
+                stream: None,
             });
             chat
         });
@@ -18397,6 +18499,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "answer".into(),
                 document: parse_chat_markdown("answer"),
+                stream: None,
             });
             chat
         });
@@ -20055,6 +20158,7 @@ two"
             Entry::Assistant {
                 text: "leading note".into(),
                 document: parse_chat_markdown("leading note"),
+                stream: None,
             },
             Entry::User {
                 text: "what does this do?\nsecond line".into(),
@@ -20080,6 +20184,7 @@ two"
             Entry::Assistant {
                 text: "no question here".into(),
                 document: parse_chat_markdown("no question here"),
+                stream: None,
             },
             Entry::TurnFooter("10:00".into()),
         ];
@@ -20762,6 +20867,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "hello **bold** world".into(),
                 document: parse_chat_markdown("hello **bold** world"),
+                stream: None,
             });
             chat
         });
@@ -20813,6 +20919,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "hello **bold** world".into(),
                 document: parse_chat_markdown("hello **bold** world"),
+                stream: None,
             });
             chat
         });
@@ -20913,6 +21020,7 @@ two"
         chat.push_entry(Entry::Assistant {
             document: parse_chat_markdown(text),
             text: text.into(),
+            stream: None,
         });
     }
 

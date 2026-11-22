@@ -387,14 +387,19 @@ impl StreamingDoc {
         Self::default()
     }
 
+    // The next three are read by the tests now, and by the reveal (a later task of this
+    // delivery) once it draws a reply by its parts.
+    #[allow(dead_code)]
     pub(crate) fn segments(&self) -> &[Segment] {
         &self.segments
     }
 
+    #[allow(dead_code)]
     pub(crate) fn cut(&self) -> usize {
         self.cut
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_whole(&self) -> bool {
         self.whole
     }
