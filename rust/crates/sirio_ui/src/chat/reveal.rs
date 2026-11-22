@@ -161,19 +161,67 @@ fn floor_char_boundary(text: &str, at: usize) -> usize {
     at
 }
 
-/// The live reply's row in the transcript's offset space, and the text last drawn for it.
+/// The live reply's entry, its row in the transcript's offset space, and the text last drawn for
+/// it.
 pub(super) struct LiveRow {
+    entry: usize,
     row: std::ops::Range<usize>,
     drawn: String,
 }
 
 impl LiveRow {
+    /// The live reply's entry.
+    pub(super) fn entry(&self) -> usize {
+        self.entry
+    }
+
     /// `offset` of an endpoint placed in the live row, brought inside the drawn text, onto a
     /// character boundary of it. However the drawn text changes (it can shrink under a drag as
     /// the reveal reads what the document has already resolved), the endpoint stays in the row.
     pub(super) fn clamp(&self, offset: usize) -> usize {
         self.row.start + floor_char_boundary(&self.drawn, offset.saturating_sub(self.row.start))
     }
+}
+
+/// One end of a selection: its offset, and whether it was placed in the live reply (the offset
+/// is then in the text drawn for it).
+#[derive(Clone, Copy)]
+struct End {
+    at: usize,
+    live: bool,
+}
+
+impl TranscriptSelection {
+    /// The two ends, the first in the transcript first, while the reply at `live` is live. Ends in
+    /// two entries are in the order of their entries, and ends in one entry in the order of their
+    /// offsets: an offset in the live reply is a place in its drawn text, which can be longer than
+    /// the document's row, and the offsets of the rows below it are placed by the document's.
+    fn ends(&self, live: usize) -> [End; 2] {
+        let anchor = End {
+            at: self.anchor,
+            live: self.anchor_entry == Some(live),
+        };
+        let head = End {
+            at: self.head,
+            live: self.head_entry == Some(live),
+        };
+        let anchor_first = match (self.anchor_entry, self.head_entry) {
+            (Some(anchor), Some(head)) if anchor != head => anchor < head,
+            _ => self.anchor <= self.head,
+        };
+        match anchor_first {
+            true => [anchor, head],
+            false => [head, anchor],
+        }
+    }
+}
+
+/// The part of the transcript's `span` that lies in a body of `len` bytes starting at `start`,
+/// as the body's own bytes.
+fn local(span: std::ops::Range<usize>, start: usize, len: usize) -> Option<std::ops::Range<usize>> {
+    let from = span.start.max(start);
+    let to = span.end.min(start + len);
+    (from < to).then(|| from - start..to - start)
 }
 
 /// Where the tail of a reply revealed up to `revealed` starts: the end of the last frozen segment
@@ -345,25 +393,59 @@ impl Chat {
         drawn
     }
 
+    /// The entry of the reply being revealed, if one is. It is the last entry that is not an aside
+    /// (`push_entry`), so the walk from the end is short.
+    fn live_entry(&self) -> Option<usize> {
+        self.reveal.as_ref()?;
+        let entry = (self.entries.iter())
+            .rposition(|entry| matches!(entry, Entry::Assistant { stream: Some(_), .. }))?;
+        self.revealing(entry).then_some(entry)
+    }
+
     /// The live reply's row in the transcript's offset space, and the text of the blocks last
     /// drawn for it: what a drag over it selects. `None` when no reply is being revealed.
     pub(super) fn live_row(&self) -> Option<LiveRow> {
-        let entry = (self.entries.iter())
-            .rposition(|entry| matches!(entry, Entry::Assistant { stream: Some(_), .. }))?;
-        if !self.revealing(entry) {
-            return None;
-        }
+        let entry = self.live_entry()?;
         let (_, drawn) = self.reveal.as_ref()?.drawn.as_ref()?;
         Some(LiveRow {
+            entry,
             row: self.transcript_entry_ranges()[entry].clone(),
             drawn: drawn.text.text.clone(),
         })
     }
 
-    /// Whether the body that starts at `row` in the transcript's offset space is the live reply's:
-    /// what the press or the move of a drag asks to tell where an endpoint was placed.
-    pub(super) fn is_live_row(&self, row: usize) -> bool {
-        self.live_row().is_some_and(|live| live.row.start == row)
+    /// The part of the selection a body of `len` bytes that starts at `start` in the transcript's
+    /// offset space holds, as the body's own bytes: what it highlights. Where an end is in the live
+    /// reply, the ends are taken in their entries' order: the reply's body is lit from an end in
+    /// it to the end of its drawn text (the selection goes on below) or from its start (it came
+    /// from above), and a row above or below it is lit as if that end stood at the reply's edge.
+    /// This is what [`Chat::copy_from_live_reply`] copies.
+    pub(super) fn selection_in_body(&self, start: usize, len: usize) -> Option<std::ops::Range<usize>> {
+        let selection = self.transcript_selection.as_ref()?;
+        let live = self.live_entry().filter(|live| {
+            !selection.whole
+                && (selection.anchor_entry == Some(*live) || selection.head_entry == Some(*live))
+        });
+        let Some(live) = live else {
+            return local(selection.range(), start, len);
+        };
+        let row = self.transcript_entry_ranges()[live].clone();
+        let [first, last] = selection.ends(live);
+        let span = match start == row.start {
+            // The reply's own body, in its drawn text's offsets.
+            true => {
+                let from = if first.live { first.at } else { start };
+                let to = if last.live { last.at } else { start + len };
+                from..to
+            }
+            // A row above or below it, in the document's.
+            false => {
+                let from = if first.live { row.end } else { first.at };
+                let to = if last.live { row.start } else { last.at };
+                from..to
+            }
+        };
+        local(span, start, len)
     }
 
     /// What a selection copies when one of its ends was placed in the live reply: the text of the
@@ -373,38 +455,36 @@ impl Chat {
     /// reveal has not yet read what the document has: `[t][7]` is a link `t` there, and the bytes
     /// past the reveal are not on screen at all. An end placed above the reply is a place in the
     /// document's text, which is read up to the reply; one placed below it, from the end of the
-    /// reply's document row. Select All is not a drag over the screen: it is of the transcript's
+    /// reply's document row. The ends are taken in their entries' order ([`TranscriptSelection`]),
+    /// so the copy is what [`Chat::selection_in_body`] lights, row by row, with the separators
+    /// between the rows. Select All is not a drag over the screen: it is of the transcript's
     /// text, and `None` says to read that, as it does for a selection with no end in the reply (a
     /// notice below it, whose offsets can fall inside the drawn text's).
     pub(super) fn copy_from_live_reply(&self, selection: &TranscriptSelection) -> Option<String> {
         if selection.whole {
             return None;
         }
-        let (start_live, end_live) = match selection.anchor <= selection.head {
-            true => (selection.anchor_live, selection.head_live),
-            false => (selection.head_live, selection.anchor_live),
-        };
-        if !start_live && !end_live {
+        let live = self.live_row()?;
+        let [first, last] = selection.ends(live.entry);
+        if !first.live && !last.live {
             return None;
         }
-        let live = self.live_row()?;
-        let range = selection.range();
         let document = self.transcript_text();
         let mut copied = String::new();
-        if !start_live {
-            copied.push_str(document.get(range.start..live.row.start)?);
+        if !first.live {
+            copied.push_str(document.get(first.at..live.row.start)?);
         }
-        let from = match start_live {
-            true => live.clamp(range.start),
+        let from = match first.live {
+            true => live.clamp(first.at),
             false => live.row.start,
         };
-        let to = match end_live {
-            true => live.clamp(range.end),
+        let to = match last.live {
+            true => live.clamp(last.at),
             false => live.row.start + live.drawn.len(),
         };
         copied.push_str(&live.drawn[from - live.row.start..to.max(from) - live.row.start]);
-        if !end_live {
-            copied.push_str(document.get(live.row.end..range.end)?);
+        if !last.live {
+            copied.push_str(document.get(live.row.end..last.at)?);
         }
         Some(copied)
     }
@@ -423,10 +503,10 @@ impl Chat {
         let Some(selection) = self.transcript_selection.as_mut() else {
             return;
         };
-        if selection.anchor_live {
+        if selection.anchor_entry == Some(live.entry) {
             selection.anchor = live.clamp(selection.anchor);
         }
-        if selection.head_live {
+        if selection.head_entry == Some(live.entry) {
             selection.head = live.clamp(selection.head);
         }
     }
@@ -458,7 +538,7 @@ mod tests {
         SHOWCASE, chat_with, last_painted_row, painted_caret, painted_text, revealed, tick,
     };
     use super::super::tests::refresh_frame;
-    use super::super::{NoticeKind, TranscriptSelection};
+    use super::super::NoticeKind;
     use super::*;
     use crate::markdown::{Policy, StreamingDoc, Surface};
 
@@ -1016,20 +1096,243 @@ mod tests {
         assert_eq!(drawn, line, "the drawn text is longer than the document's row");
 
         let notice = cx.debug_bounds("notice-task-text").expect("the notice is drawn");
-        let (from, to) = (
+        let (left, right) = (
             gpui::point(notice.left() + px(1.0), notice.center().y),
             gpui::point(notice.left() + px(22.0), notice.center().y),
         );
+        // Left to right, then right to left: the press and the end are both in the notice.
+        for (what, from, to) in [("left to right", left, right), ("right to left", right, left)] {
+            drag(cx, from, to);
+            let copied = chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text());
+            let copied = copied.unwrap_or_else(|| panic!("{what}: the drag selected nothing"));
+            assert!(
+                !copied.is_empty() && "done".contains(&copied),
+                "{what}: a drag over the notice copied {copied:?}"
+            );
+        }
+    }
+
+    /// A real drag with the left button, from `from` to `to`.
+    fn drag(cx: &mut gpui::VisualTestContext, from: gpui::Point<gpui::Pixels>, to: gpui::Point<gpui::Pixels>) {
         cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
         cx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::none());
         cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
         cx.run_until_parked();
-        let copied = chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text());
-        let copied = copied.expect("the drag selected something");
-        assert!(
-            !copied.is_empty() && "done".contains(&copied),
-            "a drag over the notice copied {copied:?}"
+    }
+
+    /// What Ctrl+C writes now: `None` when it writes nothing (the clipboard keeps what was in it).
+    fn copy_keys(cx: &mut gpui::VisualTestContext) -> Option<String> {
+        let sentinel = "the clipboard before Ctrl+C";
+        cx.cx.write_to_clipboard(gpui::ClipboardItem::new_string(sentinel.into()));
+        cx.simulate_keystrokes("ctrl-c");
+        cx.run_until_parked();
+        let text = cx.cx.read_from_clipboard().and_then(|item| item.text());
+        text.filter(|text| text != sentinel)
+    }
+
+    /// A live reply `See [a][1] and [b][2].` with its definitions below, revealed to the end of the
+    /// line: 22 bytes drawn, 12 in the document (`See a and b.`). The box of the line.
+    fn a_live_line_longer_than_its_document(
+        chat: &gpui::Entity<Chat>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        let line = "See [a][1] and [b][2].";
+        let reply = format!("{line}\n\n[1]: https://example.com/1\n[2]: https://example.com/2\n");
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(&reply), cx);
+            chat.reveal.as_mut().expect("live").show(line.len());
+        });
+        refresh_frame(cx);
+        let (row, on_screen) = last_painted_row(chat, cx);
+        assert_eq!(on_screen, line);
+        row
+    }
+
+    /// The bytes the last paint lit in the replies' texts, each in its own text's bytes.
+    fn highlighted(chat: &gpui::Entity<Chat>, cx: &gpui::VisualTestContext) -> Vec<std::ops::Range<usize>> {
+        chat.read_with(&cx.cx, |chat, _| {
+            (chat.transcript_links.borrow().iter())
+                .flat_map(|layouts| layouts.drawn_parts())
+                .flat_map(|part| part.selected)
+                .collect()
+        })
+    }
+
+    fn tool_call_started(id: &str) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::ToolCallStarted {
+            id: id.into(),
+            title: "Edit a file".into(),
+            status: "InProgress".into(),
+            kind: "Edit".into(),
+            content: vec![],
+            locations: vec![],
+            raw_input: None,
+            raw_output: None,
+        }
+    }
+
+    /// A drag made in a live reply is of the text drawn for it, whose offsets do not map onto the
+    /// document the reply is drawn from once it ends: the drag goes when the reply ends, and it is
+    /// not handed to the next reply. Here a tool call ends reply A, and reply B starts below it; at
+    /// no step does Ctrl+C write anything.
+    #[gpui::test]
+    async fn a_drag_in_a_reply_that_a_tool_call_ends_goes_with_it(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        let row = a_live_line_longer_than_its_document(&chat, cx);
+        drag(cx, gpui::point(row.left() + px(1.0), row.center().y), gpui::point(row.right() - px(10.0), row.center().y));
+        assert_eq!(copy_keys(cx).as_deref(), Some("See [a][1] and [b][2]."), "the drag copies the line as drawn");
+
+        chat.update(cx, |chat, cx| chat.handle_event(tool_call_started("t1"), cx));
+        refresh_frame(cx);
+        assert_eq!(copy_keys(cx), None, "after the tool call");
+        assert!(chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()), "the tool call ended the reply, and the drag in it");
+
+        chat.update(cx, |chat, cx| chat.handle_event(chunk("Reply B, which takes a while to reveal at its pace."), cx));
+        for step in 0..3 {
+            tick(cx, Duration::from_millis(30));
+            assert_eq!(copy_keys(cx), None, "frame {step} of reply B");
+            assert!(chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()), "frame {step} of reply B");
+        }
+    }
+
+    /// A drag from the user's message above a live reply into the reply goes when the reply ends:
+    /// its head is in the drawn text, and the rows below it would slide under it.
+    #[gpui::test]
+    async fn a_drag_from_above_into_a_reply_that_ends_goes_with_it(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "Please read the two links.".into(),
+                at: None,
+            })
+        });
+        let row = a_live_line_longer_than_its_document(&chat, cx);
+        let user = cx.debug_bounds("user-bubble-0").expect("the message is drawn");
+        drag(cx, gpui::point(user.right() - px(60.0), user.center().y), gpui::point(row.right() - px(10.0), row.center().y));
+        let copied = copy_keys(cx).expect("the drag selected something");
+        let (message, reply) = copied.split_once("\n\n").expect("two rows");
+        assert!(!message.is_empty() && "Please read the two links.".ends_with(message), "{copied:?}");
+        assert_eq!(reply, "See [a][1] and [b][2].", "the line as drawn");
+
+        chat.update(cx, |chat, cx| chat.handle_event(tool_call_started("t1"), cx));
+        refresh_frame(cx);
+        assert_eq!(copy_keys(cx), None, "after the tool call");
+        assert!(chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()), "the tool call ended the reply, and the drag into it");
+    }
+
+    /// The end of the turn ends the reply, and a drag in it.
+    #[gpui::test]
+    async fn a_drag_in_a_reply_goes_when_its_turn_ends(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_with(cx, &[]);
+        let row = a_live_line_longer_than_its_document(&chat, cx);
+        drag(cx, gpui::point(row.left() + px(1.0), row.center().y), gpui::point(row.right() - px(10.0), row.center().y));
+        assert_eq!(copy_keys(cx).as_deref(), Some("See [a][1] and [b][2]."));
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(sirio_chat::ChatEvent::TurnEnded { stop_reason: "EndTurn".into() }, cx)
+        });
+        refresh_frame(cx);
+        assert_eq!(copy_keys(cx), None, "after the turn's end");
+        assert!(chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()), "the turn ended, and the drag");
+    }
+
+    /// A row removed above a live reply (an error dismissed, or the connection errors a reconnect
+    /// clears) renumbers the entries below it: the end of a drag placed in the user's message above
+    /// the reply would be taken for one in the reply, which now has the message's number, and the
+    /// end in the reply for one in a row past it. The drag goes, as the folds and scrolls keyed by
+    /// entry do.
+    #[gpui::test]
+    async fn a_drag_in_a_live_reply_goes_when_a_row_above_it_is_removed(cx: &mut TestAppContext) {
+        for how in ["dismissed", "cleared on reconnect"] {
+            let (chat, cx) = chat_with(cx, &[]);
+            chat.update(cx, |chat, _| {
+                chat.push_entry(Entry::Error {
+                    message: "lost".into(),
+                    retryable: true,
+                    kind: super::super::ErrorKind::Connection,
+                });
+                chat.push_entry(Entry::User {
+                    text: "Please read the two links.".into(),
+                    at: None,
+                });
+            });
+            let row = a_live_line_longer_than_its_document(&chat, cx);
+            let user = cx.debug_bounds("user-bubble-1").expect("the message is drawn");
+            drag(cx, gpui::point(user.right() - px(60.0), user.center().y), gpui::point(row.right() - px(10.0), row.center().y));
+            let copied = copy_keys(cx).expect("the drag selected something");
+            assert!(copied.ends_with("\n\nSee [a][1] and [b][2]."), "{how}: {copied:?}");
+
+            chat.update(cx, |chat, cx| match how {
+                "dismissed" => chat.dismiss_error(0, cx),
+                _ => chat.clear_recovered_connection_errors(),
+            });
+            refresh_frame(cx);
+            assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.entries.len()), 2, "{how}: the error went");
+            assert_eq!(copy_keys(cx), None, "{how}: after the error went");
+            assert_eq!(highlighted(&chat, cx), Vec::<std::ops::Range<usize>>::new(), "{how}: the reply is not lit");
+            assert!(chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()), "{how}");
+        }
+    }
+
+    /// A drag pressed in the live reply and let go in a notice below it, whose offsets (in the
+    /// document's text) are smaller than the press's (in the drawn text): the press is still the
+    /// start, as the rows are in that order. It highlights the reply from the press to the end of
+    /// its drawn text, and copies that, the separator, and the start of the notice.
+    #[gpui::test]
+    async fn a_drag_from_a_live_reply_down_into_a_notice_copies_both_in_order(
+        cx: &mut TestAppContext,
+    ) {
+        let line = "[a][1] [b][2] [c][3] [d][4] [e][5].";
+        let reply = format!(
+            "{line}\n\n[1]: https://example.com/1\n[2]: https://example.com/2\n\
+             [3]: https://example.com/3\n[4]: https://example.com/4\n[5]: https://example.com/5\n"
         );
+        let notice_text = "done, and said so at some length";
+        let (chat, cx) = chat_with(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(chunk(&reply), cx);
+            chat.push_entry(Entry::Notice {
+                text: notice_text.into(),
+                kind: NoticeKind::BackgroundTask,
+            });
+            chat.reveal.as_mut().expect("live").show(line.len());
+        });
+        refresh_frame(cx);
+        let (row, on_screen) = last_painted_row(&chat, cx);
+        assert_eq!(on_screen, line);
+        let (reply_row, notice_row) = chat.read_with(&cx.cx, |chat, _| {
+            let ranges = chat.transcript_entry_ranges();
+            (ranges[0].clone(), ranges[1].clone())
+        });
+        assert_eq!(reply_row.len(), "a b c d e.".len(), "the document has resolved every label");
+
+        // The press lands on `[e][5]`, past the 10 bytes of the document's row.
+        let press = chat.read_with(&cx.cx, |chat, _| {
+            let layouts = chat.transcript_links.borrow();
+            let reply = layouts.first().expect("the reply's layouts");
+            let mut x = row.left();
+            while reply.offset_at(gpui::point(x, row.center().y)).is_some_and(|at| at < line.find("[e]").unwrap() + 1) {
+                x += px(1.0);
+            }
+            gpui::point(x, row.center().y)
+        });
+        let notice = cx.debug_bounds("notice-task-text").expect("the notice is drawn");
+        drag(cx, press, gpui::point(notice.left() + px(22.0), notice.center().y));
+        let (anchor, head) = chat.read_with(&cx.cx, |chat, _| {
+            let selection = chat.transcript_selection.as_ref().expect("a selection");
+            (selection.anchor, selection.head)
+        });
+        let pressed = anchor - reply_row.start;
+        let reached = head - notice_row.start;
+        assert!(pressed > reply_row.len() && pressed < line.len(), "the press is past the document's row: {pressed}");
+        assert!(reached > 0 && reached < notice_text.len(), "the end is inside the notice: {reached}");
+        assert!(anchor > head, "the press's offset is the larger of the two");
+
+        let expected = format!("{}\n\n{}", &line[pressed..], &notice_text[..reached]);
+        assert_eq!(copy_keys(cx), Some(expected), "the reply's tail, the separator once, the notice's start");
+        assert_eq!(highlighted(&chat, cx), vec![pressed..line.len()], "the reply is lit from the press to its end");
     }
 
     /// A reply whose stream went whole without being refused (the guard declined a later text, or

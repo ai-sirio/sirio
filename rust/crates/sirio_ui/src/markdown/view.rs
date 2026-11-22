@@ -120,7 +120,7 @@ impl BodyActions {
             Mode::Transcript {
                 source_start,
                 interaction,
-            } => local(interaction.selected_span(cx)?, *source_start, self.plain.text.len())?,
+            } => interaction.selected_in(*source_start, self.plain.text.len(), cx)?,
             Mode::None => return None,
         };
         self.plain.text.get(range).map(str::to_owned)
@@ -147,14 +147,6 @@ impl BodyActions {
         );
         focus_sink(window, cx);
     }
-}
-
-/// The part of the transcript's `span` that lies in a body of `len` bytes starting at
-/// `start`, as the body's own bytes.
-fn local(span: Range<usize>, start: usize, len: usize) -> Option<Range<usize>> {
-    let from = span.start.max(start);
-    let to = span.end.min(start + len);
-    (from < to).then(|| from - start..to - start)
 }
 
 /// Opens a link only for a click: set by a release, spent by the link that hears it.
@@ -248,7 +240,7 @@ impl MarkdownView {
             SelectionHost::Transcript {
                 source_start,
                 interaction,
-            } => local(interaction.selected_span(cx)?, *source_start, self.plain.text.len()),
+            } => interaction.selected_in(*source_start, self.plain.text.len(), cx),
             SelectionHost::None => None,
         }
     }

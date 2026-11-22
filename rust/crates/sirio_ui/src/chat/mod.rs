@@ -1450,13 +1450,15 @@ struct TranscriptSelection {
     /// included; a drag over a live reply is of what its body drew (`reveal.rs`), and its offsets
     /// are the drawn text's, which can run past the document's.
     whole: bool,
-    /// The anchor and the head were placed in the body of the live reply, by the press and the move
-    /// that made them. An endpoint is told to belong to that reply by this and not by its offset,
-    /// which is a place in the drawn text, a text that changes under it: the row of the reply
-    /// holds it from then on, clamped to what is drawn, and the entries below it, whose offsets
-    /// the document's lengths place, are never taken for it.
-    anchor_live: bool,
-    head_live: bool,
+    /// The entries the anchor and the head were placed in, by the press and the move that made
+    /// them (`None` for Select All). An end is of the live reply while its entry is the live reply
+    /// (`reveal.rs`): its offset is then a place in the text drawn for the reply, a text that
+    /// changes under it, which the entries below the reply, placed by the document's lengths, do
+    /// not measure. So an end is told to belong to the reply by its entry and never by its offset,
+    /// and the ends are put in order by their entries first. When the reply ends, a selection with
+    /// an end in it goes (`finish_reply`): its drawn offsets do not map onto the document.
+    anchor_entry: Option<usize>,
+    head_entry: Option<usize>,
 }
 
 /// The assistant-response copy affordance currently showing its short-lived
@@ -1631,7 +1633,7 @@ impl TranscriptInteraction {
     /// runs after it and hands focus to the composer (`select_pane`), which is
     /// where a plain click on the transcript is meant to leave it.
     /// `row` is where the body the pointer is over starts in the transcript's offset space: the
-    /// head is of the live reply when that is the live reply's.
+    /// head is placed in the entry that holds it.
     pub(crate) fn extend_selection(
         &self,
         head: usize,
@@ -1641,10 +1643,10 @@ impl TranscriptInteraction {
     ) {
         let selecting = self.chat.update(cx, |chat, cx| {
             cx.notify();
-            let live = chat.is_live_row(row);
+            let entry = chat.entry_at(row);
             chat.transcript_selection.as_mut().is_some_and(|selection| {
                 selection.head = head;
-                selection.head_live = live;
+                selection.head_entry = entry;
                 selection.whole = false;
                 selection.anchor != selection.head
             })
@@ -1656,6 +1658,12 @@ impl TranscriptInteraction {
 }
 
 impl TranscriptInteraction {
+    /// The part of the selection a body of `len` bytes that starts at `start` in the transcript's
+    /// offset space holds, as the body's own bytes: what it highlights, and what its menu copies.
+    pub(crate) fn selected_in(&self, start: usize, len: usize, cx: &App) -> Option<Range<usize>> {
+        self.chat.read(cx).selection_in_body(start, len)
+    }
+
     /// The selected span of the whole transcript, while it is not empty.
     pub(crate) fn selected_span(&self, cx: &App) -> Option<Range<usize>> {
         let range = self
@@ -1679,12 +1687,12 @@ impl TranscriptInteraction {
         cx: &mut App,
     ) {
         self.chat.update(cx, |chat, cx| {
-            let live = chat.is_live_row(row);
+            let entry = chat.entry_at(row);
             chat.transcript_selection = Some(TranscriptSelection {
                 anchor,
                 head,
-                anchor_live: live,
-                head_live: live,
+                anchor_entry: entry,
+                head_entry: entry,
                 ..TranscriptSelection::default()
             });
             chat.transcript_dragging = true;
@@ -1750,28 +1758,18 @@ impl TranscriptSelectableText {
             "TranscriptText.paint_selection",
             window.current_view().as_u64(),
         );
-        let Some(selection) = self
+        let Some(selected) = self
             .interaction
             .chat
             .read(cx)
-            .transcript_selection
-            .as_ref()
-            .map(TranscriptSelection::range)
+            .selection_in_body(self.source_range.start, self.source_range.len())
         else {
             return;
         };
-        let start = selection.start.max(self.source_range.start);
-        let end = selection.end.min(self.source_range.end);
-        if start >= end {
-            return;
-        }
-
-        let local_start = start - self.source_range.start;
-        let local_end = end - self.source_range.start;
         paint_wrapped_span(
             self.text.layout(),
             bounds,
-            local_start..local_end,
+            selected,
             self.selection_fill,
             window,
             |_| {},
@@ -1908,9 +1906,12 @@ impl Element for TranscriptSelectableText {
                 pressed_index.set(Some(index));
                 interaction.chat.update(cx, |chat, cx| {
                     let position = source_range.start + index;
+                    let entry = chat.entry_at(source_range.start);
                     chat.transcript_selection = Some(TranscriptSelection {
                         anchor: position,
                         head: position,
+                        anchor_entry: entry,
+                        head_entry: entry,
                         ..TranscriptSelection::default()
                     });
                     chat.transcript_dragging = true;
@@ -2755,6 +2756,15 @@ impl Chat {
         }
         if finished.is_empty() {
             return;
+        }
+        // A drag with an end in a reply that ends here goes with it: the end is a place in the text
+        // drawn for the reply, which the document it is drawn from now does not measure.
+        if let Some(selection) = &self.transcript_selection
+            && [selection.anchor_entry, selection.head_entry]
+                .iter()
+                .any(|entry| entry.is_some_and(|entry| finished.contains(&entry)))
+        {
+            self.transcript_selection = None;
         }
         for index in finished {
             self.remeasure_entry(index);
@@ -4364,6 +4374,13 @@ impl Chat {
             .collect()
     }
 
+    /// The entry whose row holds the offset `at` of the transcript's text: the one a body that
+    /// starts there belongs to. The live reply's body starts where its document's row does.
+    fn entry_at(&self, at: usize) -> Option<usize> {
+        let ranges = self.transcript_entry_ranges();
+        ranges.partition_point(|range| range.start <= at).checked_sub(1)
+    }
+
     fn transcript_text(&self) -> String {
         self.entries
             .iter()
@@ -5034,6 +5051,7 @@ impl Chat {
         self.close_widgets(cx);
         self.entries.clear();
         self.reveal = None;
+        self.transcript_selection = None;
         self.turn_message_ids.clear();
         // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
@@ -5292,6 +5310,8 @@ impl Chat {
         });
         self.turn_message_ids = kept_ids;
         if self.entries.len() != old_count {
+            // The selection's ends name their entries (`TranscriptSelection`), which this renumbers.
+            self.transcript_selection = None;
             self.folded_turns.clear();
             self.thought_scroll.clear();
             self.tool_output_scroll.clear();
@@ -5870,9 +5890,13 @@ impl Chat {
         let Some(selection) = self.transcript_selection.as_mut() else {
             return;
         };
+        let live_entry = live.as_ref().map(|live| live.entry());
         let (anchor_live, head_live) = match selection.whole {
             true => (false, false),
-            false => (selection.anchor_live, selection.head_live),
+            false => (
+                live_entry.is_some() && selection.anchor_entry == live_entry,
+                live_entry.is_some() && selection.head_entry == live_entry,
+            ),
         };
         for (end, in_live) in [
             (&mut selection.anchor, anchor_live),
@@ -7059,6 +7083,8 @@ impl Chat {
         }
         self.entries.remove(index);
         self.turn_message_ids.remove(index);
+        // The selection's ends name their entries (`TranscriptSelection`), which this renumbers.
+        self.transcript_selection = None;
         self.list_state.splice(index..index + 1, 0);
         cx.notify();
     }
