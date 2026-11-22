@@ -126,7 +126,7 @@ So a table of contents, heading ordinals and slug de-duplication stay global wit
 - **The nesting guard refusing a part:** `whole`, as above.
 
 **As built (deviation recorded 2026-11-22, Task 2 and its review).** The rules above are not enough for equivalence; the oracle and a review probe found counterexamples. The code keeps the model (freeze, hold, rewind) and changes these points:
-- **Where a cut may fall.** Only before a top-level block that follows a blank line, that does not start on the line still being written, that is not inside a `$$` pair or after a run with no partner yet, and that does not begin with U+FEFF. Setext underlines, a table's delimiter row, a definition's title and lazy lines reach back only across lines with no blank between, so they never cross a cut. Blocks stacked without a blank line freeze together, and a reply with no blank line never freezes: those cost what they cost before this delivery.
+- **Where a cut may fall.** Only before a top-level block that follows a blank line, that does not start on the line still being written, that is not inside a `$$` pair or after a run with no partner yet, and that does not begin with U+FEFF. Setext underlines, a table's delimiter row, a definition's title and lazy lines reach back only across lines with no blank between, so they never cross a cut. Blocks stacked without a blank line freeze together, and a reply with no blank line never freezes. Those cost a little more per chunk than before this delivery, because the scans run on top of the one parse. Measured in `handle_event`: a compact 40 KiB reply +6% (2.99 against 2.83 ms), an open 40 KiB fence +35% (187 against 139 µs, under a 9.9 ms frame).
 - **`$$` pairing.** It is Ely's (`flow::paired`): every run of two or more dollars outside code pairs with the next one of the same length, from the top, prose included. So a stray `$$` moves the pairing, and the cut stays out of every pair, not only out of an unmatched line.
 - **Labels and footnotes.** A frozen part cannot see a definition elsewhere, and footnotes are numbered by first reference across the reply. So, beside the late-definition rewind: there is no cut between the first and last mention of a label defined in the tail, or between the first and last footnote reference; and a later mention of a label already in a frozen segment rewinds to that segment. Segments may span several blocks. Labels are matched after the padding inside `[ ]` and with case folding; a non-ASCII label matches any bracket. Over-matching only keeps more in the tail, so a long reply that reuses a footnote re-parses from its first use.
 - **Block HTML room.** Each part is built with the deepest Markdown of the rest of the reply as its floor. A segment is rebuilt when that depth changes in either direction, not only when it grows.
@@ -145,6 +145,15 @@ So a table of contents, heading ordinals and slug de-duplication stay global wit
 - **`handle_event` per chunk:** flat in the reply length (the last 20 chunks within 1.5x of the first 20 on SHOWCASE), and its median at or below bezel's recorded 0.81 ms. If the machine's load makes 0.81 unreachable, report the ratio to #828's 2.98 ms measured in the same rounds.
 - **Parse + frame per chunk:** at or below #828's final figures within noise: SHOWCASE 7.95 / 15.31 ms, open `rust` fence 11.02 / 22.91 ms (median / p95). Never above bezel's 29.45 / 44.17 and 25.16 / 44.84.
 - **The rewinds:** a fixture of reference definitions, each one late, is reported too. Its median must stay flat; a rewind shows as a one-chunk spike in the p95.
+
+**Flatness, as measured (Task 3, ruled 2026-11-22, confirmed by t2s).** The target of 1.5× is not met. Measured over 3 release rounds on SHOWCASE at 40 KiB:
+- **The median target is met:** 0.33 ms against 0.81 ms, which is 0.11× #828's 2.98 ms.
+- **Parse + frame:** 4.17 / 12.22 ms.
+- **`handle_event`, last 20 against the first 20 chunks:** 3.65× (0.46 against 0.12 ms).
+- **What grows:** the held tail stays flat. The growth comes from the deep clone of the frozen nodes into the flat `Vec` the view takes, and from the join over the whole tree (plain text, tables of contents).
+- **Why it stays:** a per-segment cache would reach about 2× at best, because the clone alone sets a floor near 1.7×. Reaching 1.5× needs the view to hold shared segments instead of one flat `Vec`, a data-shape change outside this delivery.
+
+So this PR reduces #831 and does not close it: the body says "refs #831". The shared segments are the next step, and t2s records that on #831 after the merge. A chunk that rewinds must still cost no more than a full build of the text so far (t2s).
 
 The open `rust` fence of the bench is a single last block that never freezes. Its tail is the whole fence, so the
 parse stays O(fence). That is accepted: a fence is one block, and the highlight memo already holds its closed
