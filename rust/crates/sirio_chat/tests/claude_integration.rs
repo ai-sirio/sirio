@@ -608,11 +608,24 @@ fn a_stop_excuses_only_its_own_turn() {
 
 #[test]
 fn a_stop_still_excuses_its_turn_when_the_next_prompt_is_written_first() {
-    // Stop frees the composer at once, so the next prompt is written while the CLI winds the
-    // stopped turn down: the stopped turn's result comes after it. That result is still the
-    // stopped turn's, and the second prompt's own failure is still its own.
+    // The stopped turn's result leaves `queued_turn_count` out (`hold late bare`): the count of
+    // prompts pending only goes down by one.
+    stop_then_a_prompt_before_the_stopped_result("hold late bare");
+}
+
+#[test]
+fn a_stopped_result_that_counts_the_prompt_behind_it_excuses_only_its_turn() {
+    // The stopped turn's result says the second prompt is queued (`queued_turn_count: 1`), as
+    // the real CLI writes it: the count of prompts pending is taken from it.
+    stop_then_a_prompt_before_the_stopped_result("hold late");
+}
+
+/// Stop frees the composer at once, so the next prompt is written while the CLI winds the
+/// stopped turn down: the stopped turn's result comes after it. That result is still the
+/// stopped turn's, and the second prompt's own failure is still its own.
+fn stop_then_a_prompt_before_the_stopped_result(hold: &str) {
     let (mut client, events) = launch("failed_turns");
-    client.prompt("hold late").expect("prompt is accepted");
+    client.prompt(hold).expect("prompt is accepted");
     loop {
         if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
             break;
@@ -684,6 +697,48 @@ fn a_turn_the_cli_started_is_not_a_failed_turn() {
     assert!(
         matches!(woken.last(), Some(ChatEvent::TurnEnded { .. })),
         "a turn nobody prompted ends, it does not fail: {woken:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_the_cli_started_with_a_prompt_queued_behind_it_is_not_a_failed_turn() {
+    // The CLI starts a turn of its own while the surface is idle (as after a background agent
+    // ends), and the user's prompt is written and queued behind it. That turn fails, and its
+    // result says the prompt is still queued: it closed no prompt of Sirio's, so it ends with
+    // today's events (a Retry would run the prompt the CLI runs next anyway). The prompt's own
+    // failure, after it, is still a failure.
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("wake held").expect("prompt is accepted");
+    let answered = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(answered.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the prompt's own turn ends normally: {answered:?}"
+    );
+    // The CLI's own turn is under way before the next prompt is written. Its first words can
+    // come ahead of the answered turn's end, which waits for the context meter.
+    let woke = ChatEvent::AgentMessageChunk("The agent finished. ".into());
+    if !answered.contains(&woke) {
+        while next_event(&events) != woke {}
+    }
+    client.prompt("overloaded").expect("second prompt is accepted");
+
+    let woken = drain_until(&events, ends_the_turn);
+    assert!(
+        woken.contains(&ChatEvent::AgentMessageChunk("API Error: 529 overloaded".into())),
+        "the CLI's own turn draws its sentence as a reply: {woken:?}"
+    );
+    assert!(
+        matches!(woken.last(), Some(ChatEvent::TurnEnded { .. })),
+        "a turn with the prompt still queued behind it ends, it does not fail: {woken:?}"
+    );
+    let prompted = drain_until(&events, ends_the_turn);
+    assert!(
+        prompted.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "API Error: 529 overloaded"
+        )),
+        "the queued prompt's own failure is still a failure: {prompted:?}"
     );
     client.shutdown().expect("clean shutdown");
 }

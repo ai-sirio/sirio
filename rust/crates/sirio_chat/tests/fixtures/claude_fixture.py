@@ -270,7 +270,12 @@ def text(chunk):
     })
 
 
-def result(subtype="success", is_error=False, text_body="Done.", **extra):
+def result(subtype="success", is_error=False, text_body="Done.", queued=0, **extra):
+    """A turn's `result`. `queued` is its `queued_turn_count`, which the real CLI always writes:
+    the user's sends it has read and not yet run. This fixture answers a prompt before it reads
+    the next, so that is 0 unless a mode says otherwise; `None` leaves the field out."""
+    if queued is not None:
+        extra = {**extra, "queued_turn_count": queued}
     send({
         **extra,
         "type": "result",
@@ -2690,10 +2695,17 @@ def cli_notices_prompt(message):
 # when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
 # ordinary answer, so a test can tell the client is still usable after a failure. The results
 # carry no `stop_reason`, as the CLI's own failures do.
+# Every result carries `queued_turn_count`, the prompts read and not yet run, as the real CLI's
+# do: `hold late`'s stopped result says 1 (the prompt that made it due is read and waits).
+# `hold late bare` is `hold late` with that field left out, the shape of an older or synthetic
+# result.
 # `fold first` is answered by nothing and `fold second` by one result that closes both
 # prompts (`queued_turn_count: 0`): the CLI folds a queued prompt into the running turn.
 # `then wake` is answered, and then the CLI starts a turn of its own (no prompt of Sirio's
 # behind it, as after a background agent ends) that fails.
+# `wake held` is answered, and then the CLI starts a turn of its own and holds it: the next
+# prompt is read and queued behind it, so that turn's failing result says 1 is queued, and
+# only then is the prompt run.
 # ---------------------------------------------------------------------------
 
 FAILED_TURNS = {
@@ -2705,17 +2717,27 @@ FAILED_TURNS = {
 HOLDING = threading.Event()
 HOLDING_LATE = threading.Event()
 STOPPED_RESULT_OWED = threading.Event()
+WAKE_RESULT_OWED = threading.Event()
+# The `queued_turn_count` of the stopped result `hold late` owes: 1, or None for `hold late bare`.
+LATE_QUEUED = {"count": 1}
 
 
-def interrupted_result():
-    send({"type": "result", "subtype": "error_during_execution", "is_error": True,
-          "result": "Interrupted by user", "stop_reason": None,
-          "session_id": SESSION_ID, "uuid": trace_uuid()})
+def with_queued(line, queued):
+    if queued is not None:
+        line["queued_turn_count"] = queued
+    return line
 
 
-def failure_result(subtype, body):
-    send({"type": "result", "subtype": subtype, "is_error": True, "result": body,
-          "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+def interrupted_result(queued=0):
+    send(with_queued({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                      "result": "Interrupted by user", "stop_reason": None,
+                      "session_id": SESSION_ID, "uuid": trace_uuid()}, queued))
+
+
+def failure_result(subtype, body, queued=0):
+    send(with_queued({"type": "result", "subtype": subtype, "is_error": True, "result": body,
+                      "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()},
+                     queued))
 
 
 def failed_turn(prompt):
@@ -2723,23 +2745,36 @@ def failed_turn(prompt):
         init_line()
     if STOPPED_RESULT_OWED.is_set():
         STOPPED_RESULT_OWED.clear()
-        interrupted_result()
-    if prompt in ("hold", "hold late"):
+        interrupted_result(queued=LATE_QUEUED["count"])
+    if WAKE_RESULT_OWED.is_set():
+        WAKE_RESULT_OWED.clear()
+        failure_result(*FAILED_TURNS["overloaded"], queued=1)
+    if prompt in ("hold", "hold late", "hold late bare"):
         text("working")
-        (HOLDING_LATE if prompt == "hold late" else HOLDING).set()
+        if prompt == "hold":
+            HOLDING.set()
+        else:
+            LATE_QUEUED["count"] = None if prompt == "hold late bare" else 1
+            HOLDING_LATE.set()
         return
     if prompt == "fold first":
         text("first ")
         return
     if prompt == "fold second":
         text("second")
-        result(queued_turn_count=0)
+        result(queued=0)
         return
     if prompt == "then wake":
         text("ok")
         result()
         text("The agent finished. ")
         failure_result(*FAILED_TURNS["overloaded"])
+        return
+    if prompt == "wake held":
+        text("ok")
+        result()
+        text("The agent finished. ")
+        WAKE_RESULT_OWED.set()
         return
     if prompt not in FAILED_TURNS:
         text("ok")

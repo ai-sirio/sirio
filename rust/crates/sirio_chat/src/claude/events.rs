@@ -101,8 +101,10 @@ pub(crate) struct Fold {
     /// and indexes restart in every message, so a message's start and end empty it.
     open_blocks: HashMap<u64, String>,
     /// Prompts written whose turn a `result` has not closed: the turn in flight and the ones
-    /// waiting behind it. A `result` with none pending is a turn the CLI started on its own. A
-    /// `result` that says how many turns are still queued sets this; otherwise it closes one.
+    /// waiting behind it. A `result` that says how many prompts are still queued
+    /// (`queued_turn_count`) closed one of these only when fewer are queued than are pending, and
+    /// sets this to what it says; a `result` that does not say closes one when any is pending.
+    /// A `result` that closed none is a turn the CLI started on its own.
     pending_prompts: usize,
     /// The worker sent an `interrupt` during the open turn, and no `result` has closed that
     /// turn yet: the result that does is a stopped turn's, whatever it says.
@@ -148,13 +150,15 @@ impl Fold {
         }
     }
 
-    /// The worker wrote a prompt. A turn is pending from here to the `result` that closes it, as
-    /// in the trace (`TraceFold::prompt_sent`). Stop frees the composer at once, so a prompt can
-    /// be written while the CLI is still winding a stopped turn down: it waits for that `result`,
+    /// The worker wrote a prompt. A turn is pending from here to the `result` that closes it.
+    /// (The trace counts its prompts on its own, in `TraceFold::prompt_sent`, and does not
+    /// realign on `queued_turn_count`.) Stop frees the composer at once, so a prompt can be
+    /// written while the CLI is still winding a stopped turn down: it waits for that `result`,
     /// which stays the stopped turn's and uses the mark up, and the turn of the prompt that waited
     /// begins behind it.
     pub(crate) fn turn_started(&mut self) {
-        self.pending_prompts += 1;
+        // Saturating: a result can claim any count at all.
+        self.pending_prompts = self.pending_prompts.saturating_add(1);
     }
 
     /// Turns the MCP tool notices on or off. The worker sets it from `system/init`.
@@ -958,14 +962,25 @@ impl Fold {
         // A Stop's result closes the turn it interrupted, once, and a prompt that waited for it
         // begins its own turn now, without the mark.
         let stopped = std::mem::take(&mut self.interrupted);
-        // With no prompt of ours pending, the turn this result closes is one the CLI started on
-        // its own (a background agent's wake): there is no prompt to retry.
-        let prompted = self.pending_prompts > 0;
-        self.pending_prompts = match result.queued_turn_count {
-            // The CLI can fold queued prompts into the running turn and answer them with one
-            // result, so what it says is queued after this one is what is pending.
-            Some(queued) => usize::try_from(queued).unwrap_or(usize::MAX),
-            None => self.pending_prompts.saturating_sub(1),
+        // A result that closed no prompt of ours closes a turn the CLI started on its own (a
+        // background agent's wake): there is no prompt to retry.
+        let prompted = match result.queued_turn_count {
+            // The CLI counts the user's sends it has read and not yet run. When as many of our
+            // prompts are queued as are pending, the prompt written while the CLI's own turn ran
+            // still waits, and this result closed none of them. The CLI can fold queued prompts
+            // into the running turn and answer them with one result, so what it says is queued
+            // after this one is what is pending.
+            Some(queued) => {
+                let queued = usize::try_from(queued).unwrap_or(usize::MAX);
+                let prompted = queued < self.pending_prompts;
+                self.pending_prompts = queued;
+                prompted
+            }
+            None => {
+                let prompted = self.pending_prompts > 0;
+                self.pending_prompts = self.pending_prompts.saturating_sub(1);
+                prompted
+            }
         };
         // The sentence of a turn that failed, which ends it in place of `TurnEnded`.
         let mut failure = None;
@@ -2244,6 +2259,54 @@ mod tests {
         fold.apply(result_with_queued(1));
         assert!(is_failure(&fold.apply(overloaded_result())), "the third prompt's turn");
         assert!(!is_failure(&fold.apply(overloaded_result())), "none is left");
+    }
+
+    // A result as the real CLI writes it: with `queued_turn_count`, the user's sends it has read
+    // and not yet run when it wrote the result.
+    fn counted(result: CliMessage, queued: u64) -> CliMessage {
+        match result {
+            CliMessage::Result(mut payload) => {
+                payload.queued_turn_count = Some(queued);
+                CliMessage::Result(payload)
+            }
+            other => other,
+        }
+    }
+
+    #[test]
+    fn a_turn_the_cli_started_with_a_prompt_queued_behind_it_is_not_a_failed_turn() {
+        // The CLI runs a turn of its own (a background agent's wake) while the surface is idle;
+        // the user's prompt is written and waits behind it. That turn's result says the prompt
+        // is still queued, so it closed none of Sirio's prompts: no Retry, which would run the
+        // prompt twice.
+        let mut fold = Fold::new();
+        fold.turn_started();
+        let events = fold.apply(counted(overloaded_result(), 1));
+        assert!(!is_failure(&events), "the CLI's own turn: {events:?}");
+        assert!(events.contains(&ChatEvent::AgentMessageChunk("API Error: 529 overloaded".into())));
+        assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
+        // The prompt is still pending: its own failure is a failure.
+        assert!(is_failure(&fold.apply(counted(overloaded_result(), 0))), "the prompt's turn");
+    }
+
+    #[test]
+    fn a_stopped_result_that_counts_the_prompt_behind_it_excuses_only_its_turn() {
+        // P1, Stop, P2: the stopped turn's result says P2 is queued, as the real CLI writes it.
+        let mut fold = Fold::new();
+        fold.turn_started();
+        fold.interrupt_sent();
+        fold.turn_started();
+        assert!(!is_failure(&fold.apply(counted(interrupted_result(), 1))), "P1's stopped result");
+        assert!(is_failure(&fold.apply(counted(overloaded_result(), 0))), "P2's failure");
+        assert!(!is_failure(&fold.apply(counted(overloaded_result(), 0))), "a turn nobody prompted");
+    }
+
+    #[test]
+    fn a_queued_count_out_of_all_measure_does_not_overflow_the_next_prompt() {
+        let mut fold = Fold::new();
+        fold.apply(result_with_queued(u64::MAX));
+        fold.turn_started();
+        fold.turn_started();
     }
 
     // Failure list for the MCP tool notices:
