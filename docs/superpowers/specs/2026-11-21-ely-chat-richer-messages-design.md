@@ -162,6 +162,16 @@ So this PR reduces #831 and does not close it: the body says "refs #831". The sh
 - **The chunk right after a rewind** costs 1.1–1.33× a full build. It parses the region it froze once, as the segment it freezes. That happens once per late definition, not on every chunk. Accepted by t2s on 2026-11-22.
 - **The late-definitions fixture:** median 278 µs and p95 493 µs. Its rewinding chunks cost at most 0.17× a full build.
 
+**The steady bound (Task 3 fix round 2, t2s: "no chunk steadily worse than a full build").**
+- **The measure.** Each bench prints the ratio of `handle_event` to a full build at the same index, the number of chunks above 1.15× and the longest run of such chunks. Across SHOWCASE, the open fence, the compact reply, the late definitions and three label-heavy replies, no run is longer than 2 chunks. The median ratio stays at or below 0.97.
+- **Labels match whole.** A mention matches the whole label under pulldown's normalisation, so `[1]` is no longer taken for a mention of `[10]`. A reply with 130 such labels went from 2.3–3.0× to 0.2× a full build.
+- **Waiting after a fruitless look.** If an analysis freezes nothing while at least half the reply is still in the tail, the stream serves the full build until the reply has grown by a quarter. This applies only to replies of 4 KiB or more. While it waits, `cut()` and `segments()` can lag by up to a quarter of the reply; the document is still the build of the text.
+- **Isolated spikes, accepted.** A spike is a single chunk, once per late definition:
+  - the chunk right after a deep rewind, in a reply that has both `\(` / `\[` math and block HTML, costs 2.1–2.6×;
+  - the chunk right after a rewind once reached 1.60× in a reply with late definitions;
+  - an open fence costs about 2× a 0.15 ms build when it looks again after growing.
+- **Ely's `$$` pairing** looked up the held ranges once per byte (vendored change L12). Every full build paid for it: 23–28 ms against 6.4–7.0 ms on a document with many fences and code spans, and 4.0–4.5 ms against 3.2–3.6 ms on SHOWCASE.
+
 The open `rust` fence of the bench is a single last block that never freezes. Its tail is the whole fence, so the
 parse stays O(fence). That is accepted: a fence is one block, and the highlight memo already holds its closed
 predecessors. It is reported as measured.
