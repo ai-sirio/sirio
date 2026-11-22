@@ -522,7 +522,7 @@ fn is_a_name_windows_changes(name: &str) -> bool {
 /// reads as written. Either separator, as the path may be a Windows one. `.` and `..` are no
 /// names. A colon belongs only to a drive at the start (`C:`): anywhere else it names a device
 /// (`COM1:`) or a stream. Written on the text, so it runs on any platform.
-fn names_are_plain(address: &str) -> bool {
+pub(crate) fn names_are_plain(address: &str) -> bool {
     let bytes = address.as_bytes();
     // A drive is `C:` at the very start of the path, then a separator or the end.
     let drive = bytes.first().is_some_and(u8::is_ascii_alphabetic)
@@ -628,13 +628,18 @@ pub(super) fn preview_address(url: &str, base: Option<&std::path::Path>) -> Opti
     if is_web_image(url) || is_data_image(url) {
         return Some(url.to_owned());
     }
-    let checked = checked_preview_path(url, base)?;
-    let delivered = address_of(&checked);
-    // The renderer's own reading of what is delivered is the proof: trimmed, cut and decoded it
-    // is the path that was checked, and it is read as a path.
+    picture_address(&checked_preview_path(url, base)?)
+}
+
+/// `checked`, a local path that was checked, as the address the renderer is handed, or none. The
+/// address is built by [`address_of`], and the renderer's own reading of it is the proof: trimmed,
+/// cut and decoded it is the path that was checked, and it is read as a path. Both the Preview
+/// and the chat deliver a picture through it.
+pub(crate) fn picture_address(checked: &str) -> Option<String> {
+    let delivered = address_of(checked);
     (delivered.trim() == delivered
         && is_read_as_a_path(&delivered)
-        && markdown_picture_path(&delivered).as_deref() == Some(std::path::Path::new(&checked)))
+        && markdown_picture_path(&delivered).as_deref() == Some(std::path::Path::new(checked)))
     .then_some(delivered)
 }
 

@@ -2,9 +2,11 @@
 """The checks of test-markdown-documents-e2e.sh that need real input and parsing.
 
 `preview` drives a real Sirio showing documents.md in the file Preview; `chat` drives a real Sirio
-with a long chat reply. Both run under the script's private Xvfb, in the script's isolated world,
-and write what they saw to the script's artifact directory. The checks are named as the script's
-header names them; a failed check raises Fail, and the script's FAIL line carries its message.
+with a long chat reply; `pictures` drives a real Sirio with a chat reply of pictures whose paths
+the chat must draw as the exact file or refuse. Each runs under the script's private Xvfb, in the
+script's isolated world, and writes what it saw to the script's artifact directory. The checks are
+named as the script's header names them; a failed check raises Fail, and the script's FAIL line
+carries its message.
 """
 import base64
 import hashlib
@@ -173,19 +175,23 @@ def shoot(window, name):
     return destination
 
 
-def largest_square(frame):
-    """The side of the largest square of the picture's colour in a capture (a 2% fuzz)."""
+def largest_square(frame, colour=MAGENTA, name="picture-width"):
+    """The side of the largest square of `colour` in a capture (a 2% fuzz). The showcase's picture is
+    MAGENTA; `name` is the check a malformed mask is reported under."""
     width, height = (int(v) for v in subprocess.run(["identify", "-format", "%w %h", str(frame)],
                                                      capture_output=True, text=True, check=True).stdout.split())
-    rgb = "rgb({},{},{})".format(*MAGENTA)
+    rgb = "rgb({},{},{})".format(*colour)
     data = subprocess.run(["magick", str(frame), "-fuzz", "2%", "-fill", "rgb(1,2,3)", "-opaque", rgb, "-fuzz", "0",
                            "-fill", "black", "+opaque", "rgb(1,2,3)", "-depth", "8", "gray:-"],
                           capture_output=True, check=True).stdout
-    need(len(data) == width * height, "picture-width", f"the mask is {len(data)} bytes, not {width * height}")
+    need(len(data) == width * height, name, f"the mask is {len(data)} bytes, not {width * height}")
     best = 0
     previous = [0] * (width + 1)
     for y in range(height):
         row = data[y * width:(y + 1) * width]
+        if not row.strip(b"\0"):  # no pixel of the colour: every side restarts, and the scan is skipped
+            previous = [0] * (width + 1)
+            continue
         current = [0] * (width + 1)
         for column in range(width):
             if row[column]:
@@ -672,12 +678,18 @@ def same_boxes(a, b, tolerance=2.0):
     return len(a) == len(b) and all(abs(p[0] - q[0]) <= tolerance and abs(p[1] - q[1]) <= tolerance for p, q in zip(a, b))
 
 
+def load_chatui():
+    """The chat UI E2E's harness (Run, Scenario, Instance, texts), loaded from its file."""
+    spec = importlib.util.spec_from_file_location("chatui", Path(E["ROOT"]) / "Scripts/Tests/test-ely-chat-ui-e2e.py")
+    chatui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(chatui)
+    return chatui
+
+
 def chat():
     import argparse
     root = Path(E["ROOT"])
-    spec = importlib.util.spec_from_file_location("chatui", root / "Scripts/Tests/test-ely-chat-ui-e2e.py")
-    chatui = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(chatui)
+    chatui = load_chatui()
     fixture = root / "Scripts/Tests/fixtures/markdown-documents"
     showcase = (fixture / "showcase.md").read_text().replace("{{REMOTE_PORT}}", E["PORT"])
     reply = long_reply(showcase, 9)
@@ -860,6 +872,148 @@ def chat():
         raise failed if isinstance(failed, Fail) else Fail(f"chat-select-all: {failed!r}")
 
 
+# ---------------------------------------------------------------- leg 3
+
+# #832: which paths a chat picture may draw. The reply holds one picture per paragraph; every file is a
+# 48x48 square of one colour, and none of the colours is near the showcase's MAGENTA.
+BLUE, ORANGE, TEAL, GREEN = (20, 70, 255), (255, 140, 0), (0, 190, 190), (30, 190, 40)
+RED, YELLOW = (220, 0, 0), (240, 220, 0)
+COLOUR_NAMES = {BLUE: "blue", ORANGE: "orange", TEAL: "teal", GREEN: "green", RED: "red", YELLOW: "yellow"}
+# Drawn: (alt, the file's path under the repository, which is also the destination written in the reply, colour).
+# A `#`, a `?` and a `%XX` in a name must reach the renderer as that file, not as the address cut at `#` or
+# `?`, nor decoded (COM1%2Epng is a file of that name, not COM1.png).
+PICTURES_KEPT = [("kept-ok", "ok.png", BLUE), ("kept-hash", "C#/a.png", ORANGE), ("kept-query", "what?.png", TEAL),
+                 ("kept-percent", "COM1%2Epng", GREEN)]
+# Decoys that must never show: files that exist, each the file a wrong reading of a refused path would reach (a
+# device name, a name ending in a dot or a space, a colon outside the drive, an undecoded `%2E`).
+PICTURES_DECOYS = [("COM1.png", RED), ("COM1", YELLOW), ("nul.png", YELLOW), ("CONIN$", YELLOW), ("dot.png.", YELLOW),
+                   ("sp /p.png", YELLOW), ("s.png:zone", YELLOW)]
+# Refused: (alt, destination). `{repo}` is the repository's absolute path: the file URL decodes to
+# REPO/COM1.png, a device name (before the fix it showed the red COM1.png).
+PICTURES_REFUSED = [("refused-com1", "COM1"), ("refused-nul", "nul.png"), ("refused-conin", "CONIN$"),
+                    ("refused-dot", "dot.png."), ("refused-space", "sp /p.png"), ("refused-stream", "s.png:zone"),
+                    ("refused-file-url", "file://{repo}/COM1%2Epng")]
+PICTURE_MIN = 40  # a 48 px picture scans as about 46: the least side a kept picture must show
+DECOY_MAX = 8  # the largest square of a decoy's colour that may show (no picture of it is drawn)
+
+
+def pictures():
+    import argparse
+    chatui = load_chatui()
+    args = argparse.Namespace(out_dir=str(OUT / "logs" / "pictures-run"), state_only=False, display=DISP,
+                              window_size=E["WINDOW_SIZE"], sirio_bin=E["SIRIO"])
+    run = chatui.Run(args)
+    failed = None
+    try:
+        run.preflight()
+        scenario = chatui.Scenario(run, "pictures", "reply-file")
+        # One plain PNG per colour, made outside the repository: ImageMagick reads an output name's `%`, `[..]`
+        # and `prefix:`, so the unusual names below are copied to, never written by it.
+        swatches = {}
+        (scenario.dir / "swatches").mkdir()
+        for colour in (BLUE, ORANGE, TEAL, GREEN, RED, YELLOW):
+            swatch = scenario.dir / "swatches" / "{}-{}-{}.png".format(*colour)
+            subprocess.run(["magick", "-size", "48x48", "xc:rgb({},{},{})".format(*colour), f"PNG24:{swatch}"],
+                           check=True, timeout=30)
+            swatches[colour] = swatch
+        files = [(name, colour) for _, name, colour in PICTURES_KEPT] + PICTURES_DECOYS
+        for name, colour in files:
+            target = scenario.repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(swatches[colour], target)
+        missing = [name for name, _ in files if not (scenario.repo / name).is_file()]
+        need(not missing, "chat-pictures", f"setup: the repository lacks {missing} of its picture files")
+        refused = [(alt, destination.format(repo=scenario.repo)) for alt, destination in PICTURES_REFUSED]
+        refused_alts = [alt for alt, _ in refused]
+        kept_alts = [alt for alt, _, _ in PICTURES_KEPT]
+        # One picture per paragraph: the blank lines make a paragraph of each, not one with soft breaks.
+        cases = [(alt, name) for alt, name, _ in PICTURES_KEPT] + refused
+        (scenario.agent_dir / "reply.md").write_text(
+            "Pictures:\n\n" + "\n\n".join(f"![{alt}](<{destination}>)" for alt, destination in cases) + "\n")
+        chat_app = scenario.instance
+        chat_app.start()
+        chat_app.send("show the pictures")
+        chat_app.until("the turn completes with the pictures",
+                       lambda st: st["status"] == "completed" and "Pictures:" in "".join(chatui.texts(st, "assistant")),
+                       timeout=90)
+        pid = chat_app.process.pid
+
+        def drawn_rows():
+            result = chat_app.call("surface.chat.read", surfaceId=chat_app.surface)["result"]
+            return [r["text"] for r in json.loads(result["transcriptTextRows"] or "[]")]
+
+        # Text rows: every refused picture is a plain paragraph whose drawn row is exactly its alt.
+        try:
+            until("every refused picture to draw as its alt text",
+                  lambda: (lambda rows: all(alt in rows for alt in refused_alts) or None)(drawn_rows()), timeout=20)
+        except Fail as error:
+            if not str(error).startswith("timed out"):
+                raise
+            rows = drawn_rows()
+            shoot_chat(run, pid, "chat-pictures-failed")
+            not_drawn = [f"{alt} ({destination})" for alt, destination in refused if alt not in rows]
+            raise Fail(f"chat-pictures: {not_drawn} did not draw as a row of exactly the alt text (the path was handed to "
+                       f"the renderer, or the picture drew); the drawn rows are {[t[:60] for t in rows]}")
+
+        # Colours: each kept picture forms a square of at least PICTURE_MIN px. They load after the first paint,
+        # so the captures are polled, and only the colours not yet seen are scanned again.
+        poll = run.out / "frames" / "chat-pictures-poll.png"
+        seen = {}
+
+        def kept_drawn():
+            run.capture(pid, poll, settle=0.5)
+            for alt, _, colour in PICTURES_KEPT:
+                if seen.get(alt, 0) < PICTURE_MIN:
+                    seen[alt] = largest_square(poll, colour, "chat-pictures")
+            return all(seen[alt] >= PICTURE_MIN for alt in kept_alts) or None
+
+        try:
+            until("every kept picture to draw", kept_drawn, timeout=20)
+        except Fail as error:
+            if not str(error).startswith("timed out"):
+                raise
+            shoot_chat(run, pid, "chat-pictures-failed")
+            absent = [f"{alt} ({name}, {COLOUR_NAMES[colour]}): {seen.get(alt, 0)} px" for alt, name, colour in PICTURES_KEPT
+                      if seen.get(alt, 0) < PICTURE_MIN]
+            raise Fail(f"chat-pictures: after 20 s these kept pictures show no square of {PICTURE_MIN} px or more: {absent}")
+        finally:
+            poll.unlink(missing_ok=True)
+
+        # The evidence frame, taken a little later so that a picture drawn late is in it too; the kept squares
+        # and the decoys are judged on it, and so is the text, once the pictures have loaded (a picture may draw
+        # its alt while loading).
+        time.sleep(2)
+        final = shoot_chat(run, pid, "chat-pictures")
+        sides = {alt: largest_square(final, colour, "chat-pictures") for alt, _, colour in PICTURES_KEPT}
+        for alt, name, colour in PICTURES_KEPT:
+            need(sides[alt] >= PICTURE_MIN, "chat-pictures",
+                 f"{alt} ({name}) draws a {COLOUR_NAMES[colour]} square of {sides[alt]} px, wanted at least {PICTURE_MIN}")
+        shown = {COLOUR_NAMES[colour]: largest_square(final, colour, "chat-pictures") for colour in (RED, YELLOW)}
+        need(shown["red"] < DECOY_MAX, "chat-pictures",
+             f"a red square of {shown['red']} px is drawn: COM1.png, the file an undecoded COM1%2Epng or the file: URL reaches, was loaded")
+        need(shown["yellow"] < DECOY_MAX, "chat-pictures",
+             f"a yellow square of {shown['yellow']} px is drawn: one of COM1, nul.png, CONIN$, dot.png., 'sp /p.png', s.png:zone was loaded")
+        rows = drawn_rows()
+        need(not [alt for alt in kept_alts if any(alt in row for row in rows)], "chat-pictures",
+             f"a kept picture drew as its alt text: {[alt for alt in kept_alts if any(alt in row for row in rows)]} (rows {[t[:60] for t in rows]})")
+        need(all(alt in rows for alt in refused_alts), "chat-pictures",
+             f"a refused picture is no longer a row of exactly its alt: {[alt for alt in refused_alts if alt not in rows]}")
+        record("chat-pictures",
+               "drawn as the exact file: " + ", ".join(f"{alt} ({name}, {COLOUR_NAMES[colour]}) {sides[alt]} px"
+                                                       for alt, name, colour in PICTURES_KEPT)
+               + "; refused, each a row of exactly its alt: " + ", ".join(refused_alts)
+               + f"; no decoy drawn (red COM1.png {shown['red']} px, yellow COM1, nul.png, CONIN$, dot.png., 'sp /p.png', s.png:zone {shown['yellow']} px, limit {DECOY_MAX})")
+        scenario.finish()
+    except BaseException as error:
+        failed = error
+    finally:
+        for instance in run.instances:
+            instance.quit()
+        chatui.stop_hosts(run)
+    if failed is not None:
+        raise failed if isinstance(failed, Fail) else Fail(f"chat-pictures: {failed!r}")
+
+
 def shoot_chat(run, pid, name):
     """The chat window's capture, taken by the chat harness into its own directory and kept in frames/."""
     taken = run.out / "frames" / f"{name}.png"
@@ -879,7 +1033,7 @@ def write_leg(leg, extra):
 def main():
     leg = sys.argv[1]
     try:
-        {"preview": preview, "chat": chat}[leg]()
+        {"preview": preview, "chat": chat, "pictures": pictures}[leg]()
     except Fail as failure:
         log(f"FAIL: {failure}")
         write_leg(leg, {"failed": str(failure)})

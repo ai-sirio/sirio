@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ely_gpui_component::documents::{Inline, Style};
 use sirio_project::{FileLinkTarget, resolve_file_link};
@@ -20,7 +20,7 @@ use crate::markdown::FileLinkInputs;
 #[derive(Default)]
 pub(crate) struct FileLinkMemo {
     links: HashMap<String, Option<FileLinkTarget>>,
-    /// Image url -> the absolute path it is kept as, or `None` when it is shown
+    /// Image url -> the address the renderer is handed for it, or `None` when it is shown
     /// as its alt text: the resolution and the size check, asked once.
     images: HashMap<String, Option<String>>,
 }
@@ -48,32 +48,89 @@ impl FileLinkMemo {
     }
 }
 
-/// Resolves what a response wrote as a path to an existing regular file.
+/// A place a chat path may name, found on the text alone.
+pub(crate) struct ChatPathCandidate {
+    pub(crate) target: FileLinkTarget,
+    /// What the text itself contributes to `target.path`: all of an absolute path or a file
+    /// URL's, and only the part under the project of a relative one or under the home of `~/`.
+    /// The project's and the home's own names are the person's, not the response's.
+    pub(crate) contributed: PathBuf,
+}
+
+/// The places a response's path may name, in the order they are tried, without asking the disk.
 ///
 /// `#L42` / `#L42-L50` and `:42-50` become a plain line (`:42`), `~/` expands
-/// against `home`, and an absolute path that names nothing is tried again
-/// inside `cwd`, because an agent's `/docs/x.md` usually means the project's.
+/// against `home` (a home that is not UTF-8 names nothing: its lossy copy would be another
+/// folder), and an absolute path is followed by the same path inside `cwd`, because an agent's
+/// `/docs/x.md` usually means the project's. Text that names a share or a device has no place.
+pub(crate) fn chat_path_candidates(
+    raw: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Vec<ChatPathCandidate> {
+    let normalized = lowercase_file_scheme(normalize_location(raw.trim()));
+    let (text, under_home) = match normalized.strip_prefix("~/") {
+        Some(rest) => {
+            let Some(home) = home.filter(|home| home.to_str().is_some()) else {
+                return Vec::new();
+            };
+            (home.join(rest).to_string_lossy().into_owned(), Some(home))
+        }
+        None => (normalized, None),
+    };
+    // Not even the fallback below: `//host/x` is a share, not "x" in the project.
+    if is_network_or_device_path(Path::new(&text)) {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    // `trusted`: the folders the person owns, cut off in turn from the path `text` resolves to.
+    let mut place = |text: &str, trusted: &[&Path]| {
+        let Some(target) = resolve_file_link(text, cwd) else {
+            return;
+        };
+        let mut contributed = target.path.as_path();
+        for folder in trusted {
+            if let Ok(rest) = contributed.strip_prefix(folder) {
+                contributed = rest;
+            }
+        }
+        let contributed = contributed.to_path_buf();
+        candidates.push(ChatPathCandidate { target, contributed });
+    };
+    let is_file_url = text.starts_with("file://");
+    let rooted = |text: &str| is_file_url || Path::new(text).is_absolute();
+    match under_home {
+        Some(home) => place(&text, &[home]),
+        None if rooted(&text) => place(&text, &[]),
+        None => place(&text, &[cwd]),
+    }
+    if !is_file_url && text.starts_with(['/', '\\']) {
+        let inside = text.trim_start_matches(['/', '\\']);
+        // The expanded home is no part of what `~/` contributes: it follows `cwd` here.
+        let home_inside = under_home
+            .and_then(Path::to_str)
+            .map(|home| Path::new(home.trim_start_matches(['/', '\\'])));
+        let mut trusted = vec![cwd];
+        trusted.extend(home_inside);
+        match rooted(inside) {
+            true => place(inside, &[]),
+            false => place(inside, &trusted),
+        }
+    }
+    candidates
+}
+
+/// Resolves what a response wrote as a path to an existing regular file: the first of its
+/// [`chat_path_candidates`] that is one.
 pub(crate) fn resolve_chat_path(
     raw: &str,
     cwd: &Path,
     home: Option<&Path>,
 ) -> Option<FileLinkTarget> {
-    let normalized = lowercase_file_scheme(normalize_location(raw.trim()));
-    let text = match normalized.strip_prefix("~/") {
-        Some(rest) => home?.join(rest).to_string_lossy().into_owned(),
-        None => normalized,
-    };
-    // Not even the fallback below: `//host/x` is a share, not "x" in the project.
-    if is_network_or_device_path(Path::new(&text)) {
-        return None;
-    }
-    if let Some(target) = existing_file(&text, cwd) {
-        return Some(target);
-    }
-    if text.starts_with("file://") || !text.starts_with(['/', '\\']) {
-        return None;
-    }
-    existing_file(text.trim_start_matches(['/', '\\']), cwd)
+    chat_path_candidates(raw, cwd, home)
+        .into_iter()
+        .map(|candidate| candidate.target)
+        .find(|target| !is_network_or_device_path(&target.path) && target.path.is_file())
 }
 
 /// Whether `path` names a network share or a device rather than a place on
@@ -126,11 +183,6 @@ pub(crate) fn may_open_on_click(path: &Path) -> bool {
     }
 }
 
-fn existing_file(text: &str, cwd: &Path) -> Option<FileLinkTarget> {
-    resolve_file_link(text, cwd)
-        .filter(|target| !is_network_or_device_path(&target.path) && target.path.is_file())
-}
-
 /// Rewrites a trailing `#L<n>`, `#L<n>-L<m>` or `:<n>-<m>` into `:<n>`;
 /// anything else is returned as it came.
 fn normalize_location(text: &str) -> String {
@@ -163,11 +215,10 @@ fn is_number(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// The absolute path of the regular file a non-web image URL names, if any.
-/// A URL that starts with whitespace or a control character is refused before
-/// anything else: the resolver would trim it, while the renderer takes it as written
-/// (and fetches it, if it holds `://`). A line suffix means nothing to a
-/// picture and is dropped.
+/// The path of the regular file a non-web image URL names, as the address the renderer is
+/// handed, if any. A URL that starts with whitespace or a control character is refused before
+/// anything else: the resolver trims it, so it would draw another file than the one written.
+/// A line suffix means nothing to a picture and is dropped.
 pub(crate) fn local_image_path(
     url: &str,
     cwd: &Path,
@@ -177,22 +228,15 @@ pub(crate) fn local_image_path(
     if let Some(known) = memo.images.get(url) {
         return known.clone();
     }
-    let kept = local_image_on_disk(url, cwd, home, memo);
+    let kept = local_image_on_disk(url, cwd, home);
     memo.images.insert(url.to_string(), kept.clone());
     kept
 }
 
-fn local_image_on_disk(
-    url: &str,
-    cwd: &Path,
-    home: Option<&Path>,
-    memo: &mut FileLinkMemo,
-) -> Option<String> {
-    let first = url.chars().next()?;
-    if first.is_whitespace() || first.is_control() {
-        return None;
-    }
-    let path = memo.resolve(url, cwd, home)?.path;
+fn local_image_on_disk(url: &str, cwd: &Path, home: Option<&Path>) -> Option<String> {
+    let path = picture_lookups(url, cwd, home)?
+        .into_iter()
+        .find(|path| path.is_file())?;
     // Read whole when painted: an empty file is no picture (and procfs calls
     // its endless files regular and empty), and past the chat's image cap
     // the read would stall the turn.
@@ -200,9 +244,40 @@ fn local_image_on_disk(
     if len == 0 || len > super::MAX_IMAGE_BYTES {
         return None;
     }
-    let path = path.to_string_lossy().into_owned();
-    // The renderer loads anything with `://` in it as a URL.
-    (!path.contains("://") && Path::new(&path).is_absolute()).then_some(path)
+    // `picture_lookups` asks only about absolute UTF-8 paths: the address names exactly this file.
+    crate::markdown::picture_address(path.to_str()?)
+}
+
+/// The paths the disk may be asked about for the picture `url` names, in order, or none when the
+/// text is refused. It is decided on the text, before any disk call: on Windows a reserved device
+/// name (`NUL`, `COM1`, `CONIN$`) in a path opens the device, and a COM port with nothing behind it
+/// blocks the UI thread, so a picture never asks the disk about one, on any platform. What is
+/// judged is what the response contributes to each place it may name, by the Preview's rule
+/// (`names_are_plain`). Of those places, only an absolute path that is UTF-8 is asked about.
+fn picture_lookups(url: &str, cwd: &Path, home: Option<&Path>) -> Option<Vec<PathBuf>> {
+    let first = url.chars().next()?;
+    if first.is_whitespace() || first.is_control() {
+        return None;
+    }
+    let candidates: Vec<_> = chat_path_candidates(url, cwd, home)
+        .into_iter()
+        .filter(|candidate| !is_network_or_device_path(&candidate.target.path))
+        .collect();
+    let plain = candidates.iter().all(|candidate| {
+        candidate
+            .contributed
+            .to_str()
+            .is_some_and(crate::markdown::names_are_plain)
+    });
+    plain.then(|| {
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.target.path)
+            // Only a path the renderer can be handed is asked about: a string, as a lossy copy
+            // names another file, and absolute, as the renderer has no folder to resolve against.
+            .filter(|path| path.is_absolute() && path.to_str().is_some())
+            .collect()
+    })
 }
 
 /// The links an agent wrote are an allowlist: a web link stays as written, a path to a
@@ -819,6 +894,198 @@ mod tests {
             first,
             "the second pass asked the disk again"
         );
+    }
+
+    #[test]
+    fn a_picture_naming_a_windows_device_is_never_looked_up() {
+        // Nothing here exists, so a refusal can only have been decided on the text. On
+        // Windows a device name opens the device, and a COM port with nothing behind it
+        // blocks the UI thread: it is refused on every platform, before the disk.
+        let root = if cfg!(windows) {
+            Path::new(r"C:\nonexistent-sirio-root")
+        } else {
+            Path::new("/nonexistent-sirio-root")
+        };
+        let (cwd, home) = (root.join("wt"), root.join("home"));
+        let lookups = |url: &str| picture_lookups(url, &cwd, Some(&home));
+        for url in [
+            "COM1",
+            "nul.png",
+            "CONIN$",
+            "aux/x.png",
+            "NUL.tar.gz",
+            "com1 .png",
+            "LPT¹.png",
+            "dot.png.",
+            "sp /p.png",
+            "docs/a.png:zone",
+            "x/COM1:",
+            "~/nul.png",
+            "/nul.png",
+            "/w/COM1.png",
+            "file:///w/COM1%2Epng",
+        ] {
+            assert_eq!(lookups(url), None, "{url}");
+        }
+        // What is plain is asked about: the places the text may name, in order. A rooted
+        // text is a path only where the platform says so, and else only the project's.
+        let in_cwd = cwd.join("docs/a.png");
+        assert_eq!(lookups("docs/a.png"), Some(vec![in_cwd.clone()]));
+        assert_eq!(lookups("docs/a.png:12"), Some(vec![in_cwd.clone()]));
+        let mut rooted = Vec::new();
+        if Path::new("/docs/a.png").is_absolute() {
+            rooted.push(PathBuf::from("/docs/a.png"));
+        }
+        rooted.push(in_cwd);
+        assert_eq!(lookups("/docs/a.png"), Some(rooted));
+    }
+
+    /// A non-empty regular file at `dir`/`name`, its folders made.
+    #[cfg(unix)]
+    fn made(dir: &Path, name: &str) -> PathBuf {
+        let file = dir.join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"png").unwrap();
+        assert!(file.is_file(), "{name}");
+        file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_picture_with_a_device_name_dot_space_or_stream_is_its_alt_text() {
+        // Every file below exists with content, so only the refusal of its name keeps it
+        // from being drawn.
+        let fx = fixture();
+        let wt = fx.wt.as_path();
+        let home = fx.home.as_path();
+        let decoded = format!("file://{}/COM1%2Epng", wt.display());
+        made(wt, "COM1.png");
+        let mut drawn = Vec::new();
+        for (case, url, base, file) in [
+            ("device", "COM1", wt, "COM1"),
+            ("device with extension", "nul.png", wt, "nul.png"),
+            ("console device", "CONIN$", wt, "CONIN$"),
+            ("device folder", "aux/x.png", wt, "aux/x.png"),
+            ("trailing dot", "dot.png.", wt, "dot.png."),
+            ("trailing space", "sp /p.png", wt, "sp /p.png"),
+            ("stream", "docs/a.png:zone", wt, "docs/a.png:zone"),
+            ("device under home", "~/nul.png", home, "nul.png"),
+            ("device by the project fallback", "/nul.png", wt, "nul.png"),
+            ("device named by an escape in a file url", decoded.as_str(), wt, "COM1.png"),
+        ] {
+            made(base, file);
+            if picture(&fx, url).is_some() {
+                drawn.push(case);
+            }
+        }
+        assert_eq!(drawn, Vec::<&str>::new(), "drawn although their names are refused");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_picture_path_reaches_the_renderer_as_the_checked_file() {
+        // The renderer reads what it is given as a URL: it cuts it at `?` and `#`, and decodes
+        // `%XX`. Whatever it is handed must read back as exactly the file that was checked.
+        use ely_gpui_component::documents::markdown_picture_path;
+        let fx = fixture();
+        let mut elsewhere = Vec::new();
+        for (case, name) in [
+            ("hash", "C#/a.png"),
+            ("question mark", "what?.png"),
+            ("escape in the name", "COM1%2Epng"),
+            ("percent", "100%.png"),
+            ("percent escape", "50%25.png"),
+        ] {
+            let file = made(&fx.wt, name);
+            match picture(&fx, name) {
+                Some(handed) if markdown_picture_path(&handed).as_deref() == Some(file.as_path()) => {}
+                _ => elsewhere.push(case),
+            }
+        }
+        assert_eq!(elsewhere, Vec::<&str>::new(), "not drawn, or drawn from another path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_picture_under_a_worktree_that_is_not_utf8_is_refused() {
+        // A lossy copy of the path names another file: a folder spelled with U+FFFD, here.
+        use std::os::unix::ffi::OsStrExt;
+        let fx = fixture();
+        let root = fx.wt.parent().unwrap();
+        let (wt_bytes, home_bytes) = (&b"wt-\xff"[..], &b"home-\xff"[..]);
+        let (bad_wt, bad_home) = (
+            root.join(std::ffi::OsStr::from_bytes(wt_bytes)),
+            root.join(std::ffi::OsStr::from_bytes(home_bytes)),
+        );
+        if std::fs::create_dir_all(&bad_wt).is_err() {
+            eprintln!("the file system refuses a name that is not UTF-8: skipped");
+            return;
+        }
+        std::fs::create_dir_all(&bad_home).unwrap();
+        for folder in [&bad_wt, &bad_home] {
+            made(folder, "a.png");
+        }
+        for bytes in [wt_bytes, home_bytes] {
+            made(&root.join(String::from_utf8_lossy(bytes).as_ref()), "a.png");
+        }
+        let ask = |url: &str, cwd: &Path, home: &Path| {
+            local_image_path(url, cwd, Some(home), &mut FileLinkMemo::default())
+        };
+        let mut drawn = Vec::new();
+        if ask("a.png", &bad_wt, &fx.home).is_some() {
+            drawn.push("worktree");
+        }
+        if ask("~/a.png", &fx.wt, &bad_home).is_some() {
+            drawn.push("home");
+        }
+        assert_eq!(drawn, Vec::<&str>::new(), "drawn although their folder is not UTF-8");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_picture_is_drawn_under_a_worktree_that_is_not_utf8() {
+        // The absolute path names its file whatever the worktree is called: the worktree only
+        // adds a fallback candidate, which is not UTF-8 and is never asked about.
+        use std::os::unix::ffi::OsStrExt;
+        let fx = fixture();
+        let root = fx.wt.parent().unwrap();
+        let bad_wt = root.join(std::ffi::OsStr::from_bytes(b"wt-\xff"));
+        if std::fs::create_dir_all(&bad_wt).is_err() {
+            eprintln!("the file system refuses a name that is not UTF-8: skipped");
+            return;
+        }
+        let abs = made(&fx.wt, "abs.png");
+        let abs_text = abs.display().to_string();
+        assert_eq!(
+            local_image_path(&abs_text, &bad_wt, Some(&fx.home), &mut FileLinkMemo::default()),
+            Some(abs.display().to_string()),
+            "an absolute picture does not depend on the worktree's name"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_worktrees_own_names_are_not_judged() {
+        // Only what the text contributes is judged: a project folder called `con` and a
+        // home called `aux.d` are the user's, and do not refuse every picture inside them.
+        let fx = fixture();
+        let root = fx.wt.parent().unwrap();
+        let (project, home) = (root.join("con"), root.join("aux.d"));
+        let in_project = made(&project, "a.png");
+        let in_home = made(&home, "a.png");
+        let ask = |url: &str| local_image_path(url, &project, Some(&home), &mut FileLinkMemo::default());
+        assert_eq!(ask("a.png"), Some(in_project.display().to_string()));
+        assert_eq!(ask("~/a.png"), Some(in_home.display().to_string()));
+    }
+
+    #[test]
+    fn a_line_suffix_still_names_the_picture() {
+        let fx = fixture();
+        let file = fx.wt.join("docs/a.png");
+        std::fs::write(&file, b"png").unwrap();
+        for url in ["docs/a.png:12", "docs/a.png:12:4"] {
+            assert_eq!(picture(&fx, url), Some(file.display().to_string()), "{url}");
+        }
     }
 
     #[test]

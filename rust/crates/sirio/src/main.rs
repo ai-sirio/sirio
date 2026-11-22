@@ -24500,6 +24500,16 @@ impl SirioWorkspace {
                 })
                 .to_string(),
             ));
+            // The project list's top: the project the sticky header names (null while there is
+            // none) and the list's scrolled distance in px. Gated like the sidebar's rects above:
+            // both are null while the sidebar was not drawn in the last frame.
+            let list = if sidebar_drawn {
+                let list = self.sidebar.read(cx).list_probe();
+                serde_json::json!({ "sticky": list.sticky, "scrolled": list.scrolled })
+            } else {
+                serde_json::json!({ "sticky": null, "scrolled": null })
+            };
+            layout.push(("sidebarList".into(), list.to_string()));
         }
         layout
     }

@@ -40,6 +40,18 @@ set -eEuo pipefail
 #                     process lives
 #   chat-deep         the same document as a chat reply: the turn completes, the chat's drawn rows hold
 #                     exactly `deep-end` (the same test), and the process lives
+#   chat-pictures     (third leg, `pictures`: a chat of its own, so that nothing else is on screen) a chat
+#                     reply of eleven pictures, one per paragraph, each destination in angle brackets, over
+#                     48 px single-colour files in the repository. A plain path and paths holding `#`, `?` or `%XX`
+#                     draw the exact file: `ok.png` (blue), `C#/a.png` (orange), `what?.png` (teal) and `COM1%2Epng`
+#                     (green) each form a square of at least 40 px, in a capture polled until the pictures
+#                     have loaded. A path that names a device (`COM1`, `nul.png`, `CONIN$`), has a component
+#                     ending in a dot (`dot.png.`) or a space (`sp /p.png`), holds a colon outside the drive
+#                     (`s.png:zone`), or is a `file:` URL that decodes to a device name (`file://<repo>/
+#                     COM1%2Epng`, which decodes to `COM1.png`) draws as its alt text: the chat's drawn
+#                     rows (`transcriptTextRows`) hold exactly each alt, and no kept alt. A file exists for
+#                     each refused path (red `COM1.png`, yellow for the others) and neither colour forms a
+#                     square of 8 px or more in the final capture, kept as frames/chat-pictures.png
 #
 # --mutate no-sections starts the app with SIRIO_DEBUG_MARKDOWN_NO_SECTIONS (a debug build's
 # knob: the Preview is drawn without `sections`, so no anchor registers). The run must FAIL at
@@ -52,6 +64,9 @@ set -eEuo pipefail
 #
 # Usage: Scripts/Tests/test-markdown-documents-e2e.sh [--bin-dir DIR] [--out-dir DIR]
 #          [--display :N] [--mutate no-sections]
+#   MARKDOWN_E2E_LEGS="preview chat pictures" (the default) names the legs to run: one leg alone
+#                   is a development knob (MARKDOWN_E2E_LEGS=pictures), and the closing list of
+#                   required checks then holds only the checks of the legs that ran
 #   --bin-dir DIR   the directory holding sirio and sirio-host (default rust/target/debug)
 #   --display :N    the Xvfb this script starts and stops, on :120 to :139 (default :120)
 #
@@ -77,7 +92,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --mutate) MUTATE="${2:?--mutate needs a name}"; shift 2 ;;
-    -h|--help) sed -n '3,60p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,78p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -367,7 +382,7 @@ APP_ENV=()
 
 # ---------------------------------------------------------------- leg 1: the file Preview
 
-LEGS="${MARKDOWN_E2E_LEGS:-preview chat}" # a development knob: one leg alone
+LEGS="${MARKDOWN_E2E_LEGS:-preview chat pictures}" # a development knob: one leg alone
 if [[ " $LEGS " == *" preview "* ]]; then
 echo "== preview (mutate: ${MUTATE:-none})"
 LEG_NAME=preview
@@ -421,6 +436,20 @@ env CTL="$CTL" DISP="$DISPLAY_TARGET" OUT="$OUT_DIR" RUN_DIR="$RUN_DIR" ROOT="$R
 stop_app
 fi
 
+# ---------------------------------------------------------------- leg 3: chat pictures
+
+# A chat of its own (a fresh scenario and instance), so that nothing but the reply's pictures is on
+# screen. The pictures are files in the scenario's repository: no image server.
+if [[ " $LEGS " == *" pictures "* ]]; then
+echo "== pictures"
+LEG_NAME=pictures
+new_world pictures
+env CTL="$CTL" DISP="$DISPLAY_TARGET" OUT="$OUT_DIR" RUN_DIR="$RUN_DIR" ROOT="$ROOT" SIRIO="$BIN" \
+  WINDOW_SIZE="$WINDOW_SIZE" CHECKS="$OUT_DIR/.checks.jsonl" \
+  python3 -I "$ROOT/Scripts/Tests/markdown_documents_e2e.py" pictures || fail "the pictures leg failed (see $OUT_DIR/logs/pictures-run)"
+stop_app
+fi
+
 # ---------------------------------------------------------------- the transcript
 
 python3 -I - "$OUT_DIR" "$BIN_DIR" "$CTL" "$WINDOW_SIZE" "$DISPLAY_TARGET" "$MUTATE" <<'PY'
@@ -443,7 +472,15 @@ document = {
 PY
 read -r CHECKS_OK CHECKS_SKIPPED < <(python3 -I -c 'import json, sys; c = [json.loads(l) for l in open(sys.argv[1])]; print(sum(x["status"] == "OK" for x in c), sum(x["status"] == "SKIP" for x in c))' "$OUT_DIR/.checks.jsonl")
 rm -f "$OUT_DIR/.ctl.tsv" "$OUT_DIR/.checks.jsonl" "$OUT_DIR"/.leg-*.json
-for needed in draws anchor-toc anchor-slug anchor-outline progress picture-width diagrams copy-drag copy-menu terminal-ctrl-c chat-select-all chat-jump; do
+# The checks each leg must have recorded; a leg left out of $LEGS owes none.
+REQUIRED=()
+if [[ " $LEGS " == *" preview "* ]]; then
+  REQUIRED+=(draws anchor-toc anchor-slug anchor-outline progress picture-width diagrams copy-drag copy-menu terminal-ctrl-c)
+fi
+if [[ " $LEGS " == *" chat "* ]]; then REQUIRED+=(chat-select-all chat-jump); fi
+if [[ " $LEGS " == *" pictures "* ]]; then REQUIRED+=(chat-pictures); fi
+[ "${#REQUIRED[@]}" -gt 0 ] || fail "MARKDOWN_E2E_LEGS ('$LEGS') names no leg: preview, chat or pictures"
+for needed in "${REQUIRED[@]}"; do
   grep -q "\"check\": \"$needed\"" "$OUT_DIR/transcript.json" || fail "the run holds no result for the check $needed"
 done
 echo "artifact: $OUT_DIR"
