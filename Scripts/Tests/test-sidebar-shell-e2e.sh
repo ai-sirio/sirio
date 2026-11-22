@@ -64,9 +64,21 @@ set -eEuo pipefail
 #       strip is clipped, the seat is not pushed out)
 #   11  a third project with 40 worktrees: the list is captured at rest, after a
 #       wheel turn with the pointer off the list (idle frame, bar up) and 2.2 s
-#       later (bar faded). The list body is the same in the last two and the bar's
-#       strip differs, so the check fails when no bar is drawn; the body differs
-#       from the rest frame (the list overflowed and moved)
+#       later (bar faded). The list body is the same in the last two (the list had
+#       stopped), and the bar is judged by direction: the 14 px strip beside the
+#       list's right edge holds, in the visible frame, a vertical run of at least 30
+#       px of one colour that is not the strip's ground (the thumb: a status bloom
+#       is short), and in the faded frame the same column holds no run of 30 px of
+#       that colour. A bar drawn only in the faded frame fails; so does no bar at
+#       all. The body differs from the rest frame (the list overflowed and moved)
+#   12  the sticky project header at interface font 18 (there is no live setting
+#       verb: the app is quit, appearance.uiFontSize=18 is written to its database
+#       and it is relaunched). A fourth project, a second repository of 40
+#       worktrees, is added after the third. A card is drawn 36 px high, and the
+#       wheel turns the list to an offset past where Sidebar::sticky_section's row
+#       sum (a card counted at 31) already named the fourth project, and short of
+#       where the drawn rows bring its header to the top: `surface layout read`'s
+#       `sidebarList` names the third project as sticky, not the fourth
 # Every step ends with its captures; the run ends with
 # SIDEBAR SHELL E2E OK (<appearance>).
 #
@@ -251,6 +263,19 @@ git -C "$BIG" commit -q -m first
 for n in $(seq 1 40); do
   git -C "$BIG" worktree add -q -b "feature-$n" "$RUN_DIR/big-wt-$n"
 done
+# The fourth project, added in step 12 at interface font 18: a second repository of 40 worktrees, made
+# the same way here so that git's work is up front.
+BIG2="$RUN_DIR/big2"
+mkdir -p "$BIG2"
+git -C "$BIG2" init -q -b main
+git -C "$BIG2" config user.email tester@example.invalid
+git -C "$BIG2" config user.name Tester
+printf '# big2\n' >"$BIG2/README.md"
+git -C "$BIG2" add -A
+git -C "$BIG2" commit -q -m first
+for n in $(seq 1 40); do
+  git -C "$BIG2" worktree add -q -b "feature-$n" "$RUN_DIR/big2-wt-$n"
+done
 
 # ---- stubs ---------------------------------------------------------------
 STUB_DIR="$RUN_DIR/stub"
@@ -311,7 +336,7 @@ printf 'case\tkey\texpected\tdrawn\tok\n' >"$OUT_DIR/measurements.tsv"
 
 # The reads: the control socket's line-delimited JSON, spoken directly.
 cat >"$RUN_DIR/sb.py" <<'PY'
-import json, os, socket, sys, time
+import itertools, json, os, socket, sys, time
 from types import SimpleNamespace
 
 TSV = os.environ["SB_TSV"]
@@ -337,11 +362,22 @@ def rpc(method, params=None):
     return response.get("result") or {}
 
 
+def list_state(L):
+    """The layout read's `sidebarList` ({"sticky": the sticky header's project name or null, "scrolled":
+    px scrolled, positive down, or null}). It is no rect, so it is decoded on its own and never enters R;
+    None when the app does not report it, so that the steps before 12 do not depend on it."""
+    value = L.get("sidebarList")
+    if value is None:
+        return None
+    return json.loads(value) if isinstance(value, str) else value
+
+
 def read():
-    """One read of the layout (shellRects, decoded twice) and of the attention read's sidebar
-    object and projects. A key the app does not report raises: not yet, never a match."""
+    """One read of the layout (shellRects, decoded twice; sidebarList apart) and of the attention read's
+    sidebar object and projects. A key the app does not report raises: not yet, never a match."""
     L = rpc("surface.layout.read")
     raw = json.loads(L["shellRects"])
+    SL = list_state(L)
     A = rpc("surface.attention.read")
     S = json.loads(A["sidebar"])
     P = json.loads(A["projects"])
@@ -350,9 +386,9 @@ def read():
     for project in json.loads(rpc("project.list")["projects"]):
         for wt in json.loads(project["worktrees"]):
             W[os.path.basename(wt["path"].rstrip("/"))] = wt["primary"] == "true"
-    LAST["state"] = {"rects": raw, "sidebar": S, "projects": P, "primary": W}
+    LAST["state"] = {"rects": raw, "sidebar": S, "projects": P, "primary": W, "sidebarList": SL}
     rects = {k: (SimpleNamespace(x=v[0], y=v[1], w=v[2], h=v[3]) if v is not None else None) for k, v in raw.items()}
-    return {"R": rects, "S": S, "P": P, "L": L, "A": A, "PRIM": W}
+    return {"R": rects, "S": S, "P": P, "L": L, "A": A, "PRIM": W, "SL": SL}
 
 
 def snapshot():
@@ -470,6 +506,35 @@ elif command == "center":
         if time.time() > deadline:
             sys.exit(f"{sys.argv[2]} was not drawn within 20 s ({LAST.get('error')})")
         time.sleep(0.3)
+elif command == "starts":
+    # starts CARD_H GROUP...: where the last project's row begins in the list's content, summed over the
+    # cards the sidebar draws (S['cards'], in tree order) the way Sidebar::sticky_section sums rows: a project
+    # row is 31 (SECTION_HEIGHT), a card CARD_H, every row is followed by 2 (ROW_V_GAP), and the last card of
+    # an expanded project by 8 (PROJECT_END_SPACE). Prints "<old> <new> <counts>": the start with every card
+    # counted at 31 (what the sum did, whatever the font) and at CARD_H (what is drawn), and how many cards
+    # each project draws. A GROUP names a project's cards by the last component of their worktree paths,
+    # comma separated: "name" is exact and "prefix*" a prefix; the groups are in the projects' order.
+    PROJECT_ROW, ROW_V_GAP, PROJECT_END_SPACE, OLD_CARD = 31, 2, 8, 31
+    card_h = int(sys.argv[2])
+    groups = [group.split(",") for group in sys.argv[3:]]
+    names = [c["worktree"].rstrip("/").rsplit("/", 1)[-1] for c in settled("starts")["S"]["cards"]]
+
+    def owner(name):
+        hits = [i for i, group in enumerate(groups)
+                if any(name.startswith(spec[:-1]) if spec.endswith("*") else name == spec for spec in group)]
+        if len(hits) != 1:
+            sys.exit(f"the card {name!r} belongs to {len(hits)} of the {len(groups)} projects")
+        return hits[0]
+
+    owners = [owner(name) for name in names]
+    if owners != sorted(owners):
+        order = [(project, len(list(run))) for project, run in itertools.groupby(owners)]
+        sys.exit(f"the cards are not listed project by project, in the projects' order: (project, cards) runs {order}")
+    counts = [owners.count(i) for i in range(len(groups))]
+    before = counts[:-1]
+    fixed = len(before) * (PROJECT_ROW + ROW_V_GAP) + sum(1 for n in before if n) * PROJECT_END_SPACE
+    print(fixed + sum(before) * (OLD_CARD + ROW_V_GAP), fixed + sum(before) * (card_h + ROW_V_GAP),
+          ",".join(str(n) for n in counts))
 elif command == "tabs":
     t = rpc("surface.tabs.read")
     print(t["count"], t["active"], t[f"tab.{t['active']}"].split("|", 2)[2])
@@ -480,11 +545,82 @@ elif command == "attn-save":
 else:
     sys.exit(f"unknown command {command}")
 PY
+# The scrollbar's thumb in the raw RGB of two crops of one strip (step 11). Always exits 0 and prints
+# "<run px> <x> <y> <colour hex> <faded px, same column> <faded px, any column> <ground hex>": the longest vertical
+# run of one colour in the visible crop that is not the strip's ground (the faded crop's most common colour),
+# where it is, and the longest run of that colour in the faded crop. The caller judges; the visible crop's
+# five longest runs go to stderr, for the transcript. Two colours are "near" when every channel is within 5 levels
+# (about the 2% fuzz the markdown E2E's picture scans use).
+cat >"$RUN_DIR/strip_runs.py" <<'PY'
+import sys
+from collections import Counter
+
+visible_path, faded_path, width, height = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+TOLERANCE = 5
+
+
+def columns(path):
+    data = open(path, "rb").read()
+    if len(data) != width * height * 3:
+        print(f"strip_runs: {path} holds {len(data)} bytes, not {width}x{height} RGB ({width * height * 3})", file=sys.stderr)
+        return None
+    return [[tuple(data[(y * width + x) * 3:(y * width + x) * 3 + 3]) for y in range(height)] for x in range(width)]
+
+
+def near(a, b):
+    return abs(a[0] - b[0]) <= TOLERANCE and abs(a[1] - b[1]) <= TOLERANCE and abs(a[2] - b[2]) <= TOLERANCE
+
+
+def hexed(colour):
+    return "%02x%02x%02x" % colour
+
+
+def runs_off_ground(column, ground):
+    """(length, top, colour) of each stretch of one colour, the first pixel's, that is not the ground."""
+    found, y = [], 0
+    while y < len(column):
+        seed = column[y]
+        if near(seed, ground):
+            y += 1
+            continue
+        end = y + 1
+        while end < len(column) and near(column[end], seed):
+            end += 1
+        found.append((end - y, y, seed))
+        y = end
+    return found
+
+
+def longest_run_of(column, colour):
+    best = run = 0
+    for pixel in column:
+        run = run + 1 if near(pixel, colour) else 0
+        best = max(best, run)
+    return best
+
+
+visible, faded = columns(visible_path), columns(faded_path)
+if visible is None or faded is None:
+    print("0 0 0 000000 0 0 000000")
+    sys.exit(0)
+ground = Counter(pixel for column in faded for pixel in column).most_common(1)[0][0]
+candidates = sorted(((length, x, top, colour) for x, column in enumerate(visible)
+                     for length, top, colour in runs_off_ground(column, ground)), reverse=True)
+for length, x, top, colour in candidates[:5]:
+    print(f"  visible strip run: {length} px at x {x}, y {top}, #{hexed(colour)}", file=sys.stderr)
+if not candidates:
+    print(f"0 0 0 000000 0 0 {hexed(ground)}")
+else:
+    length, x, top, colour = candidates[0]
+    print(length, x, top, hexed(colour), longest_run_of(faded[x], colour),
+          max(longest_run_of(column, colour) for column in faded), hexed(ground))
+PY
 export SB_TSV="$OUT_DIR/measurements.tsv" SB_READS="$OUT_DIR/reads"
 SB() { python3 -I "$RUN_DIR/sb.py" "$@"; }
 # Polls until EXPR holds. EXPR sees R (rects of the shell, an object with x y w h, or None),
 # S (the sidebar's state object), P (the projects), PRIM (the served primary flag of each
-# worktree, by the last component of its path) and L (the layout read).
+# worktree, by the last component of its path), L (the layout read) and SL (its `sidebarList`:
+# {"sticky": a project name or None, "scrolled": px or None}, or None when not reported).
 wait_for() { # case label expr [seconds]
   SB wait "$1" "${4:-30}" "$2" "$3" || fail "$2"
 }
@@ -757,6 +893,16 @@ expect_drawn_in_both() { # case key frameA frameB
     fail "$2 is not drawn in both frames: $a colours in $3, $b in $4"
   fi
 }
+# The scrollbar's thumb in the strip of two frames (step 11): prints what strip_runs.py prints, for the
+# crop STRIP ("WxH+X+Y", window pixels) of the frames $1 and $2 of this run.
+strip_runs() { # visible_frame faded_frame
+  local width=${STRIP%%x*} rest=${STRIP#*x}
+  "$IM" "$OUT_DIR/frames/$1-$TAG.png" -crop "$STRIP" +repage -depth 8 "rgb:$RUN_DIR/strip-visible.rgb" \
+    || fail "could not crop the strip of $1"
+  "$IM" "$OUT_DIR/frames/$2-$TAG.png" -crop "$STRIP" +repage -depth 8 "rgb:$RUN_DIR/strip-faded.rgb" \
+    || fail "could not crop the strip of $2"
+  python3 -I "$RUN_DIR/strip_runs.py" "$RUN_DIR/strip-visible.rgb" "$RUN_DIR/strip-faded.rgb" "$width" "${rest%%+*}"
+}
 # The python expression (over S) that holds when the sidebar lists a card with these facts.
 card_expr() { # worktree-path name fallback(True|False) missing(True|False)
   echo "any(c['worktree'] == '$1' and c['name'] == '$2' and c['fallback'] is $3 and c['missing'] is $4 for c in S['cards'])"
@@ -801,7 +947,7 @@ if [ "$STATE_ONLY" -eq 1 ]; then
   SB wait state-only 30 "the attention read reports the sidebar's state" \
     'S["bell"] is None and S["filterShown"] is False and S["hoverCardRow"] is None and S["listFocused"] in (True, False)' \
     || fail "the sidebar's state is not reported"
-  echo "SKIP: steps 2-11 need a window to paint and click"
+  echo "SKIP: steps 2-12 need a window to paint and click"
   quit_app
   echo "SIDEBAR SHELL E2E OK (state only)"
   exit 0
@@ -1071,8 +1217,13 @@ wait_for 11 "the third project is listed (after the repo and the plain folder)" 
 # 44 cards of 31 px do not fit in a 1000 px window. The scrollbar is judged on idle frames only,
 # with the pointer off the list (no hover wash in the crops): one taken right after the wheel
 # stopped, one 2.2 s later (the bar holds 900 ms, then fades over 300 ms). The list body must be
-# the same in both (it had stopped moving), so the strip's difference is the bar and nothing else;
-# and it must differ from a frame taken before the wheel (the list overflowed and moved).
+# the same in both (it had stopped moving), and it must differ from a frame taken before the wheel
+# (the list overflowed and moved). The bar itself is judged by direction, not by a difference
+# (which a bar drawn only in the faded frame, or a status bloom turning in the strip, would also
+# make): in the visible frame the strip holds a vertical run of at least 30 px of one colour that
+# is not the strip's ground (the faded frame's most common colour): the thumb, where a bloom is
+# short; and in the faded frame the same column holds no run of 30 px of that colour. The run is
+# found in the visible frame and then asked of the faded one, never the other way round.
 LEFT=$(rect_of left)
 BODY=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (200, round(h) - 160, round(x + 20), round(y + 120)))' $LEFT)
 STRIP=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print("%dx%d+%d+%d" % (14, round(h) - 160, round(x + w - 16), round(y + 120)))' $LEFT)
@@ -1121,21 +1272,146 @@ for attempt in 1 2 3; do
   capture_now scrollbar-faded
   body_diff=$(frame_diff scrollbar-visible scrollbar-faded "$BODY")
   strip_diff=$(frame_diff scrollbar-visible scrollbar-faded "$STRIP")
+  # Assigned first, then split: a failed scan stops the run instead of reading as "no bar".
+  runs=$(strip_runs scrollbar-visible scrollbar-faded)
+  read -r run_len run_x run_y run_colour faded_len faded_any ground <<<"$runs"
   echo "  attempt $attempt: list body differs by $body_diff, bar strip by $strip_diff"
-  if [ "$body_diff" -eq 0 ] && [ "$strip_diff" -gt 0 ]; then
+  echo "  attempt $attempt: the visible strip's longest run off the ground (#$ground) is $run_len px of #$run_colour at x $run_x, y $run_y; the faded strip holds $faded_len px of it in that column ($faded_any in any column)"
+  if [ "$body_diff" -eq 0 ] && [ "$run_len" -ge 30 ] && [ "$faded_len" -lt 30 ]; then
     bar_seen=1
     break
   fi
 done
 if [ "$bar_seen" -eq 1 ]; then
   tsv_row 11 "the list body is the same in the visible and the faded frame (it had stopped)" "0" "$body_diff" ok
-  tsv_row 11 "the bar strip differs between the visible and the faded frame (the bar is drawn, then gone)" "> 0" "$strip_diff" ok
+  tsv_row 11 "the visible frame's strip holds a vertical run of one colour off the strip's ground, the bar's thumb (ground #$ground)" ">= 30 px" "$run_len px of #$run_colour at x $run_x, y $run_y of the strip" ok
+  tsv_row 11 "the faded frame's strip holds no run of that colour in that column: the bar is drawn, then gone (never the reverse)" "< 30 px of #$run_colour" "$faded_len px at x $run_x ($faded_any in any column)" ok
 else
-  tsv_row 11 "the bar strip differs between the visible and the faded frame, the body not" "body 0, strip > 0" "body $body_diff, strip $strip_diff" FAIL
-  fail "no attempt showed a scrollbar on an idle list: body $body_diff, strip $strip_diff"
+  tsv_row 11 "the visible strip holds a run of >= 30 px of one colour that the faded strip's same column lacks, the body the same" "body 0, visible run >= 30, faded run < 30" "body $body_diff, visible run $run_len px of #$run_colour, faded $faded_len px" FAIL
+  fail "no attempt showed a scrollbar on an idle list: body $body_diff, the visible strip's longest run $run_len px of #$run_colour at x $run_x (ground #$ground), the faded strip $faded_len px of it in that column"
 fi
 expect_frames_differ 11 "the wheel moved the list (it overflows)" scroll-rest scrollbar-faded "$BODY"
 SB attn-save "$OUT_DIR/attention-final.json" || fail "could not save the attention read"
+
+# ---- step 12 ----------------------------------------------------------------
+step 12 "at interface font 18 the sticky header names the project the drawn rows still have at the top"
+# Sidebar::sticky_section picks the project whose header has scrolled past the list's top by summing row
+# heights rather than measuring: a project row is 31, a card was always counted as 31, every row is
+# followed by 2 (ROW_V_GAP), and the last card of an expanded project by 8 (PROJECT_END_SPACE). The
+# sticky project is the last one whose start offset is <= the scroll. At interface font 18 a card is
+# drawn 36 px (31 plus the 5 the font adds to its title line), so the old sum fell 5 px short per card
+# and named a project that many px early for every card above it: with 44 cards above the fourth
+# project, 220 px. Between the old sum's start of the fourth project (OLD_START) and the drawn one
+# (NEW_START) the old code read the fourth project's name; the drawn rows still have the third
+# project's header at the top, and `sidebarList.sticky` must say so. The window exists only at font 18:
+# at 13 a card is drawn at the 31 the sum counts and the two starts are the same.
+# There is no sirioctl verb that sets the interface font live (surface settings act runs installs
+# only), so the app is quit, the setting row is written to its database (only that row: not the schema
+# version, which zed-layout's db_seed also sets) and the app is relaunched, as step 9 relaunches.
+BIG_NAME=$(get "P[2]['name']")
+quit_app
+python3 -I - "$SIRIO_DB" <<'PY' || fail "could not write appearance.uiFontSize"
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("INSERT INTO setting (key, value) VALUES ('appearance.uiFontSize', '18') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+db.commit()
+print("appearance.uiFontSize =", db.execute("SELECT value FROM setting WHERE key = 'appearance.uiFontSize'").fetchone()[0])
+db.close()
+PY
+launch_app
+# Added again, the third project keeps its place when it was restored and takes it if it was not.
+ctl project add "$BIG" >/dev/null
+wait_for 12 "the relaunch lists the repository, the plain folder and the big project, all open" \
+  "len(P) == 3 and P[2]['name'] == '$BIG_NAME' and all(p['expanded'] for p in P)" 90
+# The fourth project, after the third.
+ctl project add "$BIG2" >/dev/null
+wait_for 12 "the fourth project is listed after the big one, all four open" \
+  "len(P) == 4 and P[2]['name'] == '$BIG_NAME' and P[3]['name'] != '$BIG_NAME' and all(p['expanded'] for p in P)" 30
+BIG2_NAME=$(get "P[3]['name']")
+wait_for 12 "the layout read reports sidebarList (sticky and scrolled)" "SL is not None and 'sticky' in SL and 'scrolled' in SL"
+# The card is 36 px at font 18 (the zed-layout E2E measures the same), the project row 31.
+measure 12 \
+  "project row height at font 18|R['sidebarSection'].h|==|31" \
+  "card height h at font 18 (31 + 5 for the title line)|R['sidebarCard'].h|==|36"
+CARD_H=$(get "round(R['sidebarCard'].h)")
+if [ "$BIG_NAME" != "$BIG2_NAME" ]; then
+  tsv_row 12 "the third and the fourth project have different names (the sticky name tells them apart)" "different" "$BIG_NAME and $BIG2_NAME" ok
+else
+  tsv_row 12 "the third and the fourth project have different names (the sticky name tells them apart)" "different" "$BIG_NAME and $BIG2_NAME" FAIL
+  fail "the third and the fourth project are both named $BIG_NAME"
+fi
+# The two starts of the fourth project's row, from the cards the sidebar draws for each project (P
+# holds only names and open flags): the repository draws 2 (main and other), the plain folder 1, each
+# big project 41 (its main worktree and 40 more); 3 projects and 44 cards lie above the fourth.
+starts=$(SB starts "$CARD_H" "repo,other" "plain-folder" "big,big-wt-*" "big2,big2-wt-*") || fail "could not sum the list's rows"
+read -r OLD_START NEW_START COUNTS <<<"$starts"
+if [ "$COUNTS" = "2,1,41,41" ]; then
+  tsv_row 12 "the sidebar draws the cards of the four projects, grouped in the order they are listed (repository, plain folder, big, big2)" "2,1,41,41" "$COUNTS" ok
+else
+  tsv_row 12 "the sidebar draws the cards of the four projects, grouped in the order they are listed (repository, plain folder, big, big2)" "2,1,41,41" "$COUNTS" FAIL
+  fail "the cards per project are $COUNTS, not 2,1,41,41 (repository, plain folder, big, big2)"
+fi
+tsv_row 12 "$BIG2_NAME's project row starts at this offset with every card counted at 31 (OLD_START: what the old sum read)" "3 project rows, 44 cards at 31, 3 project ends" "$OLD_START" ok
+tsv_row 12 "$BIG2_NAME's project row starts at this offset with every card counted at h = $CARD_H (NEW_START: where it is drawn)" "3 project rows, 44 cards at $CARD_H, 3 project ends" "$NEW_START" ok
+if [ "$((NEW_START - OLD_START))" -ge 100 ]; then
+  tsv_row 12 "the two starts are at least 100 px apart (about 5 px for each of the 44 cards above)" ">= 100" "$((NEW_START - OLD_START))" ok
+else
+  tsv_row 12 "the two starts are at least 100 px apart (about 5 px for each of the 44 cards above)" ">= 100" "$((NEW_START - OLD_START))" FAIL
+  fail "the starts of $BIG2_NAME differ by only $((NEW_START - OLD_START)) px (old $OLD_START, new $NEW_START): no window to read the sticky header in"
+fi
+# The window: 15 px past the old start, 15 px short of the new one.
+WINDOW_LO=$((OLD_START + 15))
+WINDOW_HI=$((NEW_START - 15))
+sticky_scrolled() { get "round(SL['scrolled']) if SL is not None and SL['scrolled'] is not None else -1"; }
+LEFT=$(rect_of left)
+LIST_XY=$(python3 -c 'import sys; x, y, w, h = (float(v) for v in sys.argv[1:5]); print(round(x + 100), round(y + h - 4))' $LEFT)
+# The wheel turns over the list as in step 11, one notch at a time until a notch's size is known (a
+# notch is 3 lines, well under the window's width), then in as many notches as the gap holds; a read
+# after each settles the scroll. One notch back after an overshoot, and a bounded number of turns.
+move_window "$LIST_XY"
+NOTCH_PX=0
+scrolled=$(sticky_scrolled)
+readings="$scrolled"
+reached=0
+for attempt in $(seq 1 40); do
+  if [ "$scrolled" -ge "$WINDOW_LO" ] && [ "$scrolled" -le "$WINDOW_HI" ]; then
+    reached=1
+    break
+  fi
+  if [ "$scrolled" -lt "$WINDOW_LO" ]; then
+    button=5
+    gap=$((WINDOW_LO - scrolled))
+  else
+    button=4
+    gap=$((scrolled - WINDOW_HI))
+  fi
+  notches=1
+  if [ "$NOTCH_PX" -gt 0 ] && [ "$((gap / NOTCH_PX))" -gt 1 ]; then notches=$((gap / NOTCH_PX)); fi
+  [ "$notches" -le 25 ] || notches=25
+  echo "  attempt $attempt: scrolled $scrolled, window $WINDOW_LO..$WINDOW_HI: $notches notch(es) of button $button"
+  DISPLAY="$DISPLAY_TARGET" timeout 30 xdotool click --repeat "$notches" --delay 30 "$button" || fail "xdotool could not turn the wheel"
+  previous=$scrolled
+  [ "$previous" -ge 0 ] || previous=0
+  scrolled=$(sticky_scrolled)
+  readings="$readings $scrolled"
+  if [ "$notches" -eq 1 ] && [ "$scrolled" -ne "$previous" ]; then
+    NOTCH_PX=$((scrolled > previous ? scrolled - previous : previous - scrolled))
+  fi
+done
+if [ "$reached" -ne 1 ]; then
+  tsv_row 12 "the wheel brings the list into the window ($WINDOW_LO..$WINDOW_HI px scrolled) in 40 turns" "$WINDOW_LO..$WINDOW_HI" "readings: $readings (a notch moved $NOTCH_PX px)" FAIL
+  fail "the list never reached $WINDOW_LO..$WINDOW_HI px scrolled: readings $readings (a notch moved $NOTCH_PX px)"
+fi
+echo "  the list is $scrolled px down after the readings:$readings (a notch moves $NOTCH_PX px)"
+# One read judges all three: past the old sum's start (where the old code read BIG2's name), short of
+# the drawn start, and the sticky header is the third project's.
+measure 12 \
+  "scrolled is at least 15 px past the old sum's start of $BIG2_NAME ($OLD_START)|SL['scrolled']|>=|$WINDOW_LO" \
+  "scrolled is at least 15 px short of $BIG2_NAME's drawn start ($NEW_START)|SL['scrolled']|<=|$WINDOW_HI" \
+  "sticky is $BIG_NAME's header, not $BIG2_NAME's (the old sum read $BIG2_NAME here)|SL['sticky']|==|'$BIG_NAME'"
+park_pointer
+capture sticky-font18
+SB attn-save "$OUT_DIR/attention-font18.json" || fail "could not save the attention read"
 
 STEP="the last check"
 echo "the last check: quitting leaves no process of this run behind"

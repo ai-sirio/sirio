@@ -756,8 +756,17 @@ Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 # moved away and Sirio relaunched; a worktree with 9 tabs keeps its star inside
 # its 31 px card (its tabs opened over the control socket); a project of 40
 # worktrees makes the list overflow, and on idle frames with the pointer off
-# the list the bar's strip differs between right after a wheel turn and 2.2 s
-# later while the list body does not (it fails when no bar is drawn). --display :N is a private Xvfb
+# the list the bar is judged by direction: the visible frame's 14 px strip holds
+# a vertical run of 30 px or more of one colour that is not the strip's ground
+# (the thumb), the faded frame (2.2 s later) holds no 30 px run of it in that column, and
+# the list body is the same in both (it fails when no bar is drawn, or when the bar
+# is drawn only in the faded frame). Step 12 sets the interface font to 18 (the app
+# is quit, appearance.uiFontSize written to its database, and relaunched), adds a
+# fourth project of 40 worktrees, checks that a card is 36 px high, and turns the
+# wheel until the list is scrolled past where the old row-height sum (a card counted
+# at 31) named the fourth project and short of where its header is drawn at the top:
+# the layout read's `sidebarList` ({sticky, scrolled}) must name the third project
+# as the sticky one. --display :N is a private Xvfb
 # of at least 1600x1000 with Mesa's lavapipe; --appearance light|dark (run both);
 # --state-only runs with no display and checks only that the sidebar read is
 # reported; --out-dir DIR (must be empty) keeps transcript.log, app.log,
@@ -968,7 +977,12 @@ Scripts/Tests/capture-markdown-surfaces.sh --bin-dir DIR --out-dir DIR   # -> pr
 # PTY; a chat reply of at least 40 KiB, culled at the tail, is copied whole by the transcript menu's
 # Select All and Copy (equal to the transcript text), and a jump to its top draws no blank band; the
 # deepest nesting (MAX_NESTING levels) opens in a Preview and arrives as a chat reply, both drawn as quotes (a row of
-# exactly `deep-end`, which the plain-paragraph fallback does not make), and the app lives.
+# exactly `deep-end`, which the plain-paragraph fallback does not make), and the app lives. A third leg, `pictures`
+# (a chat of its own), sends one reply of eleven pictures over 48 px single-colour files: a plain path and paths holding `#`,
+# `?` or `%XX` draw the exact file (four colours, each a square of 40 px or more), and one that names a device (`COM1`,
+# `nul.png`, `CONIN$`), ends a component in a dot or a space, holds a colon outside the drive, or is a `file:` URL
+# decoding to a device name draws as its alt text (the drawn row is exactly the alt), with no decoy file's red or
+# yellow square of 8 px or more; MARKDOWN_E2E_LEGS=pictures runs that leg alone.
 # --mutate no-sections starts the app with SIRIO_DEBUG_MARKDOWN_NO_SECTIONS (a debug-build knob: the
 # Preview is drawn without `sections`): the run must FAIL at anchor-toc. --display :N, --out-dir DIR
 # (default artifacts/ely-md/e2e: transcript.json, frames/, the clipboards and expected texts).

@@ -728,6 +728,34 @@ struct ProbeRects {
     filter: ProbeCell,
     bell_menu: ProbeCell,
     hover_card: ProbeCell,
+    /// The project list's top, as of the latest render.
+    list: ListProbe,
+}
+
+/// The project list's top, as of the latest render: the project the sticky header names, and
+/// how far the list has scrolled.
+#[derive(Default)]
+struct ListProbe {
+    sticky: std::cell::RefCell<Option<String>>,
+    scrolled: std::cell::Cell<f32>,
+}
+
+impl ListProbe {
+    fn record(&self, sticky: Option<&str>, scrolled: f32) {
+        if self.sticky.borrow().as_deref() != sticky {
+            *self.sticky.borrow_mut() = sticky.map(str::to_owned);
+        }
+        self.scrolled.set(scrolled);
+    }
+}
+
+/// What the project list showed at its top in its latest render, for the debug layout read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SidebarListProbe {
+    /// The name the sticky header draws, `None` while there is no sticky header.
+    pub sticky: Option<String>,
+    /// How far the list is scrolled, in px, positive down.
+    pub scrolled: f32,
 }
 
 /// Where one part of the sidebar was last painted.
@@ -1023,6 +1051,14 @@ impl Sidebar {
             filter: probe.filter.get(),
             bell_menu: probe.bell_menu.get(),
             hover_card: probe.hover_card.get(),
+        }
+    }
+
+    /// The project list's top as last rendered, for the debug layout read.
+    pub fn list_probe(&self) -> SidebarListProbe {
+        SidebarListProbe {
+            sticky: self.probe.list.sticky.borrow().clone(),
+            scrolled: self.probe.list.scrolled.get(),
         }
     }
 
@@ -1505,8 +1541,10 @@ impl Sidebar {
     /// Which section header belongs at the top of the viewport: the last one
     /// whose own offset has already scrolled past. Heights are known, so this
     /// stays arithmetic over the flattened list rather than requiring a
-    /// measurement pass.
-    fn sticky_section(&self, rows: &[SidebarRow]) -> Option<SidebarRow> {
+    /// measurement pass. A worktree card counts at the height it is drawn at
+    /// (`row_drawn_height`, which grows with the interface font), a project row
+    /// at `SECTION_HEIGHT`.
+    fn sticky_section(&self, rows: &[SidebarRow], typography: &Typography) -> Option<SidebarRow> {
         let scrolled = -self.list_scroll.offset().y.as_f32();
         if scrolled <= 0.0 {
             return None;
@@ -1523,7 +1561,7 @@ impl Sidebar {
             }
             let height = match row.kind {
                 RowKind::Project => section::SECTION_HEIGHT,
-                _ => WORKTREE_CARD_HEIGHT,
+                RowKind::Worktree => Self::row_drawn_height(row, typography),
             };
             offset += height + ROW_V_GAP;
             if closes_project(rows, index) {
@@ -4951,7 +4989,7 @@ impl Render for Sidebar {
         let filter_probe = self.probe.filter.clone();
         let section_header_probe = self.probe.section_header.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
-        let sticky_section = self.sticky_section(&rows);
+        let sticky_section = self.sticky_section(&rows, &theme.typography);
         // Read off `self` here: the closure that draws the sticky header
         // runs inside the element builder, where `self` is already borrowed.
         let sticky_worktree_count = sticky_section
@@ -5018,6 +5056,15 @@ impl Render for Sidebar {
         // Folding hides the rows, never the element that owns list focus; a
         // query reaches into a folded list the way it opens folded projects.
         let show_list = !self.list_folded || !filter_is_empty;
+        // What the list shows at the top, for the debug layout read: the sticky header's name
+        // (only while the Projects list is drawn) and how far the list has scrolled.
+        self.probe.list.record(
+            sticky_section
+                .as_ref()
+                .filter(|_| show_list && view == SidebarView::Projects)
+                .map(|row| row.title.as_str()),
+            -self.list_scroll.offset().y.as_f32(),
+        );
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
         let context_menu = self.context_menu.get().map(|_| {

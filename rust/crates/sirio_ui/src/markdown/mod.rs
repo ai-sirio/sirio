@@ -35,6 +35,7 @@ pub(crate) use gather::BodyLayouts;
 #[cfg(test)]
 pub(crate) use gather::DrawnPart;
 pub(crate) use menu::{MarkdownMenuItem, perform};
+pub(crate) use rewrite::{names_are_plain, picture_address};
 pub(crate) use slug::slug;
 pub(crate) use text::{PartKind, PlainText};
 pub(crate) use view::{
