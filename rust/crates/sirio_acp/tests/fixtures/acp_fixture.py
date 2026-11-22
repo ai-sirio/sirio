@@ -496,6 +496,13 @@ def main():
                 return
             if MODE == "multi":
                 blocks_prompt(request)
+            if MODE == "prompt_error":
+                # The first turn is refused with a JSON-RPC internal error and
+                # the agent stays up: the second is answered like any other.
+                if prompt_count == 1:
+                    error(request["id"], code=-32603, message="fixture could not run this turn")
+                else:
+                    blocks_prompt(request)
             if MODE == "malformed":
                 sys.stdout.write("not-json\n")
                 sys.stdout.flush()

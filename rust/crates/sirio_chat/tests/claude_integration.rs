@@ -94,6 +94,23 @@ fn drain_until_turn_end(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
     }
 }
 
+/// Everything up to and including the event that ends the turn, whichever way
+/// it ends: `TurnEnded`, or `TurnFailed` for a turn that failed.
+fn drain_until_turn_over(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
+    let mut seen = Vec::new();
+    loop {
+        let event = next_event(events);
+        let over = matches!(
+            event,
+            ChatEvent::TurnEnded { .. } | ChatEvent::TurnFailed { .. }
+        );
+        seen.push(event);
+        if over {
+            return seen;
+        }
+    }
+}
+
 #[test]
 fn the_handshake_yields_the_catalogues_before_anything_is_typed() {
     let (mut client, _events) = launch("normal");
@@ -472,6 +489,106 @@ fn cancelling_a_turn_produces_a_terminal_outcome() {
     // has answered the interrupt, so whether a worker is still there to take
     // a shutdown is a race with nothing to do with what a cancelled turn
     // reports. `shutdown_reaps_the_process` is where that belongs.
+}
+
+#[test]
+fn a_failed_result_is_a_turn_failure() {
+    let (mut client, events) = launch("failed_turns");
+    let sentence = "API Error: 529 overloaded";
+    client.prompt("overloaded").expect("prompt is accepted");
+    let seen = drain_until_turn_over(&events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == sentence
+        )),
+        "the failure must carry the CLI's sentence: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, ChatEvent::AgentMessageChunk(_))),
+        "the sentence is the failure's message, not also a reply: {seen:?}"
+    );
+    // The meter is read before the turn is over, a failed one included: a
+    // surface re-reading on the end must not see the previous turn's numbers.
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, ChatEvent::ContextUsage(_))),
+        "the failed turn's end was not held for the context meter: {seen:?}"
+    );
+
+    // The failure ends the turn in place of `TurnEnded`, and the client stays:
+    // the next turn is answered, and nothing of the first (a late end) is in
+    // front of its reply.
+    client.prompt("anything else").expect("second prompt accepted");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        seen.contains(&ChatEvent::AgentMessageChunk("ok".into())),
+        "the turn after a failure must answer, with no stray end before it: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_limit_result_keeps_todays_events() {
+    // A resend would hit the same limit, so these two stay what they were: the
+    // sentence as a reply, then the turn's end.
+    let (mut client, events) = launch("failed_turns");
+    for (prompt, sentence) in [
+        ("turn limit", "Reached the turn limit"),
+        ("budget limit", "Reached the budget limit"),
+    ] {
+        client.prompt(prompt).expect("prompt is accepted");
+        let seen = drain_until_turn_over(&events);
+        assert!(
+            seen.contains(&ChatEvent::AgentMessageChunk(sentence.into())),
+            "{prompt}: the sentence is still drawn as a reply: {seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
+            "{prompt}: the turn still ends with TurnEnded: {seen:?}"
+        );
+    }
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_thinking_block_stop_ends_the_thought() {
+    let (mut client, events) = launch("thinking_blocks");
+    client.prompt("think first").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+    let thoughts: Vec<&str> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ChatEvent::ThoughtChunk(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thoughts, ["weighing ", "the options"]);
+    // The turn holds two text-block stops and one thinking-block stop (the
+    // second message even reuses the thinking block's index), so exactly one
+    // thought end, and only a thinking block's.
+    let ends: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, ChatEvent::ThoughtEnded))
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(ends.len(), 1, "one thought end per thinking block: {seen:?}");
+    let last_thought = seen
+        .iter()
+        .rposition(|event| matches!(event, ChatEvent::ThoughtChunk(_)))
+        .expect("the thought was streamed");
+    let first_reply = seen
+        .iter()
+        .position(|event| matches!(event, ChatEvent::AgentMessageChunk(_)))
+        .expect("the reply was streamed");
+    assert!(
+        last_thought < ends[0] && ends[0] < first_reply,
+        "the thought ends after its last chunk and before the reply starts: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
 }
 
 #[test]
@@ -1076,6 +1193,8 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
 enum Seen {
     Chunk(String),
     Notices(Vec<SessionNotice>),
+    /// The turn failed (`TurnFailed`) with this message instead of ending.
+    Failed(String),
 }
 
 fn cli_notices_turn(
@@ -1092,6 +1211,10 @@ fn cli_notices_turn(
                 seen.push(Seen::Notices(client.take_notices()));
             }
             ChatEvent::TurnEnded { .. } => return seen,
+            ChatEvent::TurnFailed { message, .. } => {
+                seen.push(Seen::Failed(message));
+                return seen;
+            }
             _ => {}
         }
     }
@@ -1101,7 +1224,7 @@ fn notices_of(seen: &[Seen]) -> Vec<SessionNotice> {
     seen.iter()
         .filter_map(|item| match item {
             Seen::Notices(notices) => Some(notices.clone()),
-            Seen::Chunk(_) => None,
+            Seen::Chunk(_) | Seen::Failed(_) => None,
         })
         .flatten()
         .collect()
@@ -1111,7 +1234,7 @@ fn reply_of(seen: &[Seen]) -> String {
     seen.iter()
         .filter_map(|item| match item {
             Seen::Chunk(text) => Some(text.as_str()),
-            Seen::Notices(_) => None,
+            Seen::Notices(_) | Seen::Failed(_) => None,
         })
         .collect()
 }
@@ -1267,7 +1390,8 @@ fn an_answer_no_stream_carried_is_drawn_once() {
         ("unstreamed", "ok"),
         ("midstream", "partial-before-error\n\nok"),
         ("midstream drop", "partial-before-error\n\nok"),
-        ("retry out", exhaustion),
+        // The exhaustion sentence is the turn's failure, not a reply: nothing is drawn.
+        ("retry out", ""),
         // The error result of the turn before left no separator behind.
         ("unstreamed", "ok"),
         ("subagent text", "ok"),
@@ -1288,6 +1412,13 @@ fn an_answer_no_stream_carried_is_drawn_once() {
             expected,
             "the reply text of one turn, drawn once"
         );
+        if prompt == "retry out" {
+            assert_eq!(
+                seen.last(),
+                Some(&Seen::Failed(exhaustion.into())),
+                "the sentence is the failure the turn ends in"
+            );
+        }
     }
     // Both halves were streamed, so no separator is added, and the notice
     // sits between them.

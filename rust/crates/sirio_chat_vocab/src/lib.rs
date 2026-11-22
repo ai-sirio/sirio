@@ -554,6 +554,23 @@ pub enum ChatEvent {
         /// Protocol stop reason, retained as text to remain forward-compatible.
         stop_reason: String,
     },
+    /// The turn failed and the agent is still up; ends the turn in place of
+    /// [`ChatEvent::TurnEnded`]. The same client takes the next prompt; a
+    /// failure that leaves no client behind is a [`ChatEvent::TransportError`]
+    /// instead.
+    TurnFailed {
+        /// What the agent or the CLI said went wrong, for the reader.
+        message: String,
+        /// The stop reason the footer would have shown for this turn, spelled
+        /// as `TurnEnded`'s is.
+        stop_reason: String,
+    },
+    /// A thinking block closed: the thought streamed so far is complete. Only
+    /// the native Claude client emits it, since the CLI names where a block
+    /// ends; an ACP agent never does, so a thought there ends when something
+    /// else begins or the turn does. It is not the end of a turn or of an
+    /// entry: more thinking or the reply may follow.
+    ThoughtEnded,
     /// The agent transport failed or closed before the client shut it down.
     /// A mid-session request rejected with ACP's `auth_required` error
     /// (F-CHAT-02) also arrives here rather than as its own variant — this

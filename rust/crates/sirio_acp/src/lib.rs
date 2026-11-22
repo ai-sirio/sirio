@@ -1085,10 +1085,11 @@ fn run_connection(
                                             // `Incoming transport closed` names
                                             // a symptom. Everything Sirio knows
                                             // about the cause has to ride along
-                                            // here: this turn error is the only
-                                            // message the user ever sees, since
-                                            // the UI drops the client on it and
-                                            // that marks the shutdown clean,
+                                            // here: when the agent is gone this
+                                            // turn error is the only message the
+                                            // user ever sees, since the UI drops
+                                            // the client on a `TransportError`
+                                            // and that marks the shutdown clean,
                                             // suppressing the connection-level
                                             // `Timeout` event entirely.
                                             let cause = timeout_cause(&prompt_death_reason);
@@ -1099,11 +1100,26 @@ fn run_connection(
                                             .await;
                                             wait_for_stderr_drain(&prompt_stderr_drained).await;
                                             let report = stderr_tail_report(&prompt_stderr_tail);
-                                            let _ = event_tx
-                                                .send(ChatEvent::TransportError(format!(
-                                                    "prompt failed: {error}{cause}{exit}{report}"
-                                                )))
-                                                .await;
+                                            let message =
+                                                format!("prompt failed: {error}{cause}{exit}{report}");
+                                            // The agent is still up when nothing says it is not:
+                                            // `child_exit_report` found no exit within its own
+                                            // short probe (it is empty exactly then, and this arm
+                                            // waits no longer for one), and Sirio's watchdog did
+                                            // not reap it (`cause`). Then only the turn failed,
+                                            // and the client stays, so a surface can send the
+                                            // prompt again. Otherwise there is no client to keep,
+                                            // and the error is the transport's, as it always was.
+                                            let agent_is_up = exit.is_empty() && cause.is_empty();
+                                            let event = if agent_is_up {
+                                                ChatEvent::TurnFailed {
+                                                    message,
+                                                    stop_reason: "Error".into(),
+                                                }
+                                            } else {
+                                                ChatEvent::TransportError(message)
+                                            };
+                                            let _ = event_tx.send(event).await;
                                         }
                                     }
                                     Ok(())

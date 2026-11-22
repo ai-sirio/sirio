@@ -631,7 +631,40 @@ pub enum Delta {
     Thinking(String),
 }
 
+/// The start or the end of one content block of a message, lifted out of a
+/// `stream_event`. Block indexes restart at zero in every message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockEvent {
+    /// `content_block_start`: the block at `index` opens. `kind` is the block's own
+    /// `type` (`text`, `thinking`, `tool_use`, …), an open set.
+    Start { index: u64, kind: String },
+    /// `content_block_stop`: the block at `index` is complete. The event does not say
+    /// what kind of block it was; that is the caller's to remember from the start.
+    Stop { index: u64 },
+}
+
 impl StreamEventPayload {
+    /// The block start or stop this event is, when it is one. A start that names no
+    /// index or no block type, and a stop that names no index, yield `None`: nothing
+    /// could be matched to them.
+    #[must_use]
+    pub fn block(&self) -> Option<BlockEvent> {
+        let index = self.event.get("index")?.as_u64()?;
+        match self.event.get("type")?.as_str()? {
+            "content_block_start" => Some(BlockEvent::Start {
+                index,
+                kind: self
+                    .event
+                    .get("content_block")?
+                    .get("type")?
+                    .as_str()?
+                    .to_string(),
+            }),
+            "content_block_stop" => Some(BlockEvent::Stop { index }),
+            _ => None,
+        }
+    }
+
     /// The delta this event carries, when it carries one. Every other event
     /// kind (`message_start`, `content_block_stop`, `input_json_delta`, …)
     /// yields `None`; the caller treats that as protocol traffic to observe,

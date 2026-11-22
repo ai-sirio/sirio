@@ -676,7 +676,9 @@ fn apply_event(state: &mut ChatState, event: ChatEvent) -> EventFold {
                 next_prompt,
             }
         }
-        ChatEvent::TransportError(message) => EventFold {
+        // A failed turn is what a refused ACP prompt always was here: an error row and
+        // `ChatStatus::Error`, with the queued text left queued, not sent.
+        ChatEvent::TurnFailed { message, .. } | ChatEvent::TransportError(message) => EventFold {
             persisted: state.mark_error(message),
             next_prompt: None,
         },
@@ -696,6 +698,7 @@ fn apply_event(state: &mut ChatState, event: ChatEvent) -> EventFold {
         | ChatEvent::CliState { .. }
         | ChatEvent::BackgroundTask(_)
         | ChatEvent::SessionRenamed { .. }
+        | ChatEvent::ThoughtEnded
         | ChatEvent::Trace(_) => EventFold::default(),
     }
 }

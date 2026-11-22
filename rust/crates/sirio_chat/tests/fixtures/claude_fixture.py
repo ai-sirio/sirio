@@ -2678,6 +2678,70 @@ def cli_notices_prompt(message):
 
 
 # ---------------------------------------------------------------------------
+# `failed_turns`: a turn the CLI ends with an `is_error` result, chosen by the
+# prompt: `overloaded` is a `success` subtype that says it failed (the API gave
+# up), `turn limit` and `budget limit` are the two limits a resend would hit
+# again. Any other prompt is an ordinary answer, so a test can tell the client
+# is still usable after a failure. The results carry no `stop_reason`, as the
+# CLI's own failures do.
+# ---------------------------------------------------------------------------
+
+FAILED_TURNS = {
+    "overloaded": ("success", "API Error: 529 overloaded"),
+    "turn limit": ("error_max_turns", "Reached the turn limit"),
+    "budget limit": ("error_max_budget_usd", "Reached the budget limit"),
+}
+
+
+def failed_turn(prompt):
+    if not INIT_PRINTED:
+        init_line()
+    if prompt not in FAILED_TURNS:
+        text("ok")
+        result()
+        return
+    subtype, body = FAILED_TURNS[prompt]
+    send({"type": "result", "subtype": subtype, "is_error": True, "result": body,
+          "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
+# ---------------------------------------------------------------------------
+# `thinking_blocks`: a reply streamed block by block, as the Messages API does:
+# a thinking block (index 0) and a text block (index 1) of the first message,
+# then a second message whose text block reuses index 0, the index a stale map
+# would still call a thinking block.
+# ---------------------------------------------------------------------------
+
+
+def block_event(kind, index, **fields):
+    trace_stream({"type": kind, "index": index, **fields})
+
+
+def thinking_blocks_turn():
+    if not INIT_PRINTED:
+        init_line()
+    message_start("msg_thinking")
+    block_event("content_block_start", 0,
+                content_block={"type": "thinking", "thinking": "", "signature": ""})
+    for piece in ("weighing ", "the options"):
+        block_event("content_block_delta", 0,
+                    delta={"type": "thinking_delta", "thinking": piece})
+    block_event("content_block_stop", 0)
+    block_event("content_block_start", 1, content_block={"type": "text", "text": ""})
+    block_event("content_block_delta", 1, delta={"type": "text_delta", "text": "first answer"})
+    block_event("content_block_stop", 1)
+    trace_assistant("msg_thinking", {"type": "text", "text": "first answer"})
+    message_end()
+    message_start("msg_second")
+    block_event("content_block_start", 0, content_block={"type": "text", "text": ""})
+    block_event("content_block_delta", 0, delta={"type": "text_delta", "text": " second answer"})
+    block_event("content_block_stop", 0)
+    trace_assistant("msg_second", {"type": "text", "text": " second answer"})
+    message_end()
+    result()
+
+
+# ---------------------------------------------------------------------------
 # `--fixture-startup=<kind>`: a CLI that cannot start. Unless a kind says
 # otherwise it writes at once, never reads stdin, and exits 1. Shapes copy the
 # live probe (`.superpowers/probe-a7`, Q5).
@@ -3117,6 +3181,12 @@ def main():
                 tool_input = {"plan": "1. Read\n2. Write"}
                 assistant_tool_use("toolu_plan_1", "ExitPlanMode", tool_input)
                 ask_permission("cli-plan-1", "ExitPlanMode", "toolu_plan_1", tool_input)
+                continue
+            if MODE == "failed_turns":
+                failed_turn(cli_notices_prompt(message))
+                continue
+            if MODE == "thinking_blocks":
+                thinking_blocks_turn()
                 continue
             if MODE == "cli_notices":
                 if not INIT_PRINTED:

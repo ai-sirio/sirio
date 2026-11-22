@@ -268,7 +268,8 @@ struct PendingContextUsage {
     request_id: String,
     /// What the turn's `result` reported, the fallback when no answer comes.
     summary: ResultSummary,
-    /// The `TurnEnded` event, held back until the meter is emitted.
+    /// The `TurnEnded` event, or the `TurnFailed` that ends a failed turn in its place,
+    /// held back until the meter is emitted.
     held: Option<ChatEvent>,
     /// When the ask went out, for the grace.
     asked_at: std::time::Instant,
@@ -1638,9 +1639,12 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             if let Some(pending) = pending_context_usage.take() {
                                 resolve_context_usage(&event_tx, pending, None).await;
                             }
-                            let held = matches!(events.last(), Some(ChatEvent::TurnEnded { .. }))
-                                .then(|| events.pop())
-                                .flatten();
+                            let held = matches!(
+                                events.last(),
+                                Some(ChatEvent::TurnEnded { .. } | ChatEvent::TurnFailed { .. })
+                            )
+                            .then(|| events.pop())
+                            .flatten();
                             let request_id = next_request_id();
                             pending_context_usage = Some(PendingContextUsage {
                                 request_id: request_id.clone(),

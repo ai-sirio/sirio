@@ -3498,6 +3498,7 @@ impl Chat {
                 | sirio_chat::ChatEvent::ToolCallCompleted { .. }
                 | sirio_chat::ChatEvent::PlanUpdate { .. }
                 | sirio_chat::ChatEvent::TurnEnded { .. }
+                | sirio_chat::ChatEvent::TurnFailed { .. }
                 | sirio_chat::ChatEvent::TransportError(_)
                 | sirio_chat::ChatEvent::Timeout { .. }
         ) {
@@ -4106,46 +4107,23 @@ impl Chat {
                     });
                 }
             }
-            sirio_chat::ChatEvent::TurnEnded { stop_reason } => {
-                self.settle_open_thought();
-                self.reread_plain_replies();
-                self.finish_reply();
-                // The footer must state *why* the turn stopped. A cancelled
-                // or refused turn that ends in a plain timestamp looks like an
-                // ordinary completion, and that is the exact failure class
-                // this surface is responsible for: the transcript is where a
-                // user notices a hidden state least.
-                let time = now_hhmm();
-                let label = match stop_reason.as_str() {
-                    "EndTurn" => time,
-                    reason => format!("{time} · {}", turn_end_label(reason)),
-                };
-                self.expire_unanswered(WidgetAsks::Keep, cx);
-                self.surface_mcp_warnings();
-                self.push_entry(Entry::TurnFooter(label));
-                self.streaming = false;
-                self.reload_idle(cx);
-                self.has_completed_turn = true;
-                self.persist_settled_transcript();
-                self.ask_session_permissions(cx);
-                self.ask_session_hooks(cx);
-                // The turn may have switched the branch.
-                if self.session_panel_open() {
-                    self.reread_session_branch(cx);
-                }
-                // D-CHAT-03: a turn ended — completed or cancelled alike,
-                // one rule — drains the queue's front entry as the next
-                // turn, exactly once; the rest wait for that turn's end.
-                // The footer lands before the queued turn so the transcript
-                // reads: stop stated, then the redirect.
-                self.send_queued_item(cx);
-                // F-CORE-DOM-07: tell the workspace a turn just settled so
-                // throttled auto-naming has a signal to react to. Emitted
-                // after the transcript is persisted so a subscriber reading
-                // `transcript_for_resume()` in response sees this turn's
-                // reply included.
-                cx.emit(ChatEvent::TurnEnded);
+            sirio_chat::ChatEvent::TurnEnded { stop_reason } => self.end_turn(&stop_reason, cx),
+            // A failed turn shows as the connection error's row, then ends as any other turn
+            // does. The agent is up, so unlike a `TransportError` the client stays.
+            sirio_chat::ChatEvent::TurnFailed {
+                message,
+                stop_reason,
+            } => {
+                self.push_entry(Entry::Error {
+                    message,
+                    retryable: true,
+                    kind: ErrorKind::Connection,
+                });
+                self.end_turn(&stop_reason, cx);
             }
+            // A thought's duration still settles when the next row is pushed or the turn
+            // ends. This is not an entry, so it ends no reply.
+            sirio_chat::ChatEvent::ThoughtEnded => {}
             sirio_chat::ChatEvent::TransportError(message) => {
                 self.lose_client(cx);
                 // The CLI that said it was running is gone.
@@ -4323,6 +4301,50 @@ impl Chat {
         }
         sirio_perf::event(perf_notification, cx.entity_id().as_u64());
         cx.notify();
+    }
+
+    /// Everything a turn's end does: settles the live reply and thought, states why the
+    /// turn stopped, persists the transcript and sends the next queued item. A turn ends
+    /// this way whether the agent finished it (`TurnEnded`) or failed it (`TurnFailed`).
+    fn end_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+        self.settle_open_thought();
+        self.reread_plain_replies();
+        self.finish_reply();
+        // The footer must state *why* the turn stopped. A cancelled
+        // or refused turn that ends in a plain timestamp looks like an
+        // ordinary completion, and that is the exact failure class
+        // this surface is responsible for: the transcript is where a
+        // user notices a hidden state least.
+        let time = now_hhmm();
+        let label = match stop_reason {
+            "EndTurn" => time,
+            reason => format!("{time} · {}", turn_end_label(reason)),
+        };
+        self.expire_unanswered(WidgetAsks::Keep, cx);
+        self.surface_mcp_warnings();
+        self.push_entry(Entry::TurnFooter(label));
+        self.streaming = false;
+        self.reload_idle(cx);
+        self.has_completed_turn = true;
+        self.persist_settled_transcript();
+        self.ask_session_permissions(cx);
+        self.ask_session_hooks(cx);
+        // The turn may have switched the branch.
+        if self.session_panel_open() {
+            self.reread_session_branch(cx);
+        }
+        // D-CHAT-03: a turn ended — completed or cancelled alike,
+        // one rule — drains the queue's front entry as the next
+        // turn, exactly once; the rest wait for that turn's end.
+        // The footer lands before the queued turn so the transcript
+        // reads: stop stated, then the redirect.
+        self.send_queued_item(cx);
+        // F-CORE-DOM-07: tell the workspace a turn just settled so
+        // throttled auto-naming has a signal to react to. Emitted
+        // after the transcript is persisted so a subscriber reading
+        // `transcript_for_resume()` in response sees this turn's
+        // reply included.
+        cx.emit(ChatEvent::TurnEnded);
     }
 
     /// F-CHAT-05: true exactly when the composer's own "offline" placeholder

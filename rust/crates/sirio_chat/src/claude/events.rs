@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use sirio_claude::message::{
-    CliMessage, ContentBlock, Delta, MessageLifecycle, ResultPayload, SystemPayload,
+    BlockEvent, CliMessage, ContentBlock, Delta, MessageLifecycle, ResultPayload, SystemPayload,
 };
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
@@ -96,6 +96,10 @@ pub(crate) struct Fold {
     /// The main-thread message a `message_start` opened and no
     /// `message_stop` has closed: `Some(None)` when it named no id.
     open_message: Option<Option<String>>,
+    /// The kind of each main-thread content block a `content_block_start` opened and no
+    /// `content_block_stop` has closed, by block index. A stop does not say what it closed,
+    /// and indexes restart in every message, so a message's start and end empty it.
+    open_blocks: HashMap<u64, String>,
     /// A text delta arrived while no message was open. The real CLI never
     /// does this; the fixture's `state_text` does, and its `assistant` line
     /// repeats the text. Cleared by every main-thread `assistant` line.
@@ -201,7 +205,7 @@ impl Fold {
                 | ChatEvent::PlanUpdate { .. } => self.last_row_was_chunk = false,
                 // A turn starts with neither flag set, whatever chunk its
                 // `result` itself carried (an error's text).
-                ChatEvent::TurnEnded { .. } => {
+                ChatEvent::TurnEnded { .. } | ChatEvent::TurnFailed { .. } => {
                     self.last_row_was_chunk = false;
                     self.orphan_text = false;
                 }
@@ -225,9 +229,27 @@ impl Fold {
                             self.streamed_ids.insert(id.clone());
                         }
                         self.open_message = Some(id);
+                        self.open_blocks.clear();
                     }
-                    Some(MessageLifecycle::Stop) => self.open_message = None,
+                    Some(MessageLifecycle::Stop) => {
+                        self.open_message = None;
+                        self.open_blocks.clear();
+                    }
                     Some(MessageLifecycle::Delta { .. }) | None => {}
+                }
+                match event.block() {
+                    Some(BlockEvent::Start { index, kind }) => {
+                        self.open_blocks.insert(index, kind);
+                    }
+                    // Only a thinking block's end is a thought's: a text or a tool block's
+                    // is news to nobody here, and a stop whose start was never seen is
+                    // not matched to anything.
+                    Some(BlockEvent::Stop { index }) => {
+                        if self.open_blocks.remove(&index).as_deref() == Some("thinking") {
+                            return vec![ChatEvent::ThoughtEnded];
+                        }
+                    }
+                    None => {}
                 }
                 match event.delta() {
                     Some(Delta::Text(text)) => {
@@ -902,6 +924,9 @@ impl Fold {
     fn apply_result(&mut self, result: ResultPayload) -> Vec<ChatEvent> {
         let mut events = Vec::new();
         let local_command_text = self.local_command_text.take();
+        let stop_reason = stop_reason_label(&result);
+        // The sentence of a turn that failed, which ends it in place of `TurnEnded`.
+        let mut failure = None;
         if result.is_error
             && let Some(text) = result.result.clone().filter(|text| !text.is_empty())
             && local_command_text.as_deref() != Some(text.as_str())
@@ -909,7 +934,11 @@ impl Fold {
             // The user must see why a turn failed. The alternative — a bare
             // footer saying "ended" — is the exact silent failure this
             // transcript is responsible for not producing.
-            events.push(ChatEvent::AgentMessageChunk(text));
+            if fails_the_turn(&result.subtype, &stop_reason) {
+                failure = Some(text);
+            } else {
+                events.push(ChatEvent::AgentMessageChunk(text));
+            }
         }
         let mut input_tokens = 0;
         let mut output_tokens = 0;
@@ -932,7 +961,6 @@ impl Fold {
                 cached_read_tokens: Some(cached_read_tokens),
             });
         }
-        let stop_reason = stop_reason_label(&result);
         self.last_result = Some(ResultSummary {
             stop_reason: stop_reason.clone(),
             is_error: result.is_error,
@@ -962,9 +990,25 @@ impl Fold {
         self.streamed_ids.clear();
         self.open_message = None;
         self.last_row_was_chunk = false;
-        events.push(ChatEvent::TurnEnded { stop_reason });
+        events.push(match failure {
+            Some(message) => ChatEvent::TurnFailed {
+                message,
+                stop_reason,
+            },
+            None => ChatEvent::TurnEnded { stop_reason },
+        });
         events
     }
+}
+
+/// Whether an error `result`, whose text is the CLI's own and not a local command's echo, is
+/// a turn that failed (`ChatEvent::TurnFailed`), as against one that ended on a limit.
+///
+/// The turn and budget limits keep the sentence as a reply and the turn's end: a resend would
+/// meet the same limit. So does a turn the user stopped, which the CLI reports as cancelled:
+/// stopping it is not a failure to offer a retry for.
+fn fails_the_turn(subtype: &str, stop_reason: &str) -> bool {
+    !matches!(subtype, "error_max_turns" | "error_max_budget_usd") && stop_reason != "Cancelled"
 }
 
 /// The stop reason, spelled the way `sirio_ui::chat::turn_end_label` reads
@@ -1975,18 +2019,18 @@ mod tests {
         // Guard: holds before the change. `apply_result` always ends the turn.
         assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
 
-        // Guard: holds before the change (every failed result was drawn). The
-        // remembered text ends with its turn: the same words as a later
-        // turn's failure are that turn's own error and are drawn.
+        // The remembered text ends with its turn: the same words as a later
+        // turn's failure are that turn's own error and are reported.
         let events = fold.apply(parse(json!({
             "type": "result", "subtype": "success", "is_error": true, "result": "the block"
         })));
-        assert!(events.iter().any(|e| matches!(e, ChatEvent::AgentMessageChunk(_))));
+        assert!(events.iter().any(
+            |e| matches!(e, ChatEvent::TurnFailed { message, .. } if message == "the block")
+        ));
     }
 
     #[test]
-    fn a_failing_result_with_other_words_is_still_drawn() {
-        // Guard: holds before the change. Every failed result was drawn.
+    fn a_failing_result_with_other_words_is_still_reported() {
         let mut fold = Fold::new();
         fold.apply(parse(local_command_line(
             "<synthetic>",
@@ -1996,7 +2040,9 @@ mod tests {
         let events = fold.apply(parse(json!({
             "type": "result", "subtype": "success", "is_error": true, "result": "a real failure"
         })));
-        assert!(events.contains(&ChatEvent::AgentMessageChunk("a real failure".into())));
+        assert!(events.iter().any(
+            |e| matches!(e, ChatEvent::TurnFailed { message, .. } if message == "a real failure")
+        ));
     }
 
     // Failure list for the MCP tool notices:
