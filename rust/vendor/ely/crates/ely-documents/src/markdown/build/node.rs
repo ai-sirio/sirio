@@ -166,6 +166,7 @@ impl Builder<'_> {
                     children,
                     position: range,
                     identifier,
+                    url,
                 }),
                 None => Node::Link(mdast::Link {
                     children,
@@ -178,6 +179,7 @@ impl Builder<'_> {
                     position: range,
                     alt: value,
                     identifier,
+                    url,
                 }),
                 None => Node::Image(mdast::Image {
                     position: range,

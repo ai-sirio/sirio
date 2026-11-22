@@ -134,10 +134,9 @@ pub enum Node {
     },
 }
 
-/// A tree read against its source and its link definitions.
+/// A tree read against its source.
 pub struct Reader<'a> {
     source: &'a str,
-    urls: HashMap<String, String>,
     /// Footnotes numbered by their first reference.
     notes: HashMap<String, usize>,
     /// Every heading, as `[toc]` lists them.
@@ -205,13 +204,9 @@ impl<'a> Reader<'a> {
     fn reading(source: &'a str, root: &mdast::Node, lines: bool) -> Self {
         let mut nodes = Vec::new();
         walk(root, &mut nodes);
-        let (mut urls, mut notes, mut headings) = (HashMap::new(), HashMap::new(), Vec::new());
+        let (mut notes, mut headings) = (HashMap::new(), Vec::new());
         for node in nodes {
             match node {
-                mdast::Node::Definition(definition) => {
-                    urls.entry(definition.identifier.clone())
-                        .or_insert_with(|| definition.url.clone());
-                }
                 mdast::Node::FootnoteReference(note) => {
                     let next = notes.len() + 1;
                     notes.entry(note.identifier.clone()).or_insert(next);
@@ -222,7 +217,6 @@ impl<'a> Reader<'a> {
         }
         let mut reader = Self {
             source,
-            urls,
             notes,
             headings: Vec::new(),
             lines: false,
@@ -251,11 +245,6 @@ impl<'a> Reader<'a> {
         let mut out = Vec::new();
         self.blocks(nodes, &mut out);
         out
-    }
-
-    /// A reference's address; none when no definition is called `identifier`.
-    fn url(&self, identifier: &str) -> Option<String> {
-        self.urls.get(identifier).cloned()
     }
 
     /// `node`'s blocks, as the drawing reads them.
@@ -428,17 +417,13 @@ impl<'a> Reader<'a> {
             }
             mdast::Node::Image(_) | mdast::Node::ImageReference(_) => {
                 let (alt_text, url) = match node {
-                    mdast::Node::Image(image) => (image.alt.clone(), Some(image.url.clone())),
-                    mdast::Node::ImageReference(image) => {
-                        (image.alt.clone(), self.url(&image.identifier))
-                    }
+                    mdast::Node::Image(image) => (image.alt.clone(), image.url.clone()),
+                    mdast::Node::ImageReference(image) => (image.alt.clone(), image.url.clone()),
                     _ => unreachable!("matched as an image"),
                 };
-                // A picture whose definition is missing is its alt text.
-                let url = match url {
-                    Some(url) if !alt => url,
-                    _ => return out.text(&alt_text),
-                };
+                if alt {
+                    return out.text(&alt_text);
+                }
                 let index = images.len();
                 images.push(Picture {
                     alt: alt_text,
@@ -464,16 +449,10 @@ impl<'a> Reader<'a> {
                     format!(" href=\"{}\"{tail}", quoted(&link.url)),
                 )
             }
-            mdast::Node::LinkReference(link) => match self.url(&link.identifier) {
-                Some(url) => (&link.children, "a", format!(" href=\"{}\"", quoted(&url))),
-                // No definition: the text stands without its link.
-                None => {
-                    for child in &link.children {
-                        self.write_into(child, out, images, (verbatim, table, alt));
-                    }
-                    return;
-                }
-            },
+            mdast::Node::LinkReference(link) => {
+                let url = quoted(&link.url);
+                (&link.children, "a", format!(" href=\"{url}\""))
+            }
             other => unreachable!("{other:?} is no inline outside MDX"),
         };
         // A container is the element GitHub writes.

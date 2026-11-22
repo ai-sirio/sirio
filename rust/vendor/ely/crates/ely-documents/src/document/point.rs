@@ -372,18 +372,10 @@ fn target_at(text: &str, at: usize) -> DocumentTarget {
     let around: Vec<&mdast::Node> = (nodes.iter().copied())
         .filter(|node| span(node).contains(&at))
         .collect();
-    let defined = |identifier: &str| {
-        nodes.iter().find_map(|node| match node {
-            mdast::Node::Definition(definition) if definition.identifier == identifier => {
-                Some(definition.url.clone())
-            }
-            _ => None,
-        })
-    };
     let written = || {
         around.iter().rev().find_map(|node| match node {
             mdast::Node::Link(link) => Some(link.url.clone()),
-            mdast::Node::LinkReference(link) => defined(&link.identifier),
+            mdast::Node::LinkReference(link) => Some(link.url.clone()),
             _ => None,
         })
     };
@@ -403,7 +395,7 @@ fn target_at(text: &str, at: usize) -> DocumentTarget {
         Some((url, _)) => Some(url.clone()),
         None => picture.and_then(|node| match node {
             mdast::Node::Image(picture) => Some(picture.url.clone()),
-            mdast::Node::ImageReference(picture) => defined(&picture.identifier),
+            mdast::Node::ImageReference(picture) => Some(picture.url.clone()),
             _ => None,
         }),
     };
@@ -457,4 +449,19 @@ fn drawn_link(nodes: &[&Node], text: &str, at: usize) -> Option<Option<String>> 
     let drawn = inline.drawn_at(text, at)?;
     let link = (inline.links.iter()).find(|(range, _)| range.contains(&drawn));
     Some(link.map(|(_, url)| url.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_at;
+
+    #[test]
+    fn a_pressed_reference_gives_the_definition_pulldown_chose() {
+        // `ı` and `i` are one label to `identifier` and two to pulldown-cmark, which resolves `b`.
+        let text = "[x][ı] [ı]\n\n[i]: a\n[ı]: b\n";
+        // On the first link's text, on its label (not drawn text), on the second link's text.
+        for at in [1, 4, 9] {
+            assert_eq!(target_at(text, at).link.as_deref(), Some("b"), "byte {at}");
+        }
+    }
 }

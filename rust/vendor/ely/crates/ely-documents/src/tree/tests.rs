@@ -70,6 +70,52 @@ fn an_image_splits_its_paragraph_and_references_resolve() {
 }
 
 #[test]
+fn a_reference_goes_to_the_definition_pulldown_chose() {
+    use pulldown_cmark::{Event, Parser, Tag};
+    // pulldown-cmark matches labels by Unicode case folding and takes the first definition that
+    // matches. `identifier` folds more (`ı` is `i`, `ﬃ` is `FFI`), so reading the address back by it
+    // found an earlier definition pulldown-cmark does not count as the same label.
+    let addresses = |source: &str| -> Vec<String> {
+        parse(source)
+            .iter()
+            .flat_map(|node| match node {
+                Node::Paragraph(text) => text.links.iter().map(|(_, url)| url.clone()).collect(),
+                Node::Image { url, .. } => vec![url.clone()],
+                other => panic!("not read here: {other:?}"),
+            })
+            .collect()
+    };
+    for (source, chose) in [
+        ("[ı]\n\n[i]: https://a.example\n[ı]: https://b.example\n", "https://b.example"),
+        ("[x][ı]\n\n[i]: https://a.example\n[ı]: https://b.example\n", "https://b.example"),
+        ("[ı][]\n\n[i]: https://a.example\n[ı]: https://b.example\n", "https://b.example"),
+        ("![ı]\n\n[i]: a.png\n[ı]: b.png\n", "b.png"),
+        ("[FFI]\n\n[ﬃ]: https://a.example\n[FFI]: https://b.example\n", "https://b.example"),
+        ("[ﬃ]\n\n[FFI]: https://a.example\n[ﬃ]: https://b.example\n", "https://b.example"),
+        // Labels pulldown-cmark folds together too: the first definition is the one, as before.
+        ("[a]\n\n[A]: https://a.example\n[a]: https://b.example\n", "https://a.example"),
+        ("[ß]\n\n[SS]: https://a.example\n[ß]: https://b.example\n", "https://a.example"),
+        ("[ς]\n\n[σ]: https://a.example\n[ς]: https://b.example\n", "https://a.example"),
+        (
+            "[\u{212a}]\n\n[k]: https://a.example\n[\u{212a}]: https://b.example\n",
+            "https://a.example",
+        ),
+    ] {
+        let events = Parser::new_ext(source, crate::markdown_options());
+        let pulldown: Vec<String> = events
+            .filter_map(|event| match event {
+                Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                    Some(dest_url.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pulldown, [chose], "pulldown-cmark's choice for {source:?}");
+        assert_eq!(addresses(source), [chose], "{source:?}");
+    }
+}
+
+#[test]
 fn a_soft_break_draws_as_a_line() {
     for source in [
         "one\ntwo  \nthree",
@@ -414,8 +460,8 @@ fn a_definition_right_after_a_nested_list_builds_as_the_events_say() {
 
 #[test]
 fn a_definition_right_after_a_list_still_resolves_its_references() {
-    // The definition stays in the tree: the paragraph it opened, the list before it, a list inside
-    // it and a quote all reach it.
+    // References around a definition right after a list resolve to it: in the paragraph it opened,
+    // in the list before it, in a list inside it and in a quote.
     for source in [
         "- a\n\n[a]: https://e.example\nsee [a]",
         "- see [a]\n\n[a]: https://e.example\nx",

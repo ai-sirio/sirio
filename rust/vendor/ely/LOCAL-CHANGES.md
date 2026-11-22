@@ -69,11 +69,13 @@ describes is a review by hand.
 - `crates/ely-core/src/typography/effects.rs`
 - `crates/ely-core/src/typography/fit.rs`
 - `crates/ely-documents/Cargo.toml`
+- `crates/ely-documents/src/document/point.rs`
 - `crates/ely-documents/src/lib.rs`
 - `crates/ely-documents/src/markdown.rs`
 - `crates/ely-documents/src/markdown/build.rs`
 - `crates/ely-documents/src/markdown/build/node.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
+- `crates/ely-documents/src/markdown/mdast.rs`
 - `crates/ely-documents/src/markdown/shape.rs`
 - `crates/ely-documents/src/markdown/tex.rs`
 - `crates/ely-documents/src/math.rs`
@@ -1089,6 +1091,42 @@ covers an item too. On `ee59579e1` five of these seven fail (the three in `tree/
 two of the build tests on their assertions) and the other two, which are guards, pass. A rule that never makes a
 list a container turns four of the build tests red, the guards among them; the old rule (every list that covers
 the definition) turns the same five red as before.
+
+## ely-documents the address a reference resolved to (L15)
+
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
+the entries do not collide.
+
+Paths: `ely-documents` `src/markdown/mdast.rs`, `src/markdown/build/node.rs`, `src/tree/mod.rs` and
+`src/document/point.rs` (tests in `src/tree/tests.rs` and, for `point.rs`, in the file). Issue #840, its second
+part: a reference could link to the wrong definition, without a panic. pulldown-cmark matches reference labels
+by Unicode case folding and takes the first definition that matches. `mdast::identifier` folds more (`ı` is `i`,
+`ﬃ` is `FFI`), and the reader found the address by identifier, the first definition with the same one: `[ı]` over
+`[i]: a` and `[ı]: b` is `b` in pulldown-cmark and was drawn as `a`. The link or picture under the caret
+(`document/point.rs`) did the same.
+
+What: `mdast::LinkReference` and `mdast::ImageReference` carry `url`, the `dest_url` pulldown-cmark resolved on the
+`Tag::Link` or `Tag::Image` (`Kind::Link` and `Kind::Image` already had it; `node` hands it on). The reader and
+`point.rs` read it. The reader's map of definitions and `Reader::url` are gone, and with them what hung on a
+lookup that could miss: the `expect` in `Reader::url` and, where L13 is in, the `Option` L13 made of it and the
+fallbacks at its two call sites (a picture without a definition draws its alt text, a link its text), which
+cannot be reached once the address comes from the node. `point.rs`'s search of the definitions by identifier is
+gone too. Where both sides fold a label alike nothing changes: the address pulldown-cmark resolved is the first
+definition's, which the map gave.
+
+Left unread: after this, no code in the crate reads `Definition.url`, none outside tests reads
+`Definition.identifier`, and nothing reads the references' `identifier`. Where L13 is in, the `id` it adds to
+`Kind::Link` and `Kind::Image` is still read, but only to build that unread `identifier`. They are `pub` or still
+set, so no warning fires. They stay: they are the
+tree's public shape, and a later change can drop them if no host needs them.
+
+Proof: `tree::tests::a_reference_goes_to_the_definition_pulldown_chose`: ten sources (link, full, collapsed and
+picture references), each asserting first which address pulldown-cmark's own events resolve, then which Ely draws.
+The six with `ı` or `ﬃ` fail before the change (Ely drew the first definition's address); the four whose labels
+both fold alike (`a` and `A`, `ß` and `SS`, `ς` and `σ`, the Kelvin sign and `k`) pass either way.
+`document::point::tests::a_pressed_reference_gives_the_definition_pulldown_chose`: `target_at` on the same
+`[ı]` over `[i]: a` and `[ı]: b`, pressed on a link's text, on a reference's label and on a shortcut link, gives
+`b`; before the change it gave `a`.
 
 ## The facade and the switch (Task 8)
 
