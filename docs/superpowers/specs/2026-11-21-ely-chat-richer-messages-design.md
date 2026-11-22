@@ -198,10 +198,14 @@ text, as in Ely, including inside an open fence.
 
 **What reads the received text, never the revealed one:**
 - `document`: Select All + Copy, and the transcript copy path;
-- the control-socket rows (`transcriptText`, `transcriptTextRows`, `transcript`);
-- the file-link memo and `transcriptLinks`.
+- the control-socket rows `transcriptText` and `transcript`;
+- the file-link memo, which only a build of the received text fills. The revealed tail only looks links up in it and never stats a path.
 
-A drag selection copies what it covers on screen.
+`transcriptTextRows` and `transcriptLinks` report what the last frame painted, so they show the revealed text. They also leave out culled text. Neither one is the readout that the anti-goal protects; `transcriptText` is.
+
+A drag selection copies what it covers on screen. While a reply is live, that is the text of the blocks last drawn. The caret is drawn on the built tree and is never part of the parsed source, so it cannot change how the text parses, and no copy contains it.
+
+A reply is live only while it is the last entry that is not a notice. A tool call, a thought, a permission request, an error or a user message pushed after it finishes the reply.
 
 **When it ends.** On `TurnEnded`, a failure, Stop, or a lost client, the reply is no longer live:
 - the next frame draws `document` whole, with no caret and no pacing;
