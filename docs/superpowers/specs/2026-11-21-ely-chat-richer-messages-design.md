@@ -227,6 +227,12 @@ A reply that is not live (stored, restored, ended) never reveals.
   request) keeps today's events, whatever its subtype and text: the real CLI answers an interrupt with
   `error_during_execution`, `is_error: true` and no text. The worker knows it sent the interrupt; no string in the
   result decides it. (Controller's call during Task 5's review, 2026-11-22.)
+
+  **A turn nobody prompted is not a failed turn either.** An `is_error` result that closes a turn the CLI started on
+  its own (a background agent's wake, no prompt of Sirio's open) keeps today's events: there is no prompt to retry.
+  The worker counts the prompts it wrote against the results that closed them, and realigns on the result's
+  `queued_turn_count` when the result carries it, since the CLI can fold queued prompts into one turn. (Controller's
+  call, 2026-11-23.)
 - **ACP emits it** for a `session/prompt` RPC error that is not auth-required. `sirio_acp` no longer turns that error into `TransportError`, and the client stays.
 
 `TransportError` keeps its other uses unchanged: auth-required over ACP (`sirio_acp/src/lib.rs:1074-1082`), Claude's
