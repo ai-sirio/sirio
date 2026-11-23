@@ -283,6 +283,14 @@ which chooses among these:
 - It sits on `LaunchSpec` and not on `ChatClient`, because the case that needs it is the one where the client is gone. The chat keeps `agent_launch` across a loss.
 - The UI asks it, and whether a session id is known, to choose between the second and third rows.
 
+**As built (Task 6, controller's calls, 2026-11-23).**
+- **Stop clears `last_prompt`.** A stopped turn has ended; there is nothing to resend.
+- **A `TurnFailed` while no turn of ours streams** (ACP's error answer to a prompt that Stop cancelled) is the late end of a stopped turn: no error row, no hold. A `TurnEnded` in the same position clears nothing and releases nothing.
+- **The hold lifts at the send**, the Retry's or the user's; the "Waiting" line goes with it. The queue still drains only at that turn's `TurnEnded`, and a second failure holds it again.
+- **When no Retry is left** (the prompt went back to the composer, or the row was retired), a held queue's line reads "Waiting: send a message."
+- **Only the newest failed turn offers Retry.** Sending a new prompt retires Retry on older failed-turn rows (they keep OK), so a stale Retry cannot resend the wrong prompt. Listed as V8.
+- **A plain relaunch that connects clears `last_prompt`** when it neither resends nor hands the prompt back (e.g. a resume that hit AuthRequired), so a later idle death has nothing to resend.
+
 **Rate-limited turns** are handled in §5.4: the countdown card takes the error row's place.
 
 ### 5.4 Usage limit reached (native Claude)
@@ -346,6 +354,7 @@ All of these are added to `served.rs`'s debug list only.
 | V5 | Retry after a lost connection: Claude resumes the conversation and resends. ACP restarts and puts the message back in the composer with a note. |
 | V6 | Claude usage limit reached: a card with a countdown, then "Try again" or "Usage limit lifted". |
 | V7 | After a failed turn, queued messages wait, with the line "Waiting: press Retry or send a message." under the queue. A successful Retry or send releases them. Today a failed Claude turn still sends the next queued message. |
+| V8 | Only the newest failed turn keeps its Retry button; sending a new prompt leaves older failed-turn rows with OK only. |
 | — | Not changed, by my call: the error row's look (Sirio's row with Retry, not Ely's `ErrorMessage`); the thought header. |
 
 ## 7. Testing
