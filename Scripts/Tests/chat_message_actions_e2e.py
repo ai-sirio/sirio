@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chat_e2e_harness import (  # noqa: E402
     E, ClipboardOwner, Fail, RpcError, World, assistant_rows, brief, byte_len, clipboard_get, error_row, kill_stub,
-    last_reply, main, move, plain_by_row, press, row_with_text, rows_of, scenario, teardown, user_texts, x,
+    last_reply, main, move, plain_by_row, press, row_with_text, rows_of, scenario, scroll, teardown, user_texts, x,
 )
 
 # ---------------------------------------------------------------- what a row and the chat read as
@@ -82,7 +82,7 @@ def wait_bounds(w, index, name, timeout=8):
         if found:
             return r, found
         if time.time() > deadline:
-            raise Fail(f"row {index} drew no {name} button within {timeout} s (row: {brief(r)}; "
+            raise Fail(f"row {index} drew no {name} within {timeout} s (row: {brief(r)}; "
                        f"columns: { {k: v for k, v in r['rows'][index].items() if k.startswith('action')} })")
         time.sleep(0.15)
 
@@ -364,8 +364,13 @@ def scenario_rows(scn):
                  "Select All and Copy through the menu put the transcript text of the readout on the clipboard",
                  f"clipboard {len(copied)} chars, transcriptText {len(selected['transcript_text'])} chars", read=selected)
         reply_plain = [plain[i] for i, _ in assistant_rows(selected)]
-        scn.need(all(text and text in copied for text in reply_plain) and "Quote" not in copied and "Copy" not in copied,
-                 "the copied text holds every reply's text and none of the action row's own labels",
+        # Copy and Quote are icons; Continue is the one button of the row with a label, and the stopped reply draws it now.
+        scn.need("continue" in actions_of(selected["rows"][last_reply(selected)[0]]),
+                 "the stopped reply draws Continue while it is selected and copied (so its label could leak into the copy)",
+                 f"actions {selected['rows'][last_reply(selected)[0]].get('actions')!r}", read=selected)
+        scn.need(all(text and text in copied for text in reply_plain)
+                 and not any(label in copied for label in ("Continue", "Quote", "Copy")),
+                 "the copied text holds every reply's text and none of the action row's own labels (Continue, Quote, Copy)",
                  f"replies {[t[:20] for t in reply_plain]}", read=selected)
         # Ctrl+C copies the selection too
         owner = ClipboardOwner("sentinel before ctrl+c")
@@ -792,7 +797,11 @@ def scenario_claude_stop(scn):
 
 QUOTED = "A reply to quote.\n\nIts second paragraph says so and ends here."
 QUOTED_PATH = "Look at @src/main.rs for the entry point."
+# A reply to select a part of: a fenced block, so that its text is monospace and a character is a fixed number of pixels wide (the
+# painted row of a code block is as wide as its text, 22 characters here). What the drag covers is `PICKED`, a strict part of it.
+SELECTABLE_REPLY = "```\nalpha beta gamma delta\n```"
 SELECTABLE = "alpha beta gamma delta"
+PICKED = "beta gamma"
 CLOSE_FROM_RIGHT = 14  # px: the quote card's cross, from the right end of `composerQuoteBounds` (Ely's cross has no selector)
 
 
@@ -854,32 +863,38 @@ def scenario_quote(scn):
                  "the stub heard the quote as a `> ` block, an empty line and the typed text; the composer's quote is spent",
                  f"{w.prompts()[-1]!r}", detail={"prompt": w.prompts()[-1][1]}, read=after)
         index, user = rows_of(after, "user")[-1]
-        scn.need(user.get("quote") == QUOTED and user["text"] == expected,
-                 "the user row of the sent prompt reads its quote back (quote column) next to the whole text it sent",
-                 f"quote {user.get('quote')!r}", read=after)
+        after, card = wait_bounds(w, index, "quoteCard")
+        user = after["rows"][index]
+        scn.need(user.get("quote") == QUOTED and user["text"] == expected and card[2] > 0 and card[3] > 0,
+                 "the user row of the sent prompt reads its quote back (quote column) and has the quote card painted (actionBounds.quoteCard "
+                 "of positive size), next to the whole text it sent",
+                 f"quote {user.get('quote')!r}, card {card}", detail={"quoteCard": card}, read=after)
         w.capture("quote-sent-row")
-        # ---- Quote selection through the context menu
-        r = reply_turn(w, "replyfile", SELECTABLE)
+        # ---- Quote selection through the context menu: a part of a reply, not the reply
+        r = reply_turn(w, "replyfile", SELECTABLE_REPLY)
         park(w)
         r = w.read()
-        found = next((p for p in r["painted"] if p["text"] == SELECTABLE), None)
-        if found is None:
-            raise Fail(f"the reply is not painted as one text row: {[p['text'][:30] for p in r['painted']]}")
-        left, top, width, height = (float(found[k]) for k in ("x", "y", "w", "h"))
-        middle_y = top + height / 2
-        move(w.window, left + 1, middle_y)
+        found = [p for p in r["painted"] if p["text"] == SELECTABLE]
+        if not found:
+            raise Fail(f"the reply's code block is not painted as one text row: {[p['text'][:30] for p in r['painted']]}")
+        left, top, width, height = (float(found[-1][k]) for k in ("x", "y", "w", "h"))
+        advance = width / len(SELECTABLE)  # a monospace row is as wide as its characters
+        first = SELECTABLE.index(PICKED)
+        start_x, end_x, middle_y = left + first * advance, left + (first + len(PICKED)) * advance, top + height / 2
+        move(w.window, start_x, middle_y)
         time.sleep(0.1)
         x("mousedown", "1")
         for step in range(1, 9):
-            move(w.window, left + 1 + (width + 10) * step / 8, middle_y)
+            move(w.window, start_x + (end_x - start_x) * step / 8, middle_y)
             time.sleep(0.03)
         x("mouseup", "1")
         time.sleep(0.4)
-        menu_item(w, (int(left + width / 2) - 40, int(middle_y)), MENU_QUOTE_SELECTION)
+        menu_item(w, (int((start_x + end_x) / 2), int(middle_y)), MENU_QUOTE_SELECTION)
         r = w.wait("the selection is quoted", lambda r: "composerQuote" in r, timeout=8)
-        scn.need(r["composerQuote"] == SELECTABLE,
-                 "Quote selection in the transcript menu (right click, then the item) quotes the selected text",
-                 f"composerQuote {r['composerQuote']!r}", read=r)
+        scn.need(r["composerQuote"] == PICKED and PICKED not in (SELECTABLE, SELECTABLE_REPLY) and len(PICKED) < len(SELECTABLE),
+                 "Quote selection in the transcript menu (right click, then the item) quotes the selected part of the reply, "
+                 "not the whole message",
+                 f"composerQuote {r['composerQuote']!r}, the reply's text {SELECTABLE!r}", read=r)
         # a second quote replaces the first
         r = quote_reply(w, QUOTED)
         scn.need(r["composerQuote"] == QUOTED, "a second quote replaces the first one", f"composerQuote {r['composerQuote']!r}", read=r)
@@ -933,10 +948,15 @@ def scenario_quote(scn):
         w.start()
         w.reopen_chat()
         r = w.read()
-        row = next((row for _, row in rows_of(r, "user") if row.get("text") == expected), None)
-        scn.need(row is not None and row.get("quote") == QUOTED,
-                 "after an app relaunch the restored user row still shows its quote",
-                 f"user rows {[(u.get('text', '')[:30], u.get('quote', '')[:20]) for _, u in rows_of(r, 'user')]}", read=r)
+        at = next((i for i, row in rows_of(r, "user") if row.get("text") == expected), None)
+        if at is None:
+            raise Fail(f"the restored transcript has no user row of the quoted prompt: {brief(r)}")
+        scroll(w, -10_000_000)  # the row is far from the end of the restored transcript: it is drawn once the list is at its top
+        r, card = wait_bounds(w, at, "quoteCard")
+        row = r["rows"][at]
+        scn.need(row.get("quote") == QUOTED and card[2] > 0 and card[3] > 0,
+                 "after an app relaunch the restored user row still shows its quote: the quote column and the quote card painted",
+                 f"quote {row.get('quote')!r}, card {card}", detail={"quoteCard": card}, read=r)
         w.capture("quote-restored")
 
         # ---- a hand-back refills the quote and the field (the ACP agent is lost with the message)
