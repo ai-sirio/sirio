@@ -36,6 +36,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use ely_gpui_component::documents::{MarkdownBlock, markdown_options};
@@ -116,6 +117,54 @@ fn merged(a: Option<(usize, usize)>, b: Option<(usize, usize)>) -> Option<(usize
 fn label_key(label: &str) -> String {
     let words: Vec<String> = label.split_whitespace().map(str::to_ascii_lowercase).collect();
     words.join(" ")
+}
+
+/// A panic a test makes the stream's own passes over a text raise: the scan of what Ely read
+/// ([`Scan::of`]) and the pass that finds where the `$$` runs may pair ([`not_prose`]). Both run
+/// pulldown-cmark on text that no guard has parsed yet, so a panic in it unwinds from there the
+/// way one left in the vendored parser would. Compiled into tests only.
+#[cfg(test)]
+pub(crate) mod scan_fault {
+    use std::cell::Cell;
+
+    thread_local!(static ARMED: Cell<Option<usize>> = const { Cell::new(None) });
+    thread_local!(static STRIKES: Cell<usize> = const { Cell::new(0) });
+
+    /// While it lives, the passes over a text on this thread panic, from the one after the first
+    /// `skip` of them on, and their count begins again from zero.
+    pub(crate) struct ScanFault(());
+
+    /// The first `skip` passes go through; every one after them panics.
+    pub(crate) fn on_after(skip: usize) -> ScanFault {
+        ARMED.with(|armed| armed.set(Some(skip)));
+        STRIKES.with(|strikes| strikes.set(0));
+        ScanFault(())
+    }
+
+    /// How many passes were made since the fault was set: the ones that went through, the one
+    /// that panicked, and every one made after it.
+    pub(crate) fn strikes() -> usize {
+        STRIKES.with(Cell::get)
+    }
+
+    impl Drop for ScanFault {
+        fn drop(&mut self) {
+            ARMED.with(|armed| armed.set(None));
+        }
+    }
+
+    pub(super) fn strike() {
+        let Some(skip) = ARMED.with(Cell::get) else {
+            return;
+        };
+        let made = STRIKES.with(|strikes| {
+            strikes.set(strikes.get() + 1);
+            strikes.get()
+        });
+        if made > skip {
+            panic!("a panic injected into a pass over a streamed text");
+        }
+    }
 }
 
 impl Brackets {
@@ -233,6 +282,8 @@ struct Scan {
 
 impl Scan {
     fn of(read: &str) -> Self {
+        #[cfg(test)]
+        scan_fault::strike();
         let mut found = Self::default();
         let mut depth = 0usize;
         let mut events = Parser::new_ext(read, markdown_options()).into_offset_iter();
@@ -394,6 +445,8 @@ fn lone_crs_as_lf(text: &str) -> Cow<'_, str> {
 /// All but prose, as the text reads without math: code, HTML, link targets (Ely's
 /// `flow::not_prose`, which `$$` runs are not paired inside).
 fn not_prose(text: &str) -> Vec<Range<usize>> {
+    #[cfg(test)]
+    scan_fault::strike();
     let mut held = Vec::new();
     let (mut at, mut quiet) = (0, 0usize);
     let mut links = Vec::new();
@@ -540,6 +593,11 @@ impl StreamingDoc {
     /// reply to parse, and the wait that follows an analysis that froze nothing (`hold_until`).
     /// The segments and the cut are left as they were then, which is a state the next look
     /// starts from: the segments tile the text up to the cut.
+    ///
+    /// Everything it looks at is inside one guard. Ely's reader is guarded where it parses, but
+    /// the stream parses with pulldown-cmark itself, to scan the tail and to find where `$$`
+    /// runs pair, and those are the first parses of a text that nothing has guarded yet: a panic
+    /// in any of them (or in what slices by what they found) answers as one in the reader does.
     pub(crate) fn update(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
         if !text.starts_with(&self.frozen) {
             *self = Self::new();
@@ -550,6 +608,15 @@ impl StreamingDoc {
         if self.whole || text.len() < self.hold_until {
             return self.build_whole(text, policy);
         }
+        match catch_unwind(AssertUnwindSafe(|| self.update_in_parts(text, policy))) {
+            Ok(document) => document,
+            Err(_) => self.plain(text),
+        }
+    }
+
+    /// [`update`](Self::update) once the stream has decided to look at the reply: the tail is read
+    /// and scanned before it is built, and what can freeze does.
+    fn update_in_parts(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
         let (read, scan, brackets, depth, math) = loop {
             let tail = &text[self.cut..];
             let Some(read) = read_of(tail) else {

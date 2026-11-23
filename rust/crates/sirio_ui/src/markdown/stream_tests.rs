@@ -915,6 +915,61 @@ fn a_label_longer_than_the_scan_reaches_is_still_a_mention() {
     }
 }
 
+/// A panic in what the stream itself scans (the pulldown-cmark pass over what Ely read, and the
+/// one that finds where `$$` runs pair), whichever update path reaches it and whichever block it
+/// freezes, answers as a panic in the reader does: the text as plain text, marked, with no later
+/// pass over any text. Those passes run before Ely's guard has parsed the text, so nothing but the
+/// stream's own guard stands between a panic in them and `Chat::handle_event`.
+#[test]
+fn a_panic_in_a_scan_ends_the_streams_parsing() {
+    // The first reads the tail first and freezes `alpha`. The second takes `update`'s other way to
+    // look, which parses the tail before it scans (a `\(` pair with inline HTML in the reply). The
+    // third has `$$` runs, the only text that makes the stream look for where they pair. Each has
+    // the passes the stream makes of it: the fault must land in every one.
+    let texts = [
+        ("alpha\n\nbeta\n\ngamma", "alpha\n\nbeta\n\ngamma delta\n\nepsilon", 2),
+        (
+            "alpha <i>x</i> \\(a\\)\n\nbeta\n\ngamma",
+            "alpha <i>x</i> \\(a\\)\n\nbeta\n\ngamma delta\n\nepsilon",
+            3,
+        ),
+        (
+            "alpha\n\n$$\nx\n$$\n\nbeta\n\ngamma",
+            "alpha\n\n$$\nx\n$$\n\nbeta\n\ngamma delta\n\nepsilon",
+            4,
+        ),
+    ];
+    for (text, more, places) in texts {
+        let mut struck = 0;
+        for skip in 0..8 {
+            let mut stream = StreamingDoc::new();
+            let fault = scan_fault::on_after(skip);
+            let doc = stream.update(text, &mut chat());
+            let passes = scan_fault::strikes();
+            if !doc.reader_panicked {
+                // The fault was after every pass this update makes.
+                assert_same(&doc, &build(text, &mut chat()), &format!("{text:?} skip {skip}"));
+                continue;
+            }
+            struck += 1;
+            assert_eq!(passes, skip + 1, "{text:?} skip {skip}: a pass was made after the panic");
+            assert_eq!(doc.text.text, text, "{text:?} skip {skip}");
+            assert_eq!((doc.nodes.len(), doc.headings.len()), (1, 0), "{text:?} skip {skip}");
+            assert!(stream.is_whole(), "{text:?} skip {skip}: the stream goes on in parts");
+            let doc = stream.update(more, &mut chat());
+            assert!(doc.reader_panicked, "{text:?} skip {skip}: the next update scanned again");
+            assert_eq!(doc.text.text, more, "{text:?} skip {skip}");
+            assert_eq!(
+                scan_fault::strikes(),
+                passes,
+                "{text:?} skip {skip}: the next update made a pass"
+            );
+            drop(fault);
+        }
+        assert!(struck >= places, "{text:?}: the fault landed in {struck} places of an update");
+    }
+}
+
 /// A label that goes on over a block quote's lines: pulldown drops the `>` of each line from it
 /// and reads "one two", so the stream, which compares the label as written ("one > two"), must
 /// not tell the two apart. Written in a definition here: the definition arrives late, in a quote,
