@@ -69,6 +69,7 @@ mod mode_cycle;
 mod prompt_history;
 pub use prompt_history::PromptRecord;
 mod question_dock;
+mod quote;
 mod retry;
 mod reveal;
 mod visible_text;
