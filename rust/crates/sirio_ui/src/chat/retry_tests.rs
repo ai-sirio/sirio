@@ -9,7 +9,10 @@
 //! - an agent that died idle is made to resend a prompt that was answered long ago;
 //! - a resume that the CLI refused still sends the prompt, into a conversation without context;
 //! - the composer's own draft is overwritten by the refill, or the refill drops the mentions;
-//! - a prompt sent after a failure leaves the old row's Retry resending the wrong text.
+//! - a prompt sent after a failure leaves the old row's Retry resending the wrong text;
+//! - a failure that arrives when no turn streams is dropped whatever came before it, though only a
+//!   Stop's pending end makes it the late end of a stopped turn: a real failure goes missing after
+//!   a turn end taken as the prompt's (a Stop and a quick resend, a turn the CLI started).
 use super::tests::{
     CHAT_FIXTURE, TempDir, pump_chat_until, pump_chat_until_within, refresh_frame,
 };
@@ -868,6 +871,29 @@ async fn a_stops_end_settles_the_pending_flag_for_a_later_failure(cx: &mut TestA
         "turnFailed",
         "a failure after the Stop's end is a failed turn"
     );
+    chat.read_with(&cx.cx, |chat, _| assert!(chat.queue_held, "and holds the queue"));
+}
+
+/// Stop and an at-once resend: the late end of the stopped turn is taken as the resent prompt's end
+/// (it is the first end to arrive, and a turn of ours streams), which settles the Stop's pending
+/// end. The resent prompt's own failure then arrives with nothing streaming, and it is shown: the
+/// flag that dropped the stopped turn's answer is gone with the end that settled it.
+#[gpui::test]
+async fn a_failure_after_a_stop_and_a_resend_is_shown(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent stop me");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    chat.update(cx, |chat, cx| chat.cancel_turn(cx));
+    send(&chat, cx, "silent again");
+    wait_for_prompts(&chat, cx, &logs, 2);
+    event(&chat, cx, turn_ended());
+    assert!(!chat.read_with(&cx.cx, |chat, _| chat.streaming), "taken as the resent prompt's end");
+
+    event(&chat, cx, turn_failed());
+
+    assert_eq!(readout(&chat, cx).0, "turnFailed", "the resent prompt's failure is shown");
     chat.read_with(&cx.cx, |chat, _| assert!(chat.queue_held, "and holds the queue"));
 }
 
