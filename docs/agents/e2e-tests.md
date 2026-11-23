@@ -655,19 +655,24 @@ Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "
 # `composerRow`). Each scenario is a fresh Sirio under `env -i` with its own HOME, XDG tree, database, socket and
 # host root; ~/.config/mise/config.toml must not change.
 #   stream             a 40 KiB reply (SHOWCASE, then parts that freeze) in 200 chunks 20 ms apart: while live,
-#                      0 < shownBytes < len(text) and it only grows (so the reply took the stream path: a full build
-#                      has no reveal), transcriptText already holds the last marker the painted rows do not, and at
-#                      the turn's end live is false with shownBytes the whole text; the same bytes in one chunk give
-#                      the same plain text. A reply selected whole and copied through the transcript menu while it
+#                      0 < shownBytes < len(text), it only grows and is still behind past 8 KiB (only a reply of
+#                      frozen blocks can be: one the stream cannot freeze stops revealing at its 7 KiB tail budget),
+#                      transcriptText holds the newest marker even where the reveal has not reached it, and at the
+#                      turn's end live is false with shownBytes the whole text; the same bytes in one chunk give the
+#                      same plain text. A reply selected whole and copied through the transcript menu while it
 #                      streams (`showcase slow`, 8 s), with the transcript scrolled to its top so that the live reply is
-#                      not drawn and the reveal stands still while the text arrives, puts text of the live reply on the
-#                      clipboard that is past the revealed byte (shownBytes read right after Select All). SHOWCASE
-#                      eight times over (`showcase x8`, which cannot freeze: every copy cites [^1] again) reveals for
-#                      its first KiB and then, past the 7 KiB tail budget, draws as it arrives (shownBytes the whole
-#                      text, live still true) to its end: the documented plain behaviour.
-#   stop               Stop in mid-reveal: live false, shownBytes the whole text, no error row, nothing held, the
-#                      text equals the same bytes in one chunk; the agent dying right after has no prompt to resend
-#                      (Retry only relaunches)
+#                      not drawn and the reveal stands still (shownBytes is read again after the Copy and has not
+#                      moved) while the text arrives, puts text of the live reply on the clipboard that is past the
+#                      revealed byte (shownBytes read right after Select All). SHOWCASE eight times over (`showcase x8`,
+#                      every copy cites [^1] again) is read too: its reveal either keeps behind the text or, past the
+#                      7 KiB tail budget, hands over to drawing as it arrives (shownBytes the whole text, live still
+#                      true), depending on when the frames fall; the check is what holds either way (the reveal only
+#                      grows and never passes the text, live ends false, the text equals the one-chunk reply's) and the
+#                      artifact records which it was.
+#   stop               Stop in mid-reveal: shownBytes is behind the text at the read before the Stop, and at the first
+#                      read after it live is false and shownBytes the whole text; no error row, nothing held, the text
+#                      equals the same bytes in one chunk; the agent killed right after has nothing to resend (Retry only
+#                      relaunches)
 #   claude_turn_failed an is_error result is an error row `turnFailed` whose Retry resends (`retry: resend`) the
 #                      same text on the same pid and the second answer arrives; the partial reply equals the same
 #                      bytes in one chunk; `error_max_turns` keeps its reply and has no error row. Queue variant: two
@@ -675,30 +680,35 @@ Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "
 #                      message."), nothing is sent, one is removed with a real click on its X, Retry lifts the hold at
 #                      the send, and the other is sent only at the retried turn's end
 #   acp_prompt_failed  the same over ACP (the queue variant only over Claude): the failed `session/prompt` leaves the
-#                      process up and Retry resends to the same pid and session; an error that follows Stop is the
-#                      late end of the stopped turn (no error row)
+#                      process up (its partial reply ended) and Retry resends to the same pid, which was asked for one
+#                      session; an error that follows Stop is the late end of the stopped turn (no error row; the fixture's
+#                      log shows it got `session/cancel` and answered with an error)
 #   claude_lost_resume the CLI exits mid-turn: `retry: resume`, Retry relaunches with `--resume fixture-session-1` and
-#                      resends; the partial reply equals the same bytes in one chunk
+#                      resends; the partial reply equals the same bytes in one chunk. Killed while idle, after a finished
+#                      turn: `retry: relaunch`, Retry starts a new process and nothing is sent
 #   acp_lost_composer  the ACP agent exits mid-turn: `retry: composer`, Retry relaunches and the message is back in the
 #                      composer with a notice, nothing sent; a launch that fails and then works (no turn in flight)
-#                      is `retry: relaunch` and puts nothing back; with a draft already in the composer the draft stays
+#                      is `retry: relaunch` and puts nothing back; with a draft already in the composer the draft stays.
+#                      An ACP agent killed while idle is not noticed until the next send (as built, spec 7.2): that send
+#                      lands on `retry: composer`, the dead agent never hears it and Retry puts it back in the composer
 #   limit              a rejected limit a few seconds ahead is a `limitCard` row counting (`resetsAt`), its failed
 #                      turn's row `coveredBy: limitCard` with `retry: none`, the socket's Retry refused, a held queue
-#                      "Waiting: send a message."; then the card reads `retry`, Try again resends and the card reads
-#                      lifted (Retry refused); a rejection in a turn that did not fail ends lifted; a prompt sent while
-#                      it counts retires the row's Retry and the card ends lifted
+#                      "Waiting: send a message."; then, once the reset has passed, the card reads `retry`, Try again
+#                      resends and the card reads lifted (Retry refused); a rejection in a turn that did not fail ends
+#                      lifted once the reset has passed; a prompt sent while it counts retires the row's Retry and the
+#                      card ends lifted
 #   day_separators     a restored transcript (rows written into `chat_turn`) whose user entries are on three days
-#                      has separators "Today", "Yesterday" and a full date, an undated turn has none and no `at` key
+#                      has separators "Today", "Yesterday" and a full date (worked out from the clock after the
+#                      relaunch, midnight-proof), an undated turn has none and no `at` key
 #   thought_end        the CLI closes its thinking block, then waits 2 s: `durationMs` is the block's (under 1 s)
 #                      once the thought has settled and before the text arrives, and it does not move
 # A check prints `OK: <scenario>: <what>`, a failed one `FAIL: <scenario>: <why>` and the run goes on with the next
 # scenario; the run prints the OK line only if every check of every scenario passed. The Xvfb is the script's own,
 # started and stopped on :140 to :159 (--display :N); --out-dir DIR (default artifacts/chat-richer/e2e) keeps
-# transcript.log, checks.jsonl, scenarios/<name>.json (the readouts) and .stub.log, logs/ and frames/*.png (PID-matched
-# window captures); --only NAME[,NAME] runs some scenarios and prints "CHAT RICHER MESSAGES E2E PARTIAL". Needs
-# python3 with gi (GTK 3), xdotool, xwininfo, xprop, xdpyinfo, import, identify, Xvfb and lavapipe. Not covered: an ACP
-# agent that exits while idle (the chat does not notice it until the next send, when the row is a `disconnected` one
-# with a prompt in flight), so there is no idle row to read; Claude's idle death is read in `stop`.
+# transcript.log, checks.jsonl (each check with the newest readout of the chat when it was judged, `read`, and what it
+# measured, `detail`), scenarios/<name>.json (the same per scenario, with the series each read) and .stub.log, logs/ and
+# frames/*.png (PID-matched window captures); --only NAME[,NAME] runs some scenarios and prints "CHAT RICHER MESSAGES
+# E2E PARTIAL". Needs python3 with gi (GTK 3), xdotool, xwininfo, xprop, xdpyinfo, import, identify, Xvfb and lavapipe.
 Scripts/Tests/test-chat-richer-messages-e2e.sh   # -> prints "CHAT RICHER MESSAGES E2E OK (<n> checks)"
 Scripts/Tests/test-chat-richer-messages-e2e.sh --only limit,thought_end   # -> prints "CHAT RICHER MESSAGES E2E PARTIAL (2 of 9 scenarios: limit, thought_end; <n> checks)"
 

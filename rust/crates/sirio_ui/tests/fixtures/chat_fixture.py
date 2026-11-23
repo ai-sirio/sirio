@@ -39,7 +39,7 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                    Lets the drawn Retry click be followed by a real recovery.
   richer           The agent of Scripts/Tests/test-chat-richer-messages-e2e.sh, over ACP. Its start, every
                    `session/new` and every `session/prompt` is appended to $SIRIO_STUB_LOG as
-                   `<kind>\t<pid>\t<json>` (kinds `start`, `session_new`, `prompt`), the prompt's JSON
+                   `<kind>\t<pid>\t<json>` (kinds `start`, `session_new`, `prompt`, `cancel`, `cancel_answered`), the prompt's JSON
                    being `{"text": ..., "sessionId": ...}`. The prompt's text picks the turn, and what
                    a retry resends is the same text, so a turn that fails does so on the FIRST prompt
                    of that text only (counted over every process in the log):
@@ -48,7 +48,9 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                      `die`          streams a partial reply and exits mid-turn (status 17); the next
                                     `die` answers `recovered`;
                      `cancel fail`  streams a partial reply, waits for `session/cancel`, then answers
-                                    with a JSON-RPC error: the late end of a stopped turn;
+                                    with a JSON-RPC error: the late end of a stopped turn (the log gets a
+                                    `cancel` line when the notification arrives and a `cancel_answered`
+                                    line once the error is written);
                      anything else  answers `reply ok`.
   ely-catalogue    Like `composer`, with every catalogue an agent can report: three
                    session modes, models with long names, four effort levels and
@@ -558,7 +560,9 @@ def richer_prompt(request):
             if not line:
                 return
             if json.loads(line).get("method") == "session/cancel":
+                richer_log("cancel", {"text": text})
                 error(request["id"], "the prompt was cancelled", code=INTERNAL_ERROR)
+                richer_log("cancel_answered", {"text": text, "code": INTERNAL_ERROR})
                 break
     elif text in ("fail prompt", "die"):
         message_chunk("recovered")

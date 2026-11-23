@@ -15,38 +15,50 @@ set -eEuo pipefail
 #
 # Scenarios (each starts a fresh Sirio; the names are the ones --only takes):
 #   stream             a 40 KiB reply (the SHOWCASE document, then parts that freeze as they arrive) in 200 chunks
-#                      20 ms apart: while it is live the reveal is behind (`0 < shownBytes < len(text)` and it
-#                      only grows), which a reply the stream handed to a full build could never read, and
-#                      `transcriptText` already holds the last marker the painted rows do not yet; at the turn's
-#                      end `live` is false at once with `shownBytes == len(text)`; the same text sent in one chunk
-#                      gives the same plain text. Select All and Copy through the transcript menu while another
-#                      reply streams (`showcase slow`, 8 s), with the transcript scrolled to its top: the live reply
-#                      is then not drawn, so the reveal stands still while the text keeps arriving, and the clipboard
-#                      holds a marker of the live reply past `shownBytes`. SHOWCASE eight times over (`showcase x8`,
-#                      which cannot freeze: every copy cites [^1] again) is read too: it reveals first, then past the
-#                      7 KiB tail budget draws as it arrives (`shownBytes == len(text)`, `live` still true).
-#   stop               Stop in the middle of the reveal: the rest shows at once (`live` false, `shownBytes` the whole
-#                      text), no error row, nothing held, and the text equals the same bytes in one chunk
+#                      20 ms apart: while it is live the reveal is behind (`0 < shownBytes < len(text)`, it only
+#                      grows, and it is still behind past 8 KiB, which only a reply of frozen blocks can be: one
+#                      the stream cannot freeze stops revealing at its 7 KiB tail budget), and `transcriptText`
+#                      holds the newest marker even where the reveal has not reached it; at the turn's end `live` is
+#                      false at once with `shownBytes == len(text)`; the same text sent in one chunk gives the same
+#                      plain text. Select All and Copy through the transcript menu while another reply streams
+#                      (`showcase slow`, 8 s), with the transcript scrolled to its top: the live reply is then not
+#                      drawn, so the reveal stands still (`shownBytes` is read again after the Copy and has not
+#                      moved) while the text keeps arriving, and the clipboard holds a marker of the live reply past
+#                      `shownBytes`. SHOWCASE eight times over (`showcase x8`, every copy cites [^1] again) is read too:
+#                      its reveal either keeps behind the text or, past the 7 KiB tail budget, hands over to drawing as it
+#                      arrives (`shownBytes == len(text)`, `live` still true), depending on when the frames fall; the
+#                      check is what holds either way (it only grows, never passes the text, ends with `live` false and
+#                      the text equal to the one-chunk reply's) and the artifact records which it was.
+#   stop               Stop in the middle of the reveal: `shownBytes` is behind the text at the read before the Stop,
+#                      and at the first read after it `live` is false and `shownBytes` the whole text; no error row,
+#                      nothing held, the text equals the same bytes in one chunk; the agent killed right after has
+#                      nothing to resend (`retry: relaunch`)
 #   claude_turn_failed an is_error result is an error row `turnFailed` whose Retry resends (`retry: resend`) the
 #                      same text on the same process, and the second answer arrives; `error_max_turns` stays a
 #                      reply with no error row. Queue variant: two messages queued behind the failing turn are
 #                      held (`held`, the "Waiting: press Retry or send a message." line), one is removed with its
 #                      real X click, Retry lifts the hold at once, and the other is sent only at the retried turn's
 #                      end. The partial reply of the failed turn equals the same bytes in one chunk.
-#   acp_prompt_failed  the same over ACP: the failed `session/prompt` leaves the process up, Retry resends on the same
-#                      pid and the same session; a failure that follows Stop is the late end of the stopped turn
+#   acp_prompt_failed  the same over ACP: the failed `session/prompt` leaves the process up (its partial reply ended),
+#                      Retry resends on the same pid, which was asked for one session; a failure that follows Stop is the
+#                      late end of the stopped turn (the fixture logs that it got `session/cancel` and answered with an
+#                      error), with no error row
 #   claude_lost_resume the CLI exits mid-turn: the row says `retry: resume`, Retry relaunches with
-#                      `--resume <id>` (the stub records it) and the prompt is resent
+#                      `--resume <id>` (the stub records it) and the prompt is resent; killed while idle, after a finished
+#                      turn, the row says `retry: relaunch` and Retry starts a new process and sends nothing
 #   acp_lost_composer  the ACP agent exits mid-turn (`retry: composer`): Retry relaunches, the message is back in the
 #                      composer with the notice and nothing is sent; with no turn in flight (a launch that fails, then
 #                      works: `retry: relaunch`) nothing is put back; with a draft in the composer the draft stays. An ACP
-#                      agent that exits while idle is not noticed until the next send, so it shows no row to read
+#                      agent killed while idle is not noticed until the next send (as built, spec 7.2): that send lands
+#                      on `retry: composer`, the dead agent never hears it and Retry puts it back in the composer
 #   limit              a rejected rate limit a few seconds ahead is a `limitCard` row counting (`resetsAt`), its failed
 #                      turn's row says `coveredBy: limitCard` and `retry: none`, the socket's Retry is refused, a held
-#                      queue says "Waiting: send a message."; then the card reads `retry`, Retry resends, and the card
-#                      ends `lifted` (and refuses Retry); a rejection in a turn that did not fail ends `lifted`
+#                      queue says "Waiting: send a message."; then, once the reset has passed, the card reads `retry`,
+#                      Retry resends, and the card ends `lifted` (and refuses Retry); a rejection in a turn that did not
+#                      fail ends `lifted` once the reset has passed, and so does a card whose Retry a new prompt retired
 #   day_separators     a restored transcript whose user entries are on three days has separators "Today",
-#                      "Yesterday" and a full date, an undated turn has none and no `at`, a new turn has `at` now
+#                      "Yesterday" and a full date (worked out from the clock after the relaunch, midnight-proof),
+#                      an undated turn has none and no `at`, a new turn has `at` now
 #   thought_end        the CLI closes its thinking block and then waits 2 s before the text: `durationMs` is the
 #                      block's, under 1 s, once the thought has settled and the text has not arrived
 #
@@ -55,7 +67,8 @@ set -eEuo pipefail
 # only if every check of every scenario passed.
 #
 # The artifact: --out-dir DIR (default artifacts/chat-richer/e2e) keeps transcript.log, checks.jsonl (every check,
-# in order), scenarios/<name>.json (what each scenario read), the stubs' call and prompt log of each Sirio
+# in order, each with the newest readout of the chat when it was judged, `read`, and what it measured, `detail`),
+# scenarios/<name>.json (the same, per scenario, and the series each read), the stubs' call and prompt log of each Sirio
 # (scenarios/<name>.<world>.stub.log, `kind<TAB>pid<TAB>text`), logs/ (the app logs) and frames/*.png (PID-matched
 # window captures). Rerunning the script reproduces it.
 #
@@ -79,7 +92,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,68p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,81p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
