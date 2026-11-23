@@ -16,19 +16,21 @@ set -eEuo pipefail
 # Scenarios (each starts a fresh Sirio; the names are the ones --only takes):
 #   stream             a 40 KiB reply (the SHOWCASE document, then parts that freeze as they arrive) in 200 chunks
 #                      20 ms apart: while it is live the reveal is behind (`0 < shownBytes < len(text)`, it only
-#                      grows, and it is still behind past 8 KiB, which only a reply of frozen blocks can be: one
-#                      the stream cannot freeze stops revealing at its 7 KiB tail budget), and `transcriptText`
+#                      grows, and it is still behind past 24 KiB, which only a reply that froze its blocks as it
+#                      arrived can be: a reply that freezes little hands over to plain drawing soon after its tail
+#                      passes 7 KiB), and `transcriptText`
 #                      holds the newest marker even where the reveal has not reached it; at the turn's end `live` is
 #                      false at once with `shownBytes == len(text)`; the same text sent in one chunk gives the same
 #                      plain text. Select All and Copy through the transcript menu while another reply streams
 #                      (`showcase slow`, 8 s), with the transcript scrolled to its top: the live reply is then not
 #                      drawn, so the reveal stands still (`shownBytes` is read again after the Copy and has not
 #                      moved) while the text keeps arriving, and the clipboard holds a marker of the live reply past
-#                      `shownBytes`. SHOWCASE eight times over (`showcase x8`, every copy cites [^1] again) is read too:
-#                      its reveal either keeps behind the text or, past the 7 KiB tail budget, hands over to drawing as it
-#                      arrives (`shownBytes == len(text)`, `live` still true), depending on when the frames fall; the
-#                      check is what holds either way (it only grows, never passes the text, ends with `live` false and
-#                      the text equal to the one-chunk reply's) and the artifact records which it was.
+#                      `shownBytes`. A reply with no blank line (`compact`, 24 KiB) never freezes a block, so once its
+#                      tail passes the 7 KiB budget the reveal hands over to drawing as it arrives for the rest of the turn
+#                      (spec 5.2): from 14 KiB of text on every live read has `shownBytes == len(text)` with `live` still
+#                      true; it ends with `live` false and its text equals the same bytes in one chunk. SHOWCASE eight
+#                      times over (`showcase x8`, every copy cites [^1] again; it freezes by a varying amount, so whether
+#                      its reveal hands over depends on when the frames fall) is checked only for its end and its equivalence.
 #   stop               Stop in the middle of the reveal: `shownBytes` is behind the text at the read before the Stop,
 #                      and at the first read after it `live` is false and `shownBytes` the whole text; no error row,
 #                      nothing held, the text equals the same bytes in one chunk; the agent killed right after has
@@ -92,7 +94,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,81p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,83p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

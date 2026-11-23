@@ -2974,6 +2974,23 @@ def richer_showcase_x8():
     return (text + "\n\n") * 8
 
 
+def richer_compact():
+    """24 KiB with no blank line (headings on their text, `Run:` on its fence): the stream never freezes a block of
+    it, so past the reveal's 7 KiB tail budget the reveal hands over to drawing the reply as it arrives. (A debug
+    build builds the whole reply for every chunk of such a reply: this one is short and slow enough for the control
+    socket to be answered while it streams.)"""
+    text, step = "", 0
+    while len(text.encode("utf-8")) < 24 * 1024:
+        step += 1
+        text += (
+            f"## Step {step}\nRead `src/lib.rs` and **check** the [notes](https://example.com/{step}).\n"
+            "The second line carries on, with _emphasis_ and a list under it.\n"
+            f"- the first point of step {step}\n- the second point, with `inline code`\n"
+            f"Run:\n```sh\ncargo test -p sirio_ui step_{step}\n```\n"
+        )
+    return text
+
+
 def richer_wait(seconds):
     """Sleeps up to `seconds`; False when a Stop came in meanwhile."""
     return not RICHER_STOP.wait(seconds)
@@ -3050,11 +3067,12 @@ def richer_turn(prompt):
     hold = prompt.endswith(" hold")
     base = prompt[: -len(" hold")] if hold else prompt
     requesting()
-    if base in ("showcase", "showcase slow", "showcase x8"):
-        body = richer_showcase_x8() if base == "showcase x8" else richer_showcase()
-        # `showcase slow` is the same reply at 40 ms a chunk (8 s), long enough to select and copy while it streams.
-        pause = RICHER_CHUNK_SECONDS * (2 if base == "showcase slow" else 1)
-        if not richer_stream("msg_showcase", richer_chunks(body, RICHER_CHUNKS), pause):
+    if base in ("showcase", "showcase slow", "showcase x8", "compact"):
+        body = {"showcase x8": richer_showcase_x8, "compact": richer_compact}.get(base, richer_showcase)()
+        # `showcase slow` is the same reply at 40 ms a chunk (8 s), long enough to select and copy while it streams;
+        # `compact` is 120 chunks 40 ms apart.
+        pause = RICHER_CHUNK_SECONDS * (2 if base in ("showcase slow", "compact") else 1)
+        if not richer_stream("msg_showcase", richer_chunks(body, 120 if base == "compact" else RICHER_CHUNKS), pause):
             richer_interrupted()
             return
         result()

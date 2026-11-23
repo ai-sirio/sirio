@@ -655,20 +655,22 @@ Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "
 # `composerRow`). Each scenario is a fresh Sirio under `env -i` with its own HOME, XDG tree, database, socket and
 # host root; ~/.config/mise/config.toml must not change.
 #   stream             a 40 KiB reply (SHOWCASE, then parts that freeze) in 200 chunks 20 ms apart: while live,
-#                      0 < shownBytes < len(text), it only grows and is still behind past 8 KiB (only a reply of
-#                      frozen blocks can be: one the stream cannot freeze stops revealing at its 7 KiB tail budget),
+#                      0 < shownBytes < len(text), it only grows and is still behind past 24 KiB (only a reply that
+#                      froze its blocks as it arrived can be: one that freezes little hands over to plain drawing soon
+#                      after its tail passes 7 KiB),
 #                      transcriptText holds the newest marker even where the reveal has not reached it, and at the
 #                      turn's end live is false with shownBytes the whole text; the same bytes in one chunk give the
 #                      same plain text. A reply selected whole and copied through the transcript menu while it
 #                      streams (`showcase slow`, 8 s), with the transcript scrolled to its top so that the live reply is
 #                      not drawn and the reveal stands still (shownBytes is read again after the Copy and has not
 #                      moved) while the text arrives, puts text of the live reply on the clipboard that is past the
-#                      revealed byte (shownBytes read right after Select All). SHOWCASE eight times over (`showcase x8`,
-#                      every copy cites [^1] again) is read too: its reveal either keeps behind the text or, past the
-#                      7 KiB tail budget, hands over to drawing as it arrives (shownBytes the whole text, live still
-#                      true), depending on when the frames fall; the check is what holds either way (the reveal only
-#                      grows and never passes the text, live ends false, the text equals the one-chunk reply's) and the
-#                      artifact records which it was.
+#                      revealed byte (shownBytes read right after Select All). A reply with no blank line (`compact`,
+#                      24 KiB) never freezes a block, so once its tail passes the 7 KiB budget the reveal hands over to
+#                      drawing as it arrives for the rest of the turn (spec 5.2): from 14 KiB of text on every live read has
+#                      shownBytes the whole text with live still true; it ends with live false and its text equals the same
+#                      bytes in one chunk. SHOWCASE eight times over (`showcase x8`, every copy cites [^1] again; it freezes by
+#                      a varying amount, so whether its reveal hands over depends on when the frames fall) is checked only
+#                      for its end and its equivalence.
 #   stop               Stop in mid-reveal: shownBytes is behind the text at the read before the Stop, and at the first
 #                      read after it live is false and shownBytes the whole text; no error row, nothing held, the text
 #                      equals the same bytes in one chunk; the agent killed right after has nothing to resend (Retry only

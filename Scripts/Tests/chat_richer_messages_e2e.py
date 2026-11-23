@@ -80,33 +80,36 @@ def compact(r):
 
 class Scenario:
     """One scenario's checks. `need` records a passed check or raises Fail with the scenario's name. A check keeps,
-    in checks.jsonl and in scenarios/<name>.json, the newest readout of the chat when it was judged (`read`) and any
-    detail the check passes (`detail`), so the artifact can be re-checked."""
+    in checks.jsonl and in scenarios/<name>.json, the readout it judged (`read`: the one passed as `read=`, else the
+    newest read of the scenario, which is the one a check made right after a wait or a read judges), the values it
+    compared (`judged`, the text `why` carries) and any detail it passes (`detail`), so the artifact can be re-checked."""
 
     def __init__(self, name):
         self.name = name
         self.readouts = []  # what the scenario read, kept in scenarios/<name>.json
         self.last_read = None  # the newest `World.read()` of this scenario
 
-    def record(self, detail):
-        out = {"read": compact(self.last_read)}
+    def record(self, detail, read, judged):
+        out = {"read": compact(read if read is not None else self.last_read)}
+        if judged:
+            out["judged"] = judged
         if detail is not None:
             out["detail"] = detail
         return out
 
-    def ok(self, what, detail=None):
+    def ok(self, what, detail=None, read=None, judged=None):
         CHECKS.append((self.name, what))
         log(f"OK: {self.name}: {what}")
-        recorded = self.record(detail)
+        recorded = self.record(detail, read, judged)
         self.readouts.append({"label": f"check: {what}", "value": recorded})
         CHECKS_LOG.write(json.dumps({"scenario": self.name, "check": what, "status": "OK", **recorded}) + "\n")
         CHECKS_LOG.flush()
 
-    def need(self, condition, what, why="", detail=None):
+    def need(self, condition, what, why="", detail=None, read=None):
         if condition:
-            self.ok(what, detail)
+            self.ok(what, detail, read, why)
         else:
-            self.readouts.append({"label": f"FAILED: {what}", "value": self.record(detail), "why": why})
+            self.readouts.append({"label": f"FAILED: {what}", "value": self.record(detail, read, why), "why": why})
             raise Fail(f"{what}" + (f": {why}" if why else ""))
 
     def keep(self, label, value):
@@ -724,15 +727,21 @@ def last_reply(r):
 
 
 def summarise(samples):
-    """What each read said about the newest reply, compactly (the artifact keeps this)."""
+    """What each read said about the newest reply, compactly (the artifact keeps this): the status, `live`,
+    `shownBytes`, the received text's length, the transcript text's, and the newest marker of the reply with where it
+    ends in the source and whether `transcriptText` holds it, which is what the received-text checks judged."""
     out = []
     for r in samples:
         _, row = last_reply(r)
+        found = markers(row["text"]) if row else []
         out.append({"t": round(r["t"], 3), "status": r["status"],
                     "live": row.get("live") if row else None,
                     "shown": int(row["shownBytes"]) if row and "shownBytes" in row else None,
                     "len": byte_len(row["text"]) if row else None,
                     "textLen": len(r["transcript_text"]),
+                    "newestMarker": found[-1][1] if found else None,
+                    "newestMarkerEnd": found[-1][0] if found else None,
+                    "markerInTranscriptText": (found[-1][1] in r["transcript_text"]) if found else None,
                     "painted": sum(len(p["text"]) for p in r["painted"])})
     return out
 
@@ -815,9 +824,20 @@ def copy_while_streaming(scn, w, number):
     return detail, copied, reply_copied, top
 
 
+def live_reads(samples):
+    """The (read, reply row) of the reads that found the newest reply live."""
+    return [(r, last_reply(r)[1]) for r in samples if last_reply(r)[1] and last_reply(r)[1].get("live") == "true"]
+
+
+def ended_read(samples):
+    """The first (read, reply row) after the turn: the read that says what the end of the turn did to the reply."""
+    return next((r, last_reply(r)[1]) for r in samples if r["status"] != "streaming")
+
+
 @scenario
 def scenario_stream(scn):
     w = World(scn, "stream")
+    tail = World(scn, "tail")
     try:
         w.start()
         w.open_chat("claude")
@@ -828,57 +848,67 @@ def scenario_stream(scn):
         final = samples[-1]
         _, reply = last_reply(final)
         text = reply["text"]
-        scn.need(byte_len(text) >= 40 * 1024, "the reply is at least 40 KiB", f"it is {byte_len(text)} bytes")
-        live = [(r, last_reply(r)[1]) for r in samples if last_reply(r)[1] and last_reply(r)[1].get("live") == "true"]
-        scn.need(live, "the reply read as live while it streamed", f"{len(samples)} reads, none live")
-        scn.need(all(r["status"] == "streaming" for r, _ in live), "a live reply is only ever read while the turn streams")
+        scn.need(byte_len(text) >= 40 * 1024, "the reply is at least 40 KiB", f"it is {byte_len(text)} bytes", read=final)
+        live = live_reads(samples)
+        scn.need(live, "the reply read as live while it streamed", f"{len(live)} of {len(samples)} reads live",
+                 read=samples[len(samples) // 2])
+        scn.need(all(r["status"] == "streaming" for r, _ in live), "a live reply is only ever read while the turn streams",
+                 f"{len(live)} live reads, statuses {sorted({r['status'] for r, _ in live})}", read=live[-1][0])
         behind = [(r, row) for r, row in live if 0 < int(row["shownBytes"]) < byte_len(row["text"])]
         scn.need(behind, "the reveal is behind the received text (0 < shownBytes < len(text)) while the reply is live",
-                 f"{len(live)} live reads, none with the reveal part of the way: "
-                 f"{[(row['shownBytes'], byte_len(row['text'])) for _, row in live][:8]}")
-        # A reply whose blocks do not freeze reveals only up to the tail budget (7 KiB): the reveal then stops and
-        # `shownBytes` is the whole text (the `showcase x8` reply below). Behind the text past 8 KiB, it was drawn from
-        # frozen blocks: the stream path.
-        deep = [(int(row["shownBytes"]), byte_len(row["text"])) for _, row in behind if int(row["shownBytes"]) > 8 * 1024]
-        scn.need(deep, "the reveal was still behind the text past 8 KiB, which only a reply of frozen blocks can be (the stream path)",
-                 f"the reveal never passed 8 KiB while behind: {[(row['shownBytes'], byte_len(row['text'])) for _, row in behind][-3:]}",
-                 detail={"readsBehindPast8KiB": len(deep), "newest": deep[-1] if deep else None})
+                 f"{len(live)} live reads, {len(behind)} with the reveal part of the way: "
+                 f"{[(row['shownBytes'], byte_len(row['text'])) for _, row in live][:8]}", read=behind[0][0] if behind else live[0][0])
+        # The reveal can only be behind the text far into a long reply if the reply froze blocks as it arrived, whatever the
+        # timing: a reply that cannot freeze hands over to drawing as it arrives once its tail passes 7 KiB (the `compact`
+        # reply below), and one that freezes little hands over soon after. Behind the text past 24 KiB, it was drawn from
+        # a good part of the reply frozen: the stream path.
+        deep = [(r, int(row["shownBytes"]), byte_len(row["text"])) for r, row in behind if int(row["shownBytes"]) > 24 * 1024]
+        scn.need(deep, "the reveal was still behind the text past 24 KiB, which only a reply that froze its blocks as it arrived can be (the stream path)",
+                 f"the reveal never passed 24 KiB while behind: {[(row['shownBytes'], byte_len(row['text'])) for _, row in behind][-3:]}",
+                 read=deep[-1][0] if deep else final,
+                 detail={"readsBehindPast24KiB": len(deep), "newest": deep[-1][1:] if deep else None})
         shown = [int(row["shownBytes"]) for _, row in live]
-        scn.need(all(a <= b for a, b in zip(shown, shown[1:])), "the revealed byte count only grows")
+        scn.need(all(a <= b for a, b in zip(shown, shown[1:])), "the revealed byte count only grows",
+                 f"{len(shown)} live reads, first {shown[:4]}, last {shown[-4:]}", read=live[-1][0])
         scn.need(all(int(row["shownBytes"]) <= byte_len(row["text"]) for _, row in live),
-                 "shownBytes never passes the received text")
+                 "shownBytes never passes the received text",
+                 f"{len(live)} live reads, widest gap {max(byte_len(row['text']) - int(row['shownBytes']) for _, row in live)} bytes",
+                 read=live[-1][0])
         # `transcriptText` is the received text: the last marker received is in it, painted or not.
         with_marker = [(r, row, markers(row["text"])) for r, row in live if markers(row["text"])]
-        scn.need(with_marker, "markers arrived while the reply was live")
+        scn.need(with_marker, "markers arrived while the reply was live", f"{len(with_marker)} live reads with a marker",
+                 read=with_marker[-1][0] if with_marker else live[-1][0])
         missing = [(m[-1][1], int(row["shownBytes"]), byte_len(row["text"]))
                    for r, row, m in with_marker if m[-1][1] not in r["transcript_text"]]
         scn.need(not missing, "transcriptText holds every received byte: the last marker received is in it at every read",
-                 f"missing at {len(missing)} reads, first {missing[:3]}")
+                 f"{len(with_marker)} reads with a marker, missing at {len(missing)}, first {missing[:3]}", read=with_marker[-1][0])
         # The reads where the last marker received lies past the byte the reveal had reached are the ones that
         # tell a received text from a revealed one: transcriptText holds that marker at every one of them.
         past = [(r, row, m[-1]) for r, row, m in with_marker if m[-1][0] > int(row["shownBytes"])]
         scn.need(past and all(name in r["transcript_text"] for r, _, (_, name) in past),
                  "transcriptText holds text the reveal has not reached: at every read where the newest marker lies past shownBytes, transcriptText has it",
                  f"{len(past)} such reads, missing at {[(name, int(row['shownBytes'])) for r, row, (_, name) in past if name not in r['transcript_text']][:3]}",
-                 detail={"readsWithTheNewestMarkerPastTheReveal": len(past)})
+                 read=past[-1][0] if past else live[-1][0],
+                 detail={"readsWithTheNewestMarkerPastTheReveal": len(past),
+                         "newest": (past[-1][2], int(past[-1][1]["shownBytes"])) if past else None})
         # at the turn's end
-        ended = [(r, last_reply(r)[1]) for r in samples if r["status"] != "streaming"]
-        r0, row0 = ended[0]
+        r0, row0 = ended_read(samples)
         scn.need(row0.get("live") == "false" and int(row0["shownBytes"]) == byte_len(row0["text"]),
                  "at the turn's end live is false at once and shownBytes is the whole text",
-                 f"live={row0.get('live')} shownBytes={row0.get('shownBytes')} len={byte_len(row0['text'])}")
+                 f"live={row0.get('live')} shownBytes={row0.get('shownBytes')} len={byte_len(row0['text'])}", read=r0)
         w.capture("stream-ended")
         # -- the same bytes in one chunk
         w.reply_file.write_text(text, encoding="utf-8")
         w.send("replyfile")
         after = w.wait("the one-chunk reply ends", lambda r: r["status"] == "completed" and len(assistant_rows(r)) == 2)
         (_, first), (_, second) = assistant_rows(after)
-        scn.need(first["text"] == second["text"], "the streamed reply's source is the one-chunk reply's")
+        scn.need(first["text"] == second["text"], "the streamed reply's source is the one-chunk reply's",
+                 f"{byte_len(first['text'])} against {byte_len(second['text'])} bytes", read=after)
         plain = plain_by_row(after)
         index_first, index_second = assistant_rows(after)[0][0], assistant_rows(after)[1][0]
         scn.need(plain[index_first] == plain[index_second] and plain[index_first] != "",
                  "the streamed reply's plain text equals the one-chunk reply's",
-                 f"{len(plain[index_first])} against {len(plain[index_second])} characters")
+                 f"{len(plain[index_first])} against {len(plain[index_second])} characters", read=after)
         # -- Select All and Copy through the transcript menu while a reply streams
         chosen = None
         for number in range(1, 4):
@@ -909,40 +939,51 @@ def scenario_stream(scn):
                  f"{len(reply_copied)} characters copied, starting {reply_copied[:30]!r}",
                  detail={"replyCharsCopied": len(reply_copied), "starts": reply_copied[:40]})
         w.capture("stream-copied")
-        # -- SHOWCASE eight times over: every copy cites [^1] again, so the stream cannot freeze across the copies as it
-        # does between the parts above, and the tail may grow past the reveal's budget (7 KiB). Spec 5.2: the reveal then
-        # stops for the rest of the turn and the reply draws as it arrives. Whether a frame meets that budget depends on
-        # when the chunks and the frames fall (the same text handed over in most runs and kept revealing in one), so the
-        # check is what holds either way, and the readout records which it was.
+        w.keep_artifacts()
+        w.quit()
+
+        # ---- the tail: a Sirio of its own, so that the three long replies above are not in the transcript. A debug build
+        # builds the whole of a reply the stream cannot freeze for every chunk, and the control socket must stay answered.
+        # A reply with no blank line: the stream never freezes a block of it, so once the reveal's tail passes the 7 KiB
+        # budget (spec 5.2) it hands over for the rest of the turn and the reply draws as it arrives: `shownBytes` is the
+        # whole text while `live` is still true.
+        w = tail
+        w.start()
+        w.open_chat("claude")
+        w.send("compact")
+        samples = follow(w, ended_after_streaming())
+        scn.keep("compact samples", summarise(samples))
+        live_c = live_reads(samples)
+        scn.need(live_c and any(int(row["shownBytes"]) < byte_len(row["text"]) for _, row in live_c),
+                 "the compact reply began with a reveal that trailed the received text",
+                 f"{len(live_c)} live reads, first {[(row['shownBytes'], byte_len(row['text'])) for _, row in live_c][:4]}",
+                 read=live_c[0][0] if live_c else samples[0])
+        # The tail passes the budget when the reveal reaches 7 KiB; the reveal trails the text by about 3.5 KiB, and a read
+        # takes 170 ms (2 KiB): from 14 KiB of text on the reply is past the handover.
+        over = [(r, row) for r, row in live_c if byte_len(row["text"]) >= 14 * 1024]
+        scn.need(over and all(int(row["shownBytes"]) == byte_len(row["text"]) for _, row in over),
+                 "past the tail budget the compact reply hands over to drawing as it arrives: at every live read from 14 KiB of text on, shownBytes is the whole text and live is true",
+                 f"{len(over)} reads from 14 KiB, not whole at {[(int(row['shownBytes']), byte_len(row['text'])) for _, row in over if int(row['shownBytes']) != byte_len(row['text'])][:4]}",
+                 read=over[-1][0] if over else samples[-1],
+                 detail={"readsFrom14KiB": len(over), "newest": (int(over[-1][1]["shownBytes"]), byte_len(over[-1][1]["text"])) if over else None})
+        rc, rowc = ended_read(samples)
+        scn.need(rowc.get("live") == "false" and int(rowc["shownBytes"]) == byte_len(rowc["text"]),
+                 "the compact reply ends with live false and shownBytes the whole text",
+                 f"live={rowc.get('live')} shownBytes={rowc.get('shownBytes')} len={byte_len(rowc['text'])}", read=rc)
+        compact_text = rowc["text"]
+        after_c = one_chunk_plain(scn, w, compact_text, "the compact reply's final plain text equals the same bytes delivered in one chunk")
+        # -- SHOWCASE eight times over: every copy cites [^1] again, so a good part of the reply is held in the tail; its
+        # reveal may or may not hand over depending on when the frames fall, so only its final equivalence is checked.
         w.send("showcase x8")
         samples = follow(w, ended_after_streaming())
         scn.keep("showcase x8 samples", summarise(samples))
-        live8 = [(r, last_reply(r)[1]) for r in samples if last_reply(r)[1] and last_reply(r)[1].get("live") == "true"]
-        scn.need(live8, "the x8 reply read as live while it streamed")
-        scn.need(any(int(row["shownBytes"]) < byte_len(row["text"]) for _, row in live8),
-                 "the x8 reply began with a reveal that trailed the received text")
-        shown8 = [int(row["shownBytes"]) for _, row in live8]
-        late = [(int(row["shownBytes"]), byte_len(row["text"])) for _, row in live8 if byte_len(row["text"]) >= 20 * 1024]
-        scn.need(all(a <= b for a, b in zip(shown8, shown8[1:])) and all(int(row["shownBytes"]) <= byte_len(row["text"]) for _, row in live8),
-                 "the x8 reveal only grows and never passes the received text, whether it keeps revealing or has handed over to drawing as it arrives",
-                 f"{shown8}",
-                 detail={"readsFrom20KiB": len(late), "readsFrom20KiBWithTheRevealCaughtUp": sum(1 for a, b in late if a == b),
-                         "handedOver": bool(late) and all(a == b for a, b in late)})
-        end8 = [(r, last_reply(r)[1]) for r in samples if r["status"] != "streaming"][0]
-        scn.need(end8[1].get("live") == "false" and int(end8[1]["shownBytes"]) == byte_len(end8[1]["text"]),
-                 "the x8 reply ends with live false and shownBytes the whole text")
-        text8 = end8[1]["text"]
-        w.reply_file.write_text(text8, encoding="utf-8")
-        w.send("replyfile")
-        after8 = w.wait("the one-chunk x8 reply ends", lambda r: r["status"] == "completed" and len(assistant_rows(r)) >= 5)
-        replies = assistant_rows(after8)
-        plain8 = plain_by_row(after8)
-        (i_streamed, streamed8), (i_whole, whole8) = replies[-2], replies[-1]
-        scn.need(streamed8["text"] == whole8["text"] and plain8[i_streamed] == plain8[i_whole] and plain8[i_whole],
-                 "the x8 reply's source and plain text equal the one-chunk reply's",
-                 f"{len(plain8[i_streamed])} against {len(plain8[i_whole])} characters")
+        r8, row8 = ended_read(samples)
+        scn.need(row8.get("live") == "false" and int(row8["shownBytes"]) == byte_len(row8["text"]),
+                 "the x8 reply ends with live false and shownBytes the whole text",
+                 f"live={row8.get('live')} shownBytes={row8.get('shownBytes')} len={byte_len(row8['text'])}", read=r8)
+        one_chunk_plain(scn, w, row8["text"], "the x8 reply's final plain text equals the same bytes delivered in one chunk")
     finally:
-        teardown(w)
+        teardown([w, tail])
 
 
 def alive(pid):
@@ -969,15 +1010,14 @@ def scenario_stop(scn):
         w.start()
         w.open_chat("claude")
         w.send("showcase slow")  # 8 s, so that a capture and a read fit between the reveal's middle and the Stop
-        w.wait("the reveal is part way through a long reply",
-               lambda r: last_reply(r)[1] is not None and last_reply(r)[1].get("live") == "true"
-               and 0 < int(last_reply(r)[1]["shownBytes"]) < byte_len(last_reply(r)[1]["text"]) - 1000
-               and byte_len(last_reply(r)[1]["text"]) > 10 * 1024, timeout=30, every=0.03)
+        w.wait("the reply is part way", lambda r: last_reply(r)[1] is not None and last_reply(r)[1].get("live") == "true"
+               and byte_len(last_reply(r)[1]["text"]) > 8 * 1024, timeout=30, every=0.05)
         w.capture("stop-mid-reveal")
-        # The read right before the Stop: the reveal is behind. The first read after it: the rest shows.
-        before = w.wait("the reveal is still behind just before the Stop",
+        # The read right before the Stop: the reveal is behind the text, by however little (the lag is a few KiB, and
+        # no threshold of ours sits near it). The first read after the Stop: the rest shows.
+        before = w.wait("the reveal is behind just before the Stop",
                         lambda r: last_reply(r)[1] is not None and last_reply(r)[1].get("live") == "true"
-                        and 0 < int(last_reply(r)[1]["shownBytes"]) < byte_len(last_reply(r)[1]["text"]) - 500, timeout=15, every=0.03)
+                        and 0 < int(last_reply(r)[1]["shownBytes"]) < byte_len(last_reply(r)[1]["text"]), timeout=15, every=0.03)
         _, behind = last_reply(before)
         w.stop_turn()
         samples = follow(w, lambda r: r["status"] != "streaming", timeout=30, every=0.03)
@@ -990,12 +1030,14 @@ def scenario_stop(scn):
                  "Stop in mid-reveal shows the rest at once: shownBytes was behind the text at the read before, and at the first read after, live is false and shownBytes is the whole received text",
                  f"before: shownBytes={behind['shownBytes']} len={byte_len(behind['text'])}; after: live={row.get('live')} "
                  f"shownBytes={row.get('shownBytes')} len={byte_len(text)}",
+                 read=final,
                  detail={"before": {"live": behind.get("live"), "shownBytes": int(behind["shownBytes"]), "textBytes": byte_len(behind["text"])},
                          "after": {"live": row.get("live"), "shownBytes": int(row["shownBytes"]), "textBytes": byte_len(text)}})
         scn.need(0 < byte_len(text) < 40 * 1024, "the reply was cut by Stop (it is shorter than the whole reply)", f"{byte_len(text)} bytes",
                  detail={"textBytes": byte_len(text)})
-        scn.need(error_row(final) is None, "a Stop is not a failure: no error row")
-        scn.need(not final["is_held"], "a Stop holds no queue")
+        scn.need(error_row(final) is None, "a Stop is not a failure: no error row",
+                 f"rows after the Stop: {[row_.get('kind') for row_ in final['rows']]}", read=final)
+        scn.need(not final["is_held"], "a Stop holds no queue", f"held={final['is_held']} line={final['held_line']!r}", read=final)
         w.capture("stop-ended")
         # Stop clears the prompt to resend: the agent dying now has nothing to resume or resend.
         launches = len(w.sessions("claude"))
@@ -1018,7 +1060,8 @@ def scenario_stop(scn):
         (i_stopped, stopped), (i_whole, whole) = assistant_rows(after)
         scn.need(stopped["text"] == whole["text"] and plain[i_stopped] == plain[i_whole] and plain[i_whole],
                  "the stopped reply's final text equals the same bytes delivered in one chunk",
-                 f"{len(plain[i_stopped])} against {len(plain[i_whole])} characters")
+                 f"{len(plain[i_stopped])} against {len(plain[i_whole])} characters, source {byte_len(stopped['text'])} against {byte_len(whole['text'])} bytes",
+                 read=after)
     finally:
         teardown(w)
 
@@ -1074,7 +1117,8 @@ def scenario_claude_turn_failed(scn):
                  "a failed Claude turn is an error row with errorKind turnFailed and retry: resend",
                  f"errorKind={row.get('errorKind')} retry={row.get('retry')}")
         scn.need(row["text"] == "API Error: 529 overloaded" and not any("529" in a["text"] for _, a in assistant_rows(r)),
-                 "the failure text is the error row's, not a reply")
+                 "the failure text is the error row's, not a reply",
+                 f"error row {row['text']!r}; reply rows {[a['text'][:30] for _, a in assistant_rows(r)]}")
         (_, partial), = assistant_rows(r)
         scn.need(partial.get("live") == "false" and int(partial["shownBytes"]) == byte_len(partial["text"]) == byte_len(PARTIAL),
                  "the partial reply of the failed turn is ended at once: live false, shownBytes the whole text",
@@ -1087,7 +1131,7 @@ def scenario_claude_turn_failed(scn):
         w.retry(index)
         r2 = w.wait("the resent turn is answered", lambda r: r["status"] == "completed" and error_row(r) is None
                     and any(a["text"] == "recovered" for _, a in assistant_rows(r)))
-        scn.need(error_row(r2) is None, "Retry removed the error row")
+        scn.need(error_row(r2) is None, "Retry removed the error row", f"rows {[row_.get('kind') for row_ in r2['rows']]}")
         scn.need(user_texts(r2) == ["fail", "fail"], "Retry pushed the same text as a new user row", f"{user_texts(r2)}")
         new_at = int(rows_of(r2, "user")[1][1]["at"])
         scn.need(new_at >= at and new_at <= time.time() + 5, "the resent user row has its own `at`", f"{at} then {new_at}")
@@ -1101,7 +1145,8 @@ def scenario_claude_turn_failed(scn):
         r3 = w.wait("the turn-limit turn ends", lambda r: r["status"] == "completed"
                     and any("Reached the turn limit" in a["text"] for _, a in assistant_rows(r)))
         scn.need(error_row(r3) is None and not r3["is_held"],
-                 "error_max_turns keeps its reply text and footer: no error row, nothing held")
+                 "error_max_turns keeps its reply text and footer: no error row, nothing held",
+                 f"rows {[(row_.get('kind'), (row_.get('text') or '')[:30]) for row_ in r3['rows'][-3:]]}, held={r3['is_held']}")
         w.capture("failed-max-turns")
 
         # ---- the queue variant
@@ -1210,8 +1255,8 @@ def scenario_acp_prompt_failed(scn):
                  "the error that follows Stop is the late end of the stopped turn: no error row, nothing held",
                  brief(r))
         w.send("after the stop")
-        w.wait("the chat still works", lambda r: r["status"] == "completed" and any(a["text"] == "reply ok" for _, a in assistant_rows(r)))
-        scn.ok("the chat answers the next prompt after the stopped turn")
+        r = w.wait("the chat still works", lambda r: r["status"] == "completed" and any(a["text"] == "reply ok" for _, a in assistant_rows(r)))
+        scn.ok("the chat answers the next prompt after the stopped turn", judged=f"reply rows {[a['text'] for _, a in assistant_rows(r)]}", read=r)
     finally:
         teardown(w)
 
@@ -1234,7 +1279,7 @@ def scenario_claude_lost_resume(scn):
         scn.need(partial.get("live") == "false" and int(partial["shownBytes"]) == byte_len(partial["text"]) == byte_len(PARTIAL),
                  "the partial reply of the lost client is ended at once: live false, shownBytes the whole text",
                  f"live={partial.get('live')} shownBytes={partial.get('shownBytes')}")
-        scn.need(not alive(first), "the agent process is gone")
+        scn.need(not alive(first), "the agent process is gone", f"pid {first} alive={alive(first)}")
         w.capture("lost-error-row")
         w.retry(index)
         r = w.wait("the resumed client answers the resent prompt", lambda r: r["status"] == "completed" and error_row(r) is None
@@ -1267,13 +1312,15 @@ def scenario_claude_lost_resume(scn):
                  f"errorKind={row.get('errorKind')} retry={row.get('retry')}", detail={"row": row})
         idle.capture("lost-idle")
         idle.retry(index)
-        r = idle.wait("the relaunched CLI has connected", lambda r: r["status"] in ("idle", "completed") and error_row(r) is None, timeout=40)
-        scn.need(len(idle.sessions("claude")) == launches + 1 and idle.sessions("claude")[-1] != dead
-                 and idle.prompts() == [(dead, "ok")] and r["composerText"] == ""
+        idle.wait("the relaunched CLI has connected", lambda r: r["status"] in ("idle", "completed") and error_row(r) is None, timeout=40)
+        time.sleep(1.5)  # a prompt the retry wrongly sent would be in the stub's log by now
+        r = idle.read()
+        scn.need(len(idle.sessions("claude")) == launches + 1 and idle.prompts() == [(dead, "ok")]
+                 and user_texts(r) == ["ok"] and r["composerText"] == ""
                  and row_with_text(r, RESTARTED_BACK) is None and row_with_text(r, RESTARTED) is None,
-                 "after the idle death Retry started a new process and sent nothing: the stub heard only the first prompt, the composer is empty, no notice",
-                 f"launches {idle.sessions('claude')}, prompts {idle.prompts()}",
-                 detail={"launches": idle.sessions("claude"), "prompts": idle.prompts()})
+                 "after the idle death Retry started a new process and sent nothing: the stub heard only the first prompt, the transcript holds only that user row, the composer is empty, no notice",
+                 f"launches {idle.sessions('claude')}, prompts {idle.prompts()}, user rows {user_texts(r)}, composer {r['composerText']!r}",
+                 detail={"launches": idle.sessions("claude"), "prompts": idle.prompts(), "userRows": user_texts(r)})
     finally:
         teardown([w, idle])
 
@@ -1296,7 +1343,8 @@ def scenario_acp_lost_composer(scn):
                  f"errorKind={row.get('errorKind')} retry={row.get('retry')}")
         (_, partial), = assistant_rows(r)
         scn.need(partial.get("live") == "false" and int(partial["shownBytes"]) == byte_len(partial["text"]),
-                 "the partial reply of the lost agent is ended at once: live false, shownBytes the whole text")
+                 "the partial reply of the lost agent is ended at once: live false, shownBytes the whole text",
+                 f"live={partial.get('live')} shownBytes={partial.get('shownBytes')} len={byte_len(partial['text'])}")
         launches, prompts = len(a.sessions("opencode")), a.prompts()
         a.capture("acp-lost")
         a.retry(index)
@@ -1330,11 +1378,14 @@ def scenario_acp_lost_composer(scn):
                  f"errorKind={row.get('errorKind')} retry={row.get('retry')} prompts {k.prompts()}",
                  detail={"row": row, "prompts": k.prompts()})
         k.retry(index)
-        r = k.wait("the relaunched agent is connected with the new message back", lambda r: r["composerText"] == "next"
-                   and r["status"] in ("idle", "completed") and error_row(r) is None, timeout=40)
-        scn.need(row_with_text(r, RESTARTED_BACK) is not None and len(k.sessions("opencode")) == launches + 1 and k.prompts() == [(dead, "hello")],
+        k.wait("the relaunched agent is connected with the new message back", lambda r: r["composerText"] == "next"
+               and r["status"] in ("idle", "completed") and error_row(r) is None, timeout=40)
+        time.sleep(1.5)  # a prompt the retry wrongly sent would be in the stub's log by now
+        r = k.read()
+        scn.need(row_with_text(r, RESTARTED_BACK) is not None and len(k.sessions("opencode")) == launches + 1 and k.prompts() == [(dead, "hello")]
+                 and r["composerText"] == "next",
                  "Retry relaunched the agent, put the new message back in the composer with the notice, and sent nothing",
-                 brief(r), detail={"launches": k.sessions("opencode"), "prompts": k.prompts()})
+                 brief(r), detail={"launches": k.sessions("opencode"), "prompts": k.prompts(), "composer": r["composerText"]})
         k.capture("acp-idle-death")
         k.keep_artifacts()
         k.quit()
@@ -1567,22 +1618,26 @@ def scenario_day_separators(scn):
         scn.need(users[0][1].get("at") == str(turns[0][1]) and "at" not in users[1][1] and users[2][1].get("at") == str(turns[2][1]),
                  "a restored user row has `at`, the Unix second it was asked; an undated turn has no `at` key (absent, not null)",
                  f"{[row.get('at') for _, row in users]}")
-        want = [{"kind": "daySeparator", "entry": str(users[0][0]), "label": day_name(old.date(), today)},
-                {"kind": "daySeparator", "entry": str(users[2][0]), "label": day_name(yesterday.date(), today)}]
+        def separators_for(users, today, *moments):
+            """What the separators must say, from the app's `today` of the very read they are compared with: one above
+            the first dated user row of each day, with Ely's words for that day."""
+            return [{"kind": "daySeparator", "entry": str(entry), "label": day_name(moment.date(), today)}
+                    for (entry, _), moment in zip(users, moments) if moment is not None]
+
+        want = separators_for(users[:3], today, old, None, yesterday)
         scn.need(r["separators"] == want,
                  "a separator sits above the first dated turn (a full date) and above yesterday's: undated turns get none",
-                 f"{r['separators']} against {want}", detail={"today": str(today), "want": want})
+                 f"{r['separators']} against {want} (today {today})", detail={"today": str(today), "want": want})
         w.send("today's question")
-        r, today = read_on_a_day(w)
-        r = w.wait("today's turn is answered", lambda r: r["status"] == "completed" and "today's question" in user_texts(r))
-        r, today = read_on_a_day(w)
+        w.wait("today's turn is answered", lambda r: r["status"] == "completed" and "today's question" in user_texts(r))
+        r, today = read_on_a_day(w)  # one read, one clock: the labels below are worked out from this `today`
         users = rows_of(r, "user")
         at = int(users[-1][1]["at"])
-        want.append({"kind": "daySeparator", "entry": str(users[-1][0]),
-                     "label": day_name(datetime.fromtimestamp(at, timezone.utc).date(), today)})
-        scn.need(abs(at - time.time()) < 120 and r["separators"] == want,
+        moments = [old, None, yesterday, datetime.fromtimestamp(at, timezone.utc)]  # one per user row
+        want = separators_for(users, today, *moments)
+        scn.need(abs(at - time.time()) < 120 and r["separators"] == want and len(want) == 3,
                  "a new turn has `at` now and a separator above it; the three labels are a full date, Yesterday and Today",
-                 f"at={at}, separators {r['separators']} against {want}", detail={"today": str(today), "want": want})
+                 f"at={at}, separators {r['separators']} against {want} (today {today})", detail={"today": str(today), "want": want})
         w.capture("day-separators")
     finally:
         teardown(w)
@@ -1599,20 +1654,23 @@ def scenario_thought_end(scn):
         scn.keep("thought samples", [{"t": round(r["t"], 3), "thoughts": [t.get("durationMs") for _, t in rows_of(r, "thought")],
                                       "assistant": len(assistant_rows(r))} for r in samples])
         unsettled = [r for r in samples if rows_of(r, "thought") and "durationMs" not in rows_of(r, "thought")[0][1]]
-        scn.need(unsettled, "a thought that is still open has no durationMs key (absent, not null)", "no read saw the open thought")
+        scn.need(unsettled, "a thought that is still open has no durationMs key (absent, not null)",
+                 f"{len(unsettled)} reads of {len(samples)} had the thought open, no durationMs key", read=unsettled[0] if unsettled else samples[0])
         settled = [r for r in samples if rows_of(r, "thought") and "durationMs" in rows_of(r, "thought")[0][1]]
-        scn.need(settled, "the thought settles")
+        scn.need(settled, "the thought settles", f"{len(settled)} reads of {len(samples)} had the thought settled",
+                 read=settled[0] if settled else samples[-1])
         first = settled[0]
         scn.need(not assistant_rows(first), "the thought settled when its block closed, before any reply text had arrived",
-                 f"{len(assistant_rows(first))} reply rows at that read")
+                 f"{len(assistant_rows(first))} reply rows at the first read with a durationMs", read=first)
         duration = int(rows_of(first, "thought")[0][1]["durationMs"])
         scn.need(300 <= duration < 1000,
                  "its durationMs is the thinking block's (under 1 s), not the 2 s wait for the text",
-                 f"{duration} ms")
+                 f"{duration} ms", read=first)
         last = samples[-1]
         scn.need(int(rows_of(last, "thought")[0][1]["durationMs"]) == duration and any(a["text"] == "done thinking" for _, a in assistant_rows(last)),
                  "after the reply arrived and the turn ended the thought's durationMs is the same",
-                 f"{rows_of(last, 'thought')[0][1].get('durationMs')} ms")
+                 f"{rows_of(last, 'thought')[0][1].get('durationMs')} ms against {duration} ms; reply {[a['text'] for _, a in assistant_rows(last)]}",
+                 read=last)
         w.capture("thought-settled")
     finally:
         teardown(w)
