@@ -589,6 +589,69 @@ no prompt to resend (the end cleared `last_prompt`), and relaunching an agent th
 its row has no Retry (`retry_action` answers `None`, and the row is pushed with `retryable: false`): it keeps OK, a
 held queue reads "Waiting: send a message.", and a limit card does not cover it or offer Try again.
 
+**Message actions: Copy, Quote, Continue and a stopped turn's label** (`sirio_ui::chat::message_actions`;
+spec `docs/superpowers/specs/2026-11-23-ely-chat-message-actions-design.md`). Every user message and every
+finished reply has a row of actions under it, built in Sirio from Ely's parts with no vendor change: Ely's
+`MessageActions` for Copy (the entry's `text`: a reply's Markdown source, a user message as sent with its quote
+block), an Ely `IconButton` for Quote, and Ely's `continue_button`. `ActionsFrame::row` is the one place that
+decides what a row draws; the drawn row, the socket's readout and its verbs all read it. The row under the last
+reply is always drawn once its turn is over; every other row is drawn on hover (`group_hover`) and keeps its
+space when hidden, so hovering moves nothing. A reply that is still streaming has none, and a folded turn stands
+in for itself with one row that has none. The row is a sibling of a message's selectable text, never inside it,
+and it animates only for a press (Ely's `CopyButton` runs once per press): the `idle_cost` scenario is what
+notices a loop.
+
+**Continue** sends the prompt `Continue` as a visible user row through `submit_prompt`, the one wire path; there
+is no second resend path. It is offered when the last turn ended `MaxTokens`, `MaxTurnRequests` or `Cancelled`
+(`ContinueReason::from_stop_reason`, set by `settle_turn`). That reason lives in memory only, so a restored chat
+has none, and it is cleared by a failure (`fail_turn`: that row has Retry), by every `submit_prompt`, every new
+connection and every new, cleared or opened conversation. It sits on the last reply of the last turn, or, when
+that turn has no reply (a Stop during a tool call), as a lone button on its footer. `continue_action` runs
+Retry's own table (`retry_action`) on the state the agent is in: the client up is `Resend`; gone, with a launch
+that resumes a known session (Claude), `ResumeThenResend`; gone otherwise (ACP), `RelaunchToComposer`, which
+Continue maps to none, so it is hidden: an ACP chat that restarted has lost the conversation. It is hidden too
+while a turn runs, the agent connects or the queue is held (`continue_action_now`, with `retry_refusal`'s
+causes). A press sets `last_prompt` to `LastPrompt::continue_prompt()` and calls `dispatch_resend`, which Retry
+calls as well. A stopped turn's late end that arrives after the user sent the next prompt (`stop_end_pending`
+while a turn streams) offers none, and an ACP agent's error answer to the cancel ends the turn as `Cancelled`,
+so Continue is offered as after a clean Stop. The reason is read from the same stop reason as the footer's
+label (`stop_reason_label` for Claude), so a wrong label moves both.
+
+**A stopped Claude turn ends `Cancelled`.** In `Fold::apply_result` a result that follows Sirio's own interrupt
+ends the turn with the stop reason `Cancelled`, whatever its `subtype` or `stop_reason` say. The real CLI writes
+`error_during_execution`, `stop_reason: null`, `terminal_reason: aborted_streaming` and no `result` text
+(`sirio_claude/tests/fixtures/trace_result_interrupted.json`), and a `result` text that some CLI did send is not
+pushed as a reply chunk. The footer reads "cancelled" and `is_stopped_reason` holds for Claude as for ACP. A Stop
+with an item queued still sends the item (the redirect). `stop_reason_label` reads an `error_max_turns` subtype
+before the stop reason, because that result can carry `stop_reason: "tool_use"`.
+
+**Quote** (`chat/quote.rs`). One quote at a time: Quote on a row (the whole message) or Quote selection in the
+transcript menu (a selection inside one entry) fills `Chat::quote` and focuses the composer, and Ely's
+`QuoteReply` above the field is its card (one line, the quote's non-blank lines joined by spaces; its cross clears
+the quote). On a send, `join_quote` puts a Markdown `> ` block at the head of the prompt (an empty quoted line is
+`>`), then an empty line and the typed text. The author is never sent. The block is joined after the composer's
+mentions are assembled, so the quote is never parsed for `@path`: a quoted path stays text. A typed draft that is
+a slash command (`is_slash_command`: `/` and a letter, so `/compact` and not `/etc/hosts is wrong`) goes without
+the quote, which stays held, because the agent reads a command at the head of the prompt. From there the quote is
+prompt text, so the queue, Retry, persistence and a restore carry it with no new field, and `split_quote` is the
+one reader of it (leading lines all starting with `>`, then an empty line or the end). It draws the user row's
+card (author "Quote": the author was not sent), names the turn's fold row and the rail's tick by what was typed
+after the block (`headline`), and, on a hand-back, puts the block back in the card and the rest in the field
+unless the composer already holds a quote or a draft. A leading `>` block typed by hand reads as a quote too; the
+agent gets the same text either way.
+
+**The debug surface of the actions** (debug builds only; a release build serves none of it).
+`surface.chat.transcript` has the verbs `copy` and `quote` (by `entry`), `continue` (no entry: Continue is on at
+most one row) and `quoteSelection`. Each is refused, with the reason, when the row or the menu would not offer it,
+and a verb never presses a button nobody can see (a folded turn refuses `continue`). `surface.chat.read` gives, per
+row, `actions` (`copy`, `quote`, `continue`, comma-joined), `actionsShown` (`always`, `hover` or `none`),
+`actionBounds.<copy|quote|continue|row|quoteCard>` (`[x, y, width, height]` of what the last paint drew: a hover
+row paints no button until the pointer is over it, and `row` is always given) and a user row's `quote`; and for
+the chat `continue` (`none`, `resend` or `resume`), `continueRow`, `composerQuote` and `composerQuoteBounds`. The
+card's cross has no hook, because Ely's `QuoteReply` exposes none and the vendor is not changed: the E2E clicks
+the right end of `composerQuoteBounds`, and a click that misses leaves the quote and fails. Proof:
+`Scripts/Tests/test-chat-message-actions-e2e.sh` (`docs/agents/e2e-tests.md`).
+
 **Why Claude Code could not start.** A CLI that fails before the session writes an error `result`
 as its first stdout line, in place of the `initialize` answer, with `startup_failure_reason` and
 `errors`. Sirio reads it during the handshake, because it comes there and nowhere later (every one

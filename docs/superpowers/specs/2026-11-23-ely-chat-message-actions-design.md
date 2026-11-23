@@ -156,8 +156,8 @@ itself, so `copy_local_text` and `CopyTarget::Assistant` lose their caller. Buil
 anything another caller still needs.
 
 **Redraw cost:** the row adds no animation that runs without a press. Ely's `CopyButton` animates once per press, for
-`motion::FAST`. The E2E measures the redraws of an idle chat whose last reply shows the row, and compares them with
-main (§7).
+`motion::FAST`. The E2E measures the redraws of an idle chat whose last reply shows the row, before any press and after a
+Copy press has settled (§7).
 
 ### 5.2 Stop, and Claude's Stop label
 
@@ -188,15 +188,23 @@ is what the agent receives.
 - Any other end clears it, and so does a failure (`fail_turn`), since that row has Retry.
 - It is also cleared by:
   - every `submit_prompt`, which is the next turn;
-  - every new connection, except the one Continue's own resume starts (an ACP restart is a new, empty session);
-  - clearing or starting a new conversation.
+  - every new connection (an ACP restart is a new, empty session). Continue's own resume is no exception, and needs
+    none: pressing Continue has already put its prompt in `last_prompt`, so the resume's resend does not read the
+    reason;
+  - clearing or starting a new conversation, and opening a past session.
 - It is never persisted, so a restored chat has no Continue.
+- A stopped turn's late end that arrives after the user sent the next prompt (Stop, then Enter, then the late end)
+  does not set it: that end belongs to the stopped turn, not to the one that runs.
+- An ACP agent's error answer to the cancel (`TurnFailed` after a Stop) ends the turn as `Cancelled`, so its footer
+  says "cancelled" and Continue is offered, as after a clean Stop.
 
 **Where:**
 - On the action row of the last `Assistant` entry of the last turn.
 - When that turn has no `Assistant` entry (stopped during a tool call), on the last turn's footer row instead, as a
   lone `continue_button`.
 - Never on more than one row.
+- A folded turn stands in for itself with one row that draws no action, so while the turn Continue belongs to is
+  folded no row draws it, and the socket's `continue` is refused (§5.5).
 
 **When**, by the same table as Retry. `retry_action` gains no new arguments. Continue is decided as a `TurnFailed`-like
 row whose prompt is the `Continue` prompt:
@@ -236,33 +244,46 @@ queued later goes when the Continue turn ends, by today's rule.
 **Starting a quote:**
 - **Quote** on a row quotes the whole message: its `text`.
 - **Quote selection** is a new item in the transcript's context menu. It shows when the selection is not empty and lies
-  within one message, and it quotes the selected text.
-- Builder: if a selection spanning several messages is cheap to quote as one block, allow it. Otherwise hide the item
-  for such a selection.
+  within one transcript entry, which need not be a message, and it quotes the selected text. Its author is "You" for
+  a user message and the agent's name for any other entry.
+- A selection that spans several entries is not quoted: the item is hidden for it.
 
 **In the composer:**
 - The composer holds `quote: Option<Quote { author, text }>`. `author` is "You" for a user message and the agent's
   name for a reply.
 - While it is set, Ely's `QuoteReply` sits above the field with its ✕ (`on_remove` clears it).
+- The card shows one line: the quote's non-blank lines joined by single spaces, cut at 300 characters (Ely draws the
+  first line of what it is given).
+- Ely's `QuoteReply` exposes no selector for its ✕ and the vendor is not changed, so the ✕ has no hook of its own: the
+  E2E clicks it at the right end of the card's bounds (`composerQuoteBounds`), and a click that misses leaves the
+  quote and fails the check.
 - A second quote replaces the first.
 - The quote is in memory with the draft. It is not part of the stored draft unless the draft is stored (builder: follow
   what the draft does).
 - Quoting focuses the composer.
 
 **On send:**
-- `assemble_prompt` puts the quote at the head of the prompt's text: every line of the quoted text prefixed with `> `
+- `join_quote` puts the quote at the head of the prompt's text: every line of the quoted text prefixed with `> `
   (an empty line becomes `>`), then one empty line, then the typed text.
-- The quote is cleared when the prompt is sent.
+- It is joined **after** `assemble_prompt` has read the typed text for mentions. The quote is never parsed for `@path`:
+  a quoted `@path` stays the words that were quoted and is not attached as a file.
+- The quote is cleared when the prompt is sent, with one exception: a typed draft that is a slash command (`/` and a
+  letter, such as `/compact`; not `/etc/hosts is wrong`) is sent without the quote, which stays held in the composer.
+  The agent reads a command at the head of the prompt, and a block there would turn it into a message.
 - A quote with no typed text is allowed: the prompt is the quote alone.
 - `author` is not sent.
 - From here the quote is ordinary prompt text, so `LastPrompt.text`, the queue, Retry, persistence and a restore carry
   it with no new field.
 - `LastPrompt.draft` keeps the raw draft with the quote block in front of it, so a hand-back can restore both.
+- A held quote counts as composing, as a typed draft does: a hand-back does not put the message over a composer that
+  holds a quote or a draft, and its notice says only that the agent restarted.
 
 **Reading a quote back** (one function, used by every reader). A user text whose leading lines all start with `>`,
 followed by an empty line or the end of the text, splits into a quote and the rest:
 - **The user row** draws the quote as Ely's `QuoteReply` above the bubble's text, with author "Quote", because the
   author was not sent. The rest is drawn as today.
+- **The turn's fold row and the turn rail's tick** name the prompt by what was typed after the block, or by the
+  quote's first line when nothing was: not by the block's `>` markers.
 - **A hand-back** (`hand_prompt_back`) and a refill split the same way: the quote goes back in the composer's
   `QuoteReply`, the rest in the field.
 
@@ -274,15 +295,24 @@ receives is the same either way.
 ### 5.5 Debug surface (debug builds only)
 
 **`surface.chat.read`**, per row: which actions the row draws now and whether they are visible (`always`, `hover` or
-`none`), e.g. `actions: ["copy", "quote", "continue"]`, `actionsShown: "always"`. Assistant and user rows alike. This
-is what the row shows, so the E2E asserts what is drawn, not only what an action maps to (delivery 1's lesson).
+`none`), e.g. `actions: "copy,quote,continue"`, `actionsShown: "always"`. Assistant and user rows alike. This is what
+the row shows, so the E2E asserts what is drawn, not only what an action maps to (delivery 1's lesson). Also per row:
+- `actionBounds.<copy|quote|continue|row>`: where the last paint drew each button, `[x, y, width, height]` in window
+  pixels, so the E2E clicks at the pixels. A row shown on hover paints no button until the pointer is over its message;
+  `row`, the row's own place, is reported either way;
+- on a user row that draws a quote card: `quote` (the quoted text) and `actionBounds.quoteCard`.
 
-**`surface.chat.read`**, for the composer: the quote held, if any.
+**`surface.chat.read`**, for the chat: `continue` (what Continue does now: `none`, `resend` or `resume`) and
+`continueRow` (the row that carries it); for the composer, the quote held (`composerQuote`) and where its card was
+painted (`composerQuoteBounds`).
 
-**`surface.chat.transcript`** gains:
-- `action=copy|quote|continue entry=N`, which runs the same handler as the click and is refused with the reason when
-  the row does not show that action;
-- `action=quoteSelection` for the current selection.
+**`surface.chat.transcript`** gains four verbs, each of which runs the same handler as the click and is refused with the
+reason when the row, or the menu, does not offer the action:
+- `action=copy entry=N` and `action=quote entry=N`;
+- `action=continue`, which takes no entry: Continue is on at most one row;
+- `action=quoteSelection`, for the current selection.
+
+A verb never presses a button nobody can see: while Continue's turn is folded, `continue` is refused.
 
 Release builds serve none of these. `served::served_methods(debug)` stays the one list.
 
@@ -296,8 +326,9 @@ Release builds serve none of these. `served::served_methods(debug)` stays the on
 
 - **No vendor change.** If one turns out to be needed, it is recorded in `LOCAL-CHANGES.md` as the next L number, and
   t2s hears of it first.
-- **Diff main's calls in any rewritten function.** `retry` is factored and `assemble_prompt`, `settle_turn` and
-  `hand_prompt_back` grow, so the diff of main's calls inside each is part of the review.
+- **Diff main's calls in any rewritten function.** `retry` is factored and `send`, `settle_turn` and
+  `hand_prompt_back` grow (`assemble_prompt` itself does not: the quote is joined after it, §5.4), so the diff of
+  main's calls inside each is part of the review.
 - **Text selection rules** (`docs/agents/architecture/text-selection.md`): the row's buttons are never inside
   selectable text, and selectable text is never inside a button.
 - **Performance:** every label is a `&'static str` (`sirio_perf`), never message text.
@@ -349,8 +380,9 @@ captures. Scenarios:
    - the user row shows the quote;
    - after a restore the row still shows it;
    - a Retry or a hand-back keeps it.
-7. **Idle cost:** the redraw count of an idle chat whose last reply shows its row, over a fixed window, against the same
-   on main. This catches an Ely animation that loops.
+7. **Idle cost:** the redraw count of an idle chat whose last reply shows its row, over a fixed window, before any press
+   and after a Copy press has settled, in the same build: after is at most 1.5 times before plus 2, and neither is more
+   than 3 a second. This catches an Ely animation that loops. It compares nothing with a build of main.
 
 **Captures:** before and after, light and dark, of a transcript with the rows, a hovered row, Continue, and a quote in
 the composer and in a sent row. They are taken with `Scripts/capture-markdown-surfaces.sh` or the E2E's own captures.
@@ -369,11 +401,20 @@ the composer and in a sent row. They are taken with `Scripts/capture-markdown-su
   either; the stub's are synthetic. Continue follows the same labels, so it appears exactly where the footer already
   says "token limit" or "turn-request limit". A live capture is a hand check: a `--max-turns 1` turn with the real CLI,
   and, if one can be provoked, a token-limit one. Should the real shapes differ, the fix is in `stop_reason_label`, and
-  the footer and Continue follow it together.
+  the footer and Continue follow it together. One difference is already built in: an `error_max_turns` result is read
+  by its subtype before its stop reason, because it ends a turn whose last message asked for a tool and can carry
+  `stop_reason: "tool_use"`.
 - **The real Claude CLI on interrupt.** The capture is from one CLI version. The hand check with the real CLI repeats
   it.
 - **The real agents' answer to "Continue".** Whether each agent picks a cut answer up well is the agent's business. The
   delivery promises only that the prompt reaches the same conversation.
+- **A second Stop races the first one's late end** (a follow-up: the race is on main already, and this delivery gives
+  it one new visible consequence). There is one pending-Stop flag (`stop_end_pending`). Stop, Enter, then Stop again
+  lets the first turn's late "Cancelled" be taken as the end of the next turn, so Continue can be drawn over a turn
+  that runs, and a press would send a second prompt. A late `TurnFailed` after a Stop's failed cancel, arriving while
+  the next prompt runs, is in the same family (it takes the real-error path: a Retry row over a live turn). Fixing it
+  takes a count of pending ends, which reworks main's Stop logic beyond this delivery; it is filed as an issue when
+  the PR opens.
 - **Hover rows on every message** add elements to each drawn row. The list is culled, and the E2E's idle-cost scenario
   and the delivery-1 benches cover the frame.
 

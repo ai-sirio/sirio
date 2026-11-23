@@ -720,7 +720,7 @@ Scripts/Tests/test-chat-richer-messages-e2e.sh --only limit,thought_end   # -> p
 # messages, and Claude's Stop labelled `cancelled`, in a real, isolated debug Sirio on a private Xvfb, against the stubs of the
 # richer E2E above (`claude` and `opencode`, extended with `max tokens`, `slow`, `slow late` and a held `Continue`; ACP
 # `max tokens`, `max turns`, `max tokens drop` and `slow`; their headers list them). It reads `surface.chat.read`'s debug
-# readouts (a row's `actions`, `actionsShown` and `actionBounds.<copy|quote|continue|row>`, a user row's `quote`, the chat's
+# readouts (a row's `actions`, `actionsShown` and `actionBounds.<copy|quote|continue|row|quoteCard>`, a user row's `quote`, the chat's
 # `continue`, `continueRow`, `composerQuote`, `composerQuoteBounds`, `queued`, `transcriptText`) and drives the debug
 # `surface.chat.transcript` verbs `continue` and `toggleTurn`; every press a user makes is a real X click (xdotool) at the pixels
 # the readout reports: Copy, Quote and Continue on a row, the quote card's cross, the transcript menu's Select All, Copy and Quote
