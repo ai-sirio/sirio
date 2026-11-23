@@ -4399,6 +4399,14 @@ impl Chat {
     /// sends the same prompt again; the prompt is kept for it, and the queue is held so that no
     /// other prompt replaces it first.
     fn fail_turn(&mut self, message: String, stop_reason: &str, cx: &mut Context<Self>) {
+        // No turn of ours streams: Stop ended it, and this is the agent's error answer to the
+        // prompt it cancelled (ACP's cancel is a notification, answered like any prompt). It is
+        // the late end of a stopped turn, as a late `TurnEnded` is: no error row, no hold, and the
+        // live agent is not offered a restart.
+        if !self.streaming {
+            self.end_turn(stop_reason, cx);
+            return;
+        }
         self.fail_trace_turn(&message, cx);
         self.push_entry(Entry::Error {
             message,
@@ -5009,11 +5017,14 @@ impl Chat {
                 self.toggle_turn_folded(turn, cx);
             }
             TranscriptAction::Retry(entry) => {
-                if self
-                    .retry_action_at(entry)
-                    .is_none_or(|action| action == retry::RetryAction::None)
-                {
-                    return Err("surface.chat.transcript retry: entry has no Retry".to_string());
+                // The socket answers what happened: a click that `retry` would ignore is an
+                // error here, not a success.
+                let refusal = match self.retry_action_at(entry) {
+                    None => Some("entry has no Retry"),
+                    Some(action) => self.retry_refusal(action),
+                };
+                if let Some(why) = refusal {
+                    return Err(format!("surface.chat.transcript retry: {why}"));
                 }
                 self.retry(entry, cx);
             }
@@ -6443,12 +6454,17 @@ impl Chat {
     /// keep their order.
     fn remove_queued_entry(&mut self, index: usize, cx: &mut Context<Self>) {
         self.queue.remove(index);
+        // An emptied queue holds nothing back.
+        if self.queue.is_empty() {
+            self.queue_held = false;
+        }
         cx.notify();
     }
 
     /// "Clear all" in the queue header: nothing sends when the turn ends.
     fn clear_queue(&mut self, cx: &mut Context<Self>) {
         self.queue.clear();
+        self.queue_held = false;
         cx.notify();
     }
 
@@ -7274,6 +7290,9 @@ impl Chat {
         let Some(action) = self.retry_action_at(index) else {
             return;
         };
+        if self.retry_refusal(action).is_some() {
+            return;
+        }
         // Retry on a failed turn's row consumes it; the rows of a lost client go when the new
         // process connects (`clear_recovered_connection_errors`).
         let failed_turn_row = matches!(
@@ -7287,18 +7306,10 @@ impl Chat {
             retry::RetryAction::None => {}
             retry::RetryAction::Relaunch => self.start_connection(cx),
             retry::RetryAction::Resend => {
-                // Two prompts at once would be a double click on a row that no longer has
-                // its turn.
-                if self.streaming || self.client.is_none() {
-                    return;
-                }
                 self.dismiss_error(index, cx);
                 self.resend_last_prompt(cx);
             }
             retry::RetryAction::ResumeThenResend | retry::RetryAction::RelaunchToComposer => {
-                if self.connecting {
-                    return;
-                }
                 let resume = match (action, &self.agent_session_id) {
                     (retry::RetryAction::ResumeThenResend, Some(session)) => Some(session.clone()),
                     _ => None,
@@ -7322,6 +7333,27 @@ impl Chat {
         }
     }
 
+    /// Why Retry would do nothing on a row whose action is `action`, `None` when it acts. A resend
+    /// while a turn runs would be a second prompt at once; a relaunch while one connects is
+    /// refused by `connect`.
+    fn retry_refusal(&self, action: retry::RetryAction) -> Option<&'static str> {
+        match action {
+            retry::RetryAction::None => Some("entry has no Retry"),
+            retry::RetryAction::Resend if self.streaming => Some("a turn is running"),
+            retry::RetryAction::Resend if self.client.is_none() => {
+                Some("the agent is not connected")
+            }
+            retry::RetryAction::Relaunch
+            | retry::RetryAction::ResumeThenResend
+            | retry::RetryAction::RelaunchToComposer
+                if self.connecting =>
+            {
+                Some("the agent is connecting")
+            }
+            _ => None,
+        }
+    }
+
     /// Sends the prompt that failed, or was in flight when the client was lost, as a new turn.
     fn resend_last_prompt(&mut self, cx: &mut Context<Self>) {
         if let Some(last) = self.last_prompt.clone() {
@@ -7333,6 +7365,10 @@ impl Chat {
     /// resumed conversation, or, when the conversation did not come back, hands the prompt back.
     fn finish_retry(&mut self, cx: &mut Context<Self>) {
         let Some(after) = self.after_connect.take() else {
+            // A plain relaunch (an AuthRequired row's Retry, a Restart agent with nothing in
+            // flight) connected and sends nothing: a prompt still held would be resumed and sent
+            // by a later idle death.
+            self.last_prompt = None;
             return;
         };
         match after {
@@ -7417,9 +7453,24 @@ impl Chat {
         }
     }
 
-    /// The line under a held queue; `None` when the queue is not held or holds nothing.
+    /// The line under a held queue; `None` when the queue is not held or holds nothing. It names
+    /// Retry only while some row still has one.
     fn queue_held_line(&self) -> Option<String> {
-        (self.queue_held && !self.queue.is_empty()).then(|| retry::QUEUE_HELD_LINE.to_string())
+        if !self.queue_held || self.queue.is_empty() {
+            return None;
+        }
+        let retry_left = (0..self.entries.len()).any(|index| {
+            self.retry_action_at(index)
+                .is_some_and(|action| action != retry::RetryAction::None)
+        });
+        Some(
+            if retry_left {
+                retry::QUEUE_HELD_LINE
+            } else {
+                retry::QUEUE_HELD_LINE_NO_RETRY
+            }
+            .to_string(),
+        )
     }
 
     /// F-CHAT-33: the "OK to dismiss" affordance the VERIFY clause and the

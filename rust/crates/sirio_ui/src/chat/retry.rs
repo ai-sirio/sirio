@@ -64,6 +64,10 @@ pub(crate) enum AfterConnect {
 /// The line under a queue held after a failed turn.
 pub(crate) const QUEUE_HELD_LINE: &str = "Waiting: press Retry or send a message.";
 
+/// The same line once no Retry is left (the prompt went back to the composer, or the failed
+/// turn's row was retired or dismissed).
+pub(crate) const QUEUE_HELD_LINE_NO_RETRY: &str = "Waiting: send a message.";
+
 /// The first notice of a refill: the composer was empty and got the message back.
 pub(crate) const RESTARTED_MESSAGE_BACK: &str =
     "The agent restarted without this conversation. Your message is back in the composer.";

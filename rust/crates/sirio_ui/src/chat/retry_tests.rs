@@ -23,6 +23,7 @@ const CLAUDE_FIXTURE: &str = concat!(
 );
 
 const HELD_LINE: &str = "Waiting: press Retry or send a message.";
+const HELD_LINE_NO_RETRY: &str = "Waiting: send a message.";
 
 /// Where the fake `claude` writes what it heard: every prompt, and the `--resume` of every launch.
 struct Logs {
@@ -388,16 +389,24 @@ async fn a_failed_turn_holds_the_queue_and_shows_why(cx: &mut TestAppContext) {
         ["silent third", "silent fourth"],
         "the resend runs alone: the queue waits for its end"
     );
+    let resent = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
+    assert!(!resent.queue_held, "the hold lifts at the send");
+    assert_eq!(resent.queue_held_line, None, "and the line goes with it");
 
     event(&chat, cx, turn_ended());
     wait_for_prompts(&chat, cx, &logs, 3);
-    let released = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
-    assert!(!released.queue_held);
-    assert_eq!(released.queue_held_line, None);
-    assert_eq!(released.queued, ["silent fourth"], "the next item went out, one only");
+    assert_eq!(
+        queue_of(&chat, cx),
+        ["silent fourth"],
+        "the resend's end sent the next item, one only"
+    );
     assert_eq!(
         user_texts(&chat, cx),
         ["silent first", "silent first", "silent third"]
+    );
+    assert_eq!(
+        logs.heard()[2][0]["text"], "silent third",
+        "and it is the CLI that heard it"
     );
 }
 
@@ -420,6 +429,7 @@ async fn clearing_a_held_queue_takes_the_line_away(cx: &mut TestAppContext) {
     let snapshot = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
     assert!(snapshot.queued.is_empty());
     assert_eq!(snapshot.queue_held_line, None, "an empty queue shows no line");
+    assert!(!snapshot.queue_held, "an emptied queue is not held");
 }
 
 /// A turn the CLI started ends with a `TurnEnded` of its own: it is not the end of the failed
@@ -703,6 +713,240 @@ async fn handing_the_prompt_back_retires_the_failed_turns_retry(cx: &mut TestApp
         ("turnFailed".to_string(), "none".to_string()),
         "the failed turn's row is what is left, and it has no Retry"
     );
+}
+
+/// The user's own send is how a held queue moves again: "Send now" on a held, idle queue sends that
+/// item (whatever its place) and lifts the hold, and what is left drains at that turn's end.
+#[gpui::test]
+async fn send_now_on_a_held_queue_sends_it_and_lifts_the_hold(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    send(&chat, cx, "silent second");
+    send(&chat, cx, "silent third");
+    event(&chat, cx, turn_failed());
+    assert!(chat.read_with(&cx.cx, |chat, _| chat.queue_held));
+
+    chat.update(cx, |chat, cx| chat.send_queued_entry_now(1, cx));
+    wait_for_prompts(&chat, cx, &logs, 2);
+
+    assert_eq!(logs.heard()[1][0]["text"], "silent third", "the entry that was pressed");
+    assert_eq!(queue_of(&chat, cx), ["silent second"], "the rest waits");
+    assert!(!chat.read_with(&cx.cx, |chat, _| chat.queue_held), "the send lifted the hold");
+
+    event(&chat, cx, turn_ended());
+    wait_for_prompts(&chat, cx, &logs, 3);
+    assert_eq!(logs.heard()[2][0]["text"], "silent second", "it drained at that turn's end");
+    assert!(queue_of(&chat, cx).is_empty());
+}
+
+/// A message typed after a failure lifts the hold as Retry does: it goes out alone, and the
+/// queue drains at its own end.
+#[gpui::test]
+async fn a_manual_send_after_a_failure_drains_the_queue_at_its_own_end(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    send(&chat, cx, "silent second");
+    event(&chat, cx, turn_failed());
+
+    send(&chat, cx, "silent manual");
+    wait_for_prompts(&chat, cx, &logs, 2);
+    settle(cx, 30);
+
+    assert_eq!(logs.heard().len(), 2, "the queue did not move with the send");
+    assert_eq!(queue_of(&chat, cx), ["silent second"]);
+    assert!(!chat.read_with(&cx.cx, |chat, _| chat.queue_held));
+
+    event(&chat, cx, turn_ended());
+    wait_for_prompts(&chat, cx, &logs, 3);
+    assert_eq!(logs.heard()[2][0]["text"], "silent second");
+    assert_eq!(
+        user_texts(&chat, cx),
+        ["silent first", "silent manual", "silent second"]
+    );
+    assert!(queue_of(&chat, cx).is_empty());
+}
+
+/// ACP can answer the prompt that Stop cancelled with an error: that is the late end of the stopped
+/// turn. It leaves no error row and no hold, and the agent is not touched; like the late `TurnEnded`
+/// of a Stop it lets the queue go on.
+#[gpui::test]
+async fn a_failure_after_stop_is_the_late_end_of_the_stopped_turn(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    let generation = chat.read_with(&cx.cx, |chat, _| chat.connection_generation);
+    send(&chat, cx, "silent stop me");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    send(&chat, cx, "silent after");
+    chat.update(cx, |chat, cx| chat.cancel_turn(cx));
+
+    event(&chat, cx, turn_failed());
+
+    chat.read_with(&cx.cx, |chat, _| {
+        assert!(
+            !chat
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Error { .. })),
+            "no error row: {:?}",
+            chat.entries
+        );
+        assert!(!chat.queue_held, "no hold");
+        assert!(chat.client.is_some(), "the agent is up");
+        assert_eq!(chat.connection_generation, generation, "and not relaunched");
+    });
+    wait_for_prompts(&chat, cx, &logs, 2);
+    assert_eq!(logs.heard()[1][0]["text"], "silent after", "the queue went on");
+}
+
+/// A held queue whose Retry is gone says so: the prompt went back to the composer, and the failed
+/// turn's row was retired. The queue stays held.
+#[gpui::test]
+async fn a_held_queue_with_no_retry_left_says_to_send_a_message(cx: &mut TestAppContext) {
+    let (chat, cx) = offline_chat(cx, acp_launch());
+    chat.update(cx, |chat, cx| {
+        chat.submit_turn("the failed prompt".into(), Vec::new(), Vec::new(), cx);
+        chat.queue.push_back("queued behind it".into());
+    });
+    event(&chat, cx, turn_failed());
+    event(&chat, cx, connection_lost());
+    let line = |chat: &Entity<Chat>, cx: &VisualTestContext| {
+        chat.read_with(&cx.cx, |chat, _| chat.control_snapshot().queue_held_line)
+    };
+    assert_eq!(line(&chat, cx).as_deref(), Some(HELD_LINE), "a Retry is left");
+
+    let lost = error_row(&chat, cx);
+    retry_row(&chat, cx, lost);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some() && !chat.connecting);
+
+    assert_eq!(notices(&chat, cx), [retry::RESTARTED_MESSAGE_BACK]);
+    assert_eq!(line(&chat, cx).as_deref(), Some(HELD_LINE_NO_RETRY));
+    assert!(chat.read_with(&cx.cx, |chat, _| chat.queue_held), "still held");
+    assert_eq!(queue_of(&chat, cx), ["queued behind it"]);
+}
+
+/// OK on the failed turn's row takes its Retry away too; the held queue then waits on a message.
+#[gpui::test]
+async fn an_ok_on_the_failed_row_leaves_the_queue_waiting_on_a_message(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    send(&chat, cx, "silent second");
+    event(&chat, cx, turn_failed());
+    let line = |chat: &Entity<Chat>, cx: &VisualTestContext| {
+        chat.read_with(&cx.cx, |chat, _| chat.control_snapshot().queue_held_line)
+    };
+    assert_eq!(line(&chat, cx).as_deref(), Some(HELD_LINE));
+
+    let row = error_row(&chat, cx);
+    chat.update(cx, |chat, cx| chat.dismiss_error(row, cx));
+
+    assert_eq!(line(&chat, cx).as_deref(), Some(HELD_LINE_NO_RETRY));
+    assert!(chat.read_with(&cx.cx, |chat, _| chat.queue_held));
+}
+
+/// Sign-in is out of band: a plain relaunch of an AuthRequired row connects and sends nothing, so it
+/// must not leave the old prompt for a later idle death to resume and resend.
+#[gpui::test]
+async fn a_plain_relaunch_forgets_the_prompt_it_did_not_resend(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = offline_chat(cx, claude_launch("session_state", &logs));
+    chat.update(cx, |chat, cx| {
+        chat.agent_session_id = Some("fixture-session-1".to_string());
+        chat.submit_turn("silent mid-turn".into(), Vec::new(), Vec::new(), cx);
+    });
+    event(
+        &chat,
+        cx,
+        sirio_chat::ChatEvent::TransportError("Claude Code requires authentication".into()),
+    );
+    assert_eq!(
+        readout(&chat, cx),
+        ("authRequired".to_string(), "relaunch".to_string())
+    );
+
+    let row = error_row(&chat, cx);
+    retry_row(&chat, cx, row);
+    pump_chat_until_within(cx, &chat, 3000, |chat| {
+        chat.client.is_some() && !chat.connecting
+    });
+    assert!(logs.heard().is_empty(), "nothing was resent");
+
+    event(&chat, cx, connection_lost());
+    assert_eq!(
+        readout(&chat, cx),
+        ("disconnected".to_string(), "relaunch".to_string()),
+        "an idle death has nothing to resend"
+    );
+}
+
+/// The socket's `retry` answers what happened: a click that the chat ignores is an error there, not a
+/// success an E2E could read.
+#[gpui::test]
+async fn the_socket_retry_refuses_what_a_click_would_ignore(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    event(&chat, cx, turn_failed());
+    let row = error_row(&chat, cx);
+    let press = |chat: &Entity<Chat>, cx: &mut VisualTestContext, entry: usize| {
+        chat.update(cx, |chat, cx| chat.transcript_act(TranscriptAction::Retry(entry), cx))
+    };
+
+    // Not an error row.
+    assert_eq!(
+        press(&chat, cx, 0),
+        Err("surface.chat.transcript retry: entry has no Retry".to_string())
+    );
+    // A turn is running: Retry would send a second prompt.
+    chat.update(cx, |chat, _| chat.streaming = true);
+    assert_eq!(
+        press(&chat, cx, row),
+        Err("surface.chat.transcript retry: a turn is running".to_string())
+    );
+    settle(cx, 30);
+    assert_eq!(logs.heard().len(), 1, "nothing was sent");
+    // Idle again: the same call is the click, and succeeds.
+    chat.update(cx, |chat, _| chat.streaming = false);
+    assert_eq!(press(&chat, cx, row), Ok(()));
+    wait_for_prompts(&chat, cx, &logs, 2);
+}
+
+/// The same for a relaunch that cannot start because one is already connecting.
+#[gpui::test]
+async fn the_socket_retry_refuses_a_relaunch_while_one_is_connecting(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = offline_chat(cx, claude_launch("session_state", &logs));
+    chat.update(cx, |chat, cx| {
+        chat.agent_session_id = Some("fixture-session-1".to_string());
+        chat.submit_turn("silent mid-turn".into(), Vec::new(), Vec::new(), cx);
+    });
+    event(&chat, cx, connection_lost());
+    let row = error_row(&chat, cx);
+    assert_eq!(readout(&chat, cx).1, "resume");
+
+    chat.update(cx, |chat, _| chat.connecting = true);
+    let refused = chat.update(cx, |chat, cx| {
+        chat.transcript_act(TranscriptAction::Retry(row), cx)
+    });
+
+    assert_eq!(
+        refused,
+        Err("surface.chat.transcript retry: the agent is connecting".to_string())
+    );
+    assert!(logs.resumes().is_empty(), "nothing was launched");
 }
 
 /// A new conversation drops the old one's prompt and hold: a resend must never reach it.

@@ -50929,7 +50929,7 @@ done
                 request::chat_elicitation("chat-1", 1, Some(1), None, false)
             }
             "surface.chat.transcript" => {
-                request::chat_transcript("chat-1", "scrollBy", Some("10"), None)
+                request::chat_transcript("chat-1", "scrollBy", Some("10"), None, None)
             }
             "surface.chat.stopTask" => request::chat_task("surface.chat.stopTask", "chat-1", "task-1"),
             "surface.chat.paintTail" => {
