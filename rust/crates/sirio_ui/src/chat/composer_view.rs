@@ -919,6 +919,20 @@ impl Chat {
                         })),
                 )
             })
+            // After a failed turn the queue waits on the user, and says so: one line under the
+            // entries, whether they are folded or not.
+            .children(self.queue_held_line().map(|line| {
+                div()
+                    .id("queue-held-line")
+                    .debug_selector(|| "queue-held-line".into())
+                    .px_2p5()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .text_size(label_size)
+                    .text_color(fg_muted)
+                    .child(crate::text_selection::selectable_text(line))
+            }))
             .into_any_element()
     }
 

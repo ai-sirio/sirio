@@ -15,9 +15,9 @@ use crate::{
 };
 
 /// Graphemes a stream shows per second when it keeps up.
-const PACE: f32 = 90.0;
+pub const PACE: f32 = 90.0;
 /// The longest a backlog takes to show, however much arrived at once.
-const CATCH_UP: Duration = Duration::from_millis(350);
+pub const CATCH_UP: Duration = Duration::from_millis(350);
 /// The mark where more will come, set inline after the text.
 const CARET: &str = "▍";
 
@@ -28,7 +28,7 @@ struct Reveal {
 }
 
 /// Graphemes shown after `elapsed`, from `shown` toward `total`: a steady pace, faster when far behind.
-pub(crate) fn advanced(shown: f32, total: usize, elapsed: Duration) -> f32 {
+pub fn advanced(shown: f32, total: usize, elapsed: Duration) -> f32 {
     let behind = total as f32 - shown;
     if behind <= 0.0 {
         return total as f32;
@@ -38,7 +38,7 @@ pub(crate) fn advanced(shown: f32, total: usize, elapsed: Duration) -> f32 {
 }
 
 /// Graphemes shown next: `advanced` toward `total` while live, or all of them once finished or when motion rests.
-pub(crate) fn next_shown(
+pub fn next_shown(
     shown: f32,
     total: usize,
     still: bool,
@@ -52,7 +52,7 @@ pub(crate) fn next_shown(
 }
 
 /// Where the first `count` graphemes of `text` end, in bytes.
-pub(crate) fn grapheme_end(text: &str, count: usize) -> usize {
+pub fn grapheme_end(text: &str, count: usize) -> usize {
     text.grapheme_indices(true)
         .nth(count)
         .map_or(text.len(), |(at, _)| at)

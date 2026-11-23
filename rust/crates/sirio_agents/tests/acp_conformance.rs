@@ -3463,6 +3463,8 @@ fn claude_serves_mcp_apps_to_sirio() {
     while Instant::now() < deadline && !ended {
         match events.try_recv() {
             Ok(ChatEvent::TurnEnded { .. }) => ended = true,
+            // A failed turn is the turn's end too; waiting out the deadline would hide why.
+            Ok(ChatEvent::TurnFailed { message, .. }) => panic!("the turn failed: {message}"),
             Ok(ChatEvent::PermissionRequest { request_id, .. }) => {
                 permission_cards += 1;
                 let _ = client.cancel_permission(request_id);
@@ -3644,6 +3646,8 @@ fn claude_serves_mcp_apps_to_sirio() {
     while Instant::now() < deadline && !ended {
         match events.try_recv() {
             Ok(ChatEvent::TurnEnded { .. }) => ended = true,
+            // A failed turn is the turn's end too; waiting out the deadline would hide why.
+            Ok(ChatEvent::TurnFailed { message, .. }) => panic!("the turn failed: {message}"),
             Ok(ChatEvent::PermissionRequest { request_id, options, .. }) => {
                 second_asks += 1;
                 let reject = options.iter().find(|option| option.id == "reject_once");

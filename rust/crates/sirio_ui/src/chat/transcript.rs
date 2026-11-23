@@ -7,49 +7,28 @@
 //! where the calendar day changes between turns.
 
 use crate::text_selection::selectable_text;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local};
+use jiff::civil::Date;
 use sirio_theme::Theme;
 
 use super::*;
 use ely_gpui_component::buttons::{Button, ButtonVariant};
-use ely_gpui_component::chat::{MessageAvatar, MessageBubble, MessageFooter, MessageHeader, Role};
+use ely_gpui_component::chat::{
+    DateSeparator, MessageAvatar, MessageBubble, MessageFooter, MessageHeader, Role,
+};
 use ely_gpui_component::theme::ControlSize;
 
-/// Uppercase with a hair space between the letters, for about 0.1em of
-/// tracking: gpui has no letter-spacing at the pinned revision.
-fn tracked_upper(label: &str) -> String {
-    let upper = label.to_uppercase();
-    let mut out = String::with_capacity(upper.len() * 2);
-    let mut first = true;
-    for ch in upper.chars() {
-        if !first {
-            out.push('\u{200A}');
-        }
-        out.push(ch);
-        first = false;
-    }
-    out
+/// The calendar day `at` falls on in the reader's zone, as the type Ely's separator takes.
+/// `None` for a day `jiff` cannot hold, which no turn has: such a turn gets no separator.
+pub(crate) fn civil_day(at: DateTime<Local>) -> Option<Date> {
+    Date::new(i16::try_from(at.year()).ok()?, at.month() as i8, at.day() as i8).ok()
 }
 
-/// Sirio's words for a day — bezel carries no clock. `Today`, `Yesterday`,
-/// otherwise `Mon 2 Sep`.
-pub(crate) fn day_label(at: DateTime<Local>, now: DateTime<Local>) -> String {
-    let day = at.date_naive();
-    let today = now.date_naive();
-    if day == today {
-        "Today".to_string()
-    } else if today.pred_opt() == Some(day) {
-        "Yesterday".to_string()
-    } else {
-        at.format("%a %-d %b").to_string()
-    }
-}
-
-/// The day heading for one transcript index: the label when `entries[index]`
-/// is a stamped `User` whose calendar day differs from the previous stamped
-/// `User`'s, or is the first stamped one; `None` for undated turns, which
-/// never break the sequence either.
-pub(crate) fn heading_for(entries: &[Entry], index: usize, now: DateTime<Local>) -> Option<String> {
+/// The day heading for one transcript index: the day when `entries[index]` is a stamped `User`
+/// whose calendar day differs from the previous stamped `User`'s, or is the first stamped one;
+/// `None` for undated turns, which never break the sequence either. The words for the day are
+/// Ely's, chosen when the separator is drawn (`render_day_heading`).
+pub(crate) fn heading_for(entries: &[Entry], index: usize) -> Option<Date> {
     let Some(Entry::User { at: Some(at), .. }) = entries.get(index) else {
         return None;
     };
@@ -60,25 +39,21 @@ pub(crate) fn heading_for(entries: &[Entry], index: usize, now: DateTime<Local>)
     if previous.is_some_and(|previous| previous.date_naive() == at.date_naive()) {
         return None;
     }
-    Some(day_label(*at, now))
+    civil_day(*at)
 }
 
 impl Chat {
-    /// The day heading above a turn's question: `py 8`, `Subheadline` in
-    /// `fg_subtle`, uppercased and tracked by [`tracked_upper`].
-    pub(crate) fn render_day_heading(
-        entry_index: usize,
-        label: &str,
-        theme: &Theme,
-        bezel_theme: &bezel_theme::Theme,
-    ) -> AnyElement {
+    /// The day separator above a turn's question: Ely's `DateSeparator`, which names `day` as
+    /// seen from `today`. `today` is read here, at draw time, so a chat left open past midnight
+    /// reads its days right on the next frame.
+    pub(crate) fn render_day_heading(entry_index: usize, day: Date) -> AnyElement {
+        let Some(today) = civil_day(Local::now()) else {
+            return div().into_any_element();
+        };
         div()
             .debug_selector(move || format!("day-heading-{entry_index}"))
-            .py(px(8.0))
-            .text_size(theme.typography.footnote)
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(bezel_theme.text_faint)
-            .child(SharedString::from(tracked_upper(label)))
+            .w_full()
+            .child(DateSeparator::new(day, today))
             .into_any_element()
     }
 }
@@ -94,9 +69,12 @@ pub(super) struct TranscriptRowContext<'a> {
     pub thought_streaming: bool,
     pub thought_scroll: &'a HashMap<usize, thought::ThoughtScroll>,
     pub tool_output_scroll: &'a HashMap<String, ScrollHandle>,
-    pub day_heading: Option<&'a str>,
+    pub day_heading: Option<Date>,
     pub agent_id: Option<&'a str>,
     pub agent_name: &'a str,
+    /// What a live reply draws on this frame instead of its `document`: the blocks its reveal has
+    /// come to (`reveal.rs`). `None` draws the document.
+    pub drawn: Option<MarkdownBlocks>,
 }
 impl Chat {
     pub(crate) fn row_id(&self, index: usize, cx: &Context<Self>) -> ElementId {
@@ -130,6 +108,7 @@ impl Chat {
             day_heading,
             agent_id,
             agent_name,
+            drawn,
         } = row;
         let _perf = sirio_perf::span("Chat.render_entry", entry_index as u64);
         let typography = theme.typography;
@@ -137,6 +116,8 @@ impl Chat {
         let interaction = TranscriptInteraction {
             chat: entity.clone(),
             focus: transcript_focus,
+            entry: entry_index,
+            painted: source_start,
         };
         let presentation = match &entry {
             Entry::Error { kind, .. } => Some(
@@ -175,22 +156,17 @@ impl Chat {
                 // The heading row belongs to the `User` entry's row, so no
                 // extra list index is needed: it sits above the question.
                 match day_heading {
-                    Some(label) => div()
+                    Some(day) => div()
                         .w_full()
                         .flex()
                         .flex_col()
-                        .child(Chat::render_day_heading(
-                            entry_index,
-                            label,
-                            theme,
-                            &bezel_theme,
-                        ))
+                        .child(Chat::render_day_heading(entry_index, day))
                         .child(bubble)
                         .into_any_element(),
                     None => bubble,
                 }
             }
-            Entry::Assistant { text, document } => {
+            Entry::Assistant { text, document, .. } => {
                 let target = CopyTarget::Assistant(entry_index);
                 let copied = copied_target.as_ref() == Some(&target);
                 let hover_group = format!("assistant-response-{entry_index}");
@@ -261,7 +237,7 @@ impl Chat {
                                         format!("assistant-response-{entry_index}")
                                     })
                                     .child(super::reply_body(
-                                        &document,
+                                        drawn.as_ref().unwrap_or(&document),
                                         interaction.clone(),
                                         source_start,
                                     )),
@@ -835,7 +811,8 @@ impl Chat {
                                     .size(ControlSize::Sm)
                                     .on_click(
                                         move |_, _, cx| {
-                                            retry_entity.update(cx, |chat, cx| chat.retry(cx))
+                                            retry_entity
+                                                .update(cx, |chat, cx| chat.retry(entry_index, cx))
                                         },
                                     ),
                                 ),
@@ -905,23 +882,10 @@ impl Chat {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use jiff::civil::date;
 
     #[test]
-    fn day_labels_are_sirios_words() {
-        let now = Local.with_ymd_and_hms(2026, 9, 4, 22, 0, 0).unwrap();
-        assert_eq!(day_label(now, now), "Today");
-        assert_eq!(
-            day_label(Local.with_ymd_and_hms(2026, 9, 3, 1, 0, 0).unwrap(), now),
-            "Yesterday"
-        );
-        assert_eq!(
-            day_label(Local.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap(), now),
-            "Tue 1 Sep"
-        );
-    }
-
-    #[test]
-    fn a_heading_appears_where_the_day_changes_and_never_for_undated_turns() {
+    fn heading_for_gives_the_day_of_each_new_date() {
         let now = Local.with_ymd_and_hms(2026, 9, 4, 22, 0, 0).unwrap();
         let y = Local.with_ymd_and_hms(2026, 9, 3, 9, 0, 0).unwrap();
         let entries = vec![
@@ -942,13 +906,9 @@ mod tests {
                 at: Some(now),
             },
         ];
-        assert_eq!(heading_for(&entries, 0, now).as_deref(), Some("Yesterday"));
-        assert_eq!(heading_for(&entries, 1, now), None);
-        assert_eq!(
-            heading_for(&entries, 2, now),
-            None,
-            "undated: no heading, no break"
-        );
-        assert_eq!(heading_for(&entries, 3, now).as_deref(), Some("Today"));
+        assert_eq!(heading_for(&entries, 0), Some(date(2026, 9, 3)));
+        assert_eq!(heading_for(&entries, 1), None);
+        assert_eq!(heading_for(&entries, 2), None, "undated: no heading, no break");
+        assert_eq!(heading_for(&entries, 3), Some(date(2026, 9, 4)));
     }
 }

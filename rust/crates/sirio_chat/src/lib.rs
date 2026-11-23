@@ -54,6 +54,18 @@ impl LaunchSpec {
     pub fn is_native_claude(&self) -> bool {
         matches!(self, Self::Claude(_))
     }
+
+    /// Whether a relaunch can pick the conversation up where the lost client left it,
+    /// so a Retry can send the last prompt again. True for Claude (`--resume` of the
+    /// session id); an ACP agent starts a new session. It sits here, not on
+    /// [`ChatClient`], because the case that needs it is the one where the client is gone.
+    #[must_use]
+    pub fn resumes_on_retry(&self) -> bool {
+        match self {
+            Self::Acp(_) => false,
+            Self::Claude(_) => true,
+        }
+    }
 }
 
 /// A live chat connection, whichever transport backs it.

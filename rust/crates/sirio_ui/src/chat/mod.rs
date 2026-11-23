@@ -34,7 +34,8 @@ use std::rc::Rc;
 use crate::caret;
 use crate::composer_prefs::ComposerPrefs;
 use crate::markdown::{
-    self, FileLinkInputs, MarkdownBlocks, Policy, SelectionHost, Surface, ViewFlags, markdown_view,
+    self, FileLinkInputs, MarkdownBlocks, Policy, SelectionHost, StreamingDoc, Surface, ViewFlags,
+    markdown_view,
 };
 use crate::popup::{Filter, Popup, reap_popup};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
@@ -45,6 +46,8 @@ mod band_tests;
 mod ely_tests;
 #[cfg(test)]
 mod markdown_tests;
+#[cfg(test)]
+mod retry_tests;
 pub(crate) mod identity;
 mod agent_title;
 mod background;
@@ -58,6 +61,7 @@ mod controls;
 pub(crate) mod file_links;
 use file_links::file_link_target;
 mod history;
+mod limit_card;
 mod limit_notice;
 pub(crate) mod list_scroll;
 mod menus;
@@ -65,6 +69,8 @@ mod mode_cycle;
 mod prompt_history;
 pub use prompt_history::PromptRecord;
 mod question_dock;
+mod retry;
+mod reveal;
 mod visible_text;
 mod session_panel;
 mod usage_card;
@@ -116,8 +122,10 @@ fn remember_pressed_link(chat: Entity<Chat>) -> markdown::MenuHandler {
 }
 
 /// A transcript reply: part of the chat's one selection, so a drag across it selects its
-/// visible text and Copy reads that text. Where the last paint drew its links is reported to the
-/// control socket, and a right press leaves the link under it for the transcript's menu.
+/// visible text. Copy reads that text from the transcript's text (`document`), except for a drag
+/// that ends in a reply being revealed, which copies the blocks last drawn (`reveal.rs`). Where
+/// the last paint drew its links is reported to the control socket, and a right press leaves the
+/// link under it for the transcript's menu.
 fn reply_body(
     document: &MarkdownBlocks,
     interaction: TranscriptInteraction,
@@ -266,6 +274,61 @@ fn parse_chat_markdown(source: &str) -> MarkdownBlocks {
     )
 }
 
+/// What a reply in the chat lets through: the files it names are links. The one Policy of a
+/// whole build and of a streamed one, so the two cannot read a reply differently.
+fn with_linked_policy<R>(
+    cwd: &Path,
+    memo: &mut file_links::FileLinkMemo,
+    read: impl FnOnce(&mut Policy<'_>) -> R,
+) -> R {
+    let home = std::env::home_dir();
+    read(&mut Policy {
+        surface: Surface::Chat,
+        base: Some(cwd),
+        diagrams: None,
+        file_links: Some(FileLinkInputs {
+            worktree: cwd,
+            home: home.as_deref(),
+            memo,
+        }),
+    })
+}
+
+/// [`with_linked_policy`] for what a frame draws of a live reply: the files it names are looked
+/// up in `memo`, which the build of the received text filled, and the disk is never asked, so a
+/// frame never waits for it. A candidate the memo has not seen is plain text.
+fn with_lookup_policy<R>(
+    cwd: &Path,
+    memo: &mut file_links::FileLinkMemo,
+    read: impl FnOnce(&mut Policy<'_>) -> R,
+) -> R {
+    memo.lookup_only(true);
+    let made = with_linked_policy(cwd, &mut *memo, read);
+    memo.lookup_only(false);
+    made
+}
+
+/// Whether `entry` is news about the session that sits below a reply without ending it: a chunk
+/// that arrives after it still grows the reply (`Chat::streamed_entry`), and the reply stays live.
+fn is_aside(entry: &Entry) -> bool {
+    matches!(
+        entry,
+        Entry::Notice {
+            kind: NoticeKind::Compaction | NoticeKind::BackgroundTask | NoticeKind::Warning,
+            ..
+        }
+    )
+}
+
+/// What the list draws on a row because of the limit card (`Chat::limit_card_role`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LimitCardRole {
+    /// The card itself, on the warning notice's row.
+    Card,
+    /// Nothing: the error row the card stands in for.
+    Covered,
+}
+
 /// An assistant response's document with the files it names marked as links.
 /// The disk is asked here, while the document is built, and never while it
 /// paints; `memo` answers a candidate already seen in this response.
@@ -275,20 +338,19 @@ fn parse_linked_markdown(
     memo: &mut file_links::FileLinkMemo,
 ) -> MarkdownBlocks {
     let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
-    let home = std::env::home_dir();
-    markdown::build(
-        source,
-        &mut Policy {
-            surface: Surface::Chat,
-            base: Some(cwd),
-            diagrams: None,
-            file_links: Some(FileLinkInputs {
-                worktree: cwd,
-                home: home.as_deref(),
-                memo,
-            }),
-        },
-    )
+    with_linked_policy(cwd, memo, |policy| markdown::build(source, policy))
+}
+
+/// The same document, for a reply that is still arriving: `source` is the reply so far, and
+/// `stream` parses only the part of it that can still change.
+fn stream_linked_markdown(
+    stream: &mut StreamingDoc,
+    source: &str,
+    cwd: &Path,
+    memo: &mut file_links::FileLinkMemo,
+) -> MarkdownBlocks {
+    let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
+    with_linked_policy(cwd, memo, |policy| stream.update(source, policy))
 }
 
 actions!(
@@ -466,9 +528,16 @@ enum Entry {
     ///
     /// The parsed tree is updated at ingestion time rather than during
     /// rendering, so a redraw never reparses the entire reply.
+    ///
+    /// `stream` is what builds the tree while the reply arrives. It is `Some` only while a turn
+    /// streams: the first chunk of a reply starts it only if `Chat::streaming` is set, and
+    /// `Chat::finish_reply` ends it (with a full build) at the turn's end, at Stop and when the
+    /// client is lost. A reply restored, made whole, or arriving outside a streaming turn has none,
+    /// and each of its chunks is a full build.
     Assistant {
         text: String,
         document: MarkdownBlocks,
+        stream: Option<Box<StreamingDoc>>,
     },
     /// A streamed reasoning chunk, visually distinct from the reply.
     ///
@@ -644,6 +713,10 @@ pub struct ChatControlSnapshot {
     pub queued_text: String,
     /// The whole queue, front first.
     pub queued: Vec<String>,
+    /// The queue is held after a failed turn: nothing in it is sent until a turn ends well.
+    pub queue_held: bool,
+    /// The line drawn under the held queue, `None` while it is not shown.
+    pub queue_held_line: Option<String>,
     pub transcript: Vec<BTreeMap<String, String>>,
     /// The session panel's column: whether it is open, whether it is drawn
     /// at this width, and each section's rows.
@@ -668,6 +741,12 @@ pub struct ChatControlSnapshot {
     /// Debug builds only: the boxes of the texts the last paint drew (`x`, `y`, `w`, `h`).
     #[cfg(debug_assertions)]
     pub transcript_text_rows: Vec<BTreeMap<String, String>>,
+    /// Debug builds only: the day separators the transcript draws, one row each. `kind` is
+    /// `daySeparator`, `entry` the user entry the separator sits above, `label` Ely's words for
+    /// its day seen from today. Not rows of `transcript`: those are the entries in order, and a
+    /// row between them would move every position the readouts and `retry { entry }` name.
+    #[cfg(debug_assertions)]
+    pub day_separators: Vec<BTreeMap<String, String>>,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -702,6 +781,8 @@ pub enum TranscriptAction {
     ScrollBy(f32),
     /// Folds or unfolds the closed turn whose footer is at this entry index.
     ToggleTurn(usize),
+    /// Presses the Retry of the error row at this entry index. Refused when the row has none.
+    Retry(usize),
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -716,6 +797,20 @@ pub enum EffortListAction {
 }
 
 impl Entry {
+    /// A copy to draw a row from. A reply's stream builds its tree and is never drawn, and its
+    /// frozen text and segments are as long as the reply: a row is drawn at the reveal's pace, so
+    /// the copy leaves the stream out.
+    fn clone_for_draw(&self) -> Self {
+        match self {
+            Self::Assistant { text, document, .. } => Self::Assistant {
+                text: text.clone(),
+                document: document.clone(),
+                stream: None,
+            },
+            other => other.clone(),
+        }
+    }
+
     fn plain_text(&self) -> String {
         match self {
             Self::User { text, .. } => text.clone(),
@@ -1136,6 +1231,7 @@ fn restored_entry_with(
         ChatEntry::AssistantMessage { text } => Entry::Assistant {
             document: parse(&text),
             text,
+            stream: None,
         },
         ChatEntry::Thought { text, duration_ms } => Entry::Thought {
             text,
@@ -1293,6 +1389,9 @@ impl NoticeKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ErrorKind {
     Connection,
+    /// The turn failed and the agent is still up: its error result, or a refused prompt. The
+    /// client stays, so Retry sends the same prompt again on it (`retry::retry_action`).
+    TurnFailed,
     /// The agent rejected launch or a mid-session request with ACP's
     /// `auth_required` error (F-CHAT-02) — distinct from a generic
     /// connection failure because the fix isn't "retry", it's "sign in out
@@ -1322,6 +1421,21 @@ enum ErrorKind {
     /// Retry and the "OK to dismiss" every other error carries. Dismissing
     /// is the wrong affordance when this row IS the tab's whole content.
     Unavailable,
+}
+
+impl ErrorKind {
+    /// The socket's spelling, an error row's `errorKind`. Debug builds only, like the readout.
+    #[cfg(debug_assertions)]
+    fn wire(self) -> &'static str {
+        match self {
+            Self::TurnFailed => "turnFailed",
+            Self::Connection => "connection",
+            Self::Disconnected => "disconnected",
+            Self::AuthRequired => "authRequired",
+            Self::Unavailable => "unavailable",
+            Self::McpWarning => "mcpWarning",
+        }
+    }
 }
 
 /// What the transcript says when the agent's process is gone and no event
@@ -1384,10 +1498,25 @@ struct ChatPersistence {
     worktree_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TranscriptSelection {
     anchor: usize,
     head: usize,
+    /// Made by Select All (`select_all_transcript`), and by nothing else: a press or a drag makes a
+    /// selection of its own. Select All is of the transcript's text, the document of a live reply
+    /// included; a drag over a live reply is of what its body drew (`reveal.rs`), and its offsets
+    /// are the drawn text's, which can run past the document's.
+    whole: bool,
+    /// The entries the anchor and the head were placed in, by the press and the move that made
+    /// them (`None` for Select All). An end is of the live reply while its entry is the live reply
+    /// (`reveal.rs`): its offset is then a place in the text drawn for the reply, a text that
+    /// changes under it, which the entries below the reply, placed by the document's lengths, do
+    /// not measure. So an end is told to belong to the reply by its entry and never by its offset,
+    /// and the ends are put in order by their entries first. When the reply stops being revealed
+    /// (it ends, or it goes on as its document: `drop_selection_in`), a selection with an end in it
+    /// goes: its drawn offsets do not map onto the document.
+    anchor_entry: Option<usize>,
+    head_entry: Option<usize>,
 }
 
 /// The assistant-response copy affordance currently showing its short-lived
@@ -1547,12 +1676,31 @@ impl TranscriptSelection {
             self.head..self.anchor
         }
     }
+
+    /// Whether the two ends are one place, so that nothing is selected. Ends placed in two entries
+    /// are two places whatever their offsets, the comparison that puts them in order (`ends`, in
+    /// `reveal.rs`): an offset in the live reply is a place in its drawn text, which can run past
+    /// the document's row into the numbers of the rows below.
+    fn is_empty(&self) -> bool {
+        match (self.anchor_entry, self.head_entry) {
+            (Some(anchor), Some(head)) if anchor != head => false,
+            _ => self.anchor == self.head,
+        }
+    }
 }
 
+/// What the bodies of one entry's row share to take part in the transcript's selection.
 #[derive(Clone)]
 pub(crate) struct TranscriptInteraction {
     chat: Entity<Chat>,
     focus: FocusHandle,
+    /// The entry the row was painted for, and where its row started in the transcript's offset
+    /// space on that frame. A mouse event goes to the listeners of the frame already drawn, and
+    /// the transcript may have changed since (a chunk grew the reply above): the entry an end is
+    /// placed in is the painted one, never one looked up by an offset of that frame in the rows
+    /// as they are now, and the offset moves with its row (`place`).
+    entry: usize,
+    painted: usize,
 }
 
 impl TranscriptInteraction {
@@ -1561,12 +1709,16 @@ impl TranscriptInteraction {
     /// Focus taken at the press does not hold: the pane's own press handler
     /// runs after it and hands focus to the composer (`select_pane`), which is
     /// where a plain click on the transcript is meant to leave it.
+    /// `head` is an offset of the frame this row was painted on, placed in this row's entry.
     pub(crate) fn extend_selection(&self, head: usize, window: &mut Window, cx: &mut App) {
         let selecting = self.chat.update(cx, |chat, cx| {
             cx.notify();
+            let ([head], entry) = self.place([head], chat);
             chat.transcript_selection.as_mut().is_some_and(|selection| {
                 selection.head = head;
-                selection.anchor != selection.head
+                selection.head_entry = entry;
+                selection.whole = false;
+                !selection.is_empty()
             })
         });
         if selecting && !self.focus.is_focused(window) {
@@ -1576,21 +1728,31 @@ impl TranscriptInteraction {
 }
 
 impl TranscriptInteraction {
-    /// The selected span of the whole transcript, while it is not empty.
-    pub(crate) fn selected_span(&self, cx: &App) -> Option<Range<usize>> {
-        let range = self
-            .chat
-            .read(cx)
-            .transcript_selection
-            .as_ref()
-            .map(TranscriptSelection::range)?;
-        (!range.is_empty()).then_some(range)
+    /// Where the ends the pointer put at `at`, offsets of the frame this row was painted on, are
+    /// in the transcript as it is now, and the entry they are in: this row's. An offset moves by
+    /// as much as the row has since that frame (a chunk that grew the reply above a notice moved
+    /// the notice), so an end stays on the character under the pointer. A row whose entry is gone
+    /// (a new conversation since the frame) places an end in no entry.
+    fn place<const N: usize>(&self, at: [usize; N], chat: &Chat) -> ([usize; N], Option<usize>) {
+        match chat.transcript_entry_ranges().get(self.entry) {
+            Some(row) => (
+                at.map(|at| at.saturating_sub(self.painted) + row.start),
+                Some(self.entry),
+            ),
+            None => (at, None),
+        }
     }
 
-    /// Starts a selection at `anchor..head`. The focus goes into the transcript only when the
-    /// press selected something (a double or triple click): a caret is not a selection, and a
-    /// plain click leaves the composer focused (`extend_selection` takes it when a drag
-    /// selects).
+    /// The part of the selection a body of `len` bytes that starts at `start` in the transcript's
+    /// offset space holds, as the body's own bytes: what it highlights, and what its menu copies.
+    pub(crate) fn selected_in(&self, start: usize, len: usize, cx: &App) -> Option<Range<usize>> {
+        self.chat.read(cx).selection_in_body(start, len)
+    }
+
+    /// Starts a selection at `anchor..head`, offsets of the frame this row was painted on, in
+    /// this row's entry. The focus goes into the transcript only when the press selected
+    /// something (a double or triple click): a caret is not a selection, and a plain click leaves
+    /// the composer focused (`extend_selection` takes it when a drag selects).
     pub(crate) fn begin_selection(
         &self,
         (anchor, head): (usize, usize),
@@ -1598,7 +1760,14 @@ impl TranscriptInteraction {
         cx: &mut App,
     ) {
         self.chat.update(cx, |chat, cx| {
-            chat.transcript_selection = Some(TranscriptSelection { anchor, head });
+            let ([anchor, head], entry) = self.place([anchor, head], chat);
+            chat.transcript_selection = Some(TranscriptSelection {
+                anchor,
+                head,
+                anchor_entry: entry,
+                head_entry: entry,
+                ..TranscriptSelection::default()
+            });
             chat.transcript_dragging = true;
             cx.notify();
         });
@@ -1621,7 +1790,8 @@ impl TranscriptInteraction {
                 cx.notify();
             });
         }
-        self.selected_span(cx).is_some()
+        (self.chat.read(cx).transcript_selection.as_ref())
+            .is_some_and(|selection| !selection.is_empty())
     }
 }
 
@@ -1662,28 +1832,18 @@ impl TranscriptSelectableText {
             "TranscriptText.paint_selection",
             window.current_view().as_u64(),
         );
-        let Some(selection) = self
+        let Some(selected) = self
             .interaction
             .chat
             .read(cx)
-            .transcript_selection
-            .as_ref()
-            .map(TranscriptSelection::range)
+            .selection_in_body(self.source_range.start, self.source_range.len())
         else {
             return;
         };
-        let start = selection.start.max(self.source_range.start);
-        let end = selection.end.min(self.source_range.end);
-        if start >= end {
-            return;
-        }
-
-        let local_start = start - self.source_range.start;
-        let local_end = end - self.source_range.start;
         paint_wrapped_span(
             self.text.layout(),
             bounds,
-            local_start..local_end,
+            selected,
             self.selection_fill,
             window,
             |_| {},
@@ -1819,10 +1979,14 @@ impl Element for TranscriptSelectableText {
                 };
                 pressed_index.set(Some(index));
                 interaction.chat.update(cx, |chat, cx| {
-                    let position = source_range.start + index;
+                    let ([position], entry) =
+                        interaction.place([source_range.start + index], chat);
                     chat.transcript_selection = Some(TranscriptSelection {
                         anchor: position,
                         head: position,
+                        anchor_entry: entry,
+                        head_entry: entry,
+                        ..TranscriptSelection::default()
                     });
                     chat.transcript_dragging = true;
                     cx.notify();
@@ -1977,6 +2141,9 @@ pub struct Chat {
     /// and none of it touches the composer's draft.
     model_search_field: Entity<TextInput>,
     streaming: bool,
+    /// How far the one live reply has been revealed (`reveal.rs`). `Some` from the reply's first
+    /// chunk, while its entry holds a stream, to the turn's end: `finish_reply` clears it.
+    reveal: Option<reveal::Reveal>,
     /// Retired with the rotating streaming border: Sirio's `crate::motion`
     /// clock drives the reasoning header now, so this stays permanently `false`.
     /// Kept as a regression guard — a repaint timer reappearing here would
@@ -1992,6 +2159,24 @@ pub struct Chat {
     /// only its counting header. Starts unfolded; the reader's toggle
     /// holds for the life of the surface and is not persisted.
     queue_expanded: bool,
+    /// The queue waits on the user after a failed turn: its items are not sent until a turn ends
+    /// well, so the next one cannot replace `last_prompt` and make Retry send the wrong text.
+    /// Set by `TurnFailed`, cleared when any prompt is sent.
+    queue_held: bool,
+    /// The usage limit the CLI last rejected with a reset time: drawn as a card on the warning
+    /// notice's row, covering the error row of the turn that failed with it. In memory only.
+    limit_card: Option<limit_card::LimitCard>,
+    /// The prompt of the turn in flight, or of the one that failed, for Retry. In memory only.
+    /// Set by every send, cleared by the end of the turn it started and by Stop; a failure or a
+    /// lost client leaves it.
+    last_prompt: Option<retry::LastPrompt>,
+    /// Stop ended a turn whose own end has not arrived yet. Set by `cancel_turn`, settled by the
+    /// next turn end (`TurnEnded` or `TurnFailed`) and by a new process or conversation. While it
+    /// is set, a `TurnFailed` with no turn of ours streaming is ACP's error answer to the prompt
+    /// Stop cancelled, and `fail_turn` drops it; without it, such a failure is a real one.
+    stop_end_pending: bool,
+    /// What the relaunch Retry started does when it connects.
+    after_connect: Option<retry::AfterConnect>,
     connecting: bool,
     /// A message handed over while the agent was not yet connected and idle
     /// (`send_when_ready`). Sent when the connection comes up, or put back in
@@ -2506,9 +2691,15 @@ impl Chat {
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
+            reveal: None,
             streaming_border_timer_pending: false,
             queue: VecDeque::new(),
             queue_expanded: true,
+            queue_held: false,
+            limit_card: None,
+            last_prompt: None,
+            stop_end_pending: false,
+            after_connect: None,
             connecting: false,
             pending_send: None,
             has_completed_turn: false,
@@ -2627,17 +2818,58 @@ impl Chat {
     /// answer that follows opens a row below it instead of growing the
     /// refused one.
     fn streamed_entry(&self) -> Option<usize> {
-        self.entries.iter().rposition(|entry| {
-            !matches!(
-                entry,
-                Entry::Notice {
-                    kind: NoticeKind::Compaction
-                        | NoticeKind::BackgroundTask
-                        | NoticeKind::Warning,
-                    ..
+        self.entries.iter().rposition(|entry| !is_aside(entry))
+    }
+
+    /// Ends the streaming build of every reply that still has one: its tree is built whole from
+    /// its text, the streaming state is dropped, and so is the reveal (the reply is drawn whole,
+    /// with no caret, from the next frame). Called wherever a turn ends or the client
+    /// goes while a reply streams, and when the next reply of the turn begins. Safe to call when
+    /// nothing streams: it does nothing then.
+    ///
+    /// The streamed tree is meant to be the same, so this is the net under it: whatever it
+    /// would have got wrong does not outlive the turn, and what is stored or restored is built
+    /// whole. A row is remeasured and the selection kept in bounds, as after a chunk. A reply the
+    /// reader panicked on is the exception: its stream ends, but it stays plain text until a turn
+    /// end reaches it (`TurnEnded` or `TurnFailed`, through `settle_turn` to
+    /// `reread_plain_replies`, which reads it once).
+    fn finish_reply(&mut self) {
+        // A drag with an end in the reply being revealed goes with the reveal: that end is a
+        // place in the text drawn for the reply (`reveal.rs`). A reply that had stopped being
+        // revealed lost such drags when it did (`stop_revealing`), so an end placed in it since
+        // is a place in its document, which this rebuilds the same: that drag stays.
+        if let Some(revealed) = self.live_entry() {
+            self.drop_selection_in(revealed);
+        }
+        // The reveal ends with the stream: what is shown next is `document`, whole.
+        self.reveal = None;
+        let mut finished = Vec::new();
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if let Entry::Assistant {
+                text,
+                document,
+                stream,
+            } = entry
+                && stream.take().is_some()
+            {
+                // The reader panicked on this reply while it streamed: it stays plain text until
+                // a turn end reaches it (`reread_plain_replies` asks once). After a lost client,
+                // a relaunch in mid-turn, or a Stop whose end never comes, it stays plain. It is
+                // not parsed here, so the turn end's read is the only one after the panic.
+                if document.reader_panicked {
+                    continue;
                 }
-            )
-        })
+                *document = parse_linked_markdown(text, &self.agent_cwd, &mut self.file_link_memo);
+                finished.push(index);
+            }
+        }
+        if finished.is_empty() {
+            return;
+        }
+        for index in finished {
+            self.remeasure_entry(index);
+        }
+        self.clamp_transcript_selection();
     }
 
     /// The reply of this turn that Ely's reader panicked on while it streamed gets one read of
@@ -2647,9 +2879,16 @@ impl Chat {
         for index in (0..self.entries.len()).rev() {
             match &mut self.entries[index] {
                 Entry::User { .. } | Entry::TurnFooter(_) => break,
-                Entry::Assistant { text, document } if document.reader_panicked => {
+                Entry::Assistant {
+                    text,
+                    document,
+                    stream,
+                } if document.reader_panicked => {
                     self.file_link_memo.clear();
                     *document = parse_linked_markdown(text, &self.agent_cwd, &mut self.file_link_memo);
+                    // Read whole, so no streaming state remains for it, and `finish_reply` has
+                    // nothing left to read again.
+                    *stream = None;
                     self.remeasure_entry(index);
                     self.clamp_transcript_selection();
                 }
@@ -2661,6 +2900,8 @@ impl Chat {
     /// Turns one notice into the row, or the status line, it belongs in, at
     /// the point in the transcript where it arrived.
     fn apply_notice(&mut self, notice: SessionNotice, cx: &mut Context<Self>) {
+        // A rejected limit that says when it resets: the notice below is drawn as a card.
+        let mut rejected_limit = None;
         let entry = match notice {
             SessionNotice::Compacted {
                 trigger,
@@ -2702,15 +2943,21 @@ impl Chat {
                 let resets_at = resets_at
                     .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
                     .map(|at| at.with_timezone(&chrono::Local));
+                let text = limit_notice::rate_limit_sentence(
+                    &status,
+                    window.as_deref(),
+                    used_percent,
+                    resets_at,
+                    limit_scope.as_deref(),
+                    &now,
+                );
+                if status == "rejected"
+                    && let Some(at) = resets_at
+                {
+                    rejected_limit = Some((at, text.clone()));
+                }
                 Entry::Notice {
-                    text: limit_notice::rate_limit_sentence(
-                        &status,
-                        window.as_deref(),
-                        used_percent,
-                        resets_at,
-                        limit_scope.as_deref(),
-                        &now,
-                    ),
+                    text,
                     kind: NoticeKind::Warning,
                 }
             }
@@ -2826,6 +3073,208 @@ impl Chat {
             }
         };
         self.push_entry(entry);
+        if let Some((resets_at, sentence)) = rejected_limit {
+            self.start_limit_card(self.entries.len() - 1, resets_at, sentence, cx);
+        }
+    }
+
+    /// A rejected usage limit: the notice just pushed at `entry` becomes a card counting down to
+    /// `resets_at`, and replaces the card of an earlier limit, whose rows go back to being what
+    /// they are (a warning line, an error row). One timer wakes the chat when the count ends.
+    fn start_limit_card(
+        &mut self,
+        entry: usize,
+        resets_at: chrono::DateTime<chrono::Local>,
+        sentence: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = limit_card::LimitCard::new(
+            entry,
+            resets_at,
+            chrono::Local::now(),
+            cx.background_executor().now(),
+            sentence,
+        ) else {
+            return;
+        };
+        self.drop_limit_card();
+        self.limit_card = Some(card);
+        // The countdown wakes the row each second while it is drawn; this wakes the chat at the
+        // reset whether it is drawn or not, so the phase flips without input. The wall clock says
+        // when: each wake reads it again, and none sleeps longer than `WAKE_EVERY`, so a machine
+        // that slept through the reset is at most that late (a week-long timer would be a week
+        // late, and a platform timer takes less than a week). The card owns the task, so a card
+        // that is replaced or dropped, or a chat that is closed, stops the loop.
+        let wake = cx.spawn(async move |this, cx| {
+            loop {
+                let left = resets_at
+                    .signed_duration_since(chrono::Local::now())
+                    .to_std()
+                    .unwrap_or_default();
+                if left.is_zero() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(left.min(limit_card::WAKE_EVERY))
+                    .await;
+            }
+            let _ = this.update(cx, |chat, cx| {
+                if chat
+                    .limit_card
+                    .as_ref()
+                    .is_some_and(|card| card.resets_at == resets_at)
+                {
+                    chat.remeasure_limit_card();
+                    cx.notify();
+                }
+            });
+        });
+        if let Some(card) = self.limit_card.as_mut() {
+            card.wake = Some(wake);
+        }
+    }
+
+    /// Lets go of the limit card: its rows are drawn as what they are again.
+    fn drop_limit_card(&mut self) {
+        if let Some(card) = &self.limit_card {
+            // The row it covered is drawn and copied again: every offset below it moves, and a
+            // selection is of the offsets of the text it was made on (as when a row is removed).
+            if card.failed_entry.is_some() {
+                self.transcript_selection = None;
+            }
+            self.remeasure_limit_card();
+        }
+        self.limit_card = None;
+    }
+
+    /// The card's row and the row it covers have a new height to measure.
+    fn remeasure_limit_card(&self) {
+        let Some(card) = &self.limit_card else {
+            return;
+        };
+        for index in std::iter::once(card.entry).chain(card.failed_entry) {
+            if index < self.entries.len() {
+                self.remeasure_entry(index);
+            }
+        }
+    }
+
+    /// The error row just pushed at `row` ends the turn the limit card arrived in: the card
+    /// covers it. A later turn's failure is not the card's, whatever its text.
+    fn cover_with_limit_card(&mut self, row: usize) {
+        let Some(card) = self.limit_card.as_mut() else {
+            return;
+        };
+        let own_turn = self.entries.get(card.entry..).is_some_and(|rest| {
+            !rest
+                .iter()
+                .any(|entry| matches!(entry, Entry::User { .. }))
+        });
+        if own_turn && card.failed_entry.is_none() {
+            card.failed_entry = Some(row);
+            self.remeasure_limit_card();
+        }
+    }
+
+    /// What a Retry pressed on row `entry` does when the limit card owns that row (its own, or
+    /// the error row it covers): the failed row to retry once the limit is over, or why it is not
+    /// that time. `None` when the card does not own the row.
+    fn limit_card_retry(
+        &self,
+        entry: usize,
+        now: chrono::DateTime<chrono::Local>,
+    ) -> Option<Result<usize, &'static str>> {
+        let card = self.limit_card.as_ref()?;
+        if entry != card.entry && card.failed_entry != Some(entry) {
+            return None;
+        }
+        Some(match (limit_card::phase(card, now), card.failed_entry) {
+            (limit_card::LimitPhase::Retry, Some(row)) => Ok(row),
+            (limit_card::LimitPhase::Counting, _) => Err("the usage limit has not lifted yet"),
+            _ => Err("entry has no Retry"),
+        })
+    }
+
+    /// The card's Try again: the Retry of the turn that failed with the limit.
+    fn retry_limit_card(&mut self, cx: &mut Context<Self>) {
+        let Some(card) = &self.limit_card else {
+            return;
+        };
+        if let Some(Ok(row)) = self.limit_card_retry(card.entry, chrono::Local::now()) {
+            self.retry(row, cx);
+        }
+    }
+
+    /// The card's phase for a frame drawn now, and where its countdown counts to: the wall clock
+    /// decides both (`limit_card::phase`, `LimitCard::countdown_until`).
+    fn limit_card_frame(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<(limit_card::LimitPhase, std::time::Instant)> {
+        let wall_now = chrono::Local::now();
+        let card = self.limit_card.as_mut()?;
+        let phase = limit_card::phase(card, wall_now);
+        Some((phase, card.countdown_until(wall_now, now)))
+    }
+
+    /// Whether the card covers the error row at `index` and is still counting: that row has no
+    /// Retry yet, and the card's Try again comes when the count ends.
+    fn retry_waits_on_limit_card(&self, index: usize) -> bool {
+        self.limit_card_role(index) == Some(LimitCardRole::Covered)
+            && self.limit_card.as_ref().is_some_and(|card| {
+                limit_card::phase(card, chrono::Local::now()) == limit_card::LimitPhase::Counting
+            })
+    }
+
+    /// What the list draws on row `index` for the limit card: the card itself on its notice's
+    /// row, nothing on the error row it covers. Only a failed turn's error row is ever covered,
+    /// so a number that missed a renumbering cannot hide another row.
+    fn limit_card_role(&self, index: usize) -> Option<LimitCardRole> {
+        let card = self.limit_card.as_ref()?;
+        if card.failed_entry == Some(index)
+            && matches!(
+                self.entries.get(index),
+                Some(Entry::Error {
+                    kind: ErrorKind::TurnFailed,
+                    ..
+                })
+            )
+        {
+            return Some(LimitCardRole::Covered);
+        }
+        (card.entry == index
+            && matches!(
+                self.entries.get(index),
+                Some(Entry::Notice {
+                    kind: NoticeKind::Warning,
+                    ..
+                })
+            ))
+        .then_some(LimitCardRole::Card)
+    }
+
+    /// Debug builds only, what the control socket reads of the limit card's rows: the notice it
+    /// stands on becomes a `limitCard` row (`resetsAt` in Unix seconds, `phase`), and the error
+    /// row it covers says `coveredBy`.
+    #[cfg(debug_assertions)]
+    fn limit_card_columns(&self, index: usize, row: &mut BTreeMap<String, String>) {
+        match self.limit_card_role(index) {
+            Some(LimitCardRole::Card) => {
+                let Some(card) = &self.limit_card else {
+                    return;
+                };
+                row.insert("kind".into(), "limitCard".into());
+                row.insert("resetsAt".into(), card.resets_at.timestamp().to_string());
+                row.insert(
+                    "phase".into(),
+                    limit_card::phase(card, chrono::Local::now()).wire().into(),
+                );
+            }
+            Some(LimitCardRole::Covered) => {
+                row.insert("coveredBy".into(), "limitCard".into());
+            }
+            None => {}
+        }
     }
 
     /// Whether this chat talks to Claude Code itself, whose subagent cards
@@ -3065,6 +3514,14 @@ impl Chat {
 
     /// Add one transcript row and keep the virtualizer's index tree in sync.
     fn push_entry(&mut self, entry: Entry) {
+        // A reply is live only while it is the last entry that is not an aside: a tool call, a
+        // thought, a permission request, an error or a user message after it ends it, since the
+        // next chunk opens a new reply (`streamed_entry`). It is not left with its caret and its
+        // pace through the minutes such a row can take. A reply pushed here is a new one, which
+        // the chunk arm has already ended the last of.
+        if self.reveal.is_some() && !is_aside(&entry) && !matches!(entry, Entry::Assistant { .. }) {
+            self.finish_reply();
+        }
         let index = self.entries.len();
         self.turn_message_ids.push(None);
         let following_tail = self.list_state.is_following_tail();
@@ -3341,6 +3798,7 @@ impl Chat {
                 | sirio_chat::ChatEvent::ToolCallCompleted { .. }
                 | sirio_chat::ChatEvent::PlanUpdate { .. }
                 | sirio_chat::ChatEvent::TurnEnded { .. }
+                | sirio_chat::ChatEvent::TurnFailed { .. }
                 | sirio_chat::ChatEvent::TransportError(_)
                 | sirio_chat::ChatEvent::Timeout { .. }
         ) {
@@ -3349,10 +3807,13 @@ impl Chat {
         match event {
             sirio_chat::ChatEvent::AgentMessageChunk(text) => {
                 let streamed = self.streamed_entry();
+                // A chunk whose document the reader panics on stops the reply's reveal.
+                let was_revealing = streamed.is_some_and(|index| self.revealing(index));
                 if let Some(index) = streamed
                     && let Some(Entry::Assistant {
                         text: existing,
                         document,
+                        stream,
                     }) = self.entries.get_mut(index)
                 {
                     existing.push_str(&text);
@@ -3361,24 +3822,79 @@ impl Chat {
                         // the turn ends, since each ask prints another panic message.
                         markdown::as_plain_text(existing)
                     } else {
-                        parse_linked_markdown(existing, &self.agent_cwd, &mut self.file_link_memo)
+                        // A reply without a streaming state (restored, or ended by Stop before
+                        // this late chunk) is built whole: no state is started for it, so
+                        // nothing of it stays alive once its turn is over.
+                        match stream {
+                            Some(stream) => stream_linked_markdown(
+                                stream,
+                                existing,
+                                &self.agent_cwd,
+                                &mut self.file_link_memo,
+                            ),
+                            None => parse_linked_markdown(
+                                existing,
+                                &self.agent_cwd,
+                                &mut self.file_link_memo,
+                            ),
+                        }
                     };
                     self.remeasure_entry(index);
+                    if was_revealing && !self.revealing(index) {
+                        self.drop_selection_in(index);
+                    }
                     self.clamp_transcript_selection();
                 } else {
-                    // A new response: what the last one found is not this one's.
+                    // A new response ends the replies this turn already streamed (a tool call
+                    // came between), each with what it found; then what the last one found is
+                    // not this one's.
+                    self.finish_reply();
                     self.file_link_memo.clear();
-                    let document =
-                        parse_linked_markdown(&text, &self.agent_cwd, &mut self.file_link_memo);
-                    self.push_entry(Entry::Assistant { document, text });
+                    // Only a turn that is streaming builds its reply in parts: a chunk that comes
+                    // when none is (after Stop, or from a turn the CLI started on its own) is
+                    // built whole.
+                    let mut stream = self.streaming.then(Box::<StreamingDoc>::default);
+                    // A live reply is revealed from its first frame (`reveal.rs`).
+                    self.reveal = stream
+                        .is_some()
+                        .then(|| reveal::Reveal::new(cx.background_executor().now()));
+                    let document = match &mut stream {
+                        Some(stream) => stream_linked_markdown(
+                            stream,
+                            &text,
+                            &self.agent_cwd,
+                            &mut self.file_link_memo,
+                        ),
+                        None => parse_linked_markdown(
+                            &text,
+                            &self.agent_cwd,
+                            &mut self.file_link_memo,
+                        ),
+                    };
+                    self.push_entry(Entry::Assistant {
+                        document,
+                        text,
+                        stream,
+                    });
                 }
             }
             sirio_chat::ChatEvent::ThoughtChunk(text) => {
                 let streamed = self.streamed_entry();
                 if let Some(index) = streamed
-                    && let Some(Entry::Thought { text: existing, .. }) = self.entries.get_mut(index)
+                    && let Some(Entry::Thought {
+                        text: existing,
+                        started,
+                        duration_ms,
+                        ..
+                    }) = self.entries.get_mut(index)
                 {
                     existing.push_str(&text);
+                    // A block that follows a closed one with no row between joins its thought,
+                    // which is thinking again: the next close (or the fallbacks) times the whole
+                    // span. A restored thought has no `started` and is left as it was.
+                    if self.streaming && started.is_some() && duration_ms.is_some() {
+                        *duration_ms = None;
+                    }
                     self.remeasure_entry(index);
                 } else {
                     // A new thought re-follows: drop any stale scroll state
@@ -3902,45 +4418,18 @@ impl Chat {
                     });
                 }
             }
-            sirio_chat::ChatEvent::TurnEnded { stop_reason } => {
-                self.settle_open_thought();
-                self.reread_plain_replies();
-                // The footer must state *why* the turn stopped. A cancelled
-                // or refused turn that ends in a plain timestamp looks like an
-                // ordinary completion, and that is the exact failure class
-                // this surface is responsible for: the transcript is where a
-                // user notices a hidden state least.
-                let time = now_hhmm();
-                let label = match stop_reason.as_str() {
-                    "EndTurn" => time,
-                    reason => format!("{time} · {}", turn_end_label(reason)),
-                };
-                self.expire_unanswered(WidgetAsks::Keep, cx);
-                self.surface_mcp_warnings();
-                self.push_entry(Entry::TurnFooter(label));
-                self.streaming = false;
-                self.reload_idle(cx);
-                self.has_completed_turn = true;
-                self.persist_settled_transcript();
-                self.ask_session_permissions(cx);
-                self.ask_session_hooks(cx);
-                // The turn may have switched the branch.
-                if self.session_panel_open() {
-                    self.reread_session_branch(cx);
-                }
-                // D-CHAT-03: a turn ended — completed or cancelled alike,
-                // one rule — drains the queue's front entry as the next
-                // turn, exactly once; the rest wait for that turn's end.
-                // The footer lands before the queued turn so the transcript
-                // reads: stop stated, then the redirect.
-                self.send_queued_item(cx);
-                // F-CORE-DOM-07: tell the workspace a turn just settled so
-                // throttled auto-naming has a signal to react to. Emitted
-                // after the transcript is persisted so a subscriber reading
-                // `transcript_for_resume()` in response sees this turn's
-                // reply included.
-                cx.emit(ChatEvent::TurnEnded);
-            }
+            sirio_chat::ChatEvent::TurnEnded { stop_reason } => self.end_turn(&stop_reason, cx),
+            // A failed turn ends in place of `TurnEnded`: its error row, the turn settled, and the
+            // queue held. The agent is up, so unlike a `TransportError` the client stays.
+            sirio_chat::ChatEvent::TurnFailed {
+                message,
+                stop_reason,
+            } => self.fail_turn(message, &stop_reason, cx),
+            // A thinking block closed (Claude only): the thought settles here, not when the next
+            // row or the turn's end gets to it, which is all ACP has. With no thought open (a
+            // block that streamed no text) this does nothing: settling is not an entry, so it
+            // neither ends the turn nor the live reply.
+            sirio_chat::ChatEvent::ThoughtEnded => self.settle_open_thought(),
             sirio_chat::ChatEvent::TransportError(message) => {
                 self.lose_client(cx);
                 // The CLI that said it was running is gone.
@@ -4120,6 +4609,101 @@ impl Chat {
         cx.notify();
     }
 
+    /// What a turn's end does, whether the agent finished it (`TurnEnded`) or failed it
+    /// (`TurnFailed`): settles the live reply and thought, states why the turn stopped and
+    /// persists the transcript. What follows is not shared: a finished turn sends the next
+    /// queued item (`end_turn`), a failed one holds the queue (`fail_turn`).
+    fn settle_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+        self.settle_open_thought();
+        self.reread_plain_replies();
+        self.finish_reply();
+        // The footer must state *why* the turn stopped. A cancelled
+        // or refused turn that ends in a plain timestamp looks like an
+        // ordinary completion, and that is the exact failure class
+        // this surface is responsible for: the transcript is where a
+        // user notices a hidden state least.
+        let time = now_hhmm();
+        let label = match stop_reason {
+            "EndTurn" => time,
+            reason => format!("{time} · {}", turn_end_label(reason)),
+        };
+        self.expire_unanswered(WidgetAsks::Keep, cx);
+        self.surface_mcp_warnings();
+        self.push_entry(Entry::TurnFooter(label));
+        self.streaming = false;
+        self.reload_idle(cx);
+        self.has_completed_turn = true;
+        self.persist_settled_transcript();
+        self.ask_session_permissions(cx);
+        self.ask_session_hooks(cx);
+        // The turn may have switched the branch.
+        if self.session_panel_open() {
+            self.reread_session_branch(cx);
+        }
+    }
+
+    /// `TurnEnded`: the turn is over, whether it completed or was cancelled.
+    fn end_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+        // Stop clears `streaming` at once, and the end of the stopped turn arrives later: that end
+        // (like a turn the CLI started on its own) is not the end of a turn of ours.
+        let ended_our_turn = self.streaming;
+        // Whatever this end is, a Stop's end is no longer pending after it.
+        self.stop_end_pending = false;
+        self.settle_turn(stop_reason, cx);
+        if ended_our_turn {
+            // Answered: nothing is left to resend, and a hold is over.
+            self.last_prompt = None;
+            self.queue_held = false;
+        }
+        // D-CHAT-03: a turn ended — completed or cancelled alike,
+        // one rule — drains the queue's front entry as the next
+        // turn, exactly once; the rest wait for that turn's end.
+        // The footer lands before the queued turn so the transcript
+        // reads: stop stated, then the redirect. A queue held by a
+        // failure waits for the user instead.
+        self.send_queued_item(cx);
+        // F-CORE-DOM-07: tell the workspace a turn just settled so
+        // throttled auto-naming has a signal to react to. Emitted
+        // after the transcript is persisted so a subscriber reading
+        // `transcript_for_resume()` in response sees this turn's
+        // reply included.
+        cx.emit(ChatEvent::TurnEnded);
+    }
+
+    /// `TurnFailed`: the agent is up and the turn failed. The error row carries the Retry that
+    /// sends the same prompt again; the prompt is kept for it, and the queue is held so that no
+    /// other prompt replaces it first.
+    fn fail_turn(&mut self, message: String, stop_reason: &str, cx: &mut Context<Self>) {
+        // No turn of ours streams and Stop's end is pending: this is the agent's error answer to
+        // the prompt it cancelled (ACP's cancel is a notification, answered like any prompt). It
+        // is the late end of a stopped turn, as a late `TurnEnded` is: no error row, no hold, and
+        // the live agent is not offered a restart.
+        if !self.streaming && self.stop_end_pending {
+            self.end_turn(stop_reason, cx);
+            return;
+        }
+        // Any other failure is a real one, shown whether or not a turn streams: with none, a late
+        // `TurnEnded` was taken as this prompt's end (a Stop and a quick resend, or a turn the CLI
+        // started ending while the prompt ran), and the failure must not vanish with it.
+        self.stop_end_pending = false;
+        self.fail_trace_turn(&message, cx);
+        // Retry resends the prompt: with none held (a late `TurnEnded` taken as the prompt's end
+        // cleared it) the agent is up and a relaunch would only kill it, so the row has no Retry,
+        // keeps its OK, and is no failed turn for a limit card to offer Try again on.
+        let resendable = self.last_prompt.is_some();
+        self.push_entry(Entry::Error {
+            message,
+            retryable: resendable,
+            kind: ErrorKind::TurnFailed,
+        });
+        if resendable {
+            self.cover_with_limit_card(self.entries.len() - 1);
+        }
+        self.settle_turn(stop_reason, cx);
+        self.queue_held = true;
+        cx.emit(ChatEvent::TurnEnded);
+    }
+
     /// F-CHAT-05: true exactly when the composer's own "offline" placeholder
     /// is showing (see the `composer_parts` match in `render`) — mirrors the
     /// Swift reference's `ChatController.ChatState.disconnected`, which
@@ -4163,12 +4747,24 @@ impl Chat {
         self.accepts_sends() && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
     }
 
+    /// Whether the row at `index` has text in the transcript's copy: the error row a limit card
+    /// covers is not drawn, so it adds nothing to what a drag or Select All copies.
+    fn is_copied(&self, index: usize) -> bool {
+        self.limit_card_role(index) != Some(LimitCardRole::Covered)
+    }
+
     fn transcript_entry_ranges(&self) -> Vec<Range<usize>> {
+        let last = (0..self.entries.len())
+            .rev()
+            .find(|&index| self.is_copied(index));
         let mut offset = 0;
         self.entries
             .iter()
             .enumerate()
             .map(|(index, entry)| {
+                if !self.is_copied(index) {
+                    return offset..offset;
+                }
                 // A reply's length is read off its parsed text: no walk, no copy, per frame.
                 let length = match entry {
                     Entry::Assistant { document, .. } => document.text.text.len(),
@@ -4176,7 +4772,7 @@ impl Chat {
                 };
                 let range = offset..offset + length;
                 offset += length;
-                if index + 1 < self.entries.len() {
+                if Some(index) != last {
                     offset += 2;
                 }
                 range
@@ -4187,7 +4783,9 @@ impl Chat {
     fn transcript_text(&self) -> String {
         self.entries
             .iter()
-            .map(Entry::plain_text)
+            .enumerate()
+            .filter(|(index, _)| self.is_copied(*index))
+            .map(|(_, entry)| entry.plain_text())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -4609,7 +5207,28 @@ impl Chat {
             composer_text: self.draft.to_string(),
             queued_text: self.queue.front().cloned().unwrap_or_default(),
             queued: self.queue.iter().cloned().collect(),
-            transcript: self.entries.iter().map(control_entry_row).collect(),
+            queue_held: self.queue_held,
+            queue_held_line: self.queue_held_line(),
+            transcript: self
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    #[allow(unused_mut)]
+                    let mut row = control_entry_row(entry);
+                    #[cfg(debug_assertions)]
+                    self.error_columns(index, &mut row);
+                    #[cfg(debug_assertions)]
+                    self.limit_card_columns(index, &mut row);
+                    #[cfg(debug_assertions)]
+                    self.reveal_columns(index, &mut row);
+                    #[cfg(debug_assertions)]
+                    entry_time_columns(entry, &mut row);
+                    #[cfg(not(debug_assertions))]
+                    let _ = index;
+                    row
+                })
+                .collect(),
             session_panel: self.session_panel_snapshot(),
             composer: self.composer_snapshot(),
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
@@ -4619,6 +5238,8 @@ impl Chat {
             transcript_text: self.transcript_text(),
             #[cfg(debug_assertions)]
             transcript_text_rows: transcript_text_row_boxes(&self.transcript_links.borrow()),
+            #[cfg(debug_assertions)]
+            day_separators: self.day_separator_rows(),
             effort: self
                 .effort
                 .as_ref()
@@ -4700,6 +5321,27 @@ impl Chat {
                     return Err("no closed turn has that footer".to_string());
                 }
                 self.toggle_turn_folded(turn, cx);
+            }
+            TranscriptAction::Retry(entry) => {
+                // The limit card owns its row and the error row it covers: a press there is its
+                // Try again, which waits for the limit to lift.
+                let entry = match self.limit_card_retry(entry, chrono::Local::now()) {
+                    Some(Ok(failed_row)) => failed_row,
+                    Some(Err(why)) => {
+                        return Err(format!("surface.chat.transcript retry: {why}"));
+                    }
+                    None => entry,
+                };
+                // The socket answers what happened: a click that `retry` would ignore is an
+                // error here, not a success.
+                let refusal = match self.retry_action_at(entry) {
+                    None => Some("entry has no Retry"),
+                    Some(action) => self.retry_refusal(action),
+                };
+                if let Some(why) = refusal {
+                    return Err(format!("surface.chat.transcript retry: {why}"));
+                }
+                self.retry(entry, cx);
             }
         }
         Ok(())
@@ -4840,6 +5482,9 @@ impl Chat {
         // The widgets go, and their asks are denied, before the cards are cleared with the rest.
         self.close_widgets(cx);
         self.entries.clear();
+        self.limit_card = None;
+        self.reveal = None;
+        self.transcript_selection = None;
         self.turn_message_ids.clear();
         // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
@@ -4979,17 +5624,23 @@ impl Chat {
             text: transcript.to_string(),
             // Not linked: this flattened text mixes user, thought and tool text (spec §2).
             document: parse_chat_markdown(transcript),
+            stream: None,
         });
         self.has_completed_turn = true;
         cx.notify();
     }
 
     fn selected_transcript_text(&self) -> Option<String> {
-        let selection = self.transcript_selection.as_ref()?.range();
-        if selection.start >= selection.end {
+        let made = self.transcript_selection.as_ref()?;
+        if made.is_empty() {
             return None;
         }
-        self.transcript_text().get(selection).map(ToOwned::to_owned)
+        let copied = match self.copy_from_live_reply(made) {
+            // A drag that ends in the reply being revealed copies what is on the screen.
+            Some(on_screen) => on_screen,
+            None => self.transcript_text().get(made.range())?.to_owned(),
+        };
+        (!copied.is_empty()).then_some(copied)
     }
 
     fn copy_transcript(&mut self, _: &CopyTranscript, _: &mut Window, cx: &mut Context<Self>) {
@@ -5076,7 +5727,11 @@ impl Chat {
         let old_ids = std::mem::take(&mut self.turn_message_ids);
         let mut kept_ids = Vec::with_capacity(old_count);
         let mut ids = old_ids.into_iter();
+        let mut removed = Vec::new();
+        let mut position = 0;
         self.entries.retain(|entry| {
+            let index = position;
+            position += 1;
             let id = ids.next().unwrap_or(None);
             let keep = !matches!(
                 entry,
@@ -5087,11 +5742,16 @@ impl Chat {
             );
             if keep {
                 kept_ids.push(id);
+            } else {
+                removed.push(index);
             }
             keep
         });
         self.turn_message_ids = kept_ids;
         if self.entries.len() != old_count {
+            self.limit_card_rows_removed(&removed);
+            // The selection's ends name their entries (`TranscriptSelection`), which this renumbers.
+            self.transcript_selection = None;
             self.folded_turns.clear();
             self.thought_scroll.clear();
             self.tool_output_scroll.clear();
@@ -5606,6 +6266,8 @@ impl Chat {
             self.transcript_selection = Some(TranscriptSelection {
                 anchor: 0,
                 head: len,
+                whole: true,
+                ..TranscriptSelection::default()
             });
         }
         cx.notify();
@@ -5656,16 +6318,34 @@ impl Chat {
 
     /// Brings the transcript's selection back inside the transcript. A streamed reply can
     /// get shorter between two chunks (a closed mark drops its glyphs), and a selection made
-    /// over the text as it was would end past the text as it is, or inside a glyph.
+    /// over the text as it was would end past the text as it is, or inside a glyph. An end of a
+    /// drag that was placed in the live reply is held to the text drawn for it, which can be longer
+    /// than the document's (`reveal.rs`); every other end, and Select All, to the document's.
     fn clamp_transcript_selection(&mut self) {
         if self.transcript_selection.is_none() {
             return;
         }
         let text = self.transcript_text();
+        let live = self.live_row();
         let Some(selection) = self.transcript_selection.as_mut() else {
             return;
         };
-        for end in [&mut selection.anchor, &mut selection.head] {
+        let live_entry = live.as_ref().map(|live| live.entry());
+        let (anchor_live, head_live) = match selection.whole {
+            true => (false, false),
+            false => (
+                live_entry.is_some() && selection.anchor_entry == live_entry,
+                live_entry.is_some() && selection.head_entry == live_entry,
+            ),
+        };
+        for (end, in_live) in [
+            (&mut selection.anchor, anchor_live),
+            (&mut selection.head, head_live),
+        ] {
+            if let Some(live) = live.as_ref().filter(|_| in_live) {
+                *end = live.clamp(*end);
+                continue;
+            }
             *end = (*end).min(text.len());
             while !text.is_char_boundary(*end) {
                 *end -= 1;
@@ -5826,6 +6506,8 @@ impl Chat {
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.close_widgets(cx);
         self.entries.clear();
+        self.limit_card = None;
+        self.reveal = None;
         self.turn_message_ids.clear();
         self.pending_rewind = None;
         self.folded_turns.clear();
@@ -5844,6 +6526,11 @@ impl Chat {
         self.reset_composer_popups();
         self.overflow_open = false;
         self.streaming = false;
+        // The old conversation's prompt and hold are not the new one's: a resend must never reach it.
+        self.last_prompt = None;
+        self.stop_end_pending = false;
+        self.queue_held = false;
+        self.after_connect = None;
         self.has_completed_turn = false;
         self.transcript_selection = None;
         self.clear_persisted_transcript();
@@ -5958,17 +6645,27 @@ impl Chat {
             return;
         }
         let (text, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let draft = self.draft.to_string();
+        let mentions = self.accepted_mentions.clone();
         self.remember_prompt();
         let images = std::mem::take(&mut self.attachments);
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
-        self.submit_turn(text, mention_paths, images, cx);
+        self.submit_prompt(
+            retry::LastPrompt {
+                text,
+                mention_paths,
+                images,
+                draft,
+                mentions,
+            },
+            cx,
+        );
     }
 
-    /// Pushes the user turn into the transcript and sends it to the live
-    /// client. Shared by the normal send path and the queued-item drain, so
-    /// both turns take the same wire path.
+    /// [`Self::submit_prompt`] for a prompt that has no composer side: a queued item, a message
+    /// handed over by the shell. Its draft is what was sent.
     fn submit_turn(
         &mut self,
         text: String,
@@ -5976,6 +6673,34 @@ impl Chat {
         images: Vec<ImageAttachment>,
         cx: &mut Context<Self>,
     ) {
+        self.submit_prompt(
+            retry::LastPrompt {
+                draft: text.clone(),
+                text,
+                mention_paths,
+                images,
+                mentions: Vec::new(),
+            },
+            cx,
+        );
+    }
+
+    /// Pushes the user turn into the transcript and sends it to the live
+    /// client. Shared by the normal send path, the queued-item drain and
+    /// Retry, so every turn takes the same wire path. The prompt is kept as
+    /// `last_prompt` until its turn ends: Retry sends it again.
+    fn submit_prompt(&mut self, last: retry::LastPrompt, cx: &mut Context<Self>) {
+        // A failed turn's row is Retry for that turn only: with another prompt in flight it would
+        // send the wrong one.
+        self.retire_failed_turn_retries();
+        let (text, mention_paths, images) = (
+            last.text.clone(),
+            last.mention_paths.clone(),
+            last.images.clone(),
+        );
+        self.last_prompt = Some(last);
+        // Any prompt is the user's move after a failure: the queue waits on this turn instead.
+        self.queue_held = false;
         self.push_entry(Entry::User {
             text: text.clone(),
             at: Some(chrono::Local::now()),
@@ -6010,6 +6735,38 @@ impl Chat {
         cx.notify();
     }
 
+    /// Takes the Retry button off every failed turn's row. The rows stay, with their OK.
+    fn retire_failed_turn_retries(&mut self) {
+        let retired: Vec<usize> = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                Entry::Error {
+                    kind: ErrorKind::TurnFailed,
+                    retryable,
+                    ..
+                } if *retryable => {
+                    *retryable = false;
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect();
+        // A card offers Try again for its failed row only while that row has a Retry.
+        if let Some(card) = self.limit_card.as_mut()
+            && card.failed_entry.is_some_and(|row| retired.contains(&row))
+        {
+            card.failed_entry = None;
+            // The row is copied again, which moves every offset below it: see `drop_limit_card`.
+            self.transcript_selection = None;
+            self.remeasure_limit_card();
+        }
+        for index in retired {
+            self.remeasure_entry(index);
+        }
+    }
+
     /// D-CHAT-03: while a turn streams, a send commits the draft as a new
     /// entry at the back of the queue. Mirrors `send`'s consumption of the
     /// composer; an empty draft commits nothing and leaves the queue as
@@ -6031,12 +6788,17 @@ impl Chat {
     /// keep their order.
     fn remove_queued_entry(&mut self, index: usize, cx: &mut Context<Self>) {
         self.queue.remove(index);
+        // An emptied queue holds nothing back.
+        if self.queue.is_empty() {
+            self.queue_held = false;
+        }
         cx.notify();
     }
 
     /// "Clear all" in the queue header: nothing sends when the turn ends.
     fn clear_queue(&mut self, cx: &mut Context<Self>) {
         self.queue.clear();
+        self.queue_held = false;
         cx.notify();
     }
 
@@ -6061,7 +6823,8 @@ impl Chat {
         if self.streaming {
             self.cancel_turn(cx);
         } else {
-            self.send_queued_item(cx);
+            // The user's own send, so a hold after a failure does not stop it.
+            self.send_front_of_queue(cx);
         }
         cx.notify();
     }
@@ -6072,6 +6835,16 @@ impl Chat {
     /// A turn end without a client is a transport death: the queue stays
     /// as it is rather than firing nowhere.
     fn send_queued_item(&mut self, cx: &mut Context<Self>) {
+        // A queue held by a failure sends nothing on its own: a queued item would replace the
+        // prompt Retry sends.
+        if self.queue_held {
+            return;
+        }
+        self.send_front_of_queue(cx);
+    }
+
+    /// Sends the front entry as a turn, if there is a client to send it to.
+    fn send_front_of_queue(&mut self, cx: &mut Context<Self>) {
         if self.client.is_none() {
             return;
         }
@@ -6498,25 +7271,46 @@ impl Chat {
                 let _ = client.cancel();
             }
             self.streaming = false;
+            // The agent has yet to answer the cancelled prompt: its end is not a failure of ours.
+            self.stop_end_pending = true;
+            // The user ended this turn: a later death must not send it again.
+            self.last_prompt = None;
+            self.finish_reply();
             cx.notify();
         }
     }
 
     fn start_connection(&mut self, cx: &mut Context<Self>) {
+        self.connect(self.agent_launch.clone(), None, cx);
+    }
+
+    /// Starts a process on `launch` and, once it is connected, does `after`. The launch is a
+    /// parameter so that Retry can resume a session without writing that into the chat's own
+    /// launch: a later plain relaunch is as it was.
+    fn connect(
+        &mut self,
+        launch: Option<LaunchSpec>,
+        after: Option<retry::AfterConnect>,
+        cx: &mut Context<Self>,
+    ) {
         if self.connecting {
             return;
         }
 
-        let Some(launch) = self.agent_launch.clone() else {
+        let Some(launch) = launch else {
             // An unavailable chat has no command by construction, so there
             // is nothing to spawn and no failure to report either.
             return;
         };
+        self.after_connect = after;
+        // The process that was asked to stop a turn is replaced: its answer never comes.
+        self.stop_end_pending = false;
 
         // The client and the pump that read it are replaced below, so a turn
         // still open here would never hear of its end.
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
+        self.finish_reply();
         // The widgets belong to the session that is replaced: none is built into the new one.
         self.close_session_widgets(widget_slot::SESSION_RESTARTED, cx);
         // A new process has said nothing yet; retry, a new conversation,
@@ -6565,8 +7359,15 @@ impl Chat {
                         chat.mode_catalog = initial_mode_catalog;
                         chat.connecting = false;
                         chat.send_title_on_ready();
+                        chat.finish_retry(cx);
                         if let Some(text) = chat.pending_send.take() {
-                            chat.submit_turn(text, Vec::new(), Vec::new(), cx);
+                            if chat.streaming {
+                                // Retry's resend is running: this goes out behind it, as a
+                                // send during a turn does.
+                                chat.queue.push_back(text);
+                            } else {
+                                chat.submit_turn(text, Vec::new(), Vec::new(), cx);
+                            }
                         }
                         chat.ensure_session_context();
                         chat.refresh_session_connectors(cx);
@@ -6611,6 +7412,8 @@ impl Chat {
                         chat.connecting = false;
                         chat.client = None;
                         chat.streaming = false;
+                        // The launch Retry waited on failed: its error row has a Retry of its own.
+                        chat.after_connect = None;
                         if let Some(text) = chat.pending_send.take() {
                             chat.restore_held_text(&text, cx);
                         }
@@ -6632,6 +7435,7 @@ impl Chat {
     /// (`start_connection`) drop the client on their own paths and close the widgets there.
     fn lose_client(&mut self, cx: &mut Context<Self>) {
         self.client.take();
+        self.finish_reply();
         self.expire_unanswered(WidgetAsks::Deny, cx);
         self.close_session_widgets(widget_slot::SESSION_ENDED, cx);
     }
@@ -6647,6 +7451,7 @@ impl Chat {
             return;
         }
         self.client.take();
+        self.finish_reply();
         self.status_line.clear_retry();
         // The CLI is gone, whatever it last said.
         self.cli_state = None;
@@ -6816,8 +7621,224 @@ impl Chat {
         cx.notify();
     }
 
-    fn retry(&mut self, cx: &mut Context<Self>) {
-        self.start_connection(cx);
+    /// The Retry (or Restart agent) of the error row at `index`: see [`retry::retry_action`] for
+    /// what it does. A stale index (the row is gone: a double click, a click racing a redraw) is a
+    /// no-op, and so is a row with no Retry.
+    fn retry(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(action) = self.retry_action_at(index) else {
+            return;
+        };
+        if self.retry_refusal(action).is_some() {
+            return;
+        }
+        // Retry on a failed turn's row consumes it; the rows of a lost client go when the new
+        // process connects (`clear_recovered_connection_errors`).
+        let failed_turn_row = matches!(
+            self.entries.get(index),
+            Some(Entry::Error {
+                kind: ErrorKind::TurnFailed,
+                ..
+            })
+        );
+        match action {
+            retry::RetryAction::None => {}
+            retry::RetryAction::Relaunch => self.start_connection(cx),
+            retry::RetryAction::Resend => {
+                self.dismiss_error(index, cx);
+                self.resend_last_prompt(cx);
+            }
+            retry::RetryAction::ResumeThenResend | retry::RetryAction::RelaunchToComposer => {
+                let resume = match (action, &self.agent_session_id) {
+                    (retry::RetryAction::ResumeThenResend, Some(session)) => Some(session.clone()),
+                    _ => None,
+                };
+                let launch = self.agent_launch.clone().map(|launch| match (launch, &resume) {
+                    (LaunchSpec::Claude(mut claude), Some(session)) => {
+                        claude.resume = Some(session.clone());
+                        LaunchSpec::Claude(claude)
+                    }
+                    (launch, _) => launch,
+                });
+                if failed_turn_row {
+                    self.dismiss_error(index, cx);
+                }
+                let after = match resume {
+                    Some(session) => retry::AfterConnect::Resend { session },
+                    None => retry::AfterConnect::Composer,
+                };
+                self.connect(launch, Some(after), cx);
+            }
+        }
+    }
+
+    /// Why Retry would do nothing on a row whose action is `action`, `None` when it acts. A resend
+    /// while a turn runs would be a second prompt at once; a relaunch while one connects is
+    /// refused by `connect`.
+    fn retry_refusal(&self, action: retry::RetryAction) -> Option<&'static str> {
+        match action {
+            retry::RetryAction::None => Some("entry has no Retry"),
+            retry::RetryAction::Resend if self.streaming => Some("a turn is running"),
+            retry::RetryAction::Resend if self.client.is_none() => {
+                Some("the agent is not connected")
+            }
+            retry::RetryAction::Relaunch
+            | retry::RetryAction::ResumeThenResend
+            | retry::RetryAction::RelaunchToComposer
+                if self.connecting =>
+            {
+                Some("the agent is connecting")
+            }
+            _ => None,
+        }
+    }
+
+    /// Sends the prompt that failed, or was in flight when the client was lost, as a new turn.
+    fn resend_last_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(last) = self.last_prompt.clone() {
+            self.submit_prompt(last, cx);
+        }
+    }
+
+    /// What Retry's relaunch does once the new process is connected: resends the prompt on the
+    /// resumed conversation, or, when the conversation did not come back, hands the prompt back.
+    fn finish_retry(&mut self, cx: &mut Context<Self>) {
+        let Some(after) = self.after_connect.take() else {
+            // A plain relaunch (an AuthRequired row's Retry, a Restart agent with nothing in
+            // flight) connected and sends nothing: a prompt still held would be resumed and sent
+            // by a later idle death.
+            self.last_prompt = None;
+            // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
+            // relaunch of an agent that is up.
+            self.retire_failed_turn_retries();
+            return;
+        };
+        match after {
+            retry::AfterConnect::Resend { session } => {
+                // The worker falls back to a fresh session itself when the CLI refuses the id. The
+                // flag is already down if that session named itself before the launch returned,
+                // and then its id is not the one that was asked for.
+                let resumed = self.client.as_ref().is_some_and(|client| {
+                    !client.resumed_session_refused()
+                        && client.session_id().is_none_or(|named| named == session)
+                });
+                if resumed {
+                    self.resend_last_prompt(cx);
+                } else {
+                    self.hand_prompt_back(cx);
+                }
+            }
+            retry::AfterConnect::Composer => self.hand_prompt_back(cx),
+        }
+    }
+
+    /// The agent restarted without the conversation: puts the prompt back in the composer if the
+    /// composer is empty, and says so either way.
+    fn hand_prompt_back(&mut self, cx: &mut Context<Self>) {
+        let Some(last) = self.last_prompt.take() else {
+            return;
+        };
+        // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
+        // relaunch of an agent that is up.
+        self.retire_failed_turn_retries();
+        let text = if self.draft.trim().is_empty() && self.attachments.is_empty() {
+            self.set_composer_text(last.draft, cx);
+            self.reset_composer_popups();
+            self.accepted_mentions = last.mentions;
+            self.attachments = last.images;
+            retry::RESTARTED_MESSAGE_BACK
+        } else {
+            retry::RESTARTED
+        };
+        self.push_entry(Entry::Notice {
+            text: text.to_string(),
+            kind: NoticeKind::Info,
+        });
+        cx.notify();
+    }
+
+    /// What Retry does on the row at `index` now; `None` when that is not an error row.
+    fn retry_action_at(&self, index: usize) -> Option<retry::RetryAction> {
+        let Some(Entry::Error {
+            kind, retryable, ..
+        }) = self.entries.get(index)
+        else {
+            return None;
+        };
+        // The row a counting limit card covers has no Retry yet: the card offers Try again when
+        // the count ends, and the socket refuses the row until then.
+        if self.retry_waits_on_limit_card(index) {
+            return Some(retry::RetryAction::None);
+        }
+        // A resend needs the client the turn failed on: a failed turn's row whose client has
+        // gone since is a loss like any other.
+        let kind = if *kind == ErrorKind::TurnFailed && self.client.is_none() {
+            ErrorKind::Connection
+        } else {
+            *kind
+        };
+        Some(retry::retry_action(
+            kind,
+            self.last_prompt.is_some(),
+            self.agent_launch
+                .as_ref()
+                .is_some_and(LaunchSpec::resumes_on_retry),
+            self.agent_session_id.is_some(),
+            *retryable,
+        ))
+    }
+
+    /// Debug builds only, the control socket's two readouts of an error row: `errorKind`, and
+    /// `retry`, what its Retry does now (from state the row alone does not carry).
+    #[cfg(debug_assertions)]
+    fn error_columns(&self, index: usize, row: &mut BTreeMap<String, String>) {
+        if let Some(Entry::Error { kind, .. }) = self.entries.get(index) {
+            row.insert("errorKind".into(), kind.wire().into());
+        }
+        if let Some(action) = self.retry_action_at(index) {
+            row.insert("retry".into(), action.wire().into());
+        }
+    }
+
+    /// Debug builds only: one row per separator the transcript draws (`day_separators`). The
+    /// label is Ely's own `day_name`, so Sirio keeps no copy of its words.
+    #[cfg(debug_assertions)]
+    fn day_separator_rows(&self) -> Vec<BTreeMap<String, String>> {
+        let Some(today) = transcript::civil_day(chrono::Local::now()) else {
+            return Vec::new();
+        };
+        (0..self.entries.len())
+            .filter_map(|index| {
+                let day = transcript::heading_for(&self.entries, index)?;
+                Some(BTreeMap::from([
+                    ("kind".to_string(), "daySeparator".to_string()),
+                    ("entry".to_string(), index.to_string()),
+                    (
+                        "label".to_string(),
+                        ely_gpui_component::chat::day_name(day, today),
+                    ),
+                ]))
+            })
+            .collect()
+    }
+
+    /// The line under a held queue; `None` when the queue is not held or holds nothing. It names
+    /// Retry only while some row still has one.
+    fn queue_held_line(&self) -> Option<String> {
+        if !self.queue_held || self.queue.is_empty() {
+            return None;
+        }
+        let retry_left = (0..self.entries.len()).any(|index| {
+            self.retry_action_at(index)
+                .is_some_and(|action| action != retry::RetryAction::None)
+        });
+        Some(
+            if retry_left {
+                retry::QUEUE_HELD_LINE
+            } else {
+                retry::QUEUE_HELD_LINE_NO_RETRY
+            }
+            .to_string(),
+        )
     }
 
     /// F-CHAT-33: the "OK to dismiss" affordance the VERIFY clause and the
@@ -6838,8 +7859,28 @@ impl Chat {
         }
         self.entries.remove(index);
         self.turn_message_ids.remove(index);
+        // The selection's ends name their entries (`TranscriptSelection`), which this renumbers.
+        self.transcript_selection = None;
         self.list_state.splice(index..index + 1, 0);
+        self.limit_card_rows_removed(&[index]);
         cx.notify();
+    }
+
+    /// The rows at `removed` (their numbers before the removal, ascending) are gone from
+    /// `entries`: the limit card's numbers follow the rows, and the card goes with its own row.
+    fn limit_card_rows_removed(&mut self, removed: &[usize]) {
+        let Some(card) = self.limit_card.as_mut() else {
+            return;
+        };
+        let kept = removed
+            .iter()
+            .rev()
+            .fold(true, |kept, &index| card.entry_removed(index) && kept);
+        if kept {
+            self.remeasure_limit_card();
+        } else {
+            self.limit_card = None;
+        }
     }
 
     /// A chat that states why it cannot run and never starts anything.
@@ -7575,6 +8616,26 @@ fn subagent_part_item(part: &SubagentPart) -> serde_json::Value {
     serde_json::Value::Object(item)
 }
 
+/// Debug builds only, the control socket's readouts of when a row happened. A `user` row has
+/// `at`, Unix seconds, when the turn was asked; a `thought` row has `durationMs`, once it has
+/// ended. A value that is not known is not in the row: rows hold strings, so its absence is how
+/// the socket says null.
+#[cfg(debug_assertions)]
+fn entry_time_columns(entry: &Entry, row: &mut BTreeMap<String, String>) {
+    match entry {
+        Entry::User { at: Some(at), .. } => {
+            row.insert("at".into(), at.timestamp().to_string());
+        }
+        Entry::Thought {
+            duration_ms: Some(duration_ms),
+            ..
+        } => {
+            row.insert("durationMs".into(), duration_ms.to_string());
+        }
+        _ => {}
+    }
+}
+
 fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
     let mut row = BTreeMap::new();
     match entry {
@@ -8074,6 +9135,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
     edit_summary: None, thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
     day_heading: None, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+    drawn: None,
 }, &transcript_theme, &mut *window, &mut *cx)
                                                             },
                                                         ),
@@ -8082,6 +9144,61 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                             .into_any_element();
                                     }
                                     TurnRowRole::Normal => {}
+                                }
+                                // The limit card stands on its warning notice's row, and the error
+                                // row of the turn that failed with it is not drawn.
+                                if let Some(role) = this.limit_card_role(entry_index) {
+                                    let row_id = this.row_id(entry_index, cx);
+                                    if role == LimitCardRole::Covered {
+                                        return div().id(row_id).into_any_element();
+                                    }
+                                    let Some((phase, until)) =
+                                        this.limit_card_frame(cx.background_executor().now())
+                                    else {
+                                        return div().id(row_id).into_any_element();
+                                    };
+                                    let source_start = transcript_ranges
+                                        .get(entry_index)
+                                        .map(|range| range.start)
+                                        .unwrap_or(0);
+                                    let interaction = TranscriptInteraction {
+                                        chat: entity.clone(),
+                                        focus: transcript_focus.clone(),
+                                        entry: entry_index,
+                                        painted: source_start,
+                                    };
+                                    let words = this
+                                        .limit_card
+                                        .as_ref()
+                                        .map(|card| card.sentence.clone())
+                                        .unwrap_or_default();
+                                    let name = limit_card::accessible_name(&words);
+                                    let sentence = Chat::render_plain_text(
+                                        words,
+                                        &transcript_theme,
+                                        format!("limit-card-text-{entry_index}"),
+                                        source_start,
+                                        Some(&interaction),
+                                    );
+                                    let retry_entity = entity.clone();
+                                    return div()
+                                        .id(row_id.clone())
+                                        .w_full()
+                                        .max_w(px(TRANSCRIPT_WIDTH))
+                                        .pb(px(10.0))
+                                        .child(limit_card::render(
+                                            phase,
+                                            until,
+                                            name,
+                                            sentence,
+                                            row_id,
+                                            move |_, cx| {
+                                                retry_entity
+                                                    .update(cx, |chat, cx| chat.retry_limit_card(cx))
+                                            },
+                                            &transcript_theme,
+                                        ))
+                                        .into_any_element();
                                 }
                                 // F-CHAT-22: a run of consecutive tool
                                 // calls renders as one bordered box, keyed
@@ -8141,9 +9258,12 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                     .get(entry_index)
                                     .map(|range| range.start)
                                     .unwrap_or(0);
+                                // A live reply draws what its reveal has come to, and asks for
+                                // the next frame while it is behind: `None` draws `document`.
+                                let drawn = this.reveal_row(entry_index, window, cx);
                                 this.entries
                                     .get(entry_index)
-                                    .cloned()
+                                    .map(Entry::clone_for_draw)
                                     .map(|entry| {
                                         let bottom_padding =
                                             if matches!(entry, Entry::TurnFooter(_)) {
@@ -8154,11 +9274,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         // The heading is the processor's to
                                         // pass in: it holds `&this.entries`.
                                         let day_heading = match this.entries.get(entry_index) {
-                                            Some(Entry::User { .. }) => transcript::heading_for(
-                                                &this.entries,
-                                                entry_index,
-                                                chrono::Local::now(),
-                                            ),
+                                            Some(Entry::User { .. }) => {
+                                                transcript::heading_for(&this.entries, entry_index)
+                                            }
                                             _ => None,
                                         };
                                         let body = Chat::render_entry(entry, transcript::TranscriptRowContext {
@@ -8166,7 +9284,8 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
     focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
     edit_summary: this.edit_summaries.get(&entry_index).cloned(), thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
-    day_heading: day_heading.as_deref(), agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+    day_heading, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+    drawn,
 }, &transcript_theme, &mut *window, &mut *cx)
                                         .into_any_element();
                                         div()
@@ -8902,6 +10021,7 @@ pub(crate) mod testing {
             chat.push_entry(Entry::Assistant {
                 document: parse_chat_markdown(&text),
                 text,
+                stream: None,
             });
         }
     }
@@ -9848,6 +10968,111 @@ two"
         ));
     }
 
+    /// A thought ends when its block closes (`ThoughtEnded`, Claude's `content_block_stop`), not
+    /// when whatever follows arrives: a reply whose first text is slow does not lengthen it. A
+    /// close that finds no thought open (a block that streamed no text) changes nothing.
+    #[gpui::test]
+    async fn a_thought_ends_when_its_block_closes(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        let duration_of_first = |chat: &Chat| match chat.entries.first() {
+            Some(Entry::Thought { duration_ms, .. }) => *duration_ms,
+            other => panic!("the first entry is the thought: {other:?}"),
+        };
+        let began = std::time::Instant::now();
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(
+                sirio_chat::ChatEvent::ThoughtChunk("weigh the options".into()),
+                cx,
+            );
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+        });
+        let settled = chat.read_with(cx, |chat, _| duration_of_first(chat));
+        assert!(settled.is_some(), "the block's close settles the thought");
+        // The text is slow to come. A thought reads the real clock, so the wait is real.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk("Here is the answer.".into()),
+                cx,
+            );
+        });
+        let elapsed = began.elapsed().as_millis() as u64;
+        let after_text = chat.read_with(cx, |chat, _| duration_of_first(chat));
+        assert_eq!(
+            after_text, settled,
+            "the text that follows does not settle it again"
+        );
+        assert!(
+            settled.is_some_and(|ms| ms + 50 <= elapsed),
+            "it ended before the 50 ms wait for the text: {settled:?} of {elapsed} ms"
+        );
+        chat.update(cx, |chat, cx| {
+            let entries = chat.entries.len();
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+            assert_eq!(
+                chat.entries.len(),
+                entries,
+                "a close with no thought pushes no entry"
+            );
+            assert!(chat.streaming, "it ends no turn");
+            assert!(
+                matches!(
+                    chat.entries.last(),
+                    Some(Entry::Assistant {
+                        stream: Some(_),
+                        ..
+                    })
+                ),
+                "and it finishes no live reply"
+            );
+        });
+    }
+
+    /// A thinking block that follows a closed one with no row between joins its thought, and the
+    /// thought is open again: the next close times the whole span, not just the first block.
+    #[gpui::test]
+    async fn a_second_block_reopens_the_thought_it_joins(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        let began = std::time::Instant::now();
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk("first block".into()), cx);
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+            assert!(
+                !chat.thought_is_streaming(0),
+                "the first close settles the thought"
+            );
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk(" second block".into()), cx);
+            assert_eq!(chat.entries.len(), 1, "the second block joins the thought");
+            assert!(
+                chat.thought_is_streaming(0),
+                "and the thought is thinking again"
+            );
+        });
+        // The second block takes a while. A thought reads the real clock, so the wait is real.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+        });
+        let elapsed = began.elapsed().as_millis() as u64;
+        chat.read_with(cx, |chat, _| {
+            let Some(Entry::Thought { duration_ms, .. }) = chat.entries.first() else {
+                panic!("the first entry is the thought");
+            };
+            assert!(
+                duration_ms.is_some_and(|ms| (50..=elapsed).contains(&ms)),
+                "the second close times the whole span, first block to second close: \
+                 {duration_ms:?} of {elapsed} ms"
+            );
+            assert!(!chat.thought_is_streaming(0));
+        });
+    }
+
     /// The turn's end settles a thought that no answer followed.
     #[gpui::test]
     async fn a_turn_end_settles_a_trailing_thought(cx: &mut TestAppContext) {
@@ -10146,6 +11371,7 @@ two"
                 chat.push_entry(Entry::Assistant {
                     document: parse_chat_markdown(&body),
                     text: body,
+                    stream: None,
                 });
             }
             cx.notify();
@@ -10211,6 +11437,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 document: parse_chat_markdown("short answer"),
                 text: "short answer".into(),
+                stream: None,
             });
             cx.notify();
         });
@@ -10299,6 +11526,7 @@ two"
                 chat.push_entry(Entry::Assistant {
                     document: parse_chat_markdown(&body),
                     text: body,
+                    stream: None,
                 });
             }
             cx.notify();
@@ -10437,6 +11665,7 @@ two"
             Entry::Assistant {
                 text: "done".into(),
                 document: parse_chat_markdown("done"),
+                stream: None,
             },
             Entry::TurnFooter("12:00".into()),
             Entry::User {
@@ -10953,6 +12182,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "copy this assistant response".into(),
                 document: parse_chat_markdown("copy this assistant response"),
+                stream: None,
             });
             chat
         });
@@ -11000,6 +12230,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "```rust\nlet answer = 42;\n```".into(),
                 document: parse_chat_markdown("```rust\nlet answer = 42;\n```"),
+                stream: None,
             });
             chat
         });
@@ -11098,6 +12329,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "done".into(),
                 document: parse_chat_markdown("done"),
+                stream: None,
             });
             chat.push_entry(Entry::ToolCall {
                 id: "edit-stale".into(),
@@ -12609,6 +13841,15 @@ two"
             "a recovered chat is no longer connecting"
         );
 
+        // The agent died in the middle of "hello" and an ACP agent cannot resume: the restart
+        // says so and hands the message back (spec §5.3), which this turn then replaces.
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "hello",
+            "the message that was lost is back in the composer"
+        );
+        chat.update(cx, |chat, cx| chat.set_composer_text("", cx));
+
         focus_and_type(cx, "again");
         cx.simulate_keystrokes("enter");
         pump_chat_until(cx, &chat, |chat| {
@@ -13559,8 +14800,16 @@ two"
     async fn day_headings_are_drawn_above_the_first_question_of_a_day(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(crate::ely::init);
+        // One reading of the clock. Yesterday is the previous calendar date at noon, which no
+        // clock change lands on, not `now` less 24 hours: that is the day before yesterday on
+        // the evening after a spring-forward night.
         let now = chrono::Local::now();
-        let yesterday = now - chrono::Duration::days(1);
+        let yesterday = now
+            .date_naive()
+            .pred_opt()
+            .and_then(|day| day.and_hms_opt(12, 0, 0))
+            .and_then(|noon| noon.and_local_timezone(chrono::Local).earliest())
+            .expect("yesterday at noon exists");
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.push_entry(Entry::User {
@@ -13570,6 +14819,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "x".into(),
                 document: parse_chat_markdown("x"),
+                stream: None,
             });
             chat.push_entry(Entry::TurnFooter("t".into()));
             chat.push_entry(Entry::User {
@@ -13587,6 +14837,15 @@ two"
             "the heading sits above the question"
         );
         assert!(cx.debug_bounds("day-heading-3").is_some(), "Today");
+        // Ely draws the separators, with its words for the day.
+        assert!(
+            cx.debug_bounds("date-separator-Yesterday").is_some(),
+            "the first question's day is named Yesterday"
+        );
+        assert!(
+            cx.debug_bounds("date-separator-Today").is_some(),
+            "the last question's day is named Today"
+        );
     }
 
     #[test]
@@ -14529,6 +15788,7 @@ two"
             chat.transcript_selection = Some(TranscriptSelection {
                 anchor: ranges[0].start,
                 head: ranges[0].end,
+                ..TranscriptSelection::default()
             });
             assert!(
                 chat.selected_transcript_text()
@@ -15111,7 +16371,7 @@ two"
         let_the_agent_answer(cx);
         assert_eq!(config_requests(&log).len(), 1, "the first process is asked once");
 
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until(cx, &chat, |_| config_requests(&log).len() >= 2);
         let_the_agent_answer(cx);
 
@@ -15141,7 +16401,7 @@ two"
         let_the_agent_answer(cx);
         assert_eq!(config_requests(&log).len(), 1, "the first process is asked once");
 
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until(cx, &chat, |chat| {
             config_requests(&log).len() >= 2
                 && chat
@@ -16892,7 +18152,7 @@ two"
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |_| {
             restored_chat_session_id(&path) == Some(None)
         });
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
 
         // A turn names the session; Retry continues it.
@@ -16902,7 +18162,7 @@ two"
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |chat| {
             chat.agent_session_id().is_some() && !chat.streaming
         });
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
 
         // A new conversation continues nothing.
@@ -18161,6 +19421,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "x".into(),
                 document: parse_chat_markdown("x"),
+                stream: None,
             });
             let mut full = test_tool_call("full");
             if let Entry::ToolCall {
@@ -18250,6 +19511,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "done".into(),
                 document: parse_chat_markdown("done"),
+                stream: None,
             });
             chat.push_entry(test_tool_call("e"));
             // Row-level assertions need the rows: the turn streams so the
@@ -18354,6 +19616,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "assistant answer".into(),
                 document: parse_chat_markdown("assistant answer"),
+                stream: None,
             });
             chat
         });
@@ -18368,6 +19631,7 @@ two"
             chat.transcript_selection = Some(TranscriptSelection {
                 anchor: start,
                 head: end,
+                ..TranscriptSelection::default()
             });
             assert_eq!(
                 chat.selected_transcript_text().as_deref(),
@@ -18397,6 +19661,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "answer".into(),
                 document: parse_chat_markdown("answer"),
+                stream: None,
             });
             chat
         });
@@ -18466,7 +19731,12 @@ two"
             chat.agent_launch = Some(LaunchSpec::Acp(
                 AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain"),
             ));
-            chat.retry(cx);
+            let error = chat
+                .entries
+                .iter()
+                .position(|entry| matches!(entry, Entry::Error { retryable: true, .. }))
+                .expect("the failed launch left a retryable error row");
+            chat.retry(error, cx);
         });
 
         // A real interpreter has to start before the client exists, so the
@@ -20055,6 +21325,7 @@ two"
             Entry::Assistant {
                 text: "leading note".into(),
                 document: parse_chat_markdown("leading note"),
+                stream: None,
             },
             Entry::User {
                 text: "what does this do?\nsecond line".into(),
@@ -20080,6 +21351,7 @@ two"
             Entry::Assistant {
                 text: "no question here".into(),
                 document: parse_chat_markdown("no question here"),
+                stream: None,
             },
             Entry::TurnFooter("10:00".into()),
         ];
@@ -20762,6 +22034,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "hello **bold** world".into(),
                 document: parse_chat_markdown("hello **bold** world"),
+                stream: None,
             });
             chat
         });
@@ -20813,6 +22086,7 @@ two"
             chat.push_entry(Entry::Assistant {
                 text: "hello **bold** world".into(),
                 document: parse_chat_markdown("hello **bold** world"),
+                stream: None,
             });
             chat
         });
@@ -20913,6 +22187,7 @@ two"
         chat.push_entry(Entry::Assistant {
             document: parse_chat_markdown(text),
             text: text.into(),
+            stream: None,
         });
     }
 

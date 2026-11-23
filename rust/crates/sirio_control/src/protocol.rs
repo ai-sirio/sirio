@@ -1212,14 +1212,16 @@ pub mod request {
         )
     }
 
-    /// Debug-only `surface.chat.transcript {surfaceId, action, pixels?, turn?}`: scrolls a
-    /// chat's transcript (`scrollBy`, by `pixels`) or folds or unfolds a closed turn
-    /// (`toggleTurn`, by the turn's footer index `turn`), as the wheel and the turn's row do.
+    /// Debug-only `surface.chat.transcript {surfaceId, action, pixels?, turn?, entry?}`: scrolls a
+    /// chat's transcript (`scrollBy`, by `pixels`), folds or unfolds a closed turn (`toggleTurn`,
+    /// by the turn's footer index `turn`), as the wheel and the turn's row do, or presses the
+    /// Retry of an error row (`retry`, by the row's index `entry`).
     pub fn chat_transcript(
         surface_id: &str,
         action: &str,
         pixels: Option<&str>,
         turn: Option<&str>,
+        entry: Option<&str>,
     ) -> ControlRequest {
         let mut params = BTreeMap::from([
             ("surfaceId".to_string(), surface_id.to_string()),
@@ -1230,6 +1232,9 @@ pub mod request {
         }
         if let Some(turn) = turn {
             params.insert("turn".to_string(), turn.to_string());
+        }
+        if let Some(entry) = entry {
+            params.insert("entry".to_string(), entry.to_string());
         }
         request("surface.chat.transcript", params)
     }

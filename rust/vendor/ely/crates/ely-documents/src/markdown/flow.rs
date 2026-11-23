@@ -178,8 +178,14 @@ fn paired(text: &str, runs: &[Range<usize>], held: &[Range<usize>]) -> Vec<Range
 fn next_run(text: &str, from: usize, len: usize, held: &[Range<usize>]) -> Option<Range<usize>> {
     let bytes = text.as_bytes();
     let mut at = from;
+    // `held` is in order and its ranges do not overlap (`not_prose` makes it so), so the only range
+    // that can hold `at` is the first that ends after it: a pointer that only moves on.
+    let mut next = held.partition_point(|block| block.end <= at);
     while at < bytes.len() {
-        if let Some(block) = held.iter().find(|block| block.contains(&at)) {
+        while held.get(next).is_some_and(|block| block.end <= at) {
+            next += 1;
+        }
+        if let Some(block) = held.get(next).filter(|block| block.start <= at) {
             at = block.end;
             continue;
         }

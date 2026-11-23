@@ -65,6 +65,15 @@ struct Frame {
     texts: Vec<Drawn>,
     /// Where each sideways frame sat, by its place among the body's.
     frames: Vec<Option<Bounds<Pixels>>>,
+    /// Where the view painted the caret of a live reply this frame, if it did.
+    caret: Option<Point<Pixels>>,
+}
+
+/// Where a caret after the end of a text goes, and how big it is.
+pub(crate) struct CaretSpot {
+    pub origin: Point<Pixels>,
+    pub line_height: Pixels,
+    pub font_size: Pixels,
 }
 
 /// What a body's drawing left behind, shared with the handlers that read it: the texts,
@@ -83,10 +92,34 @@ impl BodyLayouts {
         let mut frame = self.0.borrow_mut();
         frame.texts.clear();
         frame.frames.clear();
+        frame.caret = None;
     }
 
     fn add(&self, drawn: Drawn) {
         self.0.borrow_mut().texts.push(drawn);
+    }
+
+    /// Where the last paint put the caret of a live reply, if it put one. The tests read it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn caret(&self) -> Option<Point<Pixels>> {
+        self.0.borrow().caret
+    }
+
+    /// Records where the view painted the caret.
+    pub(super) fn set_caret(&self, at: Point<Pixels>) {
+        self.0.borrow_mut().caret = Some(at);
+    }
+
+    /// Where a caret goes after the end of the text of drawn part `part`, when this frame drew
+    /// it: a culled text has no place, and so no caret.
+    pub(super) fn caret_spot(&self, part: usize) -> Option<CaretSpot> {
+        let frame = self.0.borrow();
+        let drawn = frame.texts.iter().rev().find(|drawn| drawn.part == Some(part))?;
+        Some(CaretSpot {
+            origin: drawn.layout.position_for_index(drawn.text.len())?,
+            line_height: drawn.layout.line_height(),
+            font_size: drawn.layout.line_layouts().first()?.unwrapped_layout.font_size,
+        })
     }
 
     /// The text a position is on or nearest, as the selection reads it: the first text

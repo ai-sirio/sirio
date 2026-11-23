@@ -26,6 +26,7 @@ mod menu;
 mod rewrite;
 mod sideways;
 mod slug;
+mod stream;
 mod text;
 mod view;
 
@@ -38,6 +39,7 @@ pub(crate) use gather::DrawnPart;
 pub(crate) use menu::{MarkdownMenuItem, perform};
 pub(crate) use rewrite::{names_are_plain, picture_address};
 pub(crate) use slug::slug;
+pub(crate) use stream::{Segment, StreamingDoc, with_tail};
 pub(crate) use text::{PartKind, PlainText};
 pub(crate) use view::{
     BodyActions, LinkHandler, MarkdownView, MenuHandler, MenuPress, SelectionHost, ViewFlags,
@@ -66,24 +68,46 @@ pub(crate) const MAX_HTML_NESTING: usize = 32;
 pub(crate) mod reader_fault {
     use std::cell::Cell;
 
-    thread_local!(static ARMED: Cell<bool> = const { Cell::new(false) });
+    thread_local!(static ARMED: Cell<Option<usize>> = const { Cell::new(None) });
+    thread_local!(static STRIKES: Cell<usize> = const { Cell::new(0) });
 
-    /// While it lives, every read of a text on this thread panics.
+    /// While it lives, reads of a text on this thread panic, from the one after the first
+    /// `skip` of them on, and the count of reads begins again from zero.
     pub(crate) struct ReaderFault(());
 
+    /// Every read of a text panics.
     pub(crate) fn on() -> ReaderFault {
-        ARMED.with(|armed| armed.set(true));
+        on_after(0)
+    }
+
+    /// The first `skip` reads go through; every one after them panics.
+    pub(crate) fn on_after(skip: usize) -> ReaderFault {
+        ARMED.with(|armed| armed.set(Some(skip)));
+        STRIKES.with(|strikes| strikes.set(0));
         ReaderFault(())
+    }
+
+    /// How many texts the reader was asked to read since the fault was set: the ones that went
+    /// through, and the one that panicked, and every one asked after it.
+    pub(crate) fn strikes() -> usize {
+        STRIKES.with(Cell::get)
     }
 
     impl Drop for ReaderFault {
         fn drop(&mut self) {
-            ARMED.with(|armed| armed.set(false));
+            ARMED.with(|armed| armed.set(None));
         }
     }
 
     pub(super) fn strike() {
-        if ARMED.with(Cell::get) {
+        let Some(skip) = ARMED.with(Cell::get) else {
+            return;
+        };
+        let asked = STRIKES.with(|strikes| {
+            strikes.set(strikes.get() + 1);
+            strikes.get()
+        });
+        if asked > skip {
             panic!("a panic injected into the Markdown reader");
         }
     }
@@ -154,6 +178,9 @@ pub(crate) struct MarkdownBlocks {
     /// Ely's reader panicked on the source, and `nodes` is that source as plain text. A chat
     /// reply whose document carries it is not read again while it streams.
     pub reader_panicked: bool,
+    /// The view paints a caret after the last text of the body, as a live reply is drawn. A
+    /// decoration of the drawn tree: no text and no part of the source holds it.
+    pub caret: bool,
 }
 
 impl std::fmt::Debug for MarkdownBlocks {
@@ -187,6 +214,27 @@ fn markdown_depth(source: &str) -> usize {
     deepest
 }
 
+/// The text Ely reads for `source` (a byte order mark dropped, lone CRs as line ends, `$$` fences
+/// as tildes): the first text `parts` hands the guard, taken without reading it into a tree. A
+/// guard that refuses it ends the reading there. `None` when Ely's reader panicked on the way to
+/// that text: it is vendored, and a panic left in it must not take the app down.
+pub(super) fn read_of(source: &str) -> Option<String> {
+    let mut read = None;
+    let reader = catch_unwind(AssertUnwindSafe(|| {
+        parse_markdown_guarded(
+            source,
+            &|_: &str| -> Option<Vec<MarkdownBlock>> { None },
+            &mut |text| {
+                #[cfg(test)]
+                reader_fault::strike();
+                read = Some(text.to_owned());
+                false
+            },
+        )
+    }));
+    reader.is_ok().then(|| read.unwrap_or_default())
+}
+
 /// How deep `nodes` nest, a leaf counting one.
 fn tree_depth(nodes: &[MarkdownBlock]) -> usize {
     (nodes.iter())
@@ -201,39 +249,109 @@ fn tree_depth(nodes: &[MarkdownBlock]) -> usize {
         .unwrap_or(0)
 }
 
+/// What the per-block half of [`build`] makes of one source: the nodes the surface draws, before
+/// anything that looks across the whole reply (headings, tables of contents, counts, text).
+pub(crate) struct Parts {
+    pub nodes: Vec<MarkdownBlock>,
+    pub missing: Vec<DiagramRequest>,
+    /// The deepest nesting the guard accepted in any text Ely read for this source.
+    pub deepest: usize,
+    /// The guard refused the source (or block HTML made the tree too deep): `nodes` is the
+    /// single plain paragraph.
+    pub refused: bool,
+    /// The guard refused a text after the first, so the first pass's tree was kept: the `\(`
+    /// pairs of this source are not math, which a longer text around it may not repeat.
+    pub declined: bool,
+    /// Block HTML was read, so `deepest` (of this source and every other) decided its room.
+    pub block_html: bool,
+    /// The first text Ely read for this source (a byte order mark dropped, lone CRs as line
+    /// ends, `$$` fences as tildes), the one the guard saw first.
+    pub read: Option<String>,
+    /// Ely's reader panicked on the source: `nodes` is the single plain paragraph (`refused` is
+    /// set too), and nothing else of the parse is kept, since it was cut short.
+    pub panicked: bool,
+}
+
 /// `source` as the tree `policy.surface` draws.
 pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
+    let parts = parts(source, policy, Within::default(), false);
+    join(parts.nodes, parts.missing, parts.panicked)
+}
+
+/// `source` as plain text, without asking Ely's reader: what a reply it panicked on shows while it
+/// streams, so that the reader is not asked, and does not panic, again on each chunk. The document
+/// is marked as one the reader panicked on.
+pub(crate) fn as_plain_text(source: &str) -> MarkdownBlocks {
+    join(vec![rewrite::plain_paragraph(source)], Vec::new(), true)
+}
+
+/// `source` as plain text, without asking Ely's reader, and not marked: what a reply the nesting
+/// guard refused is, and so what it shows while it is revealed.
+pub(crate) fn as_plain(source: &str) -> MarkdownBlocks {
+    join(vec![rewrite::plain_paragraph(source)], Vec::new(), false)
+}
+
+/// Where a source stands in the reply it is a part of, so that built alone it comes out as it
+/// does in the whole.
+#[derive(Clone, Copy, Default)]
+struct Within {
+    /// The deepest Markdown of the rest of the reply: block HTML nests to what it leaves.
+    deepest: usize,
+    /// Where the source starts in the reply, for the source offsets the tree keeps.
+    offset: usize,
+}
+
+fn parts(source: &str, policy: &mut Policy<'_>, within: Within, keep_read: bool) -> Parts {
     let mut missing = Vec::new();
     let mut nodes = vec![rewrite::plain_paragraph(source)];
+    let mut refused = true;
     // Ely reads another text than the one written (a byte order mark dropped, lone CRs as line
     // ends, `$$` fences as tildes), and reads `\(` pairs as math in a second pass over swapped
     // text. It asks the guard about each text it is about to parse, so the guard measures what
     // Ely reads, in one parse: a refused first text leaves the plain paragraph, a refused
     // second one keeps the first pass's tree. What depth the Markdown leaves is all block HTML
-    // may nest to, wherever it stands; HTML is read after every text was measured.
+    // may nest to, wherever it stands (in the rest of the reply too, for a part of one); HTML is
+    // read after every text was measured.
     //
     // The reader is vendored, and an `expect` left in it would take the app down from a reply:
-    // a panic in it leaves the source as the plain paragraph, marked so that a caller can tell.
+    // a panic in it leaves the source as the plain paragraph, marked so that a caller can tell,
+    // and none of what the cut-short parse had noted is kept.
     let deepest = Cell::new(0usize);
+    let (declined, block_html) = (Cell::new(false), Cell::new(false));
+    let (mut read, mut texts) = (None, 0usize);
+    let offset = within.offset;
     let parsed = catch_unwind(AssertUnwindSafe(|| {
         parse_markdown_guarded(
             source,
             &|raw: &str| {
-                let room = MAX_NESTING.saturating_sub(deepest.get()).min(MAX_HTML_NESTING);
-                rewrite::html_block(raw, room)
+                block_html.set(true);
+                let room = MAX_NESTING
+                    .saturating_sub(deepest.get().max(within.deepest))
+                    .min(MAX_HTML_NESTING);
+                let mut blocks = rewrite::html_block(raw, room)?;
+                // The offsets of the tree are moved by `offset` below; what block HTML makes has
+                // none, and is moved back by the same amount so that it ends where it began.
+                stream::shift(&mut blocks, offset.wrapping_neg());
+                Some(blocks)
             },
-            &mut |read| {
+            &mut |text| {
                 #[cfg(test)]
                 reader_fault::strike();
-                let depth = markdown_depth(read);
+                texts += 1;
+                if keep_read && texts == 1 {
+                    read = Some(text.to_owned());
+                }
+                let depth = markdown_depth(text);
                 if depth <= MAX_NESTING {
                     deepest.set(deepest.get().max(depth));
+                } else if texts > 1 {
+                    declined.set(true);
                 }
                 depth <= MAX_NESTING
             },
         )
     }));
-    let reader_panicked = parsed.is_err();
+    let panicked = parsed.is_err();
     if let Ok(Some(parsed)) = parsed {
         // Block HTML nests on top of the Markdown around it: each is under the cap, their
         // sum may not be, and every walk after this one recurses over the tree.
@@ -251,23 +369,61 @@ pub(crate) fn build(source: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
                 if policy.surface == Surface::Chat {
                     rewrite::chat_links(&mut nodes, &mut policy.file_links);
                 }
+                stream::shift(&mut nodes, offset);
+                refused = false;
             } else {
                 missing.clear();
             }
         }
     }
-
-    finish(nodes, missing, reader_panicked)
+    if panicked {
+        return Parts {
+            nodes,
+            missing: Vec::new(),
+            deepest: 0,
+            refused: true,
+            declined: false,
+            block_html: false,
+            read: None,
+            panicked: true,
+        };
+    }
+    Parts {
+        nodes,
+        missing,
+        deepest: deepest.get(),
+        refused,
+        declined: declined.get(),
+        block_html: block_html.get(),
+        read,
+        panicked: false,
+    }
 }
 
-/// `source` as plain text, without asking Ely's reader: what a reply it panicked on shows while
-/// it streams, so that the reader is not asked, and does not panic, again on each chunk.
-pub(crate) fn as_plain_text(source: &str) -> MarkdownBlocks {
-    finish(vec![rewrite::plain_paragraph(source)], Vec::new(), true)
+/// Every source offset the tree keeps (the spans of an inline's pieces, a code block's start, a
+/// picture's place): what must lie inside the text the tree was built from.
+#[cfg(test)]
+pub(crate) fn source_offsets(nodes: &[MarkdownBlock]) -> Vec<usize> {
+    let mut found = Vec::new();
+    rewrite::each(nodes, &mut |node| match node {
+        MarkdownBlock::Paragraph(inline) | MarkdownBlock::Heading(_, inline) => {
+            for (_, span, _) in &inline.sources {
+                found.extend([span.start, span.end]);
+            }
+        }
+        MarkdownBlock::Code { from, .. } => found.push(*from),
+        MarkdownBlock::Image { at, .. } => found.push(*at),
+        _ => {}
+    });
+    found
 }
 
-/// What [`build`] keeps beside `nodes`, the tree its surface draws.
-fn finish(
+/// The half of [`build`] that looks across the reply: headings and their slugs, the tables of
+/// contents that link to them, the counts and the plain text.
+///
+/// `reader_panicked` is carried to the document: `nodes` are then a plain paragraph of a source
+/// Ely's reader panicked on.
+pub(crate) fn join(
     nodes: Vec<MarkdownBlock>,
     missing: Vec<DiagramRequest>,
     reader_panicked: bool,
@@ -303,6 +459,7 @@ fn finish(
         missing_diagrams: missing,
         kinds,
         reader_panicked,
+        caret: false,
     }
 }
 

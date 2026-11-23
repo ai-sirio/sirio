@@ -35,8 +35,10 @@ describes is a review by hand.
 - `crates/ely-chat/src/composer.rs`
 - `crates/ely-chat/src/expansion.rs`
 - `crates/ely-chat/src/lib.rs`
+- `crates/ely-chat/src/list.rs`
 - `crates/ely-chat/src/message.rs`
 - `crates/ely-chat/src/status.rs`
+- `crates/ely-chat/src/stream.rs`
 - `crates/ely-collab/Cargo.toml`
 - `crates/ely-core/Cargo.toml`
 - `crates/ely-core/icons/clipboard-list.svg`
@@ -75,6 +77,7 @@ describes is a review by hand.
 - `crates/ely-documents/src/markdown/build.rs`
 - `crates/ely-documents/src/markdown/build/node.rs`
 - `crates/ely-documents/src/markdown/build/tests.rs`
+- `crates/ely-documents/src/markdown/flow.rs`
 - `crates/ely-documents/src/markdown/mdast.rs`
 - `crates/ely-documents/src/markdown/shape.rs`
 - `crates/ely-documents/src/markdown/tex.rs`
@@ -559,8 +562,9 @@ unchanged default path are named: they ran green on this code (each alone, 1 tes
 ### Row 20 (stream)
 
 Re-decided: the old crate left `StreamingMarkdown` out. Upstream exports it from
-`ely-chat/src/stream.rs` and `lib.rs`; both are verbatim and it comes along, unused by Sirio.
-No proof needed (nothing changed).
+`ely-chat/src/stream.rs` and `lib.rs`; it comes along, unused by Sirio. `StreamingMarkdown` itself is
+verbatim, so no proof is needed for it. The two files also carry L11, which changes only their
+visibility (see `## ely-chat host seams (L11)`).
 
 - `crates/ely-chat/src/lib.rs`: `#[doc(hidden)] pub mod expansion;`
 - `crates/ely-chat/src/expansion.rs`, `crates/ely-chat/src/composer.rs`,
@@ -897,10 +901,63 @@ in `tree/tests.rs` and `tests.rs` read `width: None`. Tests are in `render/tests
 - Facade: `ely-gpui-component` re-exports `ely_documents as documents` and forwards `test-support`
   (the facade is outside `check-vendor.sh`).
 
+## ely-chat host seams (L11)
+
+Sirio's chat draws its own incremental tree and needs Ely's reveal pace and day words, not a copy of
+them. So the pacing functions, their two constants and `day_name` are public. Visibility only: no body
+changed, and upstream's own callers see the same behaviour. Paths: `ely-chat` `src/stream.rs`,
+`src/list.rs` and `src/lib.rs`.
+
+- L11 `stream` is a public module, `#[doc(hidden)]` as `expansion` is. `advanced`, `next_shown` and
+  `grapheme_end` are `pub`; `PACE` and `CATCH_UP` are `pub const`; `list::day_name(day, today)` is `pub`
+  and re-exported at the root, so `ely_chat::day_name` takes two `jiff::civil::Date`s and returns a
+  `String`. Sirio reaches all of them through the facade's `chat` alias (`pub use ely_chat as chat`):
+  `ely_gpui_component::chat::stream::{advanced, next_shown, grapheme_end, PACE, CATCH_UP}` and
+  `ely_gpui_component::chat::day_name`. Why: Sirio's chat draws its own incremental tree and needs Ely's
+  pace, not a copy of it. Proof: no body changed, so the existing tests of these items still cover them:
+  `stream::tests::a_reveal_keeps_pace_and_catches_up`, `stream::tests::a_finished_stream_shows_whole`,
+  `stream::tests::a_count_of_graphemes_ends_on_a_boundary` and
+  `list::tests::days_read_as_today_yesterday_or_a_date`.
+- Facade: none. `ely-gpui-component` already re-exports `ely_chat` as `chat` (the facade is outside
+  `check-vendor.sh`).
+
+## ely-documents `next_run` (L12)
+
+`crates/ely-documents/src/markdown/flow.rs`, `next_run`. Pairing the `$$` runs of a text walks its bytes
+outside the ranges `not_prose` holds back (the code, and the markup between two texts), and it looked for
+the range that holds each byte with `held.iter().find(..)`, from the top, once per byte. `held` has a range
+for every stretch of markup between two texts (an inline code span makes two, emphasis and a link make
+more), so that walk was quadratic in the text for a document with many of them. Now a pointer walks `held`
+forward (`partition_point` once, then only on), as `outside_code` just below it already did: `held` comes
+from `not_prose`, in order and without overlap, so the one range that can hold a byte is the first that ends
+after it. Same function, same results. A text with no `$$` never builds `held` and is unchanged.
+
+Why: every full build of a Sirio chat reply pays it, and a reply that is restored, finished, or cannot be
+answered by parts is built whole; `markdown/stream.rs` had the same defect in its own copy of the function
+(fixed in 61bd67501).
+
+Measure (release; `cd rust && cargo nextest run -p sirio_ui --release --run-ignored only --no-capture
+building_a_whole_reply_costs`, `parse_linked_markdown` of the document, median of thirty builds, three runs
+each, in the order run; the machine's load at the start of each run is in the logs
+`.superpowers/sdd/2026-11-21-ely-chat-richer-messages/task-3-fix2-v-before2.log` (0.9, 14.6, 14.6) and
+`task-3-fix2-v-after2.log` (1.1, 1.1, 1.1)):
+
+| document (40 KiB) | before | after |
+|---|---|---|
+| the showcase repeated (41,888 bytes) | 4.51, 3.97, 4.10 ms | 3.53, 3.58, 3.24 ms |
+| the fixed open fence (40,935 bytes: one `rust` fence, one `$$` pair) | 0.259, 0.222, 0.240 ms | 0.198, 0.200, 0.191 ms |
+| fences and inline code spans (40,969 bytes: six code spans, emphasis and a fence a section, a `$$` pair at the head) | 27.6, 23.0, 26.8 ms | 7.01, 6.90, 6.43 ms |
+
+Proof: no behaviour changed, so the tests of `$$` fences cover it: `cargo nextest run -p ely-documents`
+(162 passed, the 8 `flow::tests` among them) and Sirio's `markdown::` tests, whose stream oracle holds `$$`
+fixtures (`a_dollar_pair_across_blocks_is_not_cut`, `a_stray_dollar_run_shifts_which_fences_pair`, ...). The
+path is listed under "Differing paths" and `check-vendor.sh` prints `VENDOR CHECK OK` (run against a partial
+clone of upstream at `8d7723ec`).
+
 ## ely-documents reference labels (L13)
 
-Numbered after L11 (`ely-chat` host seams) and L12 (`ely-documents` `next_run`) of the chat delivery, which may
-land after it, so the three do not collide.
+Numbered after L11 (`ely-chat` host seams) and L12 (`ely-documents` `next_run`) of the chat delivery, so the
+three do not collide. L13 reached main first, with #841 (0.47.1); L11 and L12 land with the chat delivery.
 
 Paths: `ely-documents` `src/markdown/build.rs`, `src/markdown/build/node.rs`, `src/markdown/shape.rs` and
 `src/tree/mod.rs` (tests in `src/tree/tests.rs`). Issue #839: a Markdown build panicked
@@ -1051,8 +1108,8 @@ files are committed.
 
 ## ely-documents definitions after a list (L14)
 
-Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
-the entries do not collide.
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), so the entries do not
+collide. It reached main with #841 (0.47.1), as L13 did; L11 and L12 land with the chat delivery.
 
 Path: `ely-documents` `src/markdown/shape.rs`, `place` (tests in `src/tree/tests.rs` and
 `src/markdown/build/tests.rs`). Issue #840: a Markdown build panicked (`a list holds items, not Definition`, in
@@ -1094,8 +1151,8 @@ the definition) turns the same five red as before.
 
 ## ely-documents the address a reference resolved to (L15)
 
-Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
-the entries do not collide.
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), so the entries do not
+collide. It reached main with #841 (0.47.1), as L13 did; L11 and L12 land with the chat delivery.
 
 Paths: `ely-documents` `src/markdown/mdast.rs`, `src/markdown/build/node.rs`, `src/tree/mod.rs` and
 `src/document/point.rs` (tests in `src/tree/tests.rs` and, for `point.rs`, in the file). Issue #840, its second

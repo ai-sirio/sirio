@@ -62,10 +62,11 @@ async fn ely_theme_change_preserves_chat_state_and_bezel_palette(cx: &mut TestAp
             v.push_entry(Entry::Assistant {
                 text: "Selezione 🌙 e testo Unicode\n".repeat(4),
                 document: parse_chat_markdown(&"Selezione 🌙 e testo Unicode\n".repeat(4)),
+                stream: None,
             });
         }
         v.control_compose("bozza 🌙 non inviata", cx);
-        v.transcript_selection = Some(TranscriptSelection { anchor: 0, head: 5 });
+        v.transcript_selection = Some(TranscriptSelection { anchor: 0, head: 5, ..TranscriptSelection::default() });
         v.list_state.scroll_to(gpui::ListOffset {
             item_ix: 0,
             offset_in_item: px(0.0),
@@ -176,18 +177,21 @@ async fn ely_unicode_selection_survives_row_remeasurement(cx: &mut TestAppContex
         v.push_entry(Entry::Assistant {
             text: "Risposta **Unicode β**".into(),
             document: parse_chat_markdown("Risposta **Unicode β**"),
+            stream: None,
         });
         v.push_entry(unicode_tool());
         for _ in 0..18 {
             v.push_entry(Entry::Assistant {
                 text: "continuazione\n".repeat(8),
                 document: parse_chat_markdown(&"continuazione\n".repeat(8)),
+                stream: None,
             });
         }
         let end = v.transcript_entry_ranges()[2].end;
         v.transcript_selection = Some(TranscriptSelection {
             anchor: 0,
             head: end,
+            ..TranscriptSelection::default()
         });
         v.list_state.scroll_to(gpui::ListOffset {
             item_ix: 0,
@@ -300,6 +304,7 @@ async fn ely_tool_and_thought_expansion_survives_virtualization(cx: &mut TestApp
                 v.push_entry(Entry::Assistant {
                     text: "long row\n".repeat(6),
                     document: parse_chat_markdown(&"long row\n".repeat(6)),
+                    stream: None,
                 });
             }
             v.list_state.scroll_to(gpui::ListOffset {
@@ -309,6 +314,7 @@ async fn ely_tool_and_thought_expansion_survives_virtualization(cx: &mut TestApp
             v.transcript_selection = Some(TranscriptSelection {
                 anchor: 0,
                 head: "Analisi 🌙 α".len(),
+                ..TranscriptSelection::default()
             });
             v
         });

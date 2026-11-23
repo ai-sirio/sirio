@@ -82,16 +82,32 @@ fn first_signal(
     }
 }
 
-fn drain_until_turn_end(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
+/// Everything up to and including the first event `last` accepts.
+fn drain_until(
+    events: &sirio_chat::EventStream,
+    last: impl Fn(&ChatEvent) -> bool,
+) -> Vec<ChatEvent> {
     let mut seen = Vec::new();
     loop {
         let event = next_event(events);
-        let ended = matches!(event, ChatEvent::TurnEnded { .. });
+        let done = last(&event);
         seen.push(event);
-        if ended {
+        if done {
             return seen;
         }
     }
+}
+
+fn drain_until_turn_end(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
+    drain_until(events, |event| matches!(event, ChatEvent::TurnEnded { .. }))
+}
+
+/// A turn is over when it ended or when it failed (`TurnFailed` ends it in place of `TurnEnded`).
+fn ends_the_turn(event: &ChatEvent) -> bool {
+    matches!(
+        event,
+        ChatEvent::TurnEnded { .. } | ChatEvent::TurnFailed { .. }
+    )
 }
 
 #[test]
@@ -472,6 +488,297 @@ fn cancelling_a_turn_produces_a_terminal_outcome() {
     // has answered the interrupt, so whether a worker is still there to take
     // a shutdown is a race with nothing to do with what a cancelled turn
     // reports. `shutdown_reaps_the_process` is where that belongs.
+}
+
+#[test]
+fn a_failed_result_is_a_turn_failure() {
+    let (mut client, events) = launch("failed_turns");
+    let sentence = "API Error: 529 overloaded";
+    client.prompt("overloaded").expect("prompt is accepted");
+    let seen = drain_until(&events, ends_the_turn);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == sentence
+        )),
+        "the failure must carry the CLI's sentence: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, ChatEvent::AgentMessageChunk(_))),
+        "the sentence is the failure's message, not also a reply: {seen:?}"
+    );
+    // The meter is read before the turn is over, a failed one included: a
+    // surface re-reading on the end must not see the previous turn's numbers.
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, ChatEvent::ContextUsage(_))),
+        "the failed turn's end was not held for the context meter: {seen:?}"
+    );
+
+    // The failure ends the turn in place of `TurnEnded`, and the client stays:
+    // the next turn is answered, and nothing of the first (a late end) is in
+    // front of its reply.
+    client.prompt("anything else").expect("second prompt accepted");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        seen.contains(&ChatEvent::AgentMessageChunk("ok".into())),
+        "the turn after a failure must answer, with no stray end before it: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_limit_result_keeps_todays_events() {
+    // A resend would hit the same limit, so these two stay what they were: the
+    // sentence as a reply, then the turn's end.
+    let (mut client, events) = launch("failed_turns");
+    for (prompt, sentence) in [
+        ("turn limit", "Reached the turn limit"),
+        ("budget limit", "Reached the budget limit"),
+    ] {
+        client.prompt(prompt).expect("prompt is accepted");
+        let seen = drain_until(&events, ends_the_turn);
+        assert!(
+            seen.contains(&ChatEvent::AgentMessageChunk(sentence.into())),
+            "{prompt}: the sentence is still drawn as a reply: {seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
+            "{prompt}: the turn still ends with TurnEnded: {seen:?}"
+        );
+    }
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_stop_is_not_a_failure() {
+    // The CLI answers an interrupt with `error_during_execution`, `is_error`, no stop
+    // reason and (in this fixture) the words "Interrupted by user". The worker sent the
+    // interrupt, so that result closes a stopped turn with `TurnEnded`, as before: no string
+    // of the result decides it.
+    let (mut client, events) = launch("trace");
+    client.prompt("cancel").expect("prompt is accepted");
+    loop {
+        if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
+            break;
+        }
+    }
+    client.cancel().expect("cancel is accepted");
+    let seen = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
+        "a stopped turn ends with TurnEnded, not TurnFailed: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_stop_excuses_only_its_own_turn() {
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("hold").expect("prompt is accepted");
+    loop {
+        if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
+            break;
+        }
+    }
+    client.cancel().expect("cancel is accepted");
+    let seen = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the turn the worker interrupted ends with TurnEnded: {seen:?}"
+    );
+
+    // The same words with no Stop behind them are a failure: the next turn's result is
+    // judged on its own, whatever it says.
+    client
+        .prompt("unasked interrupt")
+        .expect("second prompt accepted");
+    let seen = drain_until(&events, ends_the_turn);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "Interrupted by user"
+        )),
+        "a result nobody asked for is a failure, even when it reads like a Stop: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_stop_still_excuses_its_turn_when_the_next_prompt_is_written_first() {
+    // The stopped turn's result leaves `queued_turn_count` out (`hold late bare`): the count of
+    // prompts pending only goes down by one.
+    stop_then_a_prompt_before_the_stopped_result("hold late bare");
+}
+
+#[test]
+fn a_stopped_result_that_counts_the_prompt_behind_it_excuses_only_its_turn() {
+    // The stopped turn's result says the second prompt is queued (`queued_turn_count: 1`), as
+    // the real CLI writes it: the count of prompts pending is taken from it.
+    stop_then_a_prompt_before_the_stopped_result("hold late");
+}
+
+/// Stop frees the composer at once, so the next prompt is written while the CLI winds the
+/// stopped turn down: the stopped turn's result comes after it. That result is still the
+/// stopped turn's, and the second prompt's own failure is still its own.
+fn stop_then_a_prompt_before_the_stopped_result(hold: &str) {
+    let (mut client, events) = launch("failed_turns");
+    client.prompt(hold).expect("prompt is accepted");
+    loop {
+        if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
+            break;
+        }
+    }
+    client.cancel().expect("cancel is accepted");
+    client.prompt("overloaded").expect("second prompt is accepted");
+
+    let stopped = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(stopped.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the stopped turn ends with TurnEnded, though a prompt was written after the Stop: {stopped:?}"
+    );
+    let second = drain_until(&events, ends_the_turn);
+    assert!(
+        second.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "API Error: 529 overloaded"
+        )),
+        "the second prompt's own failure is still a failure: {second:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn one_result_for_two_prompts_leaves_no_turn_open() {
+    // The CLI folds the second prompt into the running turn and answers both with one result
+    // that says nothing is queued. A Stop pressed then interrupts nothing, so the next prompt's
+    // failure (a 529, not a Stop's result) is still a failure.
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("fold first").expect("first prompt is accepted");
+    client.prompt("fold second").expect("second prompt is accepted");
+    let folded = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(folded.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the one result ends the turn: {folded:?}"
+    );
+
+    client.cancel().expect("cancel is accepted");
+    client.prompt("overloaded").expect("third prompt is accepted");
+    let third = drain_until(&events, ends_the_turn);
+    assert!(
+        third.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "API Error: 529 overloaded"
+        )),
+        "a Stop with nothing open excuses nothing: {third:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_the_cli_started_is_not_a_failed_turn() {
+    // The answer to the prompt, then a turn the CLI starts on its own (as after a background
+    // agent ends) that fails. No prompt of Sirio's is behind it, so there is nothing to retry:
+    // today's events, the sentence as a reply and the turn's end.
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("then wake").expect("prompt is accepted");
+    let answered = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(answered.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the prompt's own turn ends normally: {answered:?}"
+    );
+    let woken = drain_until(&events, ends_the_turn);
+    assert!(
+        woken.contains(&ChatEvent::AgentMessageChunk("API Error: 529 overloaded".into())),
+        "the sentence is drawn as a reply: {woken:?}"
+    );
+    assert!(
+        matches!(woken.last(), Some(ChatEvent::TurnEnded { .. })),
+        "a turn nobody prompted ends, it does not fail: {woken:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_the_cli_started_with_a_prompt_queued_behind_it_is_not_a_failed_turn() {
+    // The CLI starts a turn of its own while the surface is idle (as after a background agent
+    // ends), and the user's prompt is written and queued behind it. That turn fails, and its
+    // result says the prompt is still queued: it closed no prompt of Sirio's, so it ends with
+    // today's events (a Retry would run the prompt the CLI runs next anyway). The prompt's own
+    // failure, after it, is still a failure.
+    let (mut client, events) = launch("failed_turns");
+    client.prompt("wake held").expect("prompt is accepted");
+    let answered = drain_until(&events, ends_the_turn);
+    assert!(
+        matches!(answered.last(), Some(ChatEvent::TurnEnded { .. })),
+        "the prompt's own turn ends normally: {answered:?}"
+    );
+    // The CLI's own turn is under way before the next prompt is written. Its first words can
+    // come ahead of the answered turn's end, which waits for the context meter.
+    let woke = ChatEvent::AgentMessageChunk("The agent finished. ".into());
+    if !answered.contains(&woke) {
+        while next_event(&events) != woke {}
+    }
+    client.prompt("overloaded").expect("second prompt is accepted");
+
+    let woken = drain_until(&events, ends_the_turn);
+    assert!(
+        woken.contains(&ChatEvent::AgentMessageChunk("API Error: 529 overloaded".into())),
+        "the CLI's own turn draws its sentence as a reply: {woken:?}"
+    );
+    assert!(
+        matches!(woken.last(), Some(ChatEvent::TurnEnded { .. })),
+        "a turn with the prompt still queued behind it ends, it does not fail: {woken:?}"
+    );
+    let prompted = drain_until(&events, ends_the_turn);
+    assert!(
+        prompted.iter().any(|event| matches!(
+            event,
+            ChatEvent::TurnFailed { message, .. } if message == "API Error: 529 overloaded"
+        )),
+        "the queued prompt's own failure is still a failure: {prompted:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_thinking_block_stop_ends_the_thought() {
+    let (mut client, events) = launch("thinking_blocks");
+    client.prompt("think first").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+    let thoughts: Vec<&str> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ChatEvent::ThoughtChunk(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thoughts, ["weighing ", "the options"]);
+    // The turn holds two text-block stops, one thinking-block stop, and the stops of two
+    // thinking blocks whose messages are over (one ended, one cut off by the next message's
+    // start): exactly one thought end, and only the one for a block that is still open.
+    let ends: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, ChatEvent::ThoughtEnded))
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(ends.len(), 1, "one thought end per thinking block: {seen:?}");
+    let last_thought = seen
+        .iter()
+        .rposition(|event| matches!(event, ChatEvent::ThoughtChunk(_)))
+        .expect("the thought was streamed");
+    let first_reply = seen
+        .iter()
+        .position(|event| matches!(event, ChatEvent::AgentMessageChunk(_)))
+        .expect("the reply was streamed");
+    assert!(
+        last_thought < ends[0] && ends[0] < first_reply,
+        "the thought ends after its last chunk and before the reply starts: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
 }
 
 #[test]
@@ -1076,6 +1383,8 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
 enum Seen {
     Chunk(String),
     Notices(Vec<SessionNotice>),
+    /// The turn failed (`TurnFailed`) with this message instead of ending.
+    Failed(String),
 }
 
 fn cli_notices_turn(
@@ -1092,6 +1401,10 @@ fn cli_notices_turn(
                 seen.push(Seen::Notices(client.take_notices()));
             }
             ChatEvent::TurnEnded { .. } => return seen,
+            ChatEvent::TurnFailed { message, .. } => {
+                seen.push(Seen::Failed(message));
+                return seen;
+            }
             _ => {}
         }
     }
@@ -1101,7 +1414,7 @@ fn notices_of(seen: &[Seen]) -> Vec<SessionNotice> {
     seen.iter()
         .filter_map(|item| match item {
             Seen::Notices(notices) => Some(notices.clone()),
-            Seen::Chunk(_) => None,
+            Seen::Chunk(_) | Seen::Failed(_) => None,
         })
         .flatten()
         .collect()
@@ -1111,7 +1424,7 @@ fn reply_of(seen: &[Seen]) -> String {
     seen.iter()
         .filter_map(|item| match item {
             Seen::Chunk(text) => Some(text.as_str()),
-            Seen::Notices(_) => None,
+            Seen::Notices(_) | Seen::Failed(_) => None,
         })
         .collect()
 }
@@ -1261,33 +1574,39 @@ fn the_cli_notices_reach_the_client_in_order() {
 #[test]
 fn an_answer_no_stream_carried_is_drawn_once() {
     let (mut client, events) = launch("cli_notices");
-    let exhaustion = "API Error: Repeated 529 Overloaded errors.";
-    let cases: [(&str, &str); 15] = [
+    // (prompt, the reply drawn, the failure the turn ends in: `None` for a turn that ends)
+    let cases: [(&str, &str, Option<&str>); 15] = [
         // First of a fresh launch: nothing to run on from.
-        ("unstreamed", "ok"),
-        ("midstream", "partial-before-error\n\nok"),
-        ("midstream drop", "partial-before-error\n\nok"),
-        ("retry out", exhaustion),
+        ("unstreamed", "ok", None),
+        ("midstream", "partial-before-error\n\nok", None),
+        ("midstream drop", "partial-before-error\n\nok", None),
+        // The exhaustion sentence is the turn's failure, not a reply: nothing is drawn.
+        ("retry out", "", Some("API Error: Repeated 529 Overloaded errors.")),
         // The error result of the turn before left no separator behind.
-        ("unstreamed", "ok"),
-        ("subagent text", "ok"),
-        ("retry twice", "ok"),
-        ("retry kinds", "ok"),
-        ("notify", "ok"),
-        ("notify short", "ok"),
-        ("notify short again", "ok"),
-        ("refuse fallback", "refused-partialok"),
-        ("refuse none", "refused-partial"),
-        ("inform levels", "ok"),
-        ("anything else", "ok"),
+        ("unstreamed", "ok", None),
+        ("subagent text", "ok", None),
+        ("retry twice", "ok", None),
+        ("retry kinds", "ok", None),
+        ("notify", "ok", None),
+        ("notify short", "ok", None),
+        ("notify short again", "ok", None),
+        ("refuse fallback", "refused-partialok", None),
+        ("refuse none", "refused-partial", None),
+        ("inform levels", "ok", None),
+        ("anything else", "ok", None),
     ];
-    for (prompt, expected) in cases {
+    for (prompt, expected, failure) in cases {
         let seen = cli_notices_turn(&mut client, &events, prompt);
         assert_eq!(
             reply_of(&seen),
             expected,
             "the reply text of one turn, drawn once"
         );
+        let failed_with = seen.iter().find_map(|item| match item {
+            Seen::Failed(message) => Some(message.as_str()),
+            _ => None,
+        });
+        assert_eq!(failed_with, failure, "{prompt}: how the turn ended");
     }
     // Both halves were streamed, so no separator is added, and the notice
     // sits between them.

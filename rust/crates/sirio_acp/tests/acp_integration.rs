@@ -256,6 +256,81 @@ fn death_report_waits_for_the_agents_last_stderr_line() {
 }
 
 #[test]
+fn a_failed_prompt_keeps_the_session() {
+    // The agent refuses a turn with a JSON-RPC internal error and stays up. The
+    // turn fails in place, and the same client answers the next one.
+    let (mut client, events) = launch_fixture("prompt_error");
+    client.prompt("fail this turn").expect("prompt accepted");
+    let (message, stop_reason) = loop {
+        match next_event(&events) {
+            ChatEvent::TurnFailed {
+                message,
+                stop_reason,
+            } => break (message, stop_reason),
+            ChatEvent::TransportError(error) => {
+                panic!("a refused prompt on a live agent is not a transport error: {error}")
+            }
+            ChatEvent::TurnEnded { .. } => panic!("a failed turn must not also end"),
+            other => panic!("unexpected failed-prompt event: {other:?}"),
+        }
+    };
+    assert!(
+        message.starts_with("prompt failed:"),
+        "unexpected failure message: {message}"
+    );
+    assert!(
+        message.contains("fixture could not run this turn"),
+        "the agent's own words were dropped: {message}"
+    );
+    assert_eq!(stop_reason, "Error");
+
+    // The second turn is the proof the client stayed: its answer arrives, and
+    // nothing of the first turn (a stray end, a transport error) comes first.
+    client.prompt("try again").expect("second prompt accepted");
+    let mut answered = false;
+    loop {
+        match next_event(&events) {
+            ChatEvent::AgentMessageChunk(text) => {
+                assert_eq!(text, "text:try again");
+                answered = true;
+            }
+            ChatEvent::TurnEnded { .. } => break,
+            other => panic!("unexpected event after the failed turn: {other:?}"),
+        }
+    }
+    assert!(answered, "the second prompt was never answered");
+    client
+        .shutdown()
+        .expect("prompt-error fixture should shut down cleanly");
+}
+
+#[test]
+fn a_closed_transport_is_not_a_failed_turn() {
+    // The agent's stdout closes under the prompt and the process stays up, so no exit
+    // is seen inside the host's short probe. The connection is closed all the same: it
+    // takes no second prompt, so this is the transport's error, never a failed turn that
+    // invites a resend. (A process that exits is `agent_death_is_transport_error`'s.)
+    let (mut client, events) = launch_fixture("closed_stdout");
+    client.prompt("lose the pipe").expect("prompt accepted");
+    let message = loop {
+        match next_event(&events) {
+            ChatEvent::TransportError(message) => break message,
+            ChatEvent::TurnFailed { message, .. } => {
+                panic!("a closed transport must not report a failed turn: {message}")
+            }
+            other => panic!("unexpected event for a closed transport: {other:?}"),
+        }
+    };
+    // The prompt handler's own error, not the connection's tail ("ACP transport closed
+    // unexpectedly"): the handler is what chose `TransportError` over `TurnFailed`.
+    assert!(
+        message.starts_with("prompt failed:") && message.contains("Incoming transport closed"),
+        "the TransportError should come from the prompt handler: {message}"
+    );
+    let _ = client.shutdown();
+}
+
+#[test]
 fn an_open_permission_does_not_freeze_the_session() {
     // The ACP connection dispatches every handler on one task, so a handler
     // that waits for the user stops the whole session: no `session/update` is

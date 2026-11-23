@@ -1,0 +1,20 @@
+#!/bin/sh
+# The `opencode` of test-chat-richer-messages-e2e.sh: the version probe answers at once, and `opencode acp` is the
+# ACP agent fixture in its `richer` mode (rust/crates/sirio_ui/tests/fixtures/chat_fixture.py): `fail prompt`
+# answers the first prompt of that text with a JSON-RPC error and stays up, `die` exits mid-turn, `cancel fail`
+# answers a cancelled turn with an error, anything else answers `reply ok`. Every call is recorded in
+# $SIRIO_STUB_LOG as `opencode<TAB>pid<TAB>arguments`, and the fixture records every start, session, prompt and cancel
+# in the same file with the pid. While the file $SIRIO_FIXTURE_REFUSE_FILE names exists, `opencode acp` exits at once.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -z "${SIRIO_STUB_LOG:-}" ] || printf 'opencode\t%s\t%s\n' "$$" "$*" >>"$SIRIO_STUB_LOG"
+case "$1" in
+  --version|-V|version)
+    echo "opencode 0.0.0 (e2e stub)"
+    exit 0 ;;
+esac
+# While the file $SIRIO_FIXTURE_REFUSE_FILE names exists, the agent fails to start (a failed launch).
+if [ -n "${SIRIO_FIXTURE_REFUSE_FILE:-}" ] && [ -e "$SIRIO_FIXTURE_REFUSE_FILE" ]; then
+  echo "opencode: refusing to start (the e2e's refuse file exists)" >&2
+  exit 1
+fi
+exec python3 "$here/../../../../rust/crates/sirio_ui/tests/fixtures/chat_fixture.py" richer

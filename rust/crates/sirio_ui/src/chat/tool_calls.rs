@@ -566,6 +566,8 @@ impl Chat {
             Some(TranscriptInteraction {
                 chat: entity.clone(),
                 focus: transcript_focus,
+                entry: entry_index,
+                painted: source_start,
             }),
             theme,
             bezel_theme,

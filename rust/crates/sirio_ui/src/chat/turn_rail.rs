@@ -392,6 +392,7 @@ mod tests {
         Entry::Assistant {
             text: text.into(),
             document: crate::chat::parse_chat_markdown(text),
+            stream: None,
         }
     }
     fn tool(id: &str) -> Entry {

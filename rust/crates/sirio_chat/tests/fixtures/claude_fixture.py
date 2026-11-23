@@ -70,7 +70,12 @@ LAUNCH_LOG_PATH = next(
 )
 # The file every `user` line (a prompt, as the CLI heard it) is appended to,
 # one JSON line each, before the turn runs: what a mention became on the wire.
-USER_LOG_PATH = os.environ.get("SIRIO_FIXTURE_USER_LOG")
+# A launch argument names it, so tests running side by side each keep their own;
+# the environment names it otherwise.
+USER_LOG_PATH = next(
+    (arg[len("--fixture-user-log="):] for arg in sys.argv if arg.startswith("--fixture-user-log=")),
+    os.environ.get("SIRIO_FIXTURE_USER_LOG"),
+)
 # The worker appends its protocol flags after our own argv, so a second
 # positional starting with "-" is one of those, not a pid file.
 # Where the project's memory file is said to live: a test that wants the row
@@ -270,8 +275,14 @@ def text(chunk):
     })
 
 
-def result(subtype="success", is_error=False, text_body="Done."):
+def result(subtype="success", is_error=False, text_body="Done.", queued=0, **extra):
+    """A turn's `result`. `queued` is its `queued_turn_count`, which the real CLI always writes:
+    the user's sends it has read and not yet run. This fixture answers a prompt before it reads
+    the next, so that is 0 unless a mode says otherwise; `None` leaves the field out."""
+    if queued is not None:
+        extra = {**extra, "queued_turn_count": queued}
     send({
+        **extra,
         "type": "result",
         "subtype": subtype,
         "is_error": is_error,
@@ -2050,6 +2061,9 @@ def state_main():
                 PENDING.pop(cli_request_id, None)
                 STATE_ANSWERED.set()
         elif kind == "user":
+            if USER_LOG_PATH:
+                with open(USER_LOG_PATH, "a", encoding="utf-8") as log:
+                    log.write(json.dumps(message, separators=(",", ":")) + "\n")
             STATE_PROMPTS.put(trace_prompt_text(message))
     STATE_EOF.set()
     STATE_PROMPTS.put(None)
@@ -2678,6 +2692,155 @@ def cli_notices_prompt(message):
 
 
 # ---------------------------------------------------------------------------
+# `failed_turns`: a turn the CLI ends with an `is_error` result, chosen by the
+# prompt: `overloaded` is a `success` subtype that says it failed (the API gave
+# up), `turn limit` and `budget limit` are the two limits a resend would hit
+# again. `unasked interrupt` is a result that reads like a Stop's (`error_during_execution`,
+# "Interrupted by user") that nobody asked for. `hold` streams a word and waits for the
+# `interrupt` request, then answers it the way the real CLI does: `error_during_execution`,
+# `is_error`, no stop reason. `hold late` is `hold` with the answer owed: the CLI winds the
+# stopped turn down after Stop freed the composer, so the stopped turn's result is written only
+# when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
+# ordinary answer, so a test can tell the client is still usable after a failure. The results
+# carry no `stop_reason`, as the CLI's own failures do.
+# Every result carries `queued_turn_count`, the prompts read and not yet run, as the real CLI's
+# do: `hold late`'s stopped result says 1 (the prompt that made it due is read and waits).
+# `hold late bare` is `hold late` with that field left out, the shape of an older or synthetic
+# result.
+# `fold first` is answered by nothing and `fold second` by one result that closes both
+# prompts (`queued_turn_count: 0`): the CLI folds a queued prompt into the running turn.
+# `then wake` is answered, and then the CLI starts a turn of its own (no prompt of Sirio's
+# behind it, as after a background agent ends) that fails.
+# `wake held` is answered, and then the CLI starts a turn of its own and holds it: the next
+# prompt is read and queued behind it, so that turn's failing result says 1 is queued, and
+# only then is the prompt run.
+# ---------------------------------------------------------------------------
+
+FAILED_TURNS = {
+    "overloaded": ("success", "API Error: 529 overloaded"),
+    "turn limit": ("error_max_turns", "Reached the turn limit"),
+    "budget limit": ("error_max_budget_usd", "Reached the budget limit"),
+    "unasked interrupt": ("error_during_execution", "Interrupted by user"),
+}
+HOLDING = threading.Event()
+HOLDING_LATE = threading.Event()
+STOPPED_RESULT_OWED = threading.Event()
+WAKE_RESULT_OWED = threading.Event()
+# The `queued_turn_count` of the stopped result `hold late` owes: 1, or None for `hold late bare`.
+LATE_QUEUED = {"count": 1}
+
+
+def with_queued(line, queued):
+    if queued is not None:
+        line["queued_turn_count"] = queued
+    return line
+
+
+def interrupted_result(queued=0):
+    send(with_queued({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                      "result": "Interrupted by user", "stop_reason": None,
+                      "session_id": SESSION_ID, "uuid": trace_uuid()}, queued))
+
+
+def failure_result(subtype, body, queued=0):
+    send(with_queued({"type": "result", "subtype": subtype, "is_error": True, "result": body,
+                      "stop_reason": None, "session_id": SESSION_ID, "uuid": trace_uuid()},
+                     queued))
+
+
+def failed_turn(prompt):
+    if not INIT_PRINTED:
+        init_line()
+    if STOPPED_RESULT_OWED.is_set():
+        STOPPED_RESULT_OWED.clear()
+        interrupted_result(queued=LATE_QUEUED["count"])
+    if WAKE_RESULT_OWED.is_set():
+        WAKE_RESULT_OWED.clear()
+        failure_result(*FAILED_TURNS["overloaded"], queued=1)
+    if prompt in ("hold", "hold late", "hold late bare"):
+        text("working")
+        if prompt == "hold":
+            HOLDING.set()
+        else:
+            LATE_QUEUED["count"] = None if prompt == "hold late bare" else 1
+            HOLDING_LATE.set()
+        return
+    if prompt == "fold first":
+        text("first ")
+        return
+    if prompt == "fold second":
+        text("second")
+        result(queued=0)
+        return
+    if prompt == "then wake":
+        text("ok")
+        result()
+        text("The agent finished. ")
+        failure_result(*FAILED_TURNS["overloaded"])
+        return
+    if prompt == "wake held":
+        text("ok")
+        result()
+        text("The agent finished. ")
+        WAKE_RESULT_OWED.set()
+        return
+    if prompt not in FAILED_TURNS:
+        text("ok")
+        result()
+        return
+    failure_result(*FAILED_TURNS[prompt])
+
+
+# ---------------------------------------------------------------------------
+# `thinking_blocks`: a reply streamed block by block, as the Messages API does:
+# a thinking block (index 0) and a text block (index 1) of the first message, then a second
+# message whose text block reuses index 0. Then two messages that leave a thinking block open
+# (index 2 in one that ends, index 3 in one that is cut off by the next message's start) and
+# stops that index outside them: a stop whose block belongs to a message that is over is not
+# a thought's end. That is what emptying the map at a message's end and start is for.
+# ---------------------------------------------------------------------------
+
+
+def block_event(kind, index, **fields):
+    trace_stream({"type": kind, "index": index, **fields})
+
+
+def thinking_blocks_turn():
+    if not INIT_PRINTED:
+        init_line()
+    message_start("msg_thinking")
+    block_event("content_block_start", 0,
+                content_block={"type": "thinking", "thinking": "", "signature": ""})
+    for piece in ("weighing ", "the options"):
+        block_event("content_block_delta", 0,
+                    delta={"type": "thinking_delta", "thinking": piece})
+    block_event("content_block_stop", 0)
+    block_event("content_block_start", 1, content_block={"type": "text", "text": ""})
+    block_event("content_block_delta", 1, delta={"type": "text_delta", "text": "first answer"})
+    block_event("content_block_stop", 1)
+    trace_assistant("msg_thinking", {"type": "text", "text": "first answer"})
+    message_end()
+    message_start("msg_second")
+    block_event("content_block_start", 0, content_block={"type": "text", "text": ""})
+    block_event("content_block_delta", 0, delta={"type": "text_delta", "text": " second answer"})
+    block_event("content_block_stop", 0)
+    trace_assistant("msg_second", {"type": "text", "text": " second answer"})
+    message_end()
+    message_start("msg_left_ended")
+    block_event("content_block_start", 2,
+                content_block={"type": "thinking", "thinking": "", "signature": ""})
+    message_end()
+    block_event("content_block_stop", 2)
+    message_start("msg_left_cut_off")
+    block_event("content_block_start", 3,
+                content_block={"type": "thinking", "thinking": "", "signature": ""})
+    message_start("msg_after_cut_off")
+    block_event("content_block_stop", 3)
+    message_end()
+    result()
+
+
+# ---------------------------------------------------------------------------
 # `--fixture-startup=<kind>`: a CLI that cannot start. Unless a kind says
 # otherwise it writes at once, never reads stdin, and exits 1. Shapes copy the
 # live probe (`.superpowers/probe-a7`, Q5).
@@ -2740,6 +2903,301 @@ def startup_main(kind):
     os._exit(1)
 
 
+# ---------------------------------------------------------------------------
+# `richer`: the turns of Scripts/Tests/test-chat-richer-messages-e2e.sh. The prompt picks the turn (the
+# stub's header, Scripts/Tests/stubs/richer/claude, lists them). A turn runs on its own thread, so control
+# requests (the `interrupt` of Stop above all) are answered while it streams, and a Stop ends it at once with
+# the result the real CLI writes: `error_during_execution`, `is_error`, no text.
+#
+# What a retry resends is the same prompt, so a turn that fails does so on the FIRST prompt of that text only,
+# counted over every process in $SIRIO_STUB_LOG (`prompt\t<pid>\t<json text>` lines the fixture appends as it
+# reads each prompt): the second one answers. `<prompt> hold` waits for the file `$SIRIO_FIXTURE_GATE.<n>`
+# (n the prompt's number) before it fails or answers, so a scenario can queue messages behind a running turn.
+# ---------------------------------------------------------------------------
+
+RICHER_STOP = threading.Event()
+RICHER_CHUNKS = 200
+RICHER_CHUNK_SECONDS = 0.02
+RICHER_PARTIAL = (
+    "I started on it. Here is **what I found** so far, with `code` and a list:\n\n"
+    "- the first point, written out\n- the second point\n\n"
+    "The next step is"
+)
+
+
+def richer_log(kind, text=""):
+    path = os.environ.get("SIRIO_STUB_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as log:
+            log.write(f"{kind}\t{os.getpid()}\t{json.dumps(text)}\n")
+
+
+def richer_seen(text):
+    """How many prompts of exactly this text the log already holds (every process)."""
+    path = os.environ.get("SIRIO_STUB_LOG")
+    if not path or not os.path.exists(path):
+        return 0
+    wanted = json.dumps(text)
+    count = 0
+    with open(path, encoding="utf-8") as log:
+        for line in log:
+            parts = line.rstrip("\n").split("\t", 2)
+            if len(parts) == 3 and parts[0] == "prompt" and parts[2] == wanted:
+                count += 1
+    return count
+
+
+def richer_showcase():
+    """The SHOWCASE document, then parts of a few blocks each (they freeze as they arrive, so the reply
+    reveals) until the reply is 40 KiB."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    path = os.path.join(here, *([".."] * 5), "Scripts", "Tests", "fixtures", "markdown-documents", "showcase.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read().replace("{{REMOTE_PORT}}", "9")
+    part = 0
+    while len(text.encode("utf-8")) < 40 * 1024:
+        part += 1
+        text += (
+            f"\n\n## Part {part}\n\nA paragraph of part {part}, with **bold**, `code` and a "
+            f"[link](https://example.com/{part}). Its marker is part-{part:03d}-end.\n\n"
+            "- the first point\n- the second\n"
+        )
+    return text
+
+
+def richer_showcase_x8():
+    """SHOWCASE repeated eight times: every copy mentions `[^1]` again, so the reply cannot freeze."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    path = os.path.join(here, *([".."] * 5), "Scripts", "Tests", "fixtures", "markdown-documents", "showcase.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read().replace("{{REMOTE_PORT}}", "9")
+    return (text + "\n\n") * 8
+
+
+def richer_compact():
+    """28 KiB with no blank line (headings on their text, `Run:` on its fence): the stream never freezes a block of
+    it, so past the reveal's 7 KiB tail budget the reveal hands over to drawing the reply as it arrives. (A debug
+    build builds the whole reply for every chunk of such a reply: this one arrives in 70 chunks 150 ms apart, so that
+    the UI thread has idle time between chunks and the control socket is answered while it streams.)"""
+    text, step = "", 0
+    while len(text.encode("utf-8")) < 28 * 1024:
+        step += 1
+        text += (
+            f"## Step {step}\nRead `src/lib.rs` and **check** the [notes](https://example.com/{step}).\n"
+            "The second line carries on, with _emphasis_ and a list under it.\n"
+            f"- the first point of step {step}\n- the second point, with `inline code`\n"
+            f"Run:\n```sh\ncargo test -p sirio_ui step_{step}\n```\n"
+        )
+    return text
+
+
+def richer_wait(seconds):
+    """Sleeps up to `seconds`; False when a Stop came in meanwhile."""
+    return not RICHER_STOP.wait(seconds)
+
+
+def richer_gate(number):
+    """Holds until the gate file of this prompt's number exists; False when a Stop came in."""
+    base = os.environ.get("SIRIO_FIXTURE_GATE")
+    path = f"{base}.{number}" if base else None
+    while path and not os.path.exists(path):
+        if not richer_wait(0.05):
+            return False
+    return True
+
+
+def richer_block(index, kind, **fields):
+    trace_stream({"type": kind, "index": index, **fields})
+
+
+def richer_open_text(message_id, index=0):
+    message_start(message_id)
+    richer_block(index, "content_block_start", content_block={"type": "text", "text": ""})
+
+
+def richer_delta(piece, index=0):
+    richer_block(index, "content_block_delta", delta={"type": "text_delta", "text": piece})
+
+
+def richer_close_text(message_id, body, index=0):
+    richer_block(index, "content_block_stop")
+    trace_assistant(message_id, {"type": "text", "text": body})
+    message_end()
+
+
+def richer_stream(message_id, chunks, pause):
+    """A text block delivered chunk by chunk; False when a Stop cut it short (nothing is closed then)."""
+    richer_open_text(message_id)
+    for chunk in chunks:
+        richer_delta(chunk)
+        if not richer_wait(pause):
+            return False
+    richer_close_text(message_id, "".join(chunks))
+    return True
+
+
+def richer_chunks(text, count):
+    size = max(1, -(-len(text) // count))
+    return [text[at:at + size] for at in range(0, len(text), size)]
+
+
+def richer_interrupted():
+    interrupted_result()
+
+
+def richer_failed(text_body):
+    failure_result("success", text_body)
+
+
+def richer_reply(message_id, body):
+    if richer_stream(message_id, [body], 0):
+        result()
+
+
+def richer_limit_epoch():
+    path = os.environ.get("SIRIO_FIXTURE_LIMIT_FILE")
+    with open(path, encoding="utf-8") as handle:
+        return int(handle.read().strip())
+
+
+def richer_turn(prompt):
+    number = richer_seen(prompt) + 1
+    richer_log("prompt", prompt)
+    RICHER_STOP.clear()
+    hold = prompt.endswith(" hold")
+    base = prompt[: -len(" hold")] if hold else prompt
+    requesting()
+    if base in ("showcase", "showcase slow", "showcase x8", "compact"):
+        body = {"showcase x8": richer_showcase_x8, "compact": richer_compact}.get(base, richer_showcase)()
+        # `showcase slow` is the same reply at 40 ms a chunk (8 s), long enough to select and copy while it streams;
+        # `compact` is 70 chunks 150 ms apart.
+        pause = {"showcase slow": RICHER_CHUNK_SECONDS * 2, "compact": 0.15}.get(base, RICHER_CHUNK_SECONDS)
+        if not richer_stream("msg_showcase", richer_chunks(body, 70 if base == "compact" else RICHER_CHUNKS), pause):
+            richer_interrupted()
+            return
+        result()
+    elif base == "fail":
+        if number == 1:
+            richer_open_text("msg_fail")
+            for piece in richer_chunks(RICHER_PARTIAL, 3):
+                richer_delta(piece)
+            if hold and not richer_gate(number):
+                richer_interrupted()
+                return
+            richer_failed("API Error: 529 overloaded")
+        else:
+            if hold and not richer_gate(number):
+                richer_interrupted()
+                return
+            richer_reply("msg_ok", "recovered")
+    elif base == "fail max turns":
+        richer_open_text("msg_max")
+        richer_delta("Working on it.")
+        failure_result("error_max_turns", "Reached the turn limit")
+    elif base == "think slow":
+        message_start("msg_think")
+        richer_block(0, "content_block_start", content_block={"type": "thinking", "thinking": "", "signature": ""})
+        for piece in ("weighing ", "the options ", "once more"):
+            richer_block(0, "content_block_delta", delta={"type": "thinking_delta", "thinking": piece})
+            if not richer_wait(0.15):
+                richer_interrupted()
+                return
+        richer_block(0, "content_block_stop")
+        # The thought is over; the reply's first text is 2 s away.
+        if not richer_wait(2.0):
+            richer_interrupted()
+            return
+        richer_block(1, "content_block_start", content_block={"type": "text", "text": ""})
+        richer_delta("done thinking", 1)
+        richer_block(1, "content_block_stop")
+        trace_assistant("msg_think", {"type": "text", "text": "done thinking"})
+        message_end()
+        result()
+    elif base == "die":
+        if number == 1:
+            richer_open_text("msg_die")
+            for piece in richer_chunks(RICHER_PARTIAL, 3):
+                richer_delta(piece)
+            sys.stdout.flush()
+            sys.stderr.write("richer fixture: dying mid-stream\n")
+            sys.stderr.flush()
+            os._exit(3)
+        richer_reply("msg_ok", "recovered")
+    elif base in ("limit rejected", "limit event"):
+        # The reset is read when the event is written (after the gate), so a scenario sets it just before.
+        if hold and not richer_gate(number):
+            richer_interrupted()
+            return
+        if base == "limit event" or number == 1:
+            epoch = richer_limit_epoch()
+            info = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": epoch,
+                    "unifiedWindows": {"five_hour": {"utilization": 1, "resetsAt": epoch}}}
+        if base == "limit event":
+            # The plan reached its limit but the turn went on: a rejected event and no failed turn.
+            cli_limit_event(info)
+            richer_reply("msg_ok", "ok")
+        elif number == 1:
+            cli_limit_refused("You've hit your limit \u00b7 resets 3:15pm (UTC)", info)
+        else:
+            richer_reply("msg_ok", "recovered")
+    elif base == "replyfile":
+        with open(os.environ["SIRIO_FIXTURE_REPLY_FILE"], encoding="utf-8") as handle:
+            body = handle.read()
+        richer_reply("msg_replyfile", body)
+    else:
+        if hold and not richer_gate(number):
+            richer_interrupted()
+            return
+        richer_reply("msg_ok", "ok")
+
+
+def richer_turns(prompts):
+    while True:
+        prompt = prompts.get()
+        if prompt is None:
+            return
+        richer_turn(prompt)
+
+
+def richer_main():
+    richer_log("start", " ".join(sys.argv[1:]))
+    init_line()
+    prompts = queue.Queue()
+    worker = threading.Thread(target=richer_turns, args=(prompts,), daemon=True)
+    worker.start()
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = message.get("type")
+        if kind == "control_request":
+            request = message.get("request", {})
+            subtype = request.get("subtype")
+            request_id = message.get("request_id")
+            if subtype == "initialize":
+                control_response(request_id, main_initialize_payload())
+            elif subtype == "interrupt":
+                control_response(request_id, {"still_queued": 0})
+                RICHER_STOP.set()
+            elif subtype == "get_context_usage":
+                control_response(request_id, {
+                    "totalTokens": 48000, "rawMaxTokens": 200000, "maxTokens": 180000,
+                    "percentage": 24, "model": TRACE_MODEL, "categories": []})
+            elif subtype == "mcp_status":
+                control_response(request_id, {"mcpServers": []})
+            elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
+                control_error(request_id, f"Unsupported control request subtype: {subtype}")
+            elif subtype == "set_permission_mode":
+                control_response(request_id, {"mode": request.get("mode")})
+            else:
+                control_response(request_id, {})
+        elif kind == "user":
+            prompts.put(trace_prompt_text(message).strip())
+    prompts.put(None)
+    worker.join()
+
+
 def main():
     if LAUNCH_LOG_PATH:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
@@ -2750,6 +3208,9 @@ def main():
             }) + "\n")
     if flag_value("fixture-startup"):
         startup_main(flag_value("fixture-startup"))
+    if MODE == "richer":
+        richer_main()
+        return
     if MODE == "trace":
         trace_main()
         return
@@ -2846,6 +3307,12 @@ def main():
                     })
             elif subtype == "interrupt":
                 control_response(request_id, {"still_queued": 0})
+                if MODE == "failed_turns" and HOLDING.is_set():
+                    HOLDING.clear()
+                    interrupted_result()
+                elif MODE == "failed_turns" and HOLDING_LATE.is_set():
+                    HOLDING_LATE.clear()
+                    STOPPED_RESULT_OWED.set()
                 if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):
                     result(subtype="error_during_execution", is_error=True,
                            text_body="Interrupted by user")
@@ -3117,6 +3584,12 @@ def main():
                 tool_input = {"plan": "1. Read\n2. Write"}
                 assistant_tool_use("toolu_plan_1", "ExitPlanMode", tool_input)
                 ask_permission("cli-plan-1", "ExitPlanMode", "toolu_plan_1", tool_input)
+                continue
+            if MODE == "failed_turns":
+                failed_turn(cli_notices_prompt(message))
+                continue
+            if MODE == "thinking_blocks":
+                thinking_blocks_turn()
                 continue
             if MODE == "cli_notices":
                 if not INIT_PRINTED:

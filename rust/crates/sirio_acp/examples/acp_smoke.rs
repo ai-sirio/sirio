@@ -53,6 +53,9 @@ fn run() -> anyhow::Result<()> {
             }
             ChatEvent::TurnEnded { .. } => break,
             ChatEvent::TransportError(error) => return Err(anyhow::anyhow!(error)),
+            ChatEvent::TurnFailed { message, .. } => {
+                return Err(anyhow::anyhow!("turn failed: {message}"));
+            }
             _ => {}
         }
     }

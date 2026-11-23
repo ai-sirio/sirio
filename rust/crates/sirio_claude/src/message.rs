@@ -631,7 +631,40 @@ pub enum Delta {
     Thinking(String),
 }
 
+/// The start or the end of one content block of a message, lifted out of a
+/// `stream_event`. Block indexes restart at zero in every message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockEvent {
+    /// `content_block_start`: the block at `index` opens. `kind` is the block's own
+    /// `type` (`text`, `thinking`, `tool_use`, …), an open set.
+    Start { index: u64, kind: String },
+    /// `content_block_stop`: the block at `index` is complete. The event does not say
+    /// what kind of block it was; that is the caller's to remember from the start.
+    Stop { index: u64 },
+}
+
 impl StreamEventPayload {
+    /// The block start or stop this event is, when it is one. A start that names no
+    /// index or no block type, and a stop that names no index, yield `None`: nothing
+    /// could be matched to them.
+    #[must_use]
+    pub fn block(&self) -> Option<BlockEvent> {
+        let index = self.event.get("index")?.as_u64()?;
+        match self.event.get("type")?.as_str()? {
+            "content_block_start" => Some(BlockEvent::Start {
+                index,
+                kind: self
+                    .event
+                    .get("content_block")?
+                    .get("type")?
+                    .as_str()?
+                    .to_string(),
+            }),
+            "content_block_stop" => Some(BlockEvent::Stop { index }),
+            _ => None,
+        }
+    }
+
     /// The delta this event carries, when it carries one. Every other event
     /// kind (`message_start`, `content_block_stop`, `input_json_delta`, …)
     /// yields `None`; the caller treats that as protocol traffic to observe,
@@ -793,6 +826,11 @@ pub struct ResultPayload {
     pub model_usage: BTreeMap<String, ModelUsage>,
     pub session_id: Option<String>,
     pub uuid: Option<String>,
+    /// How many turns the CLI still has queued behind this one, when the result says. The CLI can
+    /// fold a queued prompt into the running turn and answer both with one result, so this, and
+    /// not a count of results, is what says how many prompts are still waiting.
+    #[serde(deserialize_with = "lenient")]
+    pub queued_turn_count: Option<u64>,
     /// Why the CLI could not start, on a result written in place of the
     /// session. A few reasons are always written (`config_file_invalid`,
     /// `org_config_required_unavailable`, `org_config_refused`);
@@ -1310,8 +1348,24 @@ mod tests {
         assert_eq!(result.subtype, "error_during_execution");
         assert!(result.is_error);
         assert_eq!(result.stop_reason, None);
+        assert_eq!(result.queued_turn_count, Some(0));
         assert_eq!(result.duration_ms, Some(6_002));
         assert_eq!(result.total_cost_usd, Some(0.008_954_355));
+    }
+
+    #[test]
+    fn a_results_queued_turn_count_is_a_count_or_absent() {
+        let read = |line: &str| match CliMessage::parse(line) {
+            Some(CliMessage::Result(result)) => result.queued_turn_count,
+            other => panic!("not a result: {other:?}"),
+        };
+        assert_eq!(read(r#"{"type":"result","subtype":"success","queued_turn_count":2}"#), Some(2));
+        assert_eq!(read(r#"{"type":"result","subtype":"success"}"#), None);
+        // Wrongly typed: only the field is lost, never the result.
+        assert_eq!(
+            read(r#"{"type":"result","subtype":"success","queued_turn_count":"two"}"#),
+            None
+        );
     }
 
     #[test]
