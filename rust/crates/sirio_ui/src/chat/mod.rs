@@ -4820,11 +4820,12 @@ impl Chat {
             .filter(|text| !text.trim().is_empty())
     }
 
-    /// The held quote for a prompt whose typed text is `typed`. `None` for a slash command: the
-    /// agent reads a command at the head of the prompt, and a block there would make it a
-    /// message. The command goes as it is typed and the quote stays held for the next prompt.
+    /// The held quote for a prompt whose typed text is `typed`. `None` for a slash command
+    /// (`quote::is_slash_command`; a path that starts with `/` is text): the agent reads a command
+    /// at the head of the prompt, and a block there would make it a message. The command goes as
+    /// it is typed and the quote stays held for the next prompt.
     fn quote_for(&self, typed: &str) -> Option<&str> {
-        if typed.trim_start().starts_with('/') {
+        if quote::is_slash_command(typed) {
             None
         } else {
             self.quote_text()
@@ -9955,15 +9956,10 @@ fn turn_label(entries: &[Entry], turn: &TurnSegment) -> String {
         if let Some(Entry::User { text, .. }) = entries.get(index) {
             // A prompt that opens with a quote is labelled by what was typed after it, or by the
             // quote's first line when nothing was: not by the block's `>` markers.
-            let (quoted, rest) = quote::split_quote(text);
-            let line = match &quoted {
-                Some(quoted) if rest.trim().is_empty() => quoted
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or(quoted.as_str()),
-                _ => rest.lines().next().unwrap_or(rest),
-            };
-            return line.chars().take(TURN_LABEL_MAX_CHARS).collect();
+            return quote::headline(text)
+                .chars()
+                .take(TURN_LABEL_MAX_CHARS)
+                .collect();
         }
     }
     "Turn".to_string()

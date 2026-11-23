@@ -163,16 +163,16 @@ impl Chat {
                 } else {
                     text
                 };
-                // A prompt that is a quote alone has no text to draw; any other is drawn, empty
-                // or not, as it always was.
-                let draws_rest = !(quoted.is_some() && rest.is_empty());
+                // A prompt that is a quote alone (nothing after it, or only whitespace) has no text
+                // to draw; any other is drawn, empty or not, as it always was.
+                let draws_rest = !(quoted.is_some() && rest.trim().is_empty());
                 let card = quoted.map(|quoted| {
                     message_actions::measured(
                         QuoteReply::new(
                             (id.clone(), "quote-card"),
                             quote::READ_BACK_AUTHOR,
-                            // One short line: Ely draws the first line it is given, and the quote
-                            // is not copied whole into every frame.
+                            // One short line: Ely draws the first line it is given. `split_quote`
+                            // rebuilt the whole quote for this frame; the card keeps only its head.
                             quote::card_line(&quoted),
                         ),
                         &entity,

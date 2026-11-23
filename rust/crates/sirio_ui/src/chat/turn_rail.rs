@@ -19,7 +19,7 @@ use gpui::{
     SharedString, Stateful, Window, canvas, div, prelude::*, px,
 };
 
-use super::{Chat, Entry};
+use super::{Chat, Entry, quote};
 use crate::popup::menu_card;
 
 /// Longest preview a tick offers on hover — the fold row's own clip, so a
@@ -36,7 +36,8 @@ pub(crate) const MIN_GAP: Pixels = px(3.0);
 pub(crate) struct TurnTick {
     /// Index of the [`Entry::User`] this tick scrolls to.
     pub entry_index: usize,
-    /// The message's first line, clipped to [`PREVIEW_MAX_CHARS`].
+    /// The message's first line (after a leading quote, `quote::headline`), clipped to
+    /// [`PREVIEW_MAX_CHARS`].
     pub preview: String,
     /// When the message was sent, for the preview's heading.
     pub at: Option<DateTime<Local>>,
@@ -52,10 +53,7 @@ pub(crate) fn turn_ticks(entries: &[Entry]) -> Vec<TurnTick> {
         .filter_map(|(entry_index, entry)| match entry {
             Entry::User { text, at } => Some(TurnTick {
                 entry_index,
-                preview: text
-                    .lines()
-                    .next()
-                    .unwrap_or(text.as_str())
+                preview: quote::headline(text)
                     .chars()
                     .take(PREVIEW_MAX_CHARS)
                     .collect(),

@@ -43,14 +43,49 @@ pub(crate) fn card_line(quote: &str) -> String {
             chars += 1;
         }
     }
+    // The cap can fall just after a space (a separator, or one inside a line): the card's
+    // ellipsis follows the text, not a blank.
+    line.truncate(line.trim_end().len());
     line
+}
+
+/// Whether `text`, a prompt as typed, is a slash command: its first word is `/`, a letter, then
+/// letters, digits, `-`, `_` or `:` (`/compact`, `/mcp:foo`). A path that starts with `/` is text.
+/// The agent reads a command at the head of the prompt, so a quote is not put ahead of one.
+pub(crate) fn is_slash_command(text: &str) -> bool {
+    let word = text.split_whitespace().next().unwrap_or_default();
+    let Some(name) = word.strip_prefix('/') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars.next().is_some_and(|first| first.is_ascii_alphabetic())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':'))
+}
+
+/// The line that names a user text in a list (the turn's fold row, the rail's tick): the first
+/// line of what was typed after a leading quote, or the quote's first line with text in it when
+/// nothing was typed; the first line of any other text. The block's `>` markers name nothing.
+pub(crate) fn headline(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let (quoted, rest) = split_quote(text);
+    match quoted {
+        Some(quoted) if rest.trim().is_empty() => Cow::Owned(
+            quoted
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or(&quoted)
+                .to_string(),
+        ),
+        _ => Cow::Borrowed(rest.lines().next().unwrap_or(rest)),
+    }
 }
 
 /// The prompt text for `typed` with `quote` at its head: every line of the quote prefixed with
 /// `> ` (an empty line becomes `>`), an empty line, then `typed`.
 ///
-/// Returns `typed` unchanged when there is no quote or it is blank. With nothing typed it returns
-/// the block alone, with no trailing blank line.
+/// Returns `typed` unchanged when there is no quote or it is blank. With nothing typed, or only
+/// whitespace (what is left of a draft whose mention was lifted), it returns the block alone, with
+/// no trailing blank line or whitespace.
 pub(crate) fn join_quote(quote: Option<&str>, typed: &str) -> String {
     let Some(quote) = quote.filter(|quote| !quote.trim().is_empty()) else {
         return typed.to_string();
@@ -63,7 +98,7 @@ pub(crate) fn join_quote(quote: Option<&str>, typed: &str) -> String {
         .map(|line| if line.is_empty() { ">".to_string() } else { format!("> {line}") })
         .collect::<Vec<_>>()
         .join("\n");
-    if typed.is_empty() { block } else { format!("{block}\n\n{typed}") }
+    if typed.trim().is_empty() { block } else { format!("{block}\n\n{typed}") }
 }
 
 /// The inverse of `join_quote`: when the leading lines of `text` all start with `>` and are
@@ -217,5 +252,69 @@ mod tests {
     fn a_card_line_under_the_cap_is_whole() {
         let text = "y".repeat(CARD_LINE_MAX_CHARS);
         assert_eq!(card_line(&text), text);
+    }
+
+    #[test]
+    fn a_card_line_does_not_end_in_the_separator_the_cap_cut_after() {
+        // The separator is the 300th character: the next line has no room and the line must not
+        // end in a space.
+        let text = format!("{}\nb", "a".repeat(CARD_LINE_MAX_CHARS - 1));
+        assert_eq!(card_line(&text), "a".repeat(CARD_LINE_MAX_CHARS - 1));
+    }
+
+    #[test]
+    fn a_card_line_does_not_end_in_a_space_the_cap_cut_after() {
+        let text = format!("{} b", "a".repeat(CARD_LINE_MAX_CHARS - 1));
+        assert_eq!(card_line(&text), "a".repeat(CARD_LINE_MAX_CHARS - 1));
+    }
+
+    // Typed text that is only whitespace (the tail of a draft whose mention was lifted) adds
+    // nothing after a quote: the prompt is the bare block.
+    #[test]
+    fn whitespace_typed_after_a_quote_sends_the_bare_block() {
+        for typed in ["  \n", " ", "\n\n", "\t"] {
+            assert_eq!(join_quote(Some("a"), typed), "> a", "typed {typed:?}");
+        }
+    }
+
+    #[test]
+    fn whitespace_typed_with_no_quote_stays() {
+        assert_eq!(join_quote(None, "  \n"), "  \n");
+        assert_eq!(join_quote(Some(" \n"), "  "), "  ");
+    }
+
+    // A command is the first word of the typed text: `/` then a letter, then letters, digits,
+    // `-`, `_` or `:`. A path that starts with `/` is text.
+    #[test]
+    fn a_slash_word_is_a_command() {
+        for text in ["/compact", "/mcp:foo", "/c-d_e:f9", "/compact now", "  /compact", "/a\nmore"] {
+            assert!(is_slash_command(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_path_or_a_bare_slash_is_not_a_command() {
+        for text in ["/etc/hosts is wrong", "/", "/1abc", "//x", "/a/b", "/a.b", "", "x /compact", "/ compact"] {
+            assert!(!is_slash_command(text), "{text:?}");
+        }
+    }
+
+    // What names a user text in a list: what was typed after a quote, else the quote.
+    #[test]
+    fn a_headline_is_the_first_typed_line_after_a_quote() {
+        assert_eq!(headline("> a\n> b\n\nwhy?\nmore"), "why?");
+    }
+
+    #[test]
+    fn a_headline_of_a_quote_alone_is_its_first_text_line() {
+        assert_eq!(headline("> \n> a\n> b"), "a");
+        assert_eq!(headline("> a\n\n  \n"), "a");
+    }
+
+    #[test]
+    fn a_headline_of_plain_text_is_its_first_line() {
+        assert_eq!(headline("hello\nworld"), "hello");
+        assert_eq!(headline(""), "");
+        assert_eq!(headline("x\n> a"), "x");
     }
 }
