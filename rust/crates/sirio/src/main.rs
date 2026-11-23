@@ -4016,10 +4016,21 @@ impl ControlHandler for AppControlHandler {
                             }
                         }
                     }
+                    Some("retry") => {
+                        match request.params.get("entry").map(|entry| entry.parse::<usize>()) {
+                            Some(Ok(entry)) => TranscriptAction::Retry(entry),
+                            _ => {
+                                return ControlResponse::failure(
+                                    &request.id,
+                                    "surface.chat.transcript retry requires a numeric entry",
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.chat.transcript requires action scrollBy or toggleTurn",
+                            "surface.chat.transcript requires action scrollBy, toggleTurn or retry",
                         );
                     }
                 };
@@ -25825,6 +25836,15 @@ impl SirioWorkspace {
         fields.push((
             "transcriptTextRows".to_string(),
             sirio_control::protocol::rows::encode(&snapshot.transcript_text_rows),
+        ));
+        // Debug builds only: the queue is held after a failed turn, and the line it shows then
+        // (empty when none).
+        #[cfg(debug_assertions)]
+        fields.push(("held".to_string(), snapshot.queue_held.to_string()));
+        #[cfg(debug_assertions)]
+        fields.push((
+            "heldLine".to_string(),
+            snapshot.queue_held_line.unwrap_or_default(),
         ));
         fields
     }

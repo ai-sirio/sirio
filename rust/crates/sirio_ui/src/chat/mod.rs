@@ -46,6 +46,8 @@ mod band_tests;
 mod ely_tests;
 #[cfg(test)]
 mod markdown_tests;
+#[cfg(test)]
+mod retry_tests;
 pub(crate) mod identity;
 mod agent_title;
 mod background;
@@ -66,6 +68,7 @@ mod mode_cycle;
 mod prompt_history;
 pub use prompt_history::PromptRecord;
 mod question_dock;
+mod retry;
 mod reveal;
 mod visible_text;
 mod session_panel;
@@ -700,6 +703,10 @@ pub struct ChatControlSnapshot {
     pub queued_text: String,
     /// The whole queue, front first.
     pub queued: Vec<String>,
+    /// The queue is held after a failed turn: nothing in it is sent until a turn ends well.
+    pub queue_held: bool,
+    /// The line drawn under the held queue, `None` while it is not shown.
+    pub queue_held_line: Option<String>,
     pub transcript: Vec<BTreeMap<String, String>>,
     /// The session panel's column: whether it is open, whether it is drawn
     /// at this width, and each section's rows.
@@ -758,6 +765,8 @@ pub enum TranscriptAction {
     ScrollBy(f32),
     /// Folds or unfolds the closed turn whose footer is at this entry index.
     ToggleTurn(usize),
+    /// Presses the Retry of the error row at this entry index. Refused when the row has none.
+    Retry(usize),
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -1350,6 +1359,9 @@ impl NoticeKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ErrorKind {
     Connection,
+    /// The turn failed and the agent is still up: its error result, or a refused prompt. The
+    /// client stays, so Retry sends the same prompt again on it (`retry::retry_action`).
+    TurnFailed,
     /// The agent rejected launch or a mid-session request with ACP's
     /// `auth_required` error (F-CHAT-02) — distinct from a generic
     /// connection failure because the fix isn't "retry", it's "sign in out
@@ -1379,6 +1391,21 @@ enum ErrorKind {
     /// Retry and the "OK to dismiss" every other error carries. Dismissing
     /// is the wrong affordance when this row IS the tab's whole content.
     Unavailable,
+}
+
+impl ErrorKind {
+    /// The socket's spelling, an error row's `errorKind`. Debug builds only, like the readout.
+    #[cfg(debug_assertions)]
+    fn wire(self) -> &'static str {
+        match self {
+            Self::TurnFailed => "turnFailed",
+            Self::Connection => "connection",
+            Self::Disconnected => "disconnected",
+            Self::AuthRequired => "authRequired",
+            Self::Unavailable => "unavailable",
+            Self::McpWarning => "mcpWarning",
+        }
+    }
 }
 
 /// What the transcript says when the agent's process is gone and no event
@@ -2102,6 +2129,16 @@ pub struct Chat {
     /// only its counting header. Starts unfolded; the reader's toggle
     /// holds for the life of the surface and is not persisted.
     queue_expanded: bool,
+    /// The queue waits on the user after a failed turn: its items are not sent until a turn ends
+    /// well, so the next one cannot replace `last_prompt` and make Retry send the wrong text.
+    /// Set by `TurnFailed`, cleared when any prompt is sent.
+    queue_held: bool,
+    /// The prompt of the turn in flight, or of the one that failed, for Retry. In memory only.
+    /// Set by every send, cleared by the end of the turn it started and by Stop; a failure or a
+    /// lost client leaves it.
+    last_prompt: Option<retry::LastPrompt>,
+    /// What the relaunch Retry started does when it connects.
+    after_connect: Option<retry::AfterConnect>,
     connecting: bool,
     /// A message handed over while the agent was not yet connected and idle
     /// (`send_when_ready`). Sent when the connection comes up, or put back in
@@ -2620,6 +2657,9 @@ impl Chat {
             streaming_border_timer_pending: false,
             queue: VecDeque::new(),
             queue_expanded: true,
+            queue_held: false,
+            last_prompt: None,
+            after_connect: None,
             connecting: false,
             pending_send: None,
             has_completed_turn: false,
@@ -4108,19 +4148,12 @@ impl Chat {
                 }
             }
             sirio_chat::ChatEvent::TurnEnded { stop_reason } => self.end_turn(&stop_reason, cx),
-            // A failed turn shows as the connection error's row, then ends as any other turn
-            // does. The agent is up, so unlike a `TransportError` the client stays.
+            // A failed turn ends in place of `TurnEnded`: its error row, the turn settled, and the
+            // queue held. The agent is up, so unlike a `TransportError` the client stays.
             sirio_chat::ChatEvent::TurnFailed {
                 message,
                 stop_reason,
-            } => {
-                self.push_entry(Entry::Error {
-                    message,
-                    retryable: true,
-                    kind: ErrorKind::Connection,
-                });
-                self.end_turn(&stop_reason, cx);
-            }
+            } => self.fail_turn(message, &stop_reason, cx),
             // A thought's duration still settles when the next row is pushed or the turn
             // ends. This is not an entry, so it ends no reply.
             sirio_chat::ChatEvent::ThoughtEnded => {}
@@ -4303,10 +4336,11 @@ impl Chat {
         cx.notify();
     }
 
-    /// Everything a turn's end does: settles the live reply and thought, states why the
-    /// turn stopped, persists the transcript and sends the next queued item. A turn ends
-    /// this way whether the agent finished it (`TurnEnded`) or failed it (`TurnFailed`).
-    fn end_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+    /// What a turn's end does, whether the agent finished it (`TurnEnded`) or failed it
+    /// (`TurnFailed`): settles the live reply and thought, states why the turn stopped and
+    /// persists the transcript. What follows is not shared: a finished turn sends the next
+    /// queued item (`end_turn`), a failed one holds the queue (`fail_turn`).
+    fn settle_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
         self.settle_open_thought();
         self.reread_plain_replies();
         self.finish_reply();
@@ -4333,17 +4367,46 @@ impl Chat {
         if self.session_panel_open() {
             self.reread_session_branch(cx);
         }
+    }
+
+    /// `TurnEnded`: the turn is over, whether it completed or was cancelled.
+    fn end_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+        // Stop clears `streaming` at once, and the end of the stopped turn arrives later: that end
+        // (like a turn the CLI started on its own) is not the end of a turn of ours.
+        let ended_our_turn = self.streaming;
+        self.settle_turn(stop_reason, cx);
+        if ended_our_turn {
+            // Answered: nothing is left to resend, and a hold is over.
+            self.last_prompt = None;
+            self.queue_held = false;
+        }
         // D-CHAT-03: a turn ended — completed or cancelled alike,
         // one rule — drains the queue's front entry as the next
         // turn, exactly once; the rest wait for that turn's end.
         // The footer lands before the queued turn so the transcript
-        // reads: stop stated, then the redirect.
+        // reads: stop stated, then the redirect. A queue held by a
+        // failure waits for the user instead.
         self.send_queued_item(cx);
         // F-CORE-DOM-07: tell the workspace a turn just settled so
         // throttled auto-naming has a signal to react to. Emitted
         // after the transcript is persisted so a subscriber reading
         // `transcript_for_resume()` in response sees this turn's
         // reply included.
+        cx.emit(ChatEvent::TurnEnded);
+    }
+
+    /// `TurnFailed`: the agent is up and the turn failed. The error row carries the Retry that
+    /// sends the same prompt again; the prompt is kept for it, and the queue is held so that no
+    /// other prompt replaces it first.
+    fn fail_turn(&mut self, message: String, stop_reason: &str, cx: &mut Context<Self>) {
+        self.fail_trace_turn(&message, cx);
+        self.push_entry(Entry::Error {
+            message,
+            retryable: true,
+            kind: ErrorKind::TurnFailed,
+        });
+        self.settle_turn(stop_reason, cx);
+        self.queue_held = true;
         cx.emit(ChatEvent::TurnEnded);
     }
 
@@ -4836,6 +4899,8 @@ impl Chat {
             composer_text: self.draft.to_string(),
             queued_text: self.queue.front().cloned().unwrap_or_default(),
             queued: self.queue.iter().cloned().collect(),
+            queue_held: self.queue_held,
+            queue_held_line: self.queue_held_line(),
             transcript: self
                 .entries
                 .iter()
@@ -4843,6 +4908,8 @@ impl Chat {
                 .map(|(index, entry)| {
                     #[allow(unused_mut)]
                     let mut row = control_entry_row(entry);
+                    #[cfg(debug_assertions)]
+                    self.error_columns(index, &mut row);
                     #[cfg(debug_assertions)]
                     self.reveal_columns(index, &mut row);
                     #[cfg(not(debug_assertions))]
@@ -4940,6 +5007,15 @@ impl Chat {
                     return Err("no closed turn has that footer".to_string());
                 }
                 self.toggle_turn_folded(turn, cx);
+            }
+            TranscriptAction::Retry(entry) => {
+                if self
+                    .retry_action_at(entry)
+                    .is_none_or(|action| action == retry::RetryAction::None)
+                {
+                    return Err("surface.chat.transcript retry: entry has no Retry".to_string());
+                }
+                self.retry(entry, cx);
             }
         }
         Ok(())
@@ -6115,6 +6191,10 @@ impl Chat {
         self.reset_composer_popups();
         self.overflow_open = false;
         self.streaming = false;
+        // The old conversation's prompt and hold are not the new one's: a resend must never reach it.
+        self.last_prompt = None;
+        self.queue_held = false;
+        self.after_connect = None;
         self.has_completed_turn = false;
         self.transcript_selection = None;
         self.clear_persisted_transcript();
@@ -6229,17 +6309,27 @@ impl Chat {
             return;
         }
         let (text, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let draft = self.draft.to_string();
+        let mentions = self.accepted_mentions.clone();
         self.remember_prompt();
         let images = std::mem::take(&mut self.attachments);
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
-        self.submit_turn(text, mention_paths, images, cx);
+        self.submit_prompt(
+            retry::LastPrompt {
+                text,
+                mention_paths,
+                images,
+                draft,
+                mentions,
+            },
+            cx,
+        );
     }
 
-    /// Pushes the user turn into the transcript and sends it to the live
-    /// client. Shared by the normal send path and the queued-item drain, so
-    /// both turns take the same wire path.
+    /// [`Self::submit_prompt`] for a prompt that has no composer side: a queued item, a message
+    /// handed over by the shell. Its draft is what was sent.
     fn submit_turn(
         &mut self,
         text: String,
@@ -6247,6 +6337,34 @@ impl Chat {
         images: Vec<ImageAttachment>,
         cx: &mut Context<Self>,
     ) {
+        self.submit_prompt(
+            retry::LastPrompt {
+                draft: text.clone(),
+                text,
+                mention_paths,
+                images,
+                mentions: Vec::new(),
+            },
+            cx,
+        );
+    }
+
+    /// Pushes the user turn into the transcript and sends it to the live
+    /// client. Shared by the normal send path, the queued-item drain and
+    /// Retry, so every turn takes the same wire path. The prompt is kept as
+    /// `last_prompt` until its turn ends: Retry sends it again.
+    fn submit_prompt(&mut self, last: retry::LastPrompt, cx: &mut Context<Self>) {
+        // A failed turn's row is Retry for that turn only: with another prompt in flight it would
+        // send the wrong one.
+        self.retire_failed_turn_retries();
+        let (text, mention_paths, images) = (
+            last.text.clone(),
+            last.mention_paths.clone(),
+            last.images.clone(),
+        );
+        self.last_prompt = Some(last);
+        // Any prompt is the user's move after a failure: the queue waits on this turn instead.
+        self.queue_held = false;
         self.push_entry(Entry::User {
             text: text.clone(),
             at: Some(chrono::Local::now()),
@@ -6279,6 +6397,29 @@ impl Chat {
             self.streaming = false;
         }
         cx.notify();
+    }
+
+    /// Takes the Retry button off every failed turn's row. The rows stay, with their OK.
+    fn retire_failed_turn_retries(&mut self) {
+        let retired: Vec<usize> = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                Entry::Error {
+                    kind: ErrorKind::TurnFailed,
+                    retryable,
+                    ..
+                } if *retryable => {
+                    *retryable = false;
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect();
+        for index in retired {
+            self.remeasure_entry(index);
+        }
     }
 
     /// D-CHAT-03: while a turn streams, a send commits the draft as a new
@@ -6332,7 +6473,8 @@ impl Chat {
         if self.streaming {
             self.cancel_turn(cx);
         } else {
-            self.send_queued_item(cx);
+            // The user's own send, so a hold after a failure does not stop it.
+            self.send_front_of_queue(cx);
         }
         cx.notify();
     }
@@ -6343,6 +6485,16 @@ impl Chat {
     /// A turn end without a client is a transport death: the queue stays
     /// as it is rather than firing nowhere.
     fn send_queued_item(&mut self, cx: &mut Context<Self>) {
+        // A queue held by a failure sends nothing on its own: a queued item would replace the
+        // prompt Retry sends.
+        if self.queue_held {
+            return;
+        }
+        self.send_front_of_queue(cx);
+    }
+
+    /// Sends the front entry as a turn, if there is a client to send it to.
+    fn send_front_of_queue(&mut self, cx: &mut Context<Self>) {
         if self.client.is_none() {
             return;
         }
@@ -6769,21 +6921,36 @@ impl Chat {
                 let _ = client.cancel();
             }
             self.streaming = false;
+            // The user ended this turn: a later death must not send it again.
+            self.last_prompt = None;
             self.finish_reply();
             cx.notify();
         }
     }
 
     fn start_connection(&mut self, cx: &mut Context<Self>) {
+        self.connect(self.agent_launch.clone(), None, cx);
+    }
+
+    /// Starts a process on `launch` and, once it is connected, does `after`. The launch is a
+    /// parameter so that Retry can resume a session without writing that into the chat's own
+    /// launch: a later plain relaunch is as it was.
+    fn connect(
+        &mut self,
+        launch: Option<LaunchSpec>,
+        after: Option<retry::AfterConnect>,
+        cx: &mut Context<Self>,
+    ) {
         if self.connecting {
             return;
         }
 
-        let Some(launch) = self.agent_launch.clone() else {
+        let Some(launch) = launch else {
             // An unavailable chat has no command by construction, so there
             // is nothing to spawn and no failure to report either.
             return;
         };
+        self.after_connect = after;
 
         // The client and the pump that read it are replaced below, so a turn
         // still open here would never hear of its end.
@@ -6838,8 +7005,15 @@ impl Chat {
                         chat.mode_catalog = initial_mode_catalog;
                         chat.connecting = false;
                         chat.send_title_on_ready();
+                        chat.finish_retry(cx);
                         if let Some(text) = chat.pending_send.take() {
-                            chat.submit_turn(text, Vec::new(), Vec::new(), cx);
+                            if chat.streaming {
+                                // Retry's resend is running: this goes out behind it, as a
+                                // send during a turn does.
+                                chat.queue.push_back(text);
+                            } else {
+                                chat.submit_turn(text, Vec::new(), Vec::new(), cx);
+                            }
                         }
                         chat.ensure_session_context();
                         chat.refresh_session_connectors(cx);
@@ -6884,6 +7058,8 @@ impl Chat {
                         chat.connecting = false;
                         chat.client = None;
                         chat.streaming = false;
+                        // The launch Retry waited on failed: its error row has a Retry of its own.
+                        chat.after_connect = None;
                         if let Some(text) = chat.pending_send.take() {
                             chat.restore_held_text(&text, cx);
                         }
@@ -7091,8 +7267,159 @@ impl Chat {
         cx.notify();
     }
 
-    fn retry(&mut self, cx: &mut Context<Self>) {
-        self.start_connection(cx);
+    /// The Retry (or Restart agent) of the error row at `index`: see [`retry::retry_action`] for
+    /// what it does. A stale index (the row is gone: a double click, a click racing a redraw) is a
+    /// no-op, and so is a row with no Retry.
+    fn retry(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(action) = self.retry_action_at(index) else {
+            return;
+        };
+        // Retry on a failed turn's row consumes it; the rows of a lost client go when the new
+        // process connects (`clear_recovered_connection_errors`).
+        let failed_turn_row = matches!(
+            self.entries.get(index),
+            Some(Entry::Error {
+                kind: ErrorKind::TurnFailed,
+                ..
+            })
+        );
+        match action {
+            retry::RetryAction::None => {}
+            retry::RetryAction::Relaunch => self.start_connection(cx),
+            retry::RetryAction::Resend => {
+                // Two prompts at once would be a double click on a row that no longer has
+                // its turn.
+                if self.streaming || self.client.is_none() {
+                    return;
+                }
+                self.dismiss_error(index, cx);
+                self.resend_last_prompt(cx);
+            }
+            retry::RetryAction::ResumeThenResend | retry::RetryAction::RelaunchToComposer => {
+                if self.connecting {
+                    return;
+                }
+                let resume = match (action, &self.agent_session_id) {
+                    (retry::RetryAction::ResumeThenResend, Some(session)) => Some(session.clone()),
+                    _ => None,
+                };
+                let launch = self.agent_launch.clone().map(|launch| match (launch, &resume) {
+                    (LaunchSpec::Claude(mut claude), Some(session)) => {
+                        claude.resume = Some(session.clone());
+                        LaunchSpec::Claude(claude)
+                    }
+                    (launch, _) => launch,
+                });
+                if failed_turn_row {
+                    self.dismiss_error(index, cx);
+                }
+                let after = match resume {
+                    Some(session) => retry::AfterConnect::Resend { session },
+                    None => retry::AfterConnect::Composer,
+                };
+                self.connect(launch, Some(after), cx);
+            }
+        }
+    }
+
+    /// Sends the prompt that failed, or was in flight when the client was lost, as a new turn.
+    fn resend_last_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(last) = self.last_prompt.clone() {
+            self.submit_prompt(last, cx);
+        }
+    }
+
+    /// What Retry's relaunch does once the new process is connected: resends the prompt on the
+    /// resumed conversation, or, when the conversation did not come back, hands the prompt back.
+    fn finish_retry(&mut self, cx: &mut Context<Self>) {
+        let Some(after) = self.after_connect.take() else {
+            return;
+        };
+        match after {
+            retry::AfterConnect::Resend { session } => {
+                // The worker falls back to a fresh session itself when the CLI refuses the id. The
+                // flag is already down if that session named itself before the launch returned,
+                // and then its id is not the one that was asked for.
+                let resumed = self.client.as_ref().is_some_and(|client| {
+                    !client.resumed_session_refused()
+                        && client.session_id().is_none_or(|named| named == session)
+                });
+                if resumed {
+                    self.resend_last_prompt(cx);
+                } else {
+                    self.hand_prompt_back(cx);
+                }
+            }
+            retry::AfterConnect::Composer => self.hand_prompt_back(cx),
+        }
+    }
+
+    /// The agent restarted without the conversation: puts the prompt back in the composer if the
+    /// composer is empty, and says so either way.
+    fn hand_prompt_back(&mut self, cx: &mut Context<Self>) {
+        let Some(last) = self.last_prompt.take() else {
+            return;
+        };
+        // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
+        // relaunch of an agent that is up.
+        self.retire_failed_turn_retries();
+        let text = if self.draft.trim().is_empty() && self.attachments.is_empty() {
+            self.set_composer_text(last.draft, cx);
+            self.reset_composer_popups();
+            self.accepted_mentions = last.mentions;
+            self.attachments = last.images;
+            retry::RESTARTED_MESSAGE_BACK
+        } else {
+            retry::RESTARTED
+        };
+        self.push_entry(Entry::Notice {
+            text: text.to_string(),
+            kind: NoticeKind::Info,
+        });
+        cx.notify();
+    }
+
+    /// What Retry does on the row at `index` now; `None` when that is not an error row.
+    fn retry_action_at(&self, index: usize) -> Option<retry::RetryAction> {
+        let Some(Entry::Error {
+            kind, retryable, ..
+        }) = self.entries.get(index)
+        else {
+            return None;
+        };
+        // A resend needs the client the turn failed on: a failed turn's row whose client has
+        // gone since is a loss like any other.
+        let kind = if *kind == ErrorKind::TurnFailed && self.client.is_none() {
+            ErrorKind::Connection
+        } else {
+            *kind
+        };
+        Some(retry::retry_action(
+            kind,
+            self.last_prompt.is_some(),
+            self.agent_launch
+                .as_ref()
+                .is_some_and(LaunchSpec::resumes_on_retry),
+            self.agent_session_id.is_some(),
+            *retryable,
+        ))
+    }
+
+    /// Debug builds only, the control socket's two readouts of an error row: `errorKind`, and
+    /// `retry`, what its Retry does now (from state the row alone does not carry).
+    #[cfg(debug_assertions)]
+    fn error_columns(&self, index: usize, row: &mut BTreeMap<String, String>) {
+        if let Some(Entry::Error { kind, .. }) = self.entries.get(index) {
+            row.insert("errorKind".into(), kind.wire().into());
+        }
+        if let Some(action) = self.retry_action_at(index) {
+            row.insert("retry".into(), action.wire().into());
+        }
+    }
+
+    /// The line under a held queue; `None` when the queue is not held or holds nothing.
+    fn queue_held_line(&self) -> Option<String> {
+        (self.queue_held && !self.queue.is_empty()).then(|| retry::QUEUE_HELD_LINE.to_string())
     }
 
     /// F-CHAT-33: the "OK to dismiss" affordance the VERIFY clause and the
@@ -12899,6 +13226,15 @@ two"
             "a recovered chat is no longer connecting"
         );
 
+        // The agent died in the middle of "hello" and an ACP agent cannot resume: the restart
+        // says so and hands the message back (spec §5.3), which this turn then replaces.
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "hello",
+            "the message that was lost is back in the composer"
+        );
+        chat.update(cx, |chat, cx| chat.set_composer_text("", cx));
+
         focus_and_type(cx, "again");
         cx.simulate_keystrokes("enter");
         pump_chat_until(cx, &chat, |chat| {
@@ -15403,7 +15739,7 @@ two"
         let_the_agent_answer(cx);
         assert_eq!(config_requests(&log).len(), 1, "the first process is asked once");
 
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until(cx, &chat, |_| config_requests(&log).len() >= 2);
         let_the_agent_answer(cx);
 
@@ -15433,7 +15769,7 @@ two"
         let_the_agent_answer(cx);
         assert_eq!(config_requests(&log).len(), 1, "the first process is asked once");
 
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until(cx, &chat, |chat| {
             config_requests(&log).len() >= 2
                 && chat
@@ -17184,7 +17520,7 @@ two"
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |_| {
             restored_chat_session_id(&path) == Some(None)
         });
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
 
         // A turn names the session; Retry continues it.
@@ -17194,7 +17530,7 @@ two"
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, |chat| {
             chat.agent_session_id().is_some() && !chat.streaming
         });
-        chat.update(cx, |chat, cx| chat.retry(cx));
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
         pump_chat_until_within(cx, &chat, SLOW_LAUNCH_ROUNDS, connected);
 
         // A new conversation continues nothing.
@@ -18763,7 +19099,12 @@ two"
             chat.agent_launch = Some(LaunchSpec::Acp(
                 AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain"),
             ));
-            chat.retry(cx);
+            let error = chat
+                .entries
+                .iter()
+                .position(|entry| matches!(entry, Entry::Error { retryable: true, .. }))
+                .expect("the failed launch left a retryable error row");
+            chat.retry(error, cx);
         });
 
         // A real interpreter has to start before the client exists, so the

@@ -841,7 +841,8 @@ impl Chat {
                                     .size(ControlSize::Sm)
                                     .on_click(
                                         move |_, _, cx| {
-                                            retry_entity.update(cx, |chat, cx| chat.retry(cx))
+                                            retry_entity
+                                                .update(cx, |chat, cx| chat.retry(entry_index, cx))
                                         },
                                     ),
                                 ),

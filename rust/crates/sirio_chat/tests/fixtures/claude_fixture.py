@@ -70,7 +70,12 @@ LAUNCH_LOG_PATH = next(
 )
 # The file every `user` line (a prompt, as the CLI heard it) is appended to,
 # one JSON line each, before the turn runs: what a mention became on the wire.
-USER_LOG_PATH = os.environ.get("SIRIO_FIXTURE_USER_LOG")
+# A launch argument names it, so tests running side by side each keep their own;
+# the environment names it otherwise.
+USER_LOG_PATH = next(
+    (arg[len("--fixture-user-log="):] for arg in sys.argv if arg.startswith("--fixture-user-log=")),
+    os.environ.get("SIRIO_FIXTURE_USER_LOG"),
+)
 # The worker appends its protocol flags after our own argv, so a second
 # positional starting with "-" is one of those, not a pid file.
 # Where the project's memory file is said to live: a test that wants the row
@@ -2056,6 +2061,9 @@ def state_main():
                 PENDING.pop(cli_request_id, None)
                 STATE_ANSWERED.set()
         elif kind == "user":
+            if USER_LOG_PATH:
+                with open(USER_LOG_PATH, "a", encoding="utf-8") as log:
+                    log.write(json.dumps(message, separators=(",", ":")) + "\n")
             STATE_PROMPTS.put(trace_prompt_text(message))
     STATE_EOF.set()
     STATE_PROMPTS.put(None)
