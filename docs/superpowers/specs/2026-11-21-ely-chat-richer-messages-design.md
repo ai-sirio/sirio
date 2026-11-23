@@ -193,7 +193,7 @@ and it does not touch `document`.
 
 **The tail's budget (ruled 2026-11-22, after Task 3 as built).** The tail is not always small. A reply with no blank lines never freezes. Labels cited from the first section to the last hold the whole body. The wait after a fruitless look, and a deep rewind, leave the frozen blocks short. In those cases the tail can be the whole reply, about 3 ms per frame at 40 KiB. So when `revealed - from` exceeds 7 KiB, the reply stops revealing for the rest of its turn. It then draws `document` as it arrives, with no caret and no pacing, the way every reply was drawn before this delivery. A reply of a turn the CLI started on its own has no stream, and it never reveals. The budget was 8 KiB at first. Measured in release at the edge, a frame cost 0.80 ms on SHOWCASE, 1.08 ms on the compact reply and 1.19 ms on a label-heavy reply, over the 1 ms line. At 7 KiB the same frames cost 0.78, 0.86 and 0.92 ms (medians). The compact reply's p95 is 1.5 ms, on a machine that was not idle.
 
-A reply gone `whole` has no frozen blocks. A refused reply (nested past the cap) reveals as plain text, because it is one plain paragraph by then. A reply that went whole any other way (declined, or the math-with-HTML check) has a formatted `document`, so it stops revealing and draws `document` as it arrives, like a reply over the budget. A body that ends in a block with no text (a rule, a picture, a formula, a table of contents, front matter) draws no caret rather than a misplaced one. The caret sits inline after the
+A reply gone `whole` has no frozen blocks. A refused reply (nested past the cap) reveals as plain text, because it is one plain paragraph by then. A reply that went whole any other way (declined, or the math-with-HTML check) has a formatted `document`, so it stops revealing and draws `document` as it arrives, like a reply over the budget. A body that ends in a block with no text (a rule, a picture, a formula, front matter) draws no caret rather than a misplaced one. A table of contents is not such a block: its entries are text, so the caret follows the last entry generated so far (as built; recorded at the final review, 2026-11-23). The caret sits inline after the
 text, as in Ely, including inside an open fence.
 
 **What reads the received text, never the revealed one:**
@@ -250,7 +250,8 @@ A reply that is not live (stored, restored, ended) never reveals.
   - It is set by `submit_turn`, including a queued item's send.
   - It is cleared by a turn that ends with `TurnEnded`.
   - It survives `TurnFailed` and any loss of the client in mid-turn.
-- So an agent that dies while idle leaves nothing to resend.
+- So an agent that dies while idle after a turn that ended leaves nothing to resend.
+- **As built (final review, 2026-11-23).** After a failed turn that was not retried, `last_prompt` survives an idle death too. The failed row's Retry, and the Connection row, then resume and resend that prompt, which is what the held queue is still waiting on. The "no `last_prompt`" row below covers an idle death after a turn that ended, or after a Stop.
 
 **The queue after a failure.** Queued items are held, not sent:
 - A successful Retry, meaning one whose turn ends with `TurnEnded`, drains them as today.
@@ -285,7 +286,7 @@ which chooses among these:
 
 **As built (Task 6, controller's calls, 2026-11-23).**
 - **Stop clears `last_prompt`.** A stopped turn has ended; there is nothing to resend.
-- **A `TurnFailed` while no turn of ours streams** (ACP's error answer to a prompt that Stop cancelled) is the late end of a stopped turn: no error row, no hold. A `TurnEnded` in the same position clears nothing and releases nothing.
+- **A `TurnFailed` while no turn of ours streams** is dropped only while a Stop's end is pending (ACP's error answer to a prompt that Stop cancelled): no error row, no hold. A `TurnEnded` in the same position clears nothing and releases nothing. Any other `TurnFailed` while not streaming is shown as a failed turn, with its error row, Retry and the hold. This happens when a late `TurnEnded` was taken as this prompt's end, for example after a Stop and a quick resend, or a CLI-started turn ending while the prompt runs. A real failure is never silent (amended at the final review, 2026-11-23).
 - **The hold lifts at the send**, the Retry's or the user's; the "Waiting" line goes with it. The queue still drains only at that turn's `TurnEnded`, and a second failure holds it again.
 - **When no Retry is left** (the prompt went back to the composer, or the row was retired), a held queue's line reads "Waiting: send a message."
 - **Only the newest failed turn offers Retry.** Sending a new prompt retires Retry on older failed-turn rows (they keep OK), so a stale Retry cannot resend the wrong prompt. Listed as V8.
@@ -453,7 +454,7 @@ Scenarios, each proved through the socket readouts of §5.7 and a capture:
 
 - **Version:** the cycle's first `feat:`, 0.47.1 → 0.48.0, once, with `Scripts/set-workspace-version.sh 0.48.0` and `(cd rust && CARGO_SCOPE=0 cargo update --workspace --offline)`.
 - **Merge order:** t22's #832 (`sirio_ui::markdown`, `chat/file_links.rs`) merges first. Rebase onto it before the one push.
-- **Vendor:** the only Ely change is L11: the reveal's pacing (`advanced`, `next_shown`, `grapheme_end` and the pace constants) and `day_name` made public. `check-vendor.sh` must print OK.
+- **Vendor:** this delivery's Ely changes are L11 (the reveal's pacing: `advanced`, `next_shown`, `grapheme_end` and the pace constants, plus `day_name`, made public) and L12 (`ely-documents` `next_run`). L13 to L15 came to main with #841 (0.47.1). `check-vendor.sh` must print OK.
 - **Machine rules:**
   - `CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0`, one build at a time.
   - Never `Scripts/ci.sh`, `ci-linux.sh`, `cargo fmt`, `rustfmt` or `clippy`.
