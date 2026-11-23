@@ -3073,8 +3073,9 @@ impl Chat {
         // reset whether it is drawn or not, so the phase flips without input. The wall clock says
         // when: each wake reads it again, and none sleeps longer than `WAKE_EVERY`, so a machine
         // that slept through the reset is at most that late (a week-long timer would be a week
-        // late, and a platform timer takes less than a week).
-        cx.spawn(async move |this, cx| {
+        // late, and a platform timer takes less than a week). The card owns the task, so a card
+        // that is replaced or dropped, or a chat that is closed, stops the loop.
+        let wake = cx.spawn(async move |this, cx| {
             loop {
                 let left = resets_at
                     .signed_duration_since(chrono::Local::now())
@@ -3097,16 +3098,23 @@ impl Chat {
                     cx.notify();
                 }
             });
-        })
-        .detach();
+        });
+        if let Some(card) = self.limit_card.as_mut() {
+            card.wake = Some(wake);
+        }
     }
 
     /// Lets go of the limit card: its rows are drawn as what they are again.
     fn drop_limit_card(&mut self) {
-        if self.limit_card.is_some() {
+        if let Some(card) = &self.limit_card {
+            // The row it covered is drawn and copied again: every offset below it moves, and a
+            // selection is of the offsets of the text it was made on (as when a row is removed).
+            if card.failed_entry.is_some() {
+                self.transcript_selection = None;
+            }
             self.remeasure_limit_card();
-            self.limit_card = None;
         }
+        self.limit_card = None;
     }
 
     /// The card's row and the row it covers have a new height to measure.
@@ -6707,6 +6715,8 @@ impl Chat {
             && card.failed_entry.is_some_and(|row| retired.contains(&row))
         {
             card.failed_entry = None;
+            // The row is copied again, which moves every offset below it: see `drop_limit_card`.
+            self.transcript_selection = None;
             self.remeasure_limit_card();
         }
         for index in retired {
@@ -9107,11 +9117,14 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         entry: entry_index,
                                         painted: source_start,
                                     };
+                                    let words = this
+                                        .limit_card
+                                        .as_ref()
+                                        .map(|card| card.sentence.clone())
+                                        .unwrap_or_default();
+                                    let name = limit_card::accessible_name(&words);
                                     let sentence = Chat::render_plain_text(
-                                        this.limit_card
-                                            .as_ref()
-                                            .map(|card| card.sentence.clone())
-                                            .unwrap_or_default(),
+                                        words,
                                         &transcript_theme,
                                         format!("limit-card-text-{entry_index}"),
                                         source_start,
@@ -9126,6 +9139,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         .child(limit_card::render(
                                             phase,
                                             until,
+                                            name,
                                             sentence,
                                             row_id,
                                             move |_, cx| {

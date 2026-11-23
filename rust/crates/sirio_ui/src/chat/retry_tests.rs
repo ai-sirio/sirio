@@ -1297,3 +1297,81 @@ async fn the_card_follows_renumbered_rows(cx: &mut TestAppContext) {
     chat.update(cx, |chat, cx| chat.new_conversation(cx));
     assert_eq!(card_state(&chat, cx), None);
 }
+
+/// The selection is of the offsets of the text it was made on: a row that comes back into the copy
+/// moves every offset below it, so uncovering a row ends the selection, as removing one does.
+#[gpui::test]
+async fn select_all_ends_when_a_row_stops_being_covered(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    failed_with_limit(&chat, cx, &logs, false);
+    chat.update(cx, |chat, cx| chat.select_all_transcript(cx));
+    assert!(chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text()).is_some());
+
+    // A prompt retires the failed row's Retry: the card stops covering it, and it is drawn again.
+    send(&chat, cx, "silent second");
+    wait_for_prompts(&chat, cx, &logs, 2);
+    assert_eq!(card_state(&chat, cx).unwrap().1, None, "the row is uncovered");
+    assert!(
+        chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()),
+        "the selection was of the text without that row"
+    );
+}
+
+/// The same when a newer limit replaces the card and its covered row comes back.
+#[gpui::test]
+async fn select_all_ends_when_a_new_card_replaces_the_one_that_covered_a_row(
+    cx: &mut TestAppContext,
+) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    failed_with_limit(&chat, cx, &logs, false);
+    chat.update(cx, |chat, cx| chat.select_all_transcript(cx));
+
+    notice(&chat, cx, rejected(7200));
+    assert!(
+        chat.read_with(&cx.cx, |chat, _| chat.transcript_selection.is_none()),
+        "the old card's row is drawn again, which moves every offset below it"
+    );
+}
+
+/// The card owns the loop that wakes the chat at its reset, so a replaced card, a new
+/// conversation and a closed chat do not leave it waking every minute until the reset.
+#[gpui::test]
+async fn the_card_owns_its_wake_loop(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    failed_with_limit(&chat, cx, &logs, false);
+    assert!(
+        chat.read_with(&cx.cx, |chat, _| chat.limit_card.as_ref().unwrap().wake.is_some()),
+        "the card holds the task that wakes the chat at its reset"
+    );
+
+    // Put a task that notices being dropped where the card keeps its loop.
+    let seen_by_task = std::rc::Rc::new(());
+    let hold = |chat: &Entity<Chat>, cx: &mut VisualTestContext| {
+        let held = seen_by_task.clone();
+        chat.update(cx, |chat, cx| {
+            chat.limit_card.as_mut().unwrap().wake = Some(cx.spawn(async move |_, _| {
+                let _held = held;
+                std::future::pending::<()>().await;
+            }));
+        });
+        cx.run_until_parked();
+    };
+    hold(&chat, cx);
+    assert_eq!(std::rc::Rc::strong_count(&seen_by_task), 2, "the task is alive");
+
+    notice(&chat, cx, rejected(7200));
+    cx.run_until_parked();
+    assert_eq!(std::rc::Rc::strong_count(&seen_by_task), 1, "a replaced card drops its loop");
+
+    hold(&chat, cx);
+    assert_eq!(std::rc::Rc::strong_count(&seen_by_task), 2);
+    chat.update(cx, |chat, cx| chat.new_conversation(cx));
+    cx.run_until_parked();
+    assert_eq!(std::rc::Rc::strong_count(&seen_by_task), 1, "a new conversation drops it too");
+}

@@ -12,8 +12,8 @@ use ely_gpui_component::feedback::{Alert, Countdown};
 use ely_gpui_component::primitives::Severity;
 use ely_gpui_component::theme::{ControlSize, TextSize};
 use gpui::{
-    AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled,
-    Window, div,
+    AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement, Styled, Task, Window, div,
 };
 use sirio_theme::Theme;
 use std::time::{Duration, Instant};
@@ -55,7 +55,6 @@ impl LimitPhase {
 
 /// A rejected usage limit, held while the chat lives. Not persisted, like the warning it stands
 /// in for.
-#[derive(Clone, Debug)]
 pub(crate) struct LimitCard {
     /// The row it sits on: the warning notice it stands in for.
     pub(super) entry: usize,
@@ -70,6 +69,9 @@ pub(crate) struct LimitCard {
     pub(super) failed_entry: Option<usize>,
     /// The warning's sentence: the window, the scope and the reset time.
     pub(super) sentence: String,
+    /// The loop that wakes the chat at the reset. The card owns it: a replaced card, a new
+    /// conversation and a closed chat drop it, and a dropped task is cancelled.
+    pub(super) wake: Option<Task<()>>,
 }
 
 impl LimitCard {
@@ -90,6 +92,7 @@ impl LimitCard {
             until: now.checked_add(time_left(resets_at, wall_now))?,
             failed_entry: None,
             sentence,
+            wake: None,
         })
     }
 
@@ -130,6 +133,13 @@ impl LimitCard {
     }
 }
 
+/// What assistive technology calls the card: the title and the sentence, as the Alert names itself
+/// from a title and a body. The Alert is given neither (its title is empty and its text is in
+/// its content slot), so it would otherwise be nameless.
+pub(super) fn accessible_name(sentence: &str) -> String {
+    format!("{TITLE}. {sentence}")
+}
+
 /// The time from `wall_now` to `resets_at`; none when it is past.
 fn time_left(resets_at: DateTime<Local>, wall_now: DateTime<Local>) -> Duration {
     resets_at
@@ -154,10 +164,12 @@ pub(crate) fn phase(card: &LimitCard, wall_now: DateTime<Local>) -> LimitPhase {
 /// The card, drawn: Ely's warning `Alert` holding the title and `sentence` (the caller draws it
 /// through the transcript's selection, as the line it replaces was), and under them the
 /// countdown to `until`, the Try again button or the words that the limit lifted, by `phase`.
-/// `id` is the row's, so the countdown keeps its clock from frame to frame.
+/// `name` is what assistive technology calls the card (`accessible_name`). `id` is the row's, so
+/// the countdown keeps its clock from frame to frame.
 pub(super) fn render(
     phase: LimitPhase,
     until: Instant,
+    name: String,
     sentence: AnyElement,
     id: ElementId,
     on_retry: impl Fn(&mut Window, &mut App) + 'static,
@@ -181,6 +193,7 @@ pub(super) fn render(
                 .text_color(theme.ely.fg_muted)
                 .child(sentence),
         );
+    let name_id = id.clone();
     let alert = Alert::new((id.clone(), "limit-card"), Severity::Warning, "").content(words);
     let alert = match phase {
         LimitPhase::Counting => alert.action(
@@ -204,6 +217,9 @@ pub(super) fn render(
         ),
     };
     div()
+        .id((name_id, "limit-card-name"))
+        .role(Role::Group)
+        .aria_label(name)
         .w_full()
         .debug_selector(|| "limit-card".into())
         .child(alert)
@@ -298,6 +314,16 @@ mod tests {
                 LimitPhase::Lifted
             );
         }
+    }
+
+    #[test]
+    fn the_accessible_name_holds_the_title_and_the_sentence() {
+        let name = accessible_name("5-hour usage limit reached, resets at 15:15.");
+        assert!(name.starts_with(TITLE), "{name:?}");
+        assert!(
+            name.ends_with("5-hour usage limit reached, resets at 15:15."),
+            "{name:?}"
+        );
     }
 
     #[test]
