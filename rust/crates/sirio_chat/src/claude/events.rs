@@ -1082,10 +1082,16 @@ fn fails_the_turn(subtype: &str) -> bool {
 /// turn has to arrive under the same words or every abnormal end silently
 /// renders as an ordinary one.
 fn stop_reason_label(result: &ResultPayload) -> String {
-    let raw = result
-        .stop_reason
-        .as_deref()
-        .unwrap_or(result.subtype.as_str());
+    // The turn limit ends a turn whose last message asked for a tool, so its `stop_reason` can
+    // read `tool_use`: the subtype is what says the turn hit the limit.
+    let raw = if result.subtype == "error_max_turns" {
+        "error_max_turns"
+    } else {
+        result
+            .stop_reason
+            .as_deref()
+            .unwrap_or(result.subtype.as_str())
+    };
     match raw {
         "cancelled" | "canceled" | "interrupted" => "Cancelled",
         "refusal" | "refused" => "Refusal",
@@ -1499,6 +1505,25 @@ mod tests {
             ChatEvent::AgentMessageChunk("Reached the turn limit".into())
         );
         assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
+    }
+
+    /// The turn limit ends a turn whose last message asked for a tool, so the CLI can write
+    /// `stop_reason: "tool_use"` beside the `error_max_turns` subtype. The subtype names the
+    /// end: read from the stop reason alone, this turn would be labelled an ordinary one and
+    /// the transcript would offer nothing to pick it up from.
+    #[test]
+    fn a_turn_that_hit_the_limit_is_labelled_so_whatever_its_stop_reason_says() {
+        let mut fold = Fold::new();
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "error_max_turns", "is_error": true,
+            "stop_reason": "tool_use", "result": "Reached the turn limit"
+        })));
+        assert_eq!(
+            events.last(),
+            Some(&ChatEvent::TurnEnded {
+                stop_reason: "MaxTurnRequests".into()
+            })
+        );
     }
 
     #[test]
