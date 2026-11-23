@@ -61,6 +61,7 @@ mod controls;
 pub(crate) mod file_links;
 use file_links::file_link_target;
 mod history;
+mod limit_card;
 mod limit_notice;
 pub(crate) mod list_scroll;
 mod menus;
@@ -317,6 +318,15 @@ fn is_aside(entry: &Entry) -> bool {
             ..
         }
     )
+}
+
+/// What the list draws on a row because of the limit card (`Chat::limit_card_role`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LimitCardRole {
+    /// The card itself, on the warning notice's row.
+    Card,
+    /// Nothing: the error row the card stands in for.
+    Covered,
 }
 
 /// An assistant response's document with the files it names marked as links.
@@ -2139,6 +2149,9 @@ pub struct Chat {
     /// well, so the next one cannot replace `last_prompt` and make Retry send the wrong text.
     /// Set by `TurnFailed`, cleared when any prompt is sent.
     queue_held: bool,
+    /// The usage limit the CLI last rejected with a reset time: drawn as a card on the warning
+    /// notice's row, covering the error row of the turn that failed with it. In memory only.
+    limit_card: Option<limit_card::LimitCard>,
     /// The prompt of the turn in flight, or of the one that failed, for Retry. In memory only.
     /// Set by every send, cleared by the end of the turn it started and by Stop; a failure or a
     /// lost client leaves it.
@@ -2664,6 +2677,7 @@ impl Chat {
             queue: VecDeque::new(),
             queue_expanded: true,
             queue_held: false,
+            limit_card: None,
             last_prompt: None,
             after_connect: None,
             connecting: false,
@@ -2856,6 +2870,8 @@ impl Chat {
     /// Turns one notice into the row, or the status line, it belongs in, at
     /// the point in the transcript where it arrived.
     fn apply_notice(&mut self, notice: SessionNotice, cx: &mut Context<Self>) {
+        // A rejected limit that says when it resets: the notice below is drawn as a card.
+        let mut rejected_limit = None;
         let entry = match notice {
             SessionNotice::Compacted {
                 trigger,
@@ -2897,15 +2913,21 @@ impl Chat {
                 let resets_at = resets_at
                     .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
                     .map(|at| at.with_timezone(&chrono::Local));
+                let text = limit_notice::rate_limit_sentence(
+                    &status,
+                    window.as_deref(),
+                    used_percent,
+                    resets_at,
+                    limit_scope.as_deref(),
+                    &now,
+                );
+                if status == "rejected"
+                    && let Some(at) = resets_at
+                {
+                    rejected_limit = Some((at, text.clone()));
+                }
                 Entry::Notice {
-                    text: limit_notice::rate_limit_sentence(
-                        &status,
-                        window.as_deref(),
-                        used_percent,
-                        resets_at,
-                        limit_scope.as_deref(),
-                        &now,
-                    ),
+                    text,
                     kind: NoticeKind::Warning,
                 }
             }
@@ -3021,6 +3043,162 @@ impl Chat {
             }
         };
         self.push_entry(entry);
+        if let Some((resets_at, sentence)) = rejected_limit {
+            self.start_limit_card(self.entries.len() - 1, resets_at, sentence, cx);
+        }
+    }
+
+    /// A rejected usage limit: the notice just pushed at `entry` becomes a card counting down to
+    /// `resets_at`, and replaces the card of an earlier limit, whose rows go back to being what
+    /// they are (a warning line, an error row). One timer wakes the chat when the count ends.
+    fn start_limit_card(
+        &mut self,
+        entry: usize,
+        resets_at: chrono::DateTime<chrono::Local>,
+        sentence: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = limit_card::LimitCard::new(
+            entry,
+            resets_at,
+            chrono::Local::now(),
+            cx.background_executor().now(),
+            sentence,
+        ) else {
+            return;
+        };
+        self.drop_limit_card();
+        let until = card.until;
+        self.limit_card = Some(card);
+        // The countdown wakes the row each second while it is drawn; this wakes the chat at the
+        // end whether it is drawn or not, so the phase flips without input. The wait is cut into
+        // days: a reset can be a week off, and the platform timer takes less.
+        cx.spawn(async move |this, cx| {
+            loop {
+                let left = until.saturating_duration_since(cx.background_executor().now());
+                if left.is_zero() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(left.min(std::time::Duration::from_millis(status_line::MAX_TIMER_MS)))
+                    .await;
+            }
+            let _ = this.update(cx, |chat, cx| {
+                if chat.limit_card.as_ref().is_some_and(|card| card.until == until) {
+                    chat.remeasure_limit_card();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Lets go of the limit card: its rows are drawn as what they are again.
+    fn drop_limit_card(&mut self) {
+        if self.limit_card.is_some() {
+            self.remeasure_limit_card();
+            self.limit_card = None;
+        }
+    }
+
+    /// The card's row and the row it covers have a new height to measure.
+    fn remeasure_limit_card(&self) {
+        let Some(card) = &self.limit_card else {
+            return;
+        };
+        for index in std::iter::once(card.entry).chain(card.failed_entry) {
+            if index < self.entries.len() {
+                self.remeasure_entry(index);
+            }
+        }
+    }
+
+    /// The error row just pushed at `row` ends the turn the limit card arrived in: the card
+    /// covers it. A later turn's failure is not the card's, whatever its text.
+    fn cover_with_limit_card(&mut self, row: usize) {
+        let Some(card) = self.limit_card.as_mut() else {
+            return;
+        };
+        let own_turn = self.entries.get(card.entry..).is_some_and(|rest| {
+            !rest
+                .iter()
+                .any(|entry| matches!(entry, Entry::User { .. }))
+        });
+        if own_turn && card.failed_entry.is_none() {
+            card.failed_entry = Some(row);
+            self.remeasure_limit_card();
+        }
+    }
+
+    /// What a Retry pressed on row `entry` does when the limit card owns that row (its own, or
+    /// the error row it covers): the failed row to retry once the limit is over, or why it is not
+    /// that time. `None` when the card does not own the row.
+    fn limit_card_retry(
+        &self,
+        entry: usize,
+        now: std::time::Instant,
+    ) -> Option<Result<usize, &'static str>> {
+        let card = self.limit_card.as_ref()?;
+        if entry != card.entry && card.failed_entry != Some(entry) {
+            return None;
+        }
+        Some(match (limit_card::phase(card, now), card.failed_entry) {
+            (limit_card::LimitPhase::Retry, Some(row)) => Ok(row),
+            (limit_card::LimitPhase::Counting, _) => Err("the usage limit has not lifted yet"),
+            _ => Err("entry has no Retry"),
+        })
+    }
+
+    /// The card's Try again: the Retry of the turn that failed with the limit.
+    fn retry_limit_card(&mut self, cx: &mut Context<Self>) {
+        let Some(card) = &self.limit_card else {
+            return;
+        };
+        if let Some(Ok(row)) = self.limit_card_retry(card.entry, cx.background_executor().now()) {
+            self.retry(row, cx);
+        }
+    }
+
+    /// What the list draws on row `index` for the limit card: the card itself on its notice's
+    /// row, nothing on the error row it covers.
+    fn limit_card_role(&self, index: usize) -> Option<LimitCardRole> {
+        let card = self.limit_card.as_ref()?;
+        if card.failed_entry == Some(index) {
+            return Some(LimitCardRole::Covered);
+        }
+        (card.entry == index
+            && matches!(
+                self.entries.get(index),
+                Some(Entry::Notice {
+                    kind: NoticeKind::Warning,
+                    ..
+                })
+            ))
+        .then_some(LimitCardRole::Card)
+    }
+
+    /// Debug builds only, what the control socket reads of the limit card's rows: the notice it
+    /// stands on becomes a `limitCard` row (`resetsAt` in Unix seconds, `phase`), and the error
+    /// row it covers says `coveredBy`.
+    #[cfg(debug_assertions)]
+    fn limit_card_columns(&self, index: usize, row: &mut BTreeMap<String, String>) {
+        match self.limit_card_role(index) {
+            Some(LimitCardRole::Card) => {
+                let Some(card) = &self.limit_card else {
+                    return;
+                };
+                row.insert("kind".into(), "limitCard".into());
+                row.insert("resetsAt".into(), card.resets_at.timestamp().to_string());
+                row.insert(
+                    "phase".into(),
+                    limit_card::phase(card, std::time::Instant::now()).wire().into(),
+                );
+            }
+            Some(LimitCardRole::Covered) => {
+                row.insert("coveredBy".into(), "limitCard".into());
+            }
+            None => {}
+        }
     }
 
     /// Whether this chat talks to Claude Code itself, whose subagent cards
@@ -4432,6 +4610,7 @@ impl Chat {
             retryable: true,
             kind: ErrorKind::TurnFailed,
         });
+        self.cover_with_limit_card(self.entries.len() - 1);
         self.settle_turn(stop_reason, cx);
         self.queue_held = true;
         cx.emit(ChatEvent::TurnEnded);
@@ -4938,6 +5117,8 @@ impl Chat {
                     #[cfg(debug_assertions)]
                     self.error_columns(index, &mut row);
                     #[cfg(debug_assertions)]
+                    self.limit_card_columns(index, &mut row);
+                    #[cfg(debug_assertions)]
                     self.reveal_columns(index, &mut row);
                     #[cfg(debug_assertions)]
                     entry_time_columns(entry, &mut row);
@@ -5040,6 +5221,15 @@ impl Chat {
                 self.toggle_turn_folded(turn, cx);
             }
             TranscriptAction::Retry(entry) => {
+                // The limit card owns its row and the error row it covers: a press there is its
+                // Try again, which waits for the limit to lift.
+                let entry = match self.limit_card_retry(entry, cx.background_executor().now()) {
+                    Some(Ok(failed_row)) => failed_row,
+                    Some(Err(why)) => {
+                        return Err(format!("surface.chat.transcript retry: {why}"));
+                    }
+                    None => entry,
+                };
                 // The socket answers what happened: a click that `retry` would ignore is an
                 // error here, not a success.
                 let refusal = match self.retry_action_at(entry) {
@@ -5190,6 +5380,7 @@ impl Chat {
         // The widgets go, and their asks are denied, before the cards are cleared with the rest.
         self.close_widgets(cx);
         self.entries.clear();
+        self.limit_card = None;
         self.reveal = None;
         self.transcript_selection = None;
         self.turn_message_ids.clear();
@@ -5434,7 +5625,11 @@ impl Chat {
         let old_ids = std::mem::take(&mut self.turn_message_ids);
         let mut kept_ids = Vec::with_capacity(old_count);
         let mut ids = old_ids.into_iter();
+        let mut removed = Vec::new();
+        let mut position = 0;
         self.entries.retain(|entry| {
+            let index = position;
+            position += 1;
             let id = ids.next().unwrap_or(None);
             let keep = !matches!(
                 entry,
@@ -5445,11 +5640,14 @@ impl Chat {
             );
             if keep {
                 kept_ids.push(id);
+            } else {
+                removed.push(index);
             }
             keep
         });
         self.turn_message_ids = kept_ids;
         if self.entries.len() != old_count {
+            self.limit_card_rows_removed(&removed);
             // The selection's ends name their entries (`TranscriptSelection`), which this renumbers.
             self.transcript_selection = None;
             self.folded_turns.clear();
@@ -6206,6 +6404,7 @@ impl Chat {
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.close_widgets(cx);
         self.entries.clear();
+        self.limit_card = None;
         self.reveal = None;
         self.turn_message_ids.clear();
         self.pending_rewind = None;
@@ -6451,6 +6650,13 @@ impl Chat {
                 _ => None,
             })
             .collect();
+        // A card offers Try again for its failed row only while that row has a Retry.
+        if let Some(card) = self.limit_card.as_mut()
+            && card.failed_entry.is_some_and(|row| retired.contains(&row))
+        {
+            card.failed_entry = None;
+            self.remeasure_limit_card();
+        }
         for index in retired {
             self.remeasure_entry(index);
         }
@@ -7539,7 +7745,25 @@ impl Chat {
         // The selection's ends name their entries (`TranscriptSelection`), which this renumbers.
         self.transcript_selection = None;
         self.list_state.splice(index..index + 1, 0);
+        self.limit_card_rows_removed(&[index]);
         cx.notify();
+    }
+
+    /// The rows at `removed` (their numbers before the removal, ascending) are gone from
+    /// `entries`: the limit card's numbers follow the rows, and the card goes with its own row.
+    fn limit_card_rows_removed(&mut self, removed: &[usize]) {
+        let Some(card) = self.limit_card.as_mut() else {
+            return;
+        };
+        let kept = removed
+            .iter()
+            .rev()
+            .fold(true, |kept, &index| card.entry_removed(index) && kept);
+        if kept {
+            self.remeasure_limit_card();
+        } else {
+            self.limit_card = None;
+        }
     }
 
     /// A chat that states why it cannot run and never starts anything.
@@ -8803,6 +9027,38 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                             .into_any_element();
                                     }
                                     TurnRowRole::Normal => {}
+                                }
+                                // The limit card stands on its warning notice's row, and the error
+                                // row of the turn that failed with it is not drawn.
+                                if let Some(role) = this.limit_card_role(entry_index) {
+                                    let row_id = this.row_id(entry_index, cx);
+                                    return match (role, this.limit_card.as_ref()) {
+                                        (LimitCardRole::Card, Some(card)) => {
+                                            let phase = limit_card::phase(
+                                                card,
+                                                cx.background_executor().now(),
+                                            );
+                                            let retry_entity = entity.clone();
+                                            div()
+                                                .id(row_id.clone())
+                                                .w_full()
+                                                .max_w(px(TRANSCRIPT_WIDTH))
+                                                .pb(px(10.0))
+                                                .child(limit_card::render(
+                                                    card,
+                                                    phase,
+                                                    row_id,
+                                                    move |_, cx| {
+                                                        retry_entity.update(cx, |chat, cx| {
+                                                            chat.retry_limit_card(cx)
+                                                        })
+                                                    },
+                                                    &transcript_theme,
+                                                ))
+                                                .into_any_element()
+                                        }
+                                        _ => div().id(row_id).into_any_element(),
+                                    };
                                 }
                                 // F-CHAT-22: a run of consecutive tool
                                 // calls renders as one bordered box, keyed
