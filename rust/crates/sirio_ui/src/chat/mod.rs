@@ -3068,23 +3068,31 @@ impl Chat {
             return;
         };
         self.drop_limit_card();
-        let until = card.until;
         self.limit_card = Some(card);
         // The countdown wakes the row each second while it is drawn; this wakes the chat at the
-        // end whether it is drawn or not, so the phase flips without input. The wait is cut into
-        // days: a reset can be a week off, and the platform timer takes less.
+        // reset whether it is drawn or not, so the phase flips without input. The wall clock says
+        // when: each wake reads it again, and none sleeps longer than `WAKE_EVERY`, so a machine
+        // that slept through the reset is at most that late (a week-long timer would be a week
+        // late, and a platform timer takes less than a week).
         cx.spawn(async move |this, cx| {
             loop {
-                let left = until.saturating_duration_since(cx.background_executor().now());
+                let left = resets_at
+                    .signed_duration_since(chrono::Local::now())
+                    .to_std()
+                    .unwrap_or_default();
                 if left.is_zero() {
                     break;
                 }
                 cx.background_executor()
-                    .timer(left.min(std::time::Duration::from_millis(status_line::MAX_TIMER_MS)))
+                    .timer(left.min(limit_card::WAKE_EVERY))
                     .await;
             }
             let _ = this.update(cx, |chat, cx| {
-                if chat.limit_card.as_ref().is_some_and(|card| card.until == until) {
+                if chat
+                    .limit_card
+                    .as_ref()
+                    .is_some_and(|card| card.resets_at == resets_at)
+                {
                     chat.remeasure_limit_card();
                     cx.notify();
                 }
@@ -3136,7 +3144,7 @@ impl Chat {
     fn limit_card_retry(
         &self,
         entry: usize,
-        now: std::time::Instant,
+        now: chrono::DateTime<chrono::Local>,
     ) -> Option<Result<usize, &'static str>> {
         let card = self.limit_card.as_ref()?;
         if entry != card.entry && card.failed_entry != Some(entry) {
@@ -3154,16 +3162,46 @@ impl Chat {
         let Some(card) = &self.limit_card else {
             return;
         };
-        if let Some(Ok(row)) = self.limit_card_retry(card.entry, cx.background_executor().now()) {
+        if let Some(Ok(row)) = self.limit_card_retry(card.entry, chrono::Local::now()) {
             self.retry(row, cx);
         }
     }
 
+    /// The card's phase for a frame drawn now, and where its countdown counts to: the wall clock
+    /// decides both (`limit_card::phase`, `LimitCard::countdown_until`).
+    fn limit_card_frame(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<(limit_card::LimitPhase, std::time::Instant)> {
+        let wall_now = chrono::Local::now();
+        let card = self.limit_card.as_mut()?;
+        let phase = limit_card::phase(card, wall_now);
+        Some((phase, card.countdown_until(wall_now, now)))
+    }
+
+    /// Whether the card covers the error row at `index` and is still counting: that row has no
+    /// Retry yet, and the card's Try again comes when the count ends.
+    fn retry_waits_on_limit_card(&self, index: usize) -> bool {
+        self.limit_card_role(index) == Some(LimitCardRole::Covered)
+            && self.limit_card.as_ref().is_some_and(|card| {
+                limit_card::phase(card, chrono::Local::now()) == limit_card::LimitPhase::Counting
+            })
+    }
+
     /// What the list draws on row `index` for the limit card: the card itself on its notice's
-    /// row, nothing on the error row it covers.
+    /// row, nothing on the error row it covers. Only a failed turn's error row is ever covered,
+    /// so a number that missed a renumbering cannot hide another row.
     fn limit_card_role(&self, index: usize) -> Option<LimitCardRole> {
         let card = self.limit_card.as_ref()?;
-        if card.failed_entry == Some(index) {
+        if card.failed_entry == Some(index)
+            && matches!(
+                self.entries.get(index),
+                Some(Entry::Error {
+                    kind: ErrorKind::TurnFailed,
+                    ..
+                })
+            )
+        {
             return Some(LimitCardRole::Covered);
         }
         (card.entry == index
@@ -3191,7 +3229,7 @@ impl Chat {
                 row.insert("resetsAt".into(), card.resets_at.timestamp().to_string());
                 row.insert(
                     "phase".into(),
-                    limit_card::phase(card, std::time::Instant::now()).wire().into(),
+                    limit_card::phase(card, chrono::Local::now()).wire().into(),
                 );
             }
             Some(LimitCardRole::Covered) => {
@@ -4659,12 +4697,24 @@ impl Chat {
         self.accepts_sends() && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
     }
 
+    /// Whether the row at `index` has text in the transcript's copy: the error row a limit card
+    /// covers is not drawn, so it adds nothing to what a drag or Select All copies.
+    fn is_copied(&self, index: usize) -> bool {
+        self.limit_card_role(index) != Some(LimitCardRole::Covered)
+    }
+
     fn transcript_entry_ranges(&self) -> Vec<Range<usize>> {
+        let last = (0..self.entries.len())
+            .rev()
+            .find(|&index| self.is_copied(index));
         let mut offset = 0;
         self.entries
             .iter()
             .enumerate()
             .map(|(index, entry)| {
+                if !self.is_copied(index) {
+                    return offset..offset;
+                }
                 // A reply's length is read off its parsed text: no walk, no copy, per frame.
                 let length = match entry {
                     Entry::Assistant { document, .. } => document.text.text.len(),
@@ -4672,7 +4722,7 @@ impl Chat {
                 };
                 let range = offset..offset + length;
                 offset += length;
-                if index + 1 < self.entries.len() {
+                if Some(index) != last {
                     offset += 2;
                 }
                 range
@@ -4683,7 +4733,9 @@ impl Chat {
     fn transcript_text(&self) -> String {
         self.entries
             .iter()
-            .map(Entry::plain_text)
+            .enumerate()
+            .filter(|(index, _)| self.is_copied(*index))
+            .map(|(_, entry)| entry.plain_text())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -5223,7 +5275,7 @@ impl Chat {
             TranscriptAction::Retry(entry) => {
                 // The limit card owns its row and the error row it covers: a press there is its
                 // Try again, which waits for the limit to lift.
-                let entry = match self.limit_card_retry(entry, cx.background_executor().now()) {
+                let entry = match self.limit_card_retry(entry, chrono::Local::now()) {
                     Some(Ok(failed_row)) => failed_row,
                     Some(Err(why)) => {
                         return Err(format!("surface.chat.transcript retry: {why}"));
@@ -7652,6 +7704,11 @@ impl Chat {
         else {
             return None;
         };
+        // The row a counting limit card covers has no Retry yet: the card offers Try again when
+        // the count ends, and the socket refuses the row until then.
+        if self.retry_waits_on_limit_card(index) {
+            return Some(retry::RetryAction::None);
+        }
         // A resend needs the client the turn failed on: a failed turn's row whose client has
         // gone since is a loss like any other.
         let kind = if *kind == ErrorKind::TurnFailed && self.client.is_none() {
@@ -9032,33 +9089,52 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                 // row of the turn that failed with it is not drawn.
                                 if let Some(role) = this.limit_card_role(entry_index) {
                                     let row_id = this.row_id(entry_index, cx);
-                                    return match (role, this.limit_card.as_ref()) {
-                                        (LimitCardRole::Card, Some(card)) => {
-                                            let phase = limit_card::phase(
-                                                card,
-                                                cx.background_executor().now(),
-                                            );
-                                            let retry_entity = entity.clone();
-                                            div()
-                                                .id(row_id.clone())
-                                                .w_full()
-                                                .max_w(px(TRANSCRIPT_WIDTH))
-                                                .pb(px(10.0))
-                                                .child(limit_card::render(
-                                                    card,
-                                                    phase,
-                                                    row_id,
-                                                    move |_, cx| {
-                                                        retry_entity.update(cx, |chat, cx| {
-                                                            chat.retry_limit_card(cx)
-                                                        })
-                                                    },
-                                                    &transcript_theme,
-                                                ))
-                                                .into_any_element()
-                                        }
-                                        _ => div().id(row_id).into_any_element(),
+                                    if role == LimitCardRole::Covered {
+                                        return div().id(row_id).into_any_element();
+                                    }
+                                    let Some((phase, until)) =
+                                        this.limit_card_frame(cx.background_executor().now())
+                                    else {
+                                        return div().id(row_id).into_any_element();
                                     };
+                                    let source_start = transcript_ranges
+                                        .get(entry_index)
+                                        .map(|range| range.start)
+                                        .unwrap_or(0);
+                                    let interaction = TranscriptInteraction {
+                                        chat: entity.clone(),
+                                        focus: transcript_focus.clone(),
+                                        entry: entry_index,
+                                        painted: source_start,
+                                    };
+                                    let sentence = Chat::render_plain_text(
+                                        this.limit_card
+                                            .as_ref()
+                                            .map(|card| card.sentence.clone())
+                                            .unwrap_or_default(),
+                                        &transcript_theme,
+                                        format!("limit-card-text-{entry_index}"),
+                                        source_start,
+                                        Some(&interaction),
+                                    );
+                                    let retry_entity = entity.clone();
+                                    return div()
+                                        .id(row_id.clone())
+                                        .w_full()
+                                        .max_w(px(TRANSCRIPT_WIDTH))
+                                        .pb(px(10.0))
+                                        .child(limit_card::render(
+                                            phase,
+                                            until,
+                                            sentence,
+                                            row_id,
+                                            move |_, cx| {
+                                                retry_entity
+                                                    .update(cx, |chat, cx| chat.retry_limit_card(cx))
+                                            },
+                                            &transcript_theme,
+                                        ))
+                                        .into_any_element();
                                 }
                                 // F-CHAT-22: a run of consecutive tool
                                 // calls renders as one bordered box, keyed

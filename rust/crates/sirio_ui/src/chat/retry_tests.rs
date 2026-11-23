@@ -970,3 +970,330 @@ async fn a_new_conversation_forgets_the_failed_prompt(cx: &mut TestAppContext) {
     event(&chat, cx, connection_lost());
     assert_eq!(readout(&chat, cx).1, "relaunch", "no prompt to resend");
 }
+
+// The usage-limit card (spec §5.4), against the fake `claude`. It is wrong if:
+// - the countdown, the Try again button and the "lifted" words do not follow the wall clock: a
+//   machine that slept past the reset still counts, because the anchor never moved;
+// - the covered error row is drawn, or its Retry is pressable, while the card counts, or the
+//   held queue names a Retry that is not there yet;
+// - the card's sentence cannot be dragged, or Select All copies the hidden error row as well;
+// - the card hides a row that is not the error row of its own turn;
+// - a failure of a later turn is hidden by an old card, or the card's numbers do not follow the
+//   rows when one before them goes.
+// No test sleeps: a counting card is one whose reset is an hour off, and the wall clock passing
+// the reset is the card's `resets_at` moved into the past.
+
+fn rejected(resets_in: i64) -> SessionNotice {
+    SessionNotice::RateLimited {
+        status: "rejected".into(),
+        window: Some("five_hour".into()),
+        resets_at: Some(chrono::Local::now().timestamp() + resets_in),
+        used_percent: None,
+        limit_scope: None,
+    }
+}
+
+fn notice(chat: &Entity<Chat>, cx: &mut VisualTestContext, notice: SessionNotice) {
+    chat.update(cx, |chat, cx| chat.apply_notice(notice, cx));
+}
+
+/// The card's row and the failed row it covers.
+fn card_state(chat: &Entity<Chat>, cx: &VisualTestContext) -> Option<(usize, Option<usize>)> {
+    chat.read_with(&cx.cx, |chat, _| {
+        chat.limit_card
+            .as_ref()
+            .map(|card| (card.entry, card.failed_entry))
+    })
+}
+
+fn rows(chat: &Entity<Chat>, cx: &VisualTestContext) -> Vec<BTreeMap<String, String>> {
+    chat.read_with(&cx.cx, |chat, _| chat.control_snapshot().transcript)
+}
+
+/// The wall clock passes the card's reset: the machine slept, and the card's own anchor, on the
+/// monotonic clock, did not move.
+fn pass_the_reset(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+    chat.update(cx, |chat, _| {
+        chat.limit_card.as_mut().expect("a card exists").resets_at =
+            chrono::Local::now() - chrono::Duration::seconds(1);
+    });
+}
+
+fn held_line(chat: &Entity<Chat>, cx: &VisualTestContext) -> Option<String> {
+    chat.read_with(&cx.cx, |chat, _| chat.control_snapshot().queue_held_line)
+}
+
+/// A turn that failed with a limit an hour off, and a prompt waiting behind it.
+fn failed_with_limit(
+    chat: &Entity<Chat>,
+    cx: &mut VisualTestContext,
+    logs: &Logs,
+    queued: bool,
+) -> (usize, usize) {
+    send(chat, cx, "silent first");
+    wait_for_prompts(chat, cx, logs, 1);
+    if queued {
+        send(chat, cx, "silent second");
+    }
+    notice(chat, cx, rejected(3600));
+    event(chat, cx, turn_failed());
+    refresh_frame(cx);
+    let (entry, failed) = card_state(chat, cx).expect("a card exists");
+    (entry, failed.expect("the failed row is marked"))
+}
+
+/// While the limit lasts the card counts and offers nothing: the covered row is not drawn and
+/// says it has no Retry, and the held queue's line does not send the user to a Retry that is
+/// not there.
+#[gpui::test]
+async fn a_counting_card_covers_the_failed_row_and_offers_no_retry(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    let (entry, failed) = failed_with_limit(&chat, cx, &logs, true);
+
+    assert_eq!(failed, entry + 1, "the error row follows the notice it stands behind");
+    assert!(cx.debug_bounds("limit-card").is_some(), "the card is drawn");
+    assert!(cx.debug_bounds("limit-card-countdown").is_some(), "it counts");
+    assert!(cx.debug_bounds("limit-card-retry").is_none(), "no Try again yet");
+    assert!(cx.debug_bounds("chat-retry").is_none(), "the covered row's Retry is not drawn");
+    assert!(
+        cx.debug_bounds(Box::leak(format!("chat-error-message-{failed}").into_boxed_str()))
+            .is_none(),
+        "the covered error row is not drawn"
+    );
+    let rows = rows(&chat, cx);
+    assert_eq!(rows[entry]["kind"], "limitCard");
+    assert_eq!(rows[entry]["phase"], "counting");
+    assert!(rows[entry]["resetsAt"].parse::<i64>().is_ok());
+    assert_eq!(rows[failed]["kind"], "error", "the error row is still a row");
+    assert_eq!(rows[failed]["coveredBy"], "limitCard");
+    assert_eq!(rows[failed]["retry"], "none", "the socket refuses it while the card counts");
+    assert_eq!(
+        held_line(&chat, cx).as_deref(),
+        Some(HELD_LINE_NO_RETRY),
+        "no Retry to press yet"
+    );
+}
+
+/// The wall clock passing the reset flips the card to Try again, and the held queue's line is
+/// today's again. Pressing it resends the same prompt, and the card then says the limit lifted.
+#[gpui::test]
+async fn the_card_offers_try_again_once_the_wall_clock_passes_the_reset(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    let (entry, _) = failed_with_limit(&chat, cx, &logs, true);
+    assert!(cx.debug_bounds("limit-card-countdown").is_some());
+
+    pass_the_reset(&chat, cx);
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("limit-card-countdown").is_none(), "no longer counting");
+    assert_eq!(rows(&chat, cx)[entry]["phase"], "retry");
+    assert_eq!(held_line(&chat, cx).as_deref(), Some(HELD_LINE));
+    let retry = cx.debug_bounds("limit-card-retry").expect("Try again is offered");
+    cx.simulate_click(retry.center(), Modifiers::none());
+    cx.run_until_parked();
+
+    wait_for_prompts(&chat, cx, &logs, 2);
+    let heard = logs.heard();
+    assert_eq!(heard[0], heard[1], "the same prompt was sent again");
+    chat.read_with(&cx.cx, |chat, _| {
+        assert!(!chat.entries.iter().any(|e| matches!(e, Entry::Error { .. })));
+    });
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("limit-card-retry").is_none(), "no second Try again");
+    assert!(cx.debug_bounds("limit-card-lifted").is_some(), "the card says the limit lifted");
+}
+
+/// No turn failed with the limit: the card counts, then says it lifted, with no button.
+#[gpui::test]
+async fn a_limit_with_no_failed_turn_lifts_with_no_button(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    notice(&chat, cx, rejected(3600));
+    event(&chat, cx, turn_ended());
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("limit-card-countdown").is_some());
+
+    pass_the_reset(&chat, cx);
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("limit-card-lifted").is_some());
+    assert!(cx.debug_bounds("limit-card-retry").is_none());
+    let (entry, failed) = card_state(&chat, cx).unwrap();
+    assert_eq!(failed, None);
+    assert_eq!(rows(&chat, cx)[entry]["phase"], "lifted");
+}
+
+/// The card's sentence is read through the transcript's selection, as the line it replaces was:
+/// a drag over it selects it, and Select All copies it once, with no trace of the hidden row.
+#[gpui::test]
+async fn the_cards_sentence_is_selected_and_copied_without_the_hidden_row(
+    cx: &mut TestAppContext,
+) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    let (entry, _) = failed_with_limit(&chat, cx, &logs, false);
+    let sentence = chat.read_with(&cx.cx, |chat, _| chat.entries[entry].plain_text());
+
+    let text = cx
+        .debug_bounds("limit-card-text")
+        .expect("the sentence is drawn in the transcript's selection");
+    let y = text.center().y;
+    cx.simulate_mouse_down(point(text.left() + px(1.0), y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(point(text.right() - px(1.0), y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(point(text.right() - px(1.0), y), MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let dragged = chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text());
+    assert_eq!(dragged.as_deref(), Some(sentence.as_str()), "a drag over the card copies what it shows");
+
+    chat.update(cx, |chat, cx| chat.select_all_transcript(cx));
+    let all = chat
+        .read_with(&cx.cx, |chat, _| chat.selected_transcript_text())
+        .expect("Select All selects");
+    assert!(all.contains(&sentence), "the card's text is copied: {all:?}");
+    assert!(
+        !all.contains("API Error: 529 overloaded"),
+        "the covered row adds nothing to the copy: {all:?}"
+    );
+    assert!(!all.contains("\n\n\n"), "and leaves no gap where it was: {all:?}");
+}
+
+/// A row the card does not stand for is never hidden, whatever its numbers say.
+#[gpui::test]
+async fn a_stale_card_never_hides_a_row_that_is_not_its_error(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    failed_with_limit(&chat, cx, &logs, false);
+    assert!(cx.debug_bounds("user-bubble-0").is_some());
+
+    chat.update(cx, |chat, _| {
+        chat.limit_card.as_mut().unwrap().failed_entry = Some(0);
+    });
+    refresh_frame(cx);
+    assert!(
+        cx.debug_bounds("user-bubble-0").is_some(),
+        "the first question is still drawn"
+    );
+    assert!(!rows(&chat, cx)[0].contains_key("coveredBy"));
+}
+
+/// A later turn that fails for another reason is not hidden by an old card.
+#[gpui::test]
+async fn a_later_failure_is_not_covered_by_an_old_card(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    notice(&chat, cx, rejected(3600));
+    event(&chat, cx, turn_ended());
+    send(&chat, cx, "silent second");
+    wait_for_prompts(&chat, cx, &logs, 2);
+    event(&chat, cx, turn_failed());
+    refresh_frame(cx);
+    assert_eq!(card_state(&chat, cx).unwrap().1, None, "not the card's turn");
+    assert!(cx.debug_bounds("chat-retry").is_some(), "the later failure is drawn, with Retry");
+}
+
+/// A prompt sent while the card counts retires the failed row's Retry: the card must not offer it.
+#[gpui::test]
+async fn a_new_prompt_retires_the_cards_try_again(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    failed_with_limit(&chat, cx, &logs, false);
+    send(&chat, cx, "silent second");
+    wait_for_prompts(&chat, cx, &logs, 2);
+    assert_eq!(card_state(&chat, cx).unwrap().1, None);
+    event(&chat, cx, turn_ended());
+    pass_the_reset(&chat, cx);
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("limit-card-retry").is_none(), "nothing to retry any more");
+    assert!(cx.debug_bounds("limit-card-lifted").is_some());
+}
+
+/// Other statuses, and a rejection with no reset time, keep today's line.
+#[gpui::test]
+async fn other_statuses_keep_the_warning_line(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    notice(
+        &chat,
+        cx,
+        SessionNotice::RateLimited {
+            status: "allowed_warning".into(),
+            window: Some("five_hour".into()),
+            resets_at: Some(chrono::Local::now().timestamp() + 3600),
+            used_percent: Some(92),
+            limit_scope: None,
+        },
+    );
+    notice(
+        &chat,
+        cx,
+        SessionNotice::RateLimited {
+            status: "rejected".into(),
+            window: None,
+            resets_at: None,
+            used_percent: None,
+            limit_scope: None,
+        },
+    );
+    assert_eq!(card_state(&chat, cx), None);
+    let kinds: Vec<String> = rows(&chat, cx).iter().map(|r| r["kind"].clone()).collect();
+    assert_eq!(kinds, vec!["warning", "warning"]);
+}
+
+/// The socket's `retry` on the card or on the row it covers: refused while the limit lasts, then
+/// the same as the error row's, once.
+#[gpui::test]
+async fn the_socket_retry_presses_the_card_once_the_limit_has_passed(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    let (entry, failed) = failed_with_limit(&chat, cx, &logs, false);
+    let press = |chat: &Entity<Chat>, cx: &mut VisualTestContext, at: usize| {
+        chat.update(cx, |chat, cx| chat.transcript_act(TranscriptAction::Retry(at), cx))
+    };
+    assert!(press(&chat, cx, entry).is_err(), "counting: refused");
+    assert!(press(&chat, cx, failed).is_err(), "the covered row is the card's: refused too");
+    assert_eq!(logs.heard().len(), 1);
+
+    pass_the_reset(&chat, cx);
+    assert_eq!(press(&chat, cx, entry), Ok(()));
+    wait_for_prompts(&chat, cx, &logs, 2);
+    assert!(press(&chat, cx, entry).is_err(), "pressed once: nothing left to retry");
+}
+
+/// Rows renumbered under the card: a recovered connection error before it goes, and the card
+/// follows its rows; a new conversation drops it.
+#[gpui::test]
+async fn the_card_follows_renumbered_rows(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    chat.update(cx, |chat, _| {
+        chat.push_entry(Entry::Error {
+            message: "old".into(),
+            retryable: false,
+            kind: ErrorKind::Connection,
+        })
+    });
+    let (entry, failed) = failed_with_limit(&chat, cx, &logs, false);
+    chat.update(cx, |chat, _| chat.clear_recovered_connection_errors());
+    assert_eq!(card_state(&chat, cx), Some((entry - 1, Some(failed - 1))));
+    chat.read_with(&cx.cx, |chat, _| {
+        let card = chat.limit_card.as_ref().unwrap();
+        assert!(matches!(chat.entries[card.entry], Entry::Notice { .. }));
+        assert!(matches!(chat.entries[card.failed_entry.unwrap()], Entry::Error { .. }));
+    });
+    chat.update(cx, |chat, cx| chat.new_conversation(cx));
+    assert_eq!(card_state(&chat, cx), None);
+}
