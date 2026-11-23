@@ -758,6 +758,11 @@ pub struct ChatControlSnapshot {
     /// Debug builds only: the text of the quote held for the next prompt, `None` when none is.
     #[cfg(debug_assertions)]
     pub composer_quote: Option<String>,
+    /// Debug builds only: where the last paint drew the composer's quote card, as
+    /// `[x, y, width, height]` in window pixels; `None` while none is drawn. The card's ✕ is Ely's
+    /// and cannot be measured on its own: it is the last part of this box, at its right edge.
+    #[cfg(debug_assertions)]
+    pub composer_quote_bounds: Option<[f32; 4]>,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -4815,6 +4820,17 @@ impl Chat {
             .filter(|text| !text.trim().is_empty())
     }
 
+    /// The held quote for a prompt whose typed text is `typed`. `None` for a slash command: the
+    /// agent reads a command at the head of the prompt, and a block there would make it a
+    /// message. The command goes as it is typed and the quote stays held for the next prompt.
+    fn quote_for(&self, typed: &str) -> Option<&str> {
+        if typed.trim_start().starts_with('/') {
+            None
+        } else {
+            self.quote_text()
+        }
+    }
+
     fn can_send(&self) -> bool {
         // F-CHAT-05: an unresolved permission/plan question must block Send
         // in its own right, not merely ride along with `streaming` (a
@@ -5355,6 +5371,12 @@ impl Chat {
             continue_row: self.continue_row(),
             #[cfg(debug_assertions)]
             composer_quote: self.quote.as_ref().map(|quote| quote.text.clone()),
+            #[cfg(debug_assertions)]
+            composer_quote_bounds: self
+                .action_bounds
+                .borrow()
+                .get(&(message_actions::COMPOSER_QUOTE, "composerQuote"))
+                .copied(),
             effort: self
                 .effort
                 .as_ref()
@@ -5485,7 +5507,7 @@ impl Chat {
                 // The menu's own rule: a verb that quotes what the menu would not offer is a lie.
                 if !self.quote_selection_available() {
                     return Err("surface.chat.transcript quoteSelection: nothing is selected \
-                         within one message"
+                         within one entry"
                         .to_string());
                 }
                 self.quote_selection(cx);
@@ -5758,7 +5780,15 @@ impl Chat {
     /// `None` rather than offering the agent's words as the user's.
     pub fn first_user_prompt(&self) -> Option<String> {
         self.entries.iter().find_map(|entry| match entry {
-            Entry::User { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            // A prompt that opens with a quote is named by what was typed after it, or by the
+            // quote when nothing was.
+            Entry::User { text, .. } if !text.trim().is_empty() => {
+                let (quoted, rest) = quote::split_quote(text);
+                match quoted {
+                    Some(quoted) if rest.trim().is_empty() => Some(quoted),
+                    _ => Some(rest.to_string()),
+                }
+            }
             _ => None,
         })
     }
@@ -6778,11 +6808,15 @@ impl Chat {
         if !self.can_send() {
             return;
         }
-        // The held quote goes at the head of the draft before the mentions are lifted, so the typed
-        // part is read as it always was. `draft` is what a hand-back puts back: the block and the
-        // field.
-        let draft = quote::join_quote(self.quote_text(), &self.draft);
-        let (text, mention_paths) = assemble_prompt(&draft, &self.accepted_mentions);
+        // Only the typed part is read for mentions: the quote is not typed text, and an `@path` in
+        // it stays the words that were quoted. It goes ahead of what is lifted. `draft` is what a
+        // hand-back puts back: the block and the field as typed. A slash command takes no quote
+        // (`quote_for`), and the quote stays held.
+        let (typed, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let quote = self.quote_for(&typed);
+        let text = quote::join_quote(quote, &typed);
+        let draft = quote::join_quote(quote, &self.draft);
+        let quoted = quote.is_some();
         let mentions = self.accepted_mentions.clone();
         self.remember_prompt();
         let images = std::mem::take(&mut self.attachments);
@@ -6790,7 +6824,9 @@ impl Chat {
         self.reset_composer_popups();
         self.set_composer_text("", cx);
         // The quote is in the prompt now: it is not the next one's.
-        self.quote = None;
+        if quoted {
+            self.quote = None;
+        }
         self.submit_prompt(
             retry::LastPrompt {
                 text,
@@ -6919,13 +6955,19 @@ impl Chat {
         {
             return;
         }
-        let draft = quote::join_quote(self.quote_text(), &self.draft);
-        let (text, _) = assemble_prompt(&draft, &self.accepted_mentions);
+        // As in `send`: the quote joins the typed part after the mentions are lifted from it, and a
+        // slash command goes without it, the quote still held.
+        let (typed, _) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let quote = self.quote_for(&typed);
+        let text = quote::join_quote(quote, &typed);
+        let quoted = quote.is_some();
         self.remember_prompt();
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
-        self.quote = None;
+        if quoted {
+            self.quote = None;
+        }
         self.queue.push_back(text);
         cx.notify();
     }
@@ -9911,7 +9953,16 @@ fn turn_is_foldable(turns: &[TurnSegment], position: usize) -> bool {
 fn turn_label(entries: &[Entry], turn: &TurnSegment) -> String {
     for index in turn.start..=turn.end {
         if let Some(Entry::User { text, .. }) = entries.get(index) {
-            let line = text.lines().next().unwrap_or(text.as_str());
+            // A prompt that opens with a quote is labelled by what was typed after it, or by the
+            // quote's first line when nothing was: not by the block's `>` markers.
+            let (quoted, rest) = quote::split_quote(text);
+            let line = match &quoted {
+                Some(quoted) if rest.trim().is_empty() => quoted
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or(quoted.as_str()),
+                _ => rest.lines().next().unwrap_or(rest),
+            };
             return line.chars().take(TURN_LABEL_MAX_CHARS).collect();
         }
     }

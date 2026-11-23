@@ -150,20 +150,40 @@ impl Chat {
                 // the transcript's offset space is still the whole `text`, block included: the
                 // rest is its tail, so it is drawn where its bytes are, and a drag or Select All
                 // reads the same bytes it highlights. Copy keeps taking the whole text.
-                let (quoted, rest) = quote::split_quote(&text);
-                let rest_at = source_start + (text.len() - rest.len());
+                let (quoted, rest_len) = {
+                    let (quoted, rest) = quote::split_quote(&text);
+                    (quoted, rest.len())
+                };
+                let rest_start = text.len() - rest_len;
+                let rest_at = source_start + rest_start;
+                // The text is moved into its element when no quote leaves it whole; with one, only
+                // the tail is copied.
+                let rest = if quoted.is_some() {
+                    text[rest_start..].to_string()
+                } else {
+                    text
+                };
+                // A prompt that is a quote alone has no text to draw; any other is drawn, empty
+                // or not, as it always was.
+                let draws_rest = !(quoted.is_some() && rest.is_empty());
                 let card = quoted.map(|quoted| {
-                    QuoteReply::new(
-                        (id.clone(), "quote-card"),
-                        quote::READ_BACK_AUTHOR,
-                        // The card shows one line: the quote is not copied whole into the frame.
-                        quoted.lines().next().unwrap_or_default().to_string(),
+                    message_actions::measured(
+                        QuoteReply::new(
+                            (id.clone(), "quote-card"),
+                            quote::READ_BACK_AUTHOR,
+                            // One short line: Ely draws the first line it is given, and the quote
+                            // is not copied whole into every frame.
+                            quote::card_line(&quoted),
+                        ),
+                        &entity,
+                        entry_index,
+                        "quoteCard",
+                        Some("message-quote-card"),
                     )
                 });
-                // A prompt that is a quote alone has no text to draw.
-                let rest = (!rest.is_empty()).then(|| {
+                let rest = draws_rest.then(|| {
                     Self::render_plain_text(
-                        rest.to_string(),
+                        rest,
                         theme,
                         format!("user-entry-{entry_index}"),
                         rest_at,

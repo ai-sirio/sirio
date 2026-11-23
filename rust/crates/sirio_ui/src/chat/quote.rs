@@ -14,6 +14,38 @@ pub(crate) struct Quote {
 /// it, because the author is never sent.
 pub(crate) const READ_BACK_AUTHOR: &str = "Quote";
 
+/// The most characters of a quote a card is given: more than any card is wide, so the card's own
+/// ellipsis shows where the line is cut.
+pub(crate) const CARD_LINE_MAX_CHARS: usize = 300;
+
+/// The one line of text a quote's card shows: its lines, each trimmed, with the blank ones
+/// skipped, joined by single spaces and cut at `CARD_LINE_MAX_CHARS` characters. Ely's card draws
+/// the first line of what it is given, so a quote that opens with a blank line, or runs over
+/// several, would show an empty card or one line of many.
+pub(crate) fn card_line(quote: &str) -> String {
+    let mut line = String::new();
+    let mut chars = 0;
+    // Chars are taken one by one up to the cap, so a quote of one huge line (a card is built
+    // every frame) is not copied whole to be cut.
+    'parts: for part in quote.lines().map(str::trim).filter(|part| !part.is_empty()) {
+        if !line.is_empty() {
+            if chars >= CARD_LINE_MAX_CHARS {
+                break;
+            }
+            line.push(' ');
+            chars += 1;
+        }
+        for ch in part.chars() {
+            if chars >= CARD_LINE_MAX_CHARS {
+                break 'parts;
+            }
+            line.push(ch);
+            chars += 1;
+        }
+    }
+    line
+}
+
 /// The prompt text for `typed` with `quote` at its head: every line of the quote prefixed with
 /// `> ` (an empty line becomes `>`), an empty line, then `typed`.
 ///
@@ -146,5 +178,44 @@ mod tests {
     fn typed_text_that_starts_with_a_quote_stays_typed() {
         let text = join_quote(Some("a"), "> b\n\nc");
         assert_eq!(split_quote(&text), (Some("a".to_string()), "> b\n\nc"));
+    }
+
+    // The card's line (`card_line`): a quote that opens with a blank line must not draw an empty
+    // card, a long one must be cut where the card's own ellipsis shows it, and the cut must not
+    // fall inside a character.
+    #[test]
+    fn a_card_line_skips_the_blank_lines_before_the_text() {
+        assert_eq!(card_line("\n\n  abc"), "abc");
+    }
+
+    #[test]
+    fn a_card_line_joins_the_lines_with_single_spaces() {
+        assert_eq!(card_line("a\n\n  b  \r\nc\n"), "a b c");
+    }
+
+    #[test]
+    fn a_card_line_of_nothing_is_empty() {
+        assert_eq!(card_line(""), "");
+        assert_eq!(card_line(" \n\t\n"), "");
+    }
+
+    #[test]
+    fn a_card_line_is_cut_at_the_cap() {
+        let long = "x".repeat(CARD_LINE_MAX_CHARS * 2);
+        assert_eq!(card_line(&long).chars().count(), CARD_LINE_MAX_CHARS);
+    }
+
+    #[test]
+    fn a_card_line_is_cut_on_a_character_boundary() {
+        let long = "\u{e9}\u{1f600}".repeat(CARD_LINE_MAX_CHARS);
+        let line = card_line(&long);
+        assert_eq!(line.chars().count(), CARD_LINE_MAX_CHARS);
+        assert!(long.starts_with(&line));
+    }
+
+    #[test]
+    fn a_card_line_under_the_cap_is_whole() {
+        let text = "y".repeat(CARD_LINE_MAX_CHARS);
+        assert_eq!(card_line(&text), text);
     }
 }

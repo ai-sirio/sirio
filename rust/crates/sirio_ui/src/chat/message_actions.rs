@@ -144,9 +144,11 @@ impl Chat {
 
     /// Debug builds only, the control socket's readouts of a row: `actions` (what it draws),
     /// `actionsShown` (`always`, `hover` or `none`) and, for each button the last paint drew,
-    /// `actionBounds.<copy|quote|continue|row>` as `[x, y, width, height]` in window pixels. A hidden
-    /// row paints none of its buttons, so a hover row reports no button until the pointer is over
-    /// its message; `actionBounds.row` is the row's own place and is reported either way.
+    /// `actionBounds.<copy|quote|continue|row>` as `[x, y, width, height]` in window pixels. A
+    /// hidden row paints none of its buttons, so a hover row reports no button until the pointer
+    /// is over its message; `actionBounds.row` is the row's own place and is reported either way.
+    /// A user row that draws a quote card also gives `quote` (the quoted text, absent otherwise)
+    /// and `actionBounds.quoteCard` (where the card was painted).
     #[cfg(debug_assertions)]
     pub(super) fn action_columns(
         &self,
@@ -155,13 +157,22 @@ impl Chat {
         roles: &[TurnRowRole],
         row: &mut std::collections::BTreeMap<String, String>,
     ) {
+        let drawn = roles.get(index).is_some_and(roles_draw);
         let actions = self
             .entries
             .get(index)
-            .filter(|_| roles.get(index).is_some_and(roles_draw))
+            .filter(|_| drawn)
             .and_then(|entry| frame.row(index, entry));
         row.insert("actions".into(), RowActions::names(actions).into());
         row.insert("actionsShown".into(), RowActions::shown_wire(actions).into());
+        // The quote a user row draws as a card (`split_quote`, the rule the row follows); absent
+        // when it draws none, as a row of a folded turn does not.
+        if drawn
+            && let Some(Entry::User { text, .. }) = self.entries.get(index)
+            && let (Some(quoted), _) = super::quote::split_quote(text)
+        {
+            row.insert("quote".into(), quoted);
+        }
         for ((entry, name), bounds) in self.action_bounds.borrow().iter() {
             if *entry == index {
                 let value = serde_json::to_string(bounds).unwrap_or_default();
@@ -269,9 +280,14 @@ pub(super) fn roles_draw(role: &TurnRowRole) -> bool {
     matches!(role, TurnRowRole::Normal | TurnRowRole::Refoldable { .. })
 }
 
+/// The row `action_bounds` files the composer's quote card under: the card is no transcript row, so
+/// it takes the one index no row has.
+#[cfg(debug_assertions)]
+pub(super) const COMPOSER_QUOTE: usize = usize::MAX;
+
 /// A part of the row in a box of its own, so the box is the part's. In a debug build it records
 /// where it is painted (`Chat::action_bounds`): a part that is not painted records nothing.
-fn measured(
+pub(super) fn measured(
     part: impl IntoElement,
     chat: &Entity<Chat>,
     entry: usize,
@@ -294,7 +310,7 @@ fn measured(
 
 /// Covers its parent and records, when painted, the parent's window bounds.
 #[cfg(debug_assertions)]
-fn probe(chat: &Entity<Chat>, entry: usize, name: &'static str) -> AnyElement {
+pub(super) fn probe(chat: &Entity<Chat>, entry: usize, name: &'static str) -> AnyElement {
     let chat = chat.clone();
     gpui::canvas(
         |bounds, _, _| bounds,

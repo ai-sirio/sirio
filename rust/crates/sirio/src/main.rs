@@ -25878,9 +25878,16 @@ impl SirioWorkspace {
             if let Some(row) = snapshot.continue_row {
                 fields.push(("continueRow".to_string(), row.to_string()));
             }
-            // The quote held for the next prompt, absent when none is.
+            // The quote held for the next prompt, absent when none is, and where its card was
+            // painted (`[x, y, width, height]` in window pixels, absent when none is drawn).
             if let Some(quote) = snapshot.composer_quote {
                 fields.push(("composerQuote".to_string(), quote));
+            }
+            if let Some(bounds) = snapshot.composer_quote_bounds {
+                fields.push((
+                    "composerQuoteBounds".to_string(),
+                    serde_json::to_string(&bounds).unwrap_or_default(),
+                ));
             }
         }
         fields
