@@ -731,6 +731,12 @@ pub struct ChatControlSnapshot {
     /// Debug builds only: the boxes of the texts the last paint drew (`x`, `y`, `w`, `h`).
     #[cfg(debug_assertions)]
     pub transcript_text_rows: Vec<BTreeMap<String, String>>,
+    /// Debug builds only: the day separators the transcript draws, one row each. `kind` is
+    /// `daySeparator`, `entry` the user entry the separator sits above, `label` Ely's words for
+    /// its day seen from today. Not rows of `transcript`: those are the entries in order, and a
+    /// row between them would move every position the readouts and `retry { entry }` name.
+    #[cfg(debug_assertions)]
+    pub day_separators: Vec<BTreeMap<String, String>>,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -4154,9 +4160,11 @@ impl Chat {
                 message,
                 stop_reason,
             } => self.fail_turn(message, &stop_reason, cx),
-            // A thought's duration still settles when the next row is pushed or the turn
-            // ends. This is not an entry, so it ends no reply.
-            sirio_chat::ChatEvent::ThoughtEnded => {}
+            // A thinking block closed (Claude only): the thought settles here, not when the next
+            // row or the turn's end gets to it, which is all ACP has. With no thought open (a
+            // block that streamed no text) this does nothing: settling is not an entry, so it
+            // neither ends the turn nor the live reply.
+            sirio_chat::ChatEvent::ThoughtEnded => self.settle_open_thought(),
             sirio_chat::ChatEvent::TransportError(message) => {
                 self.lose_client(cx);
                 // The CLI that said it was running is gone.
@@ -4920,6 +4928,8 @@ impl Chat {
                     self.error_columns(index, &mut row);
                     #[cfg(debug_assertions)]
                     self.reveal_columns(index, &mut row);
+                    #[cfg(debug_assertions)]
+                    entry_time_columns(entry, &mut row);
                     #[cfg(not(debug_assertions))]
                     let _ = index;
                     row
@@ -4934,6 +4944,8 @@ impl Chat {
             transcript_text: self.transcript_text(),
             #[cfg(debug_assertions)]
             transcript_text_rows: transcript_text_row_boxes(&self.transcript_links.borrow()),
+            #[cfg(debug_assertions)]
+            day_separators: self.day_separator_rows(),
             effort: self
                 .effort
                 .as_ref()
@@ -7453,6 +7465,28 @@ impl Chat {
         }
     }
 
+    /// Debug builds only: one row per separator the transcript draws (`day_separators`). The
+    /// label is Ely's own `day_name`, so Sirio keeps no copy of its words.
+    #[cfg(debug_assertions)]
+    fn day_separator_rows(&self) -> Vec<BTreeMap<String, String>> {
+        let Some(today) = transcript::civil_day(chrono::Local::now()) else {
+            return Vec::new();
+        };
+        (0..self.entries.len())
+            .filter_map(|index| {
+                let day = transcript::heading_for(&self.entries, index)?;
+                Some(BTreeMap::from([
+                    ("kind".to_string(), "daySeparator".to_string()),
+                    ("entry".to_string(), index.to_string()),
+                    (
+                        "label".to_string(),
+                        ely_gpui_component::chat::day_name(day, today),
+                    ),
+                ]))
+            })
+            .collect()
+    }
+
     /// The line under a held queue; `None` when the queue is not held or holds nothing. It names
     /// Retry only while some row still has one.
     fn queue_held_line(&self) -> Option<String> {
@@ -8230,6 +8264,26 @@ fn subagent_part_item(part: &SubagentPart) -> serde_json::Value {
     serde_json::Value::Object(item)
 }
 
+/// Debug builds only, the control socket's readouts of when a row happened. A `user` row has
+/// `at`, Unix seconds, when the turn was asked; a `thought` row has `durationMs`, once it has
+/// ended. A value that is not known is not in the row: rows hold strings, so its absence is how
+/// the socket says null.
+#[cfg(debug_assertions)]
+fn entry_time_columns(entry: &Entry, row: &mut BTreeMap<String, String>) {
+    match entry {
+        Entry::User { at: Some(at), .. } => {
+            row.insert("at".into(), at.timestamp().to_string());
+        }
+        Entry::Thought {
+            duration_ms: Some(duration_ms),
+            ..
+        } => {
+            row.insert("durationMs".into(), duration_ms.to_string());
+        }
+        _ => {}
+    }
+}
+
 fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
     let mut row = BTreeMap::new();
     match entry {
@@ -8813,11 +8867,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         // The heading is the processor's to
                                         // pass in: it holds `&this.entries`.
                                         let day_heading = match this.entries.get(entry_index) {
-                                            Some(Entry::User { .. }) => transcript::heading_for(
-                                                &this.entries,
-                                                entry_index,
-                                                chrono::Local::now(),
-                                            ),
+                                            Some(Entry::User { .. }) => {
+                                                transcript::heading_for(&this.entries, entry_index)
+                                            }
                                             _ => None,
                                         };
                                         let body = Chat::render_entry(entry, transcript::TranscriptRowContext {
@@ -8825,7 +8877,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
     focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
     edit_summary: this.edit_summaries.get(&entry_index).cloned(), thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
-    day_heading: day_heading.as_deref(), agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+    day_heading, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
     drawn,
 }, &transcript_theme, &mut *window, &mut *cx)
                                         .into_any_element();
@@ -10507,6 +10559,69 @@ two"
                 ..
             }
         ));
+    }
+
+    /// A thought ends when its block closes (`ThoughtEnded`, Claude's `content_block_stop`), not
+    /// when whatever follows arrives: a reply whose first text is slow does not lengthen it. A
+    /// close that finds no thought open (a block that streamed no text) changes nothing.
+    #[gpui::test]
+    async fn a_thought_ends_when_its_block_closes(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        let duration_of_first = |chat: &Chat| match chat.entries.first() {
+            Some(Entry::Thought { duration_ms, .. }) => *duration_ms,
+            other => panic!("the first entry is the thought: {other:?}"),
+        };
+        let began = std::time::Instant::now();
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(
+                sirio_chat::ChatEvent::ThoughtChunk("weigh the options".into()),
+                cx,
+            );
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+        });
+        let settled = chat.read_with(cx, |chat, _| duration_of_first(chat));
+        assert!(settled.is_some(), "the block's close settles the thought");
+        // The text is slow to come. A thought reads the real clock, so the wait is real.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk("Here is the answer.".into()),
+                cx,
+            );
+        });
+        let elapsed = began.elapsed().as_millis() as u64;
+        let after_text = chat.read_with(cx, |chat, _| duration_of_first(chat));
+        assert_eq!(
+            after_text, settled,
+            "the text that follows does not settle it again"
+        );
+        assert!(
+            settled.is_some_and(|ms| ms + 50 <= elapsed),
+            "it ended before the 50 ms wait for the text: {settled:?} of {elapsed} ms"
+        );
+        chat.update(cx, |chat, cx| {
+            let entries = chat.entries.len();
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+            assert_eq!(
+                chat.entries.len(),
+                entries,
+                "a close with no thought pushes no entry"
+            );
+            assert!(chat.streaming, "it ends no turn");
+            assert!(
+                matches!(
+                    chat.entries.last(),
+                    Some(Entry::Assistant {
+                        stream: Some(_),
+                        ..
+                    })
+                ),
+                "and it finishes no live reply"
+            );
+        });
     }
 
     /// The turn's end settles a thought that no answer followed.
@@ -14265,6 +14380,15 @@ two"
             "the heading sits above the question"
         );
         assert!(cx.debug_bounds("day-heading-3").is_some(), "Today");
+        // Ely draws the separators, with its words for the day.
+        assert!(
+            cx.debug_bounds("date-separator-Yesterday").is_some(),
+            "the first question's day is named Yesterday"
+        );
+        assert!(
+            cx.debug_bounds("date-separator-Today").is_some(),
+            "the last question's day is named Today"
+        );
     }
 
     #[test]

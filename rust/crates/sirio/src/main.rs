@@ -25846,6 +25846,13 @@ impl SirioWorkspace {
             "heldLine".to_string(),
             snapshot.queue_held_line.unwrap_or_default(),
         ));
+        // Debug builds only: the day separators drawn, `{kind, entry, label}` rows kept apart from
+        // `transcript`, whose positions are the entries'.
+        #[cfg(debug_assertions)]
+        fields.push((
+            "daySeparators".to_string(),
+            sirio_control::protocol::rows::encode(&snapshot.day_separators),
+        ));
         fields
     }
 
