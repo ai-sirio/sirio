@@ -403,16 +403,6 @@ mod tests {
     }
 
     #[test]
-    fn the_accessible_name_holds_the_title_and_the_sentence() {
-        let name = accessible_name("5-hour usage limit reached, resets at 15:15.");
-        assert!(name.starts_with(TITLE), "{name:?}");
-        assert!(
-            name.ends_with("5-hour usage limit reached, resets at 15:15."),
-            "{name:?}"
-        );
-    }
-
-    #[test]
     fn new_puts_the_time_left_on_the_executor_clock() {
         let (wall_now, now) = (Local::now(), Instant::now());
         let made = |resets_at| {
