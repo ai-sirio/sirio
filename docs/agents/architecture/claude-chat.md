@@ -655,7 +655,8 @@ line.
 `sirio_ui::chat::limit_notice` writes the sentence. A part with no value is left out.
 
 A `rejected` status with a `resets_at` is a limit card (`chat::limit_card`: Ely's `Alert` and `Countdown`) in
-the warning's place; it covers its failed turn's error row, with no Retry until the reset has passed.
+the warning's place; it covers its failed turn's error row, with no Retry until the reset has passed. A row with
+no prompt to resend (the failure after a stray end, above) has no Retry and is not covered by the card.
 
 - `allowed_warning`: `Approaching the {window} usage limit: {n}% used, resets at {time}.` The
   percent is capped at 99, since a warning is not a refusal. It never says "reached".

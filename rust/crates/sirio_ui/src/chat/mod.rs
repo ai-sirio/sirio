@@ -2830,8 +2830,9 @@ impl Chat {
     /// The streamed tree is meant to be the same, so this is the net under it: whatever it
     /// would have got wrong does not outlive the turn, and what is stored or restored is built
     /// whole. A row is remeasured and the selection kept in bounds, as after a chunk. A reply the
-    /// reader panicked on is the exception: its stream ends, but it stays plain text for the turn
-    /// (`reread_plain_replies` reads it once at the turn's end).
+    /// reader panicked on is the exception: its stream ends, but it stays plain text until a turn
+    /// end reaches it (`TurnEnded` or `TurnFailed`, through `settle_turn` to
+    /// `reread_plain_replies`, which reads it once).
     fn finish_reply(&mut self) {
         // A drag with an end in the reply being revealed goes with the reveal: that end is a
         // place in the text drawn for the reply (`reveal.rs`). A reply that had stopped being
@@ -2852,9 +2853,9 @@ impl Chat {
                 && stream.take().is_some()
             {
                 // The reader panicked on this reply while it streamed: it stays plain text until
-                // its turn ends, where `reread_plain_replies` asks once (a row in mid-turn, Stop
-                // or a lost client are not the end of the turn, and a reply that panics the
-                // reader twice would otherwise be read twice).
+                // a turn end reaches it (`reread_plain_replies` asks once). After a lost client,
+                // a relaunch in mid-turn, or a Stop whose end never comes, it stays plain. It is
+                // not parsed here, so the turn end's read is the only one after the panic.
                 if document.reader_panicked {
                     continue;
                 }

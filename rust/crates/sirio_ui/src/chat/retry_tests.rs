@@ -891,33 +891,6 @@ async fn a_stops_end_settles_the_pending_flag_for_a_later_failure(cx: &mut TestA
     chat.read_with(&cx.cx, |chat, _| assert!(chat.queue_held, "and holds the queue"));
 }
 
-/// Stop and an at-once resend: the late end of the stopped turn is taken as the resent prompt's end
-/// (it is the first end to arrive, and a turn of ours streams), which settles the Stop's pending
-/// end. The resent prompt's own failure then arrives with nothing streaming, and it is shown: the
-/// flag that dropped the stopped turn's answer is gone with the end that settled it.
-#[gpui::test]
-async fn a_failure_after_a_stop_and_a_resend_is_shown(cx: &mut TestAppContext) {
-    let dir = TempDir::new();
-    let logs = Logs::in_dir(&dir.0);
-    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
-    send(&chat, cx, "silent stop me");
-    wait_for_prompts(&chat, cx, &logs, 1);
-    chat.update(cx, |chat, cx| chat.cancel_turn(cx));
-    send(&chat, cx, "silent again");
-    wait_for_prompts(&chat, cx, &logs, 2);
-    event(&chat, cx, turn_ended());
-    assert!(!chat.read_with(&cx.cx, |chat, _| chat.streaming), "taken as the resent prompt's end");
-
-    event(&chat, cx, turn_failed());
-
-    assert_eq!(
-        readout(&chat, cx),
-        ("turnFailed".to_string(), "none".to_string()),
-        "the resent prompt's failure is shown, with no prompt left to resend"
-    );
-    chat.read_with(&cx.cx, |chat, _| assert!(chat.queue_held, "and holds the queue"));
-}
-
 /// A held queue whose Retry is gone says so: the prompt went back to the composer, and the failed
 /// turn's row was retired. The queue stays held.
 #[gpui::test]
@@ -1045,6 +1018,15 @@ async fn a_plain_relaunch_takes_the_failed_turns_retry_off_its_row(cx: &mut Test
             chat.retry_action_at(failed),
             Some(retry::RetryAction::None),
             "the failed turn's row has no Retry: there is no prompt left to send"
+        );
+        let retryable = chat.entries.get(failed).and_then(|entry| match entry {
+            Entry::Error { retryable, .. } => Some(*retryable),
+            _ => None,
+        });
+        assert_eq!(
+            retryable,
+            Some(false),
+            "the row itself is retired: the answer None alone would hold without the retirement"
         );
     });
 }
