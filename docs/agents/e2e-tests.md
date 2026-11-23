@@ -655,9 +655,9 @@ Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "
 # `composerRow`). Each scenario is a fresh Sirio under `env -i` with its own HOME, XDG tree, database, socket and
 # host root; ~/.config/mise/config.toml must not change.
 #   stream             a 40 KiB reply (SHOWCASE, then parts that freeze) in 200 chunks 20 ms apart: while live,
-#                      0 < shownBytes < len(text), it only grows and is still behind past 16 KiB (which needs 9 KiB of
-#                      the reply frozen as it arrived: one that freezes little hands over to plain drawing soon after
-#                      its tail passes 7 KiB),
+#                      0 < shownBytes < len(text), it only grows and is still behind past 12 KiB (which needs 5 KiB of
+#                      the reply frozen as it arrived: one with nothing frozen hands over to plain drawing once its
+#                      tail passes 7 KiB),
 #                      transcriptText holds the newest marker even where the reveal has not reached it, and at the
 #                      turn's end live is false at once; the same bytes in one chunk give the same plain text. A reply selected whole and copied through the transcript menu while it
 #                      streams (`showcase slow`, 8 s), with the transcript scrolled to its top so that the live reply is

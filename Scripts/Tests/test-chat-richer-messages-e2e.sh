@@ -16,8 +16,8 @@ set -eEuo pipefail
 # Scenarios (each starts a fresh Sirio; the names are the ones --only takes):
 #   stream             a 40 KiB reply (the SHOWCASE document, then parts that freeze as they arrive) in 200 chunks
 #                      20 ms apart: while it is live the reveal is behind (`0 < shownBytes < len(text)`, it only
-#                      grows, and it is still behind past 16 KiB, which needs 9 KiB of the reply frozen as it
-#                      arrived: a reply that freezes little hands over to plain drawing soon after its tail passes
+#                      grows, and it is still behind past 12 KiB, which needs 5 KiB of the reply frozen as it
+#                      arrived: a reply with nothing frozen hands over to plain drawing once its tail passes
 #                      7 KiB), and `transcriptText`
 #                      holds the newest marker even where the reveal has not reached it; at the turn's end `live` is
 #                      false at once; the same text sent in one chunk gives the same plain text. Select All and Copy through the transcript menu while another reply streams

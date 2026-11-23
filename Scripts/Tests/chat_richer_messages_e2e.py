@@ -692,30 +692,36 @@ def main():
 
 
 
-def follow(world, until, timeout=90, every=0.04):
+def follow(world, until, timeout=90, every=0.04, keep=None):
     """Reads the chat over and over until `until(read)` (a read takes about 170 ms with a long transcript); every
     read is returned with the time it was taken (`t`) and how long it took (`latency`). A read the app does not answer
-    within its control socket's 5 s dispatch bound is a failure that says so: the UI thread was too busy to be read."""
+    within its control socket's 5 s dispatch bound is a failure that says so: the UI thread was too busy to be read.
+    With `keep` (a label), the scenario's artifact keeps `summarise` of the reads taken, with their latencies, however
+    the following ends: the reads that came before a failure are what tells why it failed."""
     samples = []
     deadline = time.time() + timeout
-    while True:
-        started = time.time()
-        try:
-            r = world.read()
-        except RpcError as error:
-            if "dispatch bound" not in str(error):
-                raise
-            slowest = max((x["latency"] for x in samples), default=0.0)
-            raise Fail(f"the app did not answer a read within the control socket's 5 s dispatch bound ({error}); the UI thread was "
-                       f"too busy to be read, after {len(samples)} reads, the slowest of which took {slowest:.2f} s")
-        r["t"] = time.time()
-        r["latency"] = r["t"] - started
-        samples.append(r)
-        if until(r):
-            return samples
-        if time.time() > deadline:
-            raise Fail(f"nothing happened within {timeout:.0f} s (last: {brief(r)})")
-        time.sleep(every)
+    try:
+        while True:
+            started = time.time()
+            try:
+                r = world.read()
+            except RpcError as error:
+                if "dispatch bound" not in str(error):
+                    raise
+                slowest = max((x["latency"] for x in samples), default=0.0)
+                raise Fail(f"the app did not answer a read within the control socket's 5 s dispatch bound ({error}); the UI thread was "
+                           f"too busy to be read, after {len(samples)} reads, the slowest of which took {slowest:.2f} s")
+            r["t"] = time.time()
+            r["latency"] = r["t"] - started
+            samples.append(r)
+            if until(r):
+                return samples
+            if time.time() > deadline:
+                raise Fail(f"nothing happened within {timeout:.0f} s (last: {brief(r)})")
+            time.sleep(every)
+    finally:
+        if keep:
+            world.scn.keep(keep, summarise(samples))
 
 
 def ended_after_streaming():
@@ -866,8 +872,7 @@ def scenario_stream(scn):
         w.open_chat("claude")
         # -- a 40 KiB reply in 200 chunks, read over and over (a read takes about 170 ms) while it streams
         w.send("showcase")
-        samples = follow(w, ended_after_streaming())
-        scn.keep("showcase samples", summarise(samples))
+        samples = follow(w, ended_after_streaming(), keep="showcase samples")
         final = samples[-1]
         _, reply = last_reply(final)
         text = reply["text"]
@@ -883,17 +888,30 @@ def scenario_stream(scn):
                  f"{len(live)} live reads, {len(behind)} with the reveal part of the way: "
                  f"{[(row['shownBytes'], byte_len(row['text'])) for _, row in live][:8]}", read=behind[0][0] if behind else live[0][0])
         # The reveal is behind the text at `shownBytes` S only if the tail, from the end of the last frozen block shown to S,
-        # is within the 7 KiB budget: so at S > 16 KiB at least 9 KiB of the reply had been frozen as it arrived. A reply
-        # that cannot freeze hands over to drawing as it arrives once S passes 7 KiB (the `compact` reply below), and one
-        # that freezes about a KiB (`showcase x8`) soon after. The bar is 16 KiB and not more because the stream's
-        # `segments()` may lag by up to a quarter of the reply (spec 5.1), so a reply that froze well can still hand over
-        # from about 20 KiB on (a run read behind the text only up to 19520 of 23780); 16 KiB is more than twice what a
-        # reply that freezes little can show.
-        deep = [(r, int(row["shownBytes"]), byte_len(row["text"])) for r, row in behind if int(row["shownBytes"]) > 16 * 1024]
-        scn.need(deep, "the reveal was still behind the text past 16 KiB, which needs 9 KiB of the reply frozen as it arrived (the stream path)",
-                 f"the reveal never passed 16 KiB while behind: {[(row['shownBytes'], byte_len(row['text'])) for _, row in behind][-3:]}",
+        # is within the 7 KiB budget (reveal.rs, `drawn_reply`): so at S > 12 KiB at least 5 KiB of the reply had been frozen
+        # as it arrived. With nothing frozen the tail is all of S and the reveal hands over once S passes 7 KiB: the
+        # `compact` reply below, which cannot freeze, was read behind at 7163 bytes at most (the budget is 7168). The bar is 12 KiB and not
+        # higher because the reads are sparse here (one per 1 to 3 KiB of reveal around the bar, sparser as the transcript grows) and a
+        # reply that froze well can still hand over from about 20 KiB on (the stream's `segments()` may lag by up to a
+        # quarter of the reply, spec 5.1; a run read behind the text only up to 19520 of 23780, after 14272 and 16379).
+        deep = [(r, int(row["shownBytes"]), byte_len(row["text"])) for r, row in behind if int(row["shownBytes"]) > 12 * 1024]
+        # With no such read, say which case it is: the reveal was judged (a live read landed while the text was 14 to 24 KiB,
+        # where the reveal passes 12 KiB and before the earliest handover seen), or no read landed there because the reads
+        # were too slow, which judges nothing. Only the reads' times and text lengths decide it, never `shownBytes`.
+        in_window = [row for _, row in live if 14 * 1024 <= byte_len(row["text"]) <= 24 * 1024]
+        if deep or in_window:
+            why_deep = f"the reveal never passed 12 KiB while behind: {[(row['shownBytes'], byte_len(row['text'])) for _, row in behind][-3:]}"
+        else:
+            gaps = [(samples[i]["latency"], len(samples[i - 1]["transcript_text"]), len(samples[i]["transcript_text"]))
+                    for i in range(1, len(samples))]
+            slow = max(gaps, default=(0.0, 0, 0))
+            why_deep = (f"could not be judged: no live read landed while the text was 14 to 24 KiB ({len(samples)} reads in all, text "
+                        f"lengths {[byte_len(row['text']) for _, row in live]}; the slowest read took {slow[0]:.2f} s while the "
+                        f"transcript text went from {slow[1]} to {slow[2]} characters): the UI thread was too busy to be read")
+        scn.need(deep, "the reveal was still behind the text past 12 KiB, which needs 5 KiB of the reply frozen as it arrived (the stream path)",
+                 why_deep,
                  read=deep[-1][0] if deep else final,
-                 detail={"readsBehindPast16KiB": len(deep), "newest": deep[-1][1:] if deep else None,
+                 detail={"readsBehindPast12KiB": len(deep), "newest": deep[-1][1:] if deep else None,
                          "deepestBehind": max((int(row["shownBytes"]) for _, row in behind), default=None)})
         shown = [int(row["shownBytes"]) for _, row in live]
         shrank = [i for i in range(1, len(shown)) if shown[i] < shown[i - 1]]
@@ -985,8 +1003,7 @@ def scenario_stream(scn):
         w.start()
         w.open_chat("claude")
         w.send("compact")
-        samples = follow(w, ended_after_streaming())
-        scn.keep("compact samples", summarise(samples))
+        samples = follow(w, ended_after_streaming(), keep="compact samples")
         live_c = live_reads(samples)
         scn.need(live_c and any(int(row["shownBytes"]) < byte_len(row["text"]) for _, row in live_c),
                  "the compact reply began with a reveal that trailed the received text",
@@ -1017,11 +1034,11 @@ def scenario_stream(scn):
                  detail={"shownBytes": int(rowc["shownBytes"]), "textBytes": byte_len(rowc["text"])})
         compact_text = rowc["text"]
         after_c = one_chunk_plain(scn, w, compact_text, "the compact reply's final plain text equals the same bytes delivered in one chunk")
-        # -- SHOWCASE eight times over: every copy cites [^1] again, so a good part of the reply is held in the tail; its
-        # reveal may or may not hand over depending on when the frames fall, so only its final equivalence is checked.
+        # -- SHOWCASE eight times over: every copy cites [^1] again, so a good part of the reply is held in the tail. How
+        # much of it freezes varies from run to run: its reveal has handed over after reads behind at 5824 to 13454 bytes,
+        # and has stayed behind to 34764 and 40537; so only its end and its final equivalence are checked.
         w.send("showcase x8")
-        samples = follow(w, ended_after_streaming())
-        scn.keep("showcase x8 samples", summarise(samples))
+        samples = follow(w, ended_after_streaming(), keep="showcase x8 samples")
         r8, row8 = ended_read(samples)
         scn.need(row8.get("live") == "false",
                  "the x8 reply ends with live false",
@@ -1055,24 +1072,48 @@ def scenario_stop(scn):
     try:
         w.start()
         w.open_chat("claude")
-        w.send("showcase slow")  # 8 s, so that a capture and a read fit between the reveal's middle and the Stop
+        w.send("showcase slow")  # 8 s, so that a capture and a read fit between the reveal's start and the Stop
+        # Early: the capture and the two reads around it take two seconds or more (about 12 KiB of this reply), and the Stop must
+        # land before the reveal could hand over to drawing as the text arrives (a well-frozen reply has done so from
+        # about 20 KiB on); started at 8 KiB of text, the Stop's read had landed at 17214 to 18804 bytes of reveal.
         w.wait("the reply is part way", lambda r: last_reply(r)[1] is not None and last_reply(r)[1].get("live") == "true"
-               and byte_len(last_reply(r)[1]["text"]) > 8 * 1024, timeout=30, every=0.05)
+               and byte_len(last_reply(r)[1]["text"]) > 1024, timeout=30, every=0.05)
 
         def reveal_behind(r):
             reply = last_reply(r)[1]
             return reply is not None and reply.get("live") == "true" and 0 < int(reply["shownBytes"]) < byte_len(reply["text"])
 
+        def wait_behind(what):
+            """`reveal_behind`, with a timeout that names a handover when there was one: reads that found the reply live
+            with the whole text shown past the 7 KiB budget. The reply ends about 8 s in, before the 15 s run out, so those
+            reads are counted as they come, not judged from the last read (which the plain timeout message shows)."""
+            whole = []
+
+            def predicate(r):
+                reply = last_reply(r)[1]
+                if (reply is not None and reply.get("live") == "true" and byte_len(reply["text"]) > 7 * 1024
+                        and int(reply["shownBytes"]) == byte_len(reply["text"])):
+                    whole.append(byte_len(reply["text"]))
+                return reveal_behind(r)
+
+            try:
+                return w.wait(what, predicate, timeout=15, every=0.03)
+            except Fail as failure:
+                if whole:
+                    raise Fail(f"{what}: the reply handed over to drawing as it arrives before the Stop was taken: {len(whole)} reads "
+                               f"found it live with the whole text shown (shownBytes == len(text), from {whole[0]} bytes on), its "
+                               f"tail past the 7 KiB budget, so there was no reveal behind to stop ({failure})") from None
+                raise
+
         # The capture sits between two reads that found the reveal behind the text (by however little: the lag is a few KiB
         # and no threshold of ours is near it), so the frame shows a reveal the reads prove behind; the Stop follows the
         # second read at once, and the first read after it says what the Stop did.
-        w.wait("the reveal is behind before the capture", reveal_behind, timeout=15, every=0.03)
+        wait_behind("the reveal is behind before the capture")
         w.capture("stop-mid-reveal")
-        before = w.wait("the reveal is behind just before the Stop", reveal_behind, timeout=15, every=0.03)
+        before = wait_behind("the reveal is behind just before the Stop")
         _, behind = last_reply(before)
         w.stop_turn()
-        samples = follow(w, lambda r: r["status"] != "streaming", timeout=30, every=0.03)
-        scn.keep("reads after the Stop", summarise(samples))
+        samples = follow(w, lambda r: r["status"] != "streaming", timeout=30, every=0.03, keep="reads after the Stop")
         final = samples[-1]
         _, row = last_reply(final)
         text = row["text"]
