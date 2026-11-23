@@ -2903,6 +2903,283 @@ def startup_main(kind):
     os._exit(1)
 
 
+# ---------------------------------------------------------------------------
+# `richer`: the turns of Scripts/Tests/test-chat-richer-messages-e2e.sh. The prompt picks the turn (the
+# stub's header, Scripts/Tests/stubs/richer/claude, lists them). A turn runs on its own thread, so control
+# requests (the `interrupt` of Stop above all) are answered while it streams, and a Stop ends it at once with
+# the result the real CLI writes: `error_during_execution`, `is_error`, no text.
+#
+# What a retry resends is the same prompt, so a turn that fails does so on the FIRST prompt of that text only,
+# counted over every process in $SIRIO_STUB_LOG (`prompt\t<pid>\t<json text>` lines the fixture appends as it
+# reads each prompt): the second one answers. `<prompt> hold` waits for the file `$SIRIO_FIXTURE_GATE.<n>`
+# (n the prompt's number) before it fails or answers, so a scenario can queue messages behind a running turn.
+# ---------------------------------------------------------------------------
+
+RICHER_STOP = threading.Event()
+RICHER_CHUNKS = 200
+RICHER_CHUNK_SECONDS = 0.02
+RICHER_PARTIAL = (
+    "I started on it. Here is **what I found** so far, with `code` and a list:\n\n"
+    "- the first point, written out\n- the second point\n\n"
+    "The next step is"
+)
+
+
+def richer_log(kind, text=""):
+    path = os.environ.get("SIRIO_STUB_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as log:
+            log.write(f"{kind}\t{os.getpid()}\t{json.dumps(text)}\n")
+
+
+def richer_seen(text):
+    """How many prompts of exactly this text the log already holds (every process)."""
+    path = os.environ.get("SIRIO_STUB_LOG")
+    if not path or not os.path.exists(path):
+        return 0
+    wanted = json.dumps(text)
+    count = 0
+    with open(path, encoding="utf-8") as log:
+        for line in log:
+            parts = line.rstrip("\n").split("\t", 2)
+            if len(parts) == 3 and parts[0] == "prompt" and parts[2] == wanted:
+                count += 1
+    return count
+
+
+def richer_showcase():
+    """The SHOWCASE document, then parts of a few blocks each (they freeze as they arrive, so the reply
+    reveals) until the reply is 40 KiB."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    path = os.path.join(here, *([".."] * 5), "Scripts", "Tests", "fixtures", "markdown-documents", "showcase.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read().replace("{{REMOTE_PORT}}", "9")
+    part = 0
+    while len(text.encode("utf-8")) < 40 * 1024:
+        part += 1
+        text += (
+            f"\n\n## Part {part}\n\nA paragraph of part {part}, with **bold**, `code` and a "
+            f"[link](https://example.com/{part}). Its marker is part-{part:03d}-end.\n\n"
+            "- the first point\n- the second\n"
+        )
+    return text
+
+
+def richer_showcase_x8():
+    """SHOWCASE repeated eight times: every copy mentions `[^1]` again, so the reply cannot freeze."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    path = os.path.join(here, *([".."] * 5), "Scripts", "Tests", "fixtures", "markdown-documents", "showcase.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read().replace("{{REMOTE_PORT}}", "9")
+    return (text + "\n\n") * 8
+
+
+def richer_wait(seconds):
+    """Sleeps up to `seconds`; False when a Stop came in meanwhile."""
+    return not RICHER_STOP.wait(seconds)
+
+
+def richer_gate(number):
+    """Holds until the gate file of this prompt's number exists; False when a Stop came in."""
+    base = os.environ.get("SIRIO_FIXTURE_GATE")
+    path = f"{base}.{number}" if base else None
+    while path and not os.path.exists(path):
+        if not richer_wait(0.05):
+            return False
+    return True
+
+
+def richer_block(index, kind, **fields):
+    trace_stream({"type": kind, "index": index, **fields})
+
+
+def richer_open_text(message_id, index=0):
+    message_start(message_id)
+    richer_block(index, "content_block_start", content_block={"type": "text", "text": ""})
+
+
+def richer_delta(piece, index=0):
+    richer_block(index, "content_block_delta", delta={"type": "text_delta", "text": piece})
+
+
+def richer_close_text(message_id, body, index=0):
+    richer_block(index, "content_block_stop")
+    trace_assistant(message_id, {"type": "text", "text": body})
+    message_end()
+
+
+def richer_stream(message_id, chunks, pause):
+    """A text block delivered chunk by chunk; False when a Stop cut it short (nothing is closed then)."""
+    richer_open_text(message_id)
+    for chunk in chunks:
+        richer_delta(chunk)
+        if not richer_wait(pause):
+            return False
+    richer_close_text(message_id, "".join(chunks))
+    return True
+
+
+def richer_chunks(text, count):
+    size = max(1, -(-len(text) // count))
+    return [text[at:at + size] for at in range(0, len(text), size)]
+
+
+def richer_interrupted():
+    interrupted_result()
+
+
+def richer_failed(text_body):
+    failure_result("success", text_body)
+
+
+def richer_reply(message_id, body):
+    if richer_stream(message_id, [body], 0):
+        result()
+
+
+def richer_limit_epoch():
+    path = os.environ.get("SIRIO_FIXTURE_LIMIT_FILE")
+    with open(path, encoding="utf-8") as handle:
+        return int(handle.read().strip())
+
+
+def richer_turn(prompt):
+    number = richer_seen(prompt) + 1
+    richer_log("prompt", prompt)
+    RICHER_STOP.clear()
+    hold = prompt.endswith(" hold")
+    base = prompt[: -len(" hold")] if hold else prompt
+    requesting()
+    if base in ("showcase", "showcase slow", "showcase x8"):
+        body = richer_showcase_x8() if base == "showcase x8" else richer_showcase()
+        # `showcase slow` is the same reply at 40 ms a chunk (8 s), long enough to select and copy while it streams.
+        pause = RICHER_CHUNK_SECONDS * (2 if base == "showcase slow" else 1)
+        if not richer_stream("msg_showcase", richer_chunks(body, RICHER_CHUNKS), pause):
+            richer_interrupted()
+            return
+        result()
+    elif base == "fail":
+        if number == 1:
+            richer_open_text("msg_fail")
+            for piece in richer_chunks(RICHER_PARTIAL, 3):
+                richer_delta(piece)
+            if hold and not richer_gate(number):
+                richer_interrupted()
+                return
+            richer_failed("API Error: 529 overloaded")
+        else:
+            if hold and not richer_gate(number):
+                richer_interrupted()
+                return
+            richer_reply("msg_ok", "recovered")
+    elif base == "fail max turns":
+        richer_open_text("msg_max")
+        richer_delta("Working on it.")
+        failure_result("error_max_turns", "Reached the turn limit")
+    elif base == "think slow":
+        message_start("msg_think")
+        richer_block(0, "content_block_start", content_block={"type": "thinking", "thinking": "", "signature": ""})
+        for piece in ("weighing ", "the options ", "once more"):
+            richer_block(0, "content_block_delta", delta={"type": "thinking_delta", "thinking": piece})
+            if not richer_wait(0.15):
+                richer_interrupted()
+                return
+        richer_block(0, "content_block_stop")
+        # The thought is over; the reply's first text is 2 s away.
+        if not richer_wait(2.0):
+            richer_interrupted()
+            return
+        richer_block(1, "content_block_start", content_block={"type": "text", "text": ""})
+        richer_delta("done thinking", 1)
+        richer_block(1, "content_block_stop")
+        trace_assistant("msg_think", {"type": "text", "text": "done thinking"})
+        message_end()
+        result()
+    elif base == "die":
+        if number == 1:
+            richer_open_text("msg_die")
+            for piece in richer_chunks(RICHER_PARTIAL, 3):
+                richer_delta(piece)
+            sys.stdout.flush()
+            sys.stderr.write("richer fixture: dying mid-stream\n")
+            sys.stderr.flush()
+            os._exit(3)
+        richer_reply("msg_ok", "recovered")
+    elif base in ("limit rejected", "limit event"):
+        # The reset is read when the event is written (after the gate), so a scenario sets it just before.
+        if hold and not richer_gate(number):
+            richer_interrupted()
+            return
+        if base == "limit event" or number == 1:
+            epoch = richer_limit_epoch()
+            info = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": epoch,
+                    "unifiedWindows": {"five_hour": {"utilization": 1, "resetsAt": epoch}}}
+        if base == "limit event":
+            # The plan reached its limit but the turn went on: a rejected event and no failed turn.
+            cli_limit_event(info)
+            richer_reply("msg_ok", "ok")
+        elif number == 1:
+            cli_limit_refused("You've hit your limit \u00b7 resets 3:15pm (UTC)", info)
+        else:
+            richer_reply("msg_ok", "recovered")
+    elif base == "replyfile":
+        with open(os.environ["SIRIO_FIXTURE_REPLY_FILE"], encoding="utf-8") as handle:
+            body = handle.read()
+        richer_reply("msg_replyfile", body)
+    else:
+        if hold and not richer_gate(number):
+            richer_interrupted()
+            return
+        richer_reply("msg_ok", "ok")
+
+
+def richer_turns(prompts):
+    while True:
+        prompt = prompts.get()
+        if prompt is None:
+            return
+        richer_turn(prompt)
+
+
+def richer_main():
+    richer_log("start", " ".join(sys.argv[1:]))
+    init_line()
+    prompts = queue.Queue()
+    worker = threading.Thread(target=richer_turns, args=(prompts,), daemon=True)
+    worker.start()
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = message.get("type")
+        if kind == "control_request":
+            request = message.get("request", {})
+            subtype = request.get("subtype")
+            request_id = message.get("request_id")
+            if subtype == "initialize":
+                control_response(request_id, main_initialize_payload())
+            elif subtype == "interrupt":
+                control_response(request_id, {"still_queued": 0})
+                RICHER_STOP.set()
+            elif subtype == "get_context_usage":
+                control_response(request_id, {
+                    "totalTokens": 48000, "rawMaxTokens": 200000, "maxTokens": 180000,
+                    "percentage": 24, "model": TRACE_MODEL, "categories": []})
+            elif subtype == "mcp_status":
+                control_response(request_id, {"mcpServers": []})
+            elif subtype in ("mcp_toggle", "reload_plugins", "reload_skills"):
+                control_error(request_id, f"Unsupported control request subtype: {subtype}")
+            elif subtype == "set_permission_mode":
+                control_response(request_id, {"mode": request.get("mode")})
+            else:
+                control_response(request_id, {})
+        elif kind == "user":
+            prompts.put(trace_prompt_text(message).strip())
+    prompts.put(None)
+    worker.join()
+
+
 def main():
     if LAUNCH_LOG_PATH:
         with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
@@ -2913,6 +3190,9 @@ def main():
             }) + "\n")
     if flag_value("fixture-startup"):
         startup_main(flag_value("fixture-startup"))
+    if MODE == "richer":
+        richer_main()
+        return
     if MODE == "trace":
         trace_main()
         return

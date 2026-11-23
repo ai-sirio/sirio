@@ -37,6 +37,19 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   death-then-ok <dir>  On the first invocation (no <dir>/died marker) stream a
                    partial reply and die; later invocations stream normally.
                    Lets the drawn Retry click be followed by a real recovery.
+  richer           The agent of Scripts/Tests/test-chat-richer-messages-e2e.sh, over ACP. Its start, every
+                   `session/new` and every `session/prompt` is appended to $SIRIO_STUB_LOG as
+                   `<kind>\t<pid>\t<json>` (kinds `start`, `session_new`, `prompt`), the prompt's JSON
+                   being `{"text": ..., "sessionId": ...}`. The prompt's text picks the turn, and what
+                   a retry resends is the same text, so a turn that fails does so on the FIRST prompt
+                   of that text only (counted over every process in the log):
+                     `fail prompt`  streams a partial reply, then answers the prompt with a JSON-RPC
+                                    error and stays up; the next `fail prompt` answers `recovered`;
+                     `die`          streams a partial reply and exits mid-turn (status 17); the next
+                                    `die` answers `recovered`;
+                     `cancel fail`  streams a partial reply, waits for `session/cancel`, then answers
+                                    with a JSON-RPC error: the late end of a stopped turn;
+                     anything else  answers `reply ok`.
   ely-catalogue    Like `composer`, with every catalogue an agent can report: three
                    session modes, models with long names, four effort levels and
                    an 85% context fill. The native pass over the chat's popups.
@@ -96,12 +109,12 @@ def response(request_id, result):
     send({"jsonrpc": "2.0", "id": request_id, "result": result})
 
 
-def error(request_id, message):
+def error(request_id, message, code=-32000):
     send(
         {
             "jsonrpc": "2.0",
             "id": request_id,
-            "error": {"code": -32000, "message": message},
+            "error": {"code": code, "message": message},
         }
     )
 
@@ -494,10 +507,73 @@ def record_ely_response(directory, message):
         log.write(json.dumps(message) + "\n")
 
 
+def richer_log(kind, payload):
+    """One `<kind>\t<pid>\t<json>` line in $SIRIO_STUB_LOG, when the run names one."""
+    path = os.environ.get("SIRIO_STUB_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as log:
+            log.write(f"{kind}\t{os.getpid()}\t{json.dumps(payload)}\n")
+
+
+def richer_seen(text):
+    """How many prompts of exactly this text the log holds already, over every process."""
+    path = os.environ.get("SIRIO_STUB_LOG")
+    if not path or not os.path.exists(path):
+        return 0
+    count = 0
+    with open(path, encoding="utf-8") as log:
+        for line in log:
+            parts = line.rstrip("\n").split("\t", 2)
+            if len(parts) == 3 and parts[0] == "prompt" and json.loads(parts[2]).get("text") == text:
+                count += 1
+    return count
+
+
+# -32000 is the wire code `sirio_acp` reads as "authentication required": a failed prompt must not use it.
+INTERNAL_ERROR = -32603
+RICHER_PARTIAL = ["I started on it. Here is **what I found** so far:\n\n", "- the first point\n- the second\n\n", "The next step is"]
+
+
+def richer_prompt(request):
+    params = request.get("params", {})
+    text = "".join(
+        block.get("text", "") for block in params.get("prompt", []) if block.get("type") == "text"
+    ).strip()
+    number = richer_seen(text) + 1
+    richer_log("prompt", {"text": text, "sessionId": params.get("sessionId")})
+    if text == "fail prompt" and number == 1:
+        for piece in RICHER_PARTIAL:
+            message_chunk(piece)
+        error(request["id"], "the prompt failed", code=INTERNAL_ERROR)
+    elif text == "die" and number == 1:
+        for piece in RICHER_PARTIAL:
+            message_chunk(piece)
+        sys.stdout.flush()
+        os._exit(17)
+    elif text == "cancel fail":
+        for piece in RICHER_PARTIAL:
+            message_chunk(piece)
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                return
+            if json.loads(line).get("method") == "session/cancel":
+                error(request["id"], "the prompt was cancelled", code=INTERNAL_ERROR)
+                break
+    elif text in ("fail prompt", "die"):
+        message_chunk("recovered")
+        response(request["id"], {"stopReason": "end_turn"})
+    else:
+        message_chunk("reply ok")
+        response(request["id"], {"stopReason": "end_turn"})
+
+
 def main():
     mode = sys.argv[1]
     extra = sys.argv[2] if len(sys.argv) > 2 else None
     first_prompt = True
+    if mode == "richer":
+        richer_log("start", sys.argv[1:])
 
     for line in sys.stdin:
         if not line:
@@ -521,6 +597,8 @@ def main():
                 ]
             response(request["id"], result)
         elif method == "session/new":
+            if mode == "richer":
+                richer_log("session_new", {"cwd": request.get("params", {}).get("cwd")})
             if mode == "auth-required":
                 # -32000 is the wire code sirio_acp maps to a typed
                 # auth_required failure (see the sirio_acp fixture's own
@@ -549,6 +627,8 @@ def main():
                 advertise(mode)
         elif method == "session/set_config_option":
             answer_set_config_option(request, mode)
+        elif method == "session/prompt" and mode == "richer":
+            richer_prompt(request)
         elif method == "session/prompt":
             if mode == "staged":
                 # The first prompt is the go-gated rich turn; any later

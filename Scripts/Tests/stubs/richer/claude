@@ -1,0 +1,28 @@
+#!/bin/sh
+# The `claude` of test-chat-richer-messages-e2e.sh: the version probe answers at once (above
+# sirio_chat's MIN_CLAUDE_VERSION, so the chat is native), and any other call is the stream-json fixture in its
+# `richer` mode (rust/crates/sirio_chat/tests/fixtures/claude_fixture.py). The prompt picks the turn:
+#   showcase           the SHOWCASE document, then parts of a few blocks each, 40 KiB in 200 chunks 20 ms apart
+#   showcase x8        SHOWCASE eight times over (each copy mentions [^1] again, so the reply cannot freeze)
+#   showcase slow      the same reply at 40 ms a chunk (8 s), long enough to select and copy it while it streams
+#   fail               streams a partial reply, then fails (an is_error result); the next `fail` answers `recovered`
+#   fail hold          `fail`, each of its turns waiting for its gate ($SIRIO_FIXTURE_GATE.<n>, n = how often the
+#                      text was sent) before it fails or answers
+#   fail max turns     an `error_max_turns` result: the reply text and footer of today, no error row
+#   think slow         a thinking block that closes, a 2 s wait, then the text
+#   die                streams a partial reply and exits; the next `die` answers `recovered`
+#   limit rejected     a rejected rate-limit event (resetsAt from $SIRIO_FIXTURE_LIMIT_FILE) and a failed turn;
+#                      the next one answers `recovered`; `limit rejected hold` waits for its gate first
+#   limit event        the same event and a turn that succeeds: a limit with no failed turn
+#   replyfile          the text of $SIRIO_FIXTURE_REPLY_FILE in one chunk
+#   anything else      answers `ok`; ` hold` after any prompt makes it wait for its gate
+# Every call is recorded in $SIRIO_STUB_LOG as `claude<TAB>pid<TAB>arguments`, and the fixture records every start
+# and every prompt in the same file with the pid (see richer_log).
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude\t%s\t%s\n' "$$" "$*" >>"$SIRIO_STUB_LOG"
+case "$1" in
+  --version|-V|version)
+    echo "9.9.9 (Claude Code)"
+    exit 0 ;;
+esac
+exec python3 "$here/../../../../rust/crates/sirio_chat/tests/fixtures/claude_fixture.py" richer "$@"

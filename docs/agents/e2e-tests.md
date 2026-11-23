@@ -640,6 +640,68 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.
 Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "ELY CHAT UI E2E OK"
 
+# The richer chat messages (spec 2026-11-21-ely-chat-richer-messages-design.md §7.2) in a real, isolated debug
+# Sirio on a private Xvfb: its native Claude chat against a stub `claude` (Scripts/Tests/stubs/richer/claude, the
+# stream-json fixture in its `richer` mode) and its ACP chat against a stub `opencode`
+# (Scripts/Tests/stubs/richer/opencode, rust/crates/sirio_ui/tests/fixtures/chat_fixture.py in its `richer` mode).
+# A prompt's text picks the turn (the stubs' headers list them) and what a retry resends is the same text, so a
+# turn that fails does so on the first prompt of that text only, counted in the stub log
+# ($SIRIO_STUB_LOG, `kind<TAB>pid<TAB>text`, one per world); `<prompt> hold` waits for the file `gate.<n>`. It reads
+# `surface.chat.read`'s debug readouts (a reply's `live` and `shownBytes`, `transcriptText`, `transcriptTextRows`,
+# `held`, `heldLine`, `daySeparators`, an error row's `errorKind` and `retry`, a `limitCard` row's `phase` and
+# `resetsAt`, a user row's `at`, a thought's `durationMs`) and drives the debug `surface.chat.transcript` action
+# `retry`; real X input (xdotool) does the two things the socket has no verb for, the transcript menu's Select All
+# and Copy (read back through the display's real clipboard, GTK) and the queue's remove button (placed from
+# `composerRow`). Each scenario is a fresh Sirio under `env -i` with its own HOME, XDG tree, database, socket and
+# host root; ~/.config/mise/config.toml must not change.
+#   stream             a 40 KiB reply (SHOWCASE, then parts that freeze) in 200 chunks 20 ms apart: while live,
+#                      0 < shownBytes < len(text) and it only grows (so the reply took the stream path: a full build
+#                      has no reveal), transcriptText already holds the last marker the painted rows do not, and at
+#                      the turn's end live is false with shownBytes the whole text; the same bytes in one chunk give
+#                      the same plain text. A reply selected whole and copied through the transcript menu while it
+#                      streams (`showcase slow`, 8 s), with the transcript scrolled to its top so that the live reply is
+#                      not drawn and the reveal stands still while the text arrives, puts text of the live reply on the
+#                      clipboard that is past the revealed byte (shownBytes read right after Select All). SHOWCASE
+#                      eight times over (`showcase x8`, which cannot freeze: every copy cites [^1] again) reveals for
+#                      its first KiB and then, past the 7 KiB tail budget, draws as it arrives (shownBytes the whole
+#                      text, live still true) to its end: the documented plain behaviour.
+#   stop               Stop in mid-reveal: live false, shownBytes the whole text, no error row, nothing held, the
+#                      text equals the same bytes in one chunk; the agent dying right after has no prompt to resend
+#                      (Retry only relaunches)
+#   claude_turn_failed an is_error result is an error row `turnFailed` whose Retry resends (`retry: resend`) the
+#                      same text on the same pid and the second answer arrives; the partial reply equals the same
+#                      bytes in one chunk; `error_max_turns` keeps its reply and has no error row. Queue variant: two
+#                      messages queued behind the failing turn are held (`held`, "Waiting: press Retry or send a
+#                      message."), nothing is sent, one is removed with a real click on its X, Retry lifts the hold at
+#                      the send, and the other is sent only at the retried turn's end
+#   acp_prompt_failed  the same over ACP (the queue variant only over Claude): the failed `session/prompt` leaves the
+#                      process up and Retry resends to the same pid and session; an error that follows Stop is the
+#                      late end of the stopped turn (no error row)
+#   claude_lost_resume the CLI exits mid-turn: `retry: resume`, Retry relaunches with `--resume fixture-session-1` and
+#                      resends; the partial reply equals the same bytes in one chunk
+#   acp_lost_composer  the ACP agent exits mid-turn: `retry: composer`, Retry relaunches and the message is back in the
+#                      composer with a notice, nothing sent; a launch that fails and then works (no turn in flight)
+#                      is `retry: relaunch` and puts nothing back; with a draft already in the composer the draft stays
+#   limit              a rejected limit a few seconds ahead is a `limitCard` row counting (`resetsAt`), its failed
+#                      turn's row `coveredBy: limitCard` with `retry: none`, the socket's Retry refused, a held queue
+#                      "Waiting: send a message."; then the card reads `retry`, Try again resends and the card reads
+#                      lifted (Retry refused); a rejection in a turn that did not fail ends lifted; a prompt sent while
+#                      it counts retires the row's Retry and the card ends lifted
+#   day_separators     a restored transcript (rows written into `chat_turn`) whose user entries are on three days
+#                      has separators "Today", "Yesterday" and a full date, an undated turn has none and no `at` key
+#   thought_end        the CLI closes its thinking block, then waits 2 s: `durationMs` is the block's (under 1 s)
+#                      once the thought has settled and before the text arrives, and it does not move
+# A check prints `OK: <scenario>: <what>`, a failed one `FAIL: <scenario>: <why>` and the run goes on with the next
+# scenario; the run prints the OK line only if every check of every scenario passed. The Xvfb is the script's own,
+# started and stopped on :140 to :159 (--display :N); --out-dir DIR (default artifacts/chat-richer/e2e) keeps
+# transcript.log, checks.jsonl, scenarios/<name>.json (the readouts) and .stub.log, logs/ and frames/*.png (PID-matched
+# window captures); --only NAME[,NAME] runs some scenarios and prints "CHAT RICHER MESSAGES E2E PARTIAL". Needs
+# python3 with gi (GTK 3), xdotool, xwininfo, xprop, xdpyinfo, import, identify, Xvfb and lavapipe. Not covered: an ACP
+# agent that exits while idle (the chat does not notice it until the next send, when the row is a `disconnected` one
+# with a prompt in flight), so there is no idle row to read; Claude's idle death is read in `stop`.
+Scripts/Tests/test-chat-richer-messages-e2e.sh   # -> prints "CHAT RICHER MESSAGES E2E OK (<n> checks)"
+Scripts/Tests/test-chat-richer-messages-e2e.sh --only limit,thought_end   # -> prints "CHAT RICHER MESSAGES E2E PARTIAL (2 of 9 scenarios: limit, thought_end; <n> checks)"
+
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
 # transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1

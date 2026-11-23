@@ -101,7 +101,10 @@ unset CLAUDE_CODE_STARTUP_FAILURE_RESULTS
 #   notice_midstream   a reply cut by an error is not glued to the answer that follows
 #   limit_notice       (SIRIO_FIXTURE_LIMITS, SIRIO_E2E_TZ=UTC) the rate-limit rows say which window, how full and when
 #                      it resets: a warning once (not again, but again after an allowed), then the refusal, then the
-#                      overage refusal with its scope; the CLI's own refusal text is one error row (a failed turn)
+#                      overage refusal with its scope; the CLI's own refusal text is one error row (a failed turn). A
+#                      rejection is a limit card (one live card): the newer one, the pooled refusal, is the one
+#                      `limitCard` row, counting to its reset (`resetsAt`) with its error row covered (`coveredBy`, no
+#                      Retry); the 5-hour one's row is a warning line and a plain error row again
 #   usage_text         (SIRIO_FIXTURE_USAGE) a local command's answer (`/usage`, `/context`) is one command-output row
 #                      holding the CLI's text, never an assistant row, also when the command's `result` fails and
 #                      repeats the text, and a control or bidi character in the plain text is shown as text
@@ -5402,8 +5405,8 @@ scenario_notice_midstream() {
 scenario_limit_notice() {
   SIRIO_E2E_TZ=UTC
   SIRIO_FIXTURE_LIMITS="$RUN_DIR/limit_notice-limits.json"
-  local ts tl
-  read -r ts tl < <(python3 - "$SIRIO_FIXTURE_LIMITS" <<'PY'
+  local ts tl later
+  read -r ts tl later < <(python3 - "$SIRIO_FIXTURE_LIMITS" <<'PY'
 import json, sys, time
 from datetime import datetime, timezone
 days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -5414,7 +5417,7 @@ with open(sys.argv[1], "w") as handle:
 def text(epoch):
     at = datetime.fromtimestamp(epoch, timezone.utc)
     return "%s_%s" % (days[at.weekday()], at.strftime("%H:%M"))
-print(text(soon), text(later))
+print(text(soon), text(later), later)
 PY
 )
   ts=${ts/_/ }
@@ -5426,13 +5429,22 @@ PY
     send_prompt "$prompt"
     notice_turns "the turn of '$prompt' ends" "$n"
   done
-  check_panel "the warnings, once per change, then the refusals, each saying which and when" \
-    "[r['text'] for r in c['transcript'] if r['kind'] == 'warning'] == ['Approaching the 5-hour usage limit: 92% used, resets at $ts.', 'Approaching the 5-hour usage limit: 92% used, resets at $ts.', '5-hour usage limit reached, resets at $ts.', \"Extra usage limit reached (your team's pooled budget), resets at $tl.\"]"
+  # A rejection with a reset ahead is a limit card (Task 8), which replaces the warning line of the same row. There
+  # is one live card: the newer refusal (the pooled one) replaced the 5-hour one's, so the 5-hour refusal's row is a
+  # warning line again and the pooled sentence is the one `limitCard` row, counting to its reset (3 or 4 days off).
+  check_panel "the warnings, once per change, then the 5-hour refusal (its card was replaced by the pooled one's)" \
+    "[r['text'] for r in c['transcript'] if r['kind'] == 'warning'] == ['Approaching the 5-hour usage limit: 92% used, resets at $ts.', 'Approaching the 5-hour usage limit: 92% used, resets at $ts.', '5-hour usage limit reached, resets at $ts.']"
+  check_panel "the pooled refusal is the one limit card, counting to its reset, saying which and when" \
+    "[(r['text'], r['phase'], r['resetsAt']) for r in c['transcript'] if r['kind'] == 'limitCard'] == [(\"Extra usage limit reached (your team's pooled budget), resets at $tl.\", 'counting', '$later')]"
   # The refusal is a failed turn, so its text is an error row (it was an assistant row before a failed result
   # became `TurnFailed`), and the only row of any kind that holds it: the fixture's synthetic assistant line
   # repeats the text and is not drawn.
   check_panel "the CLI's refusal text is exactly one row, an error row" \
     "[r['kind'] for r in c['transcript'] if r.get('text') == \"You've hit your limit · resets 3:15pm (UTC)\"] == ['error']"
+  # The pooled refusal's error row is the card's to cover while it counts (no Retry, readout `retry: none`); the 5-hour
+  # one's card is gone, so its row is a plain error row again.
+  check_panel "the pooled refusal's error row is covered by the card with no Retry, the 5-hour one's is a plain row" \
+    "[(r['kind'], r.get('coveredBy'), r.get('retry')) for r in c['transcript'] if r.get('text') == \"You've hit your team's pooled group budget\"] == [('error', 'limitCard', 'none')] and all('coveredBy' not in r for r in c['transcript'] if r.get('text') == \"You've hit your limit · resets 3:15pm (UTC)\")"
   echo "OK: limit_notice: the rate-limit rows name the window, the fill, the scope and the reset"
   stop_app
 }
