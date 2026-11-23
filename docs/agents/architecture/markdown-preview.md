@@ -11,7 +11,7 @@ plain paragraph. `view.rs` draws it, `gather.rs` is Sirio's `TextGather`
 (selection and link rectangles; `SelectionHost` is `Run`, `Transcript` or `None`, see
 `text-selection.md`), `text.rs` the plain text in push order, `code.rs` the code hook (tree-sitter
 colours through `bezel_syntax`, memoized, copy button), `sideways.rs` and `cull.rs` the
-horizontal scroll area and the chat's draw-only-what-is-near. The vendored changes are L1 to L10 in
+horizontal scroll area and the chat's draw-only-what-is-near. The vendored changes are L1 to L15 in
 `rust/vendor/ely/LOCAL-CHANGES.md`; read them before a sync. Beyond bezel's reader, every surface
 now has LaTeX, GitHub alerts, footnotes, emoji shortcodes, strikethrough and bare-URL links;
 `[[toc]]` and heading anchors (GitHub slugs) work in the Preview, where the right-click menu
@@ -25,8 +25,8 @@ exactly (`address_of`, `preview_address`).
 A streaming chat reply is parsed in parts (`markdown::stream`): blocks before a cut are frozen and a late
 definition, `$$` or nesting change rewinds or holds the cut, so the tree always equals `markdown::build`; the
 turn's end replaces it with one full build. `chat::reveal` draws it at Ely's pace with a `▍` painted on the
-tree, never in the source: copy and `transcriptText` read the received text, and a tail past 7 KiB stops the
-reveal. Design: `docs/superpowers/specs/2026-11-21-ely-chat-richer-messages-design.md`.
+tree, never in the source: Select All + Copy and `transcriptText` read the received text (a drag selection
+copies what is drawn), and a tail past 7 KiB stops the reveal. Design: `docs/superpowers/specs/2026-11-21-ely-chat-richer-messages-design.md`.
 
 The file view's Preview has no HTML engine. `expand_html` maps a GitHub-style
 subset of raw HTML onto the existing `Block`/`Inline` model and reduces the rest

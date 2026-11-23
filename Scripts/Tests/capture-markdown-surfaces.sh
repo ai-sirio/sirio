@@ -48,11 +48,16 @@ set -eEuo pipefail
 #   --display :N    the Xvfb this script starts and stops, on :120 to :139 (default :120)
 #
 # The mid-reveal frames are taken when the reply has arrived up to each size in $REVEAL_AT (bytes,
-# comma list, default 1800,6000,12000). A frame of a reply in mid-reveal moves with the clock: how far the
-# reveal has come, and a limit card's countdown, differ from one run to the next.
+# comma list, default 1800,6000,12000), and fail if the reply had ended by the time the frame was shot.
+#
+# The state-* frames depend on the date and on timing, so a re-run differs in them: the day separators'
+# labels follow the date the script runs on (Today, Yesterday, and the weekday and month of the date
+# 17 days back), a limit card's reset time follows the clock, the turn footers show the time of day, and
+# how far the reveal has come in a mid-reveal frame moves with the clock.
 #
 # Needs, from the checkout's own build: rust/target/debug/examples/ely_chat_seed (chat) and
-# sirioctl when --bin-dir has none. The chat's states also need Mesa's lavapipe (lvp_icd*.json).
+# sirioctl when --bin-dir has none. The chat's state-* frames also need Mesa's lavapipe
+# (lvp_icd*.json in /usr/share/vulkan/icd.d): the script stops without it.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -584,8 +589,7 @@ try:
         if db.execute("SELECT id FROM tab WHERE id = ?", (surface,)).fetchone() is None:
             raise richer.Fail(f"the chat tab {surface} is not in the database")
         for ordinal, (text, at) in enumerate(turns):
-            user = {"text": text} if at is None else {"text": text, "at": at}
-            payload = json.dumps({"entries": [{"UserMessage": user}, {"AssistantMessage": {"text": f"the answer to {text}"}},
+            payload = json.dumps({"entries": [{"UserMessage": {"text": text, "at": at}}, {"AssistantMessage": {"text": f"the answer to {text}"}},
                                               {"TurnFooter": {"text": "12:00"}}]})
             db.execute("INSERT INTO chat_turn (tab_id, ordinal, payload, updated_at) VALUES (?, ?, ?, ?)",
                        (surface, ordinal, payload.encode(), int(time.time() * 1000)))
@@ -656,7 +660,20 @@ try:
     w.open_chat("claude")
     w.send("think slow")
     w.wait("the turn streams", lambda r: r["status"] == "streaming")
-    time.sleep(1.2)
+    # The stub closes its thinking block 0.45 s in and sends the text at 2.45 s. A build that reports a settled thought
+    # (`durationMs`) is shot as soon as it has: it must come within 3 s, before the text. A build from before this
+    # delivery reports none, and is shot at 1.2 s, where its thought is still open.
+    started = time.time()
+    while True:
+        r = w.read()
+        modern = "held" in r  # a field only a build with this delivery's readouts has
+        settled = any("durationMs" in row for row in r["rows"] if row.get("kind") == "thought")
+        if settled or (not modern and time.time() - started > 1.2):
+            break
+        if time.time() - started > 3:
+            raise richer.Fail("the thought never settled (no durationMs within 3 s)")
+        time.sleep(0.05)
+    time.sleep(0.3)  # the frame that draws it
     shoot(w, "thought-settled", w.read())
     w.keep_artifacts()
     w.quit()
@@ -678,8 +695,14 @@ try:
                 break
             if time.time() > deadline:
                 raise richer.Fail(f"the reply never reached {wanted} bytes")
+            time.sleep(0.05)
         shoot(w, f"mid-reveal-{step}", r)
         states[f"mid-reveal-{step}"]["received_bytes"] = assistant_bytes(r)
+        # The frame is of a reply that was still streaming (and, where the build says so, live) when it was shot.
+        after = w.read()
+        last = [row for row in after["rows"] if row.get("kind") == "assistant"][-1]
+        if after["status"] != "streaming" or last.get("live", "true") != "true":
+            raise richer.Fail(f"mid-reveal-{step}: the reply had ended when the frame was shot (status {after['status']}, live {last.get('live')})")
     w.wait("the reply ends", lambda r: r["status"] != "streaming", timeout=90)
     w.keep_artifacts()
     w.quit()

@@ -573,9 +573,11 @@ the thinking opens a second thought row. The CLI sends a refusal notice after it
 stream ends, which keeps this rare.
 
 **Failed turns and Retry.** An `is_error` result of a prompt Sirio sent is `ChatEvent::TurnFailed`, not
-error text and `TurnEnded` (a Stop, a CLI-started turn, `error_max_turns` and `error_max_budget_usd` keep
-today's events). The agent stays up, Retry resends `last_prompt` on the same client (after a lost client,
-with `--resume` where `LaunchSpec::resumes_on_retry`), and queued messages wait until a send lifts the hold.
+error text and `TurnEnded` (a Stop, a CLI-started turn, `error_max_turns`, `error_max_budget_usd`, an error
+`result` with no text and a local command's echo keep today's events). The agent stays up and Retry resends
+`last_prompt` on the same client (after a lost client, with `--resume` where `LaunchSpec::resumes_on_retry`).
+Queued messages are held: the next send, Retry's or the user's, lifts the hold, and the queue drains only at
+that send's `TurnEnded`.
 
 **Why Claude Code could not start.** A CLI that fails before the session writes an error `result`
 as its first stdout line, in place of the `initialize` answer, with `startup_failure_reason` and
@@ -660,8 +662,8 @@ the warning's place; it covers its failed turn's error row, with no Retry until 
   later, `%-d %b %H:%M` for any other date, past ones included.
 
 Every CLI token goes through `visible_text`. The row is a `Warning` notice, so it is never
-persisted, as before. The CLI's own refusal sentence in a failed `result` is still one assistant
-row, unchanged.
+persisted, as before. The CLI's own refusal sentence in a failed `result` is a `TurnFailed` (see Failed
+turns and Retry): an error row, which the limit card covers while it counts.
 
 **A local command's output.** `/usage` and `/context` are answered by the CLI itself, with no model
 call. The answer, already in 2.1.301 (the oldest version probed above the floor; 2.1.258-2.1.300
@@ -815,13 +817,13 @@ gate) notices the day the CLI stops streaming the lines the trace reads.
 
 **What a response may make clickable or load** is an allowlist, enforced in one place:
 `sirio_ui::markdown::build` with `Surface::Chat` (its `chat_links` and picture passes over `chat::file_links`),
-run over an assistant entry's text whenever it is built (streamed chunk, restore): one `build` per chunk. The text an agent writes can be prompt-injected, so a link, chip or picture in it
+run over an assistant entry's text whenever it is built, which is three paths with one policy: a whole `build` (restore, a turn's end), a chunk of a streaming reply (it builds only the tail after the last frozen block, `markdown::stream`) and a frame of the reveal (it builds the revealed tail of a live reply in lookup-only mode, `with_lookup_policy`: it only looks files up in the memo that the build of the received text filled and never asks the disk, so a candidate the memo has not seen is plain text). The text an agent writes can be prompt-injected, so a link, chip or picture in it
 survives only as a web URL (`http`, `https`, `mailto`, any case) or as a checked local file (an existing
 regular file, retargeted to a `file://` URL; a picture also non-empty and at most 10 MB, and read by its
 absolute path). Everything else (`smb:`, `vscode:`, `tel:`, a drive or UNC path, an unresolved path, an anchor)
 loses its mark and its text stays, a non-web picture becomes its alt text, and a network or
 device path (`//host/…`, `\\host\…`, `\\?\`, `\\.\`) is never even looked up on disk. The disk is asked while
-the document is built (memoised per entry), never while it paints, and once at a click (`may_open_on_click`). A
+the document is built (memoised per entry), never while it paints (the reveal's frame is lookup-only), and once at a click (`may_open_on_click`). A
 link opens only through the view's `ClickGate` (left button, no drag, no live selection in that body) or the
 transcript menu's Open link, both calling `Chat::open_reply_link`: a file goes to `ChatEvent::OpenFileAt`, a web
 address to `cx.open_url`, anything else nowhere, so a change to either half (the link pass, or the handler) must

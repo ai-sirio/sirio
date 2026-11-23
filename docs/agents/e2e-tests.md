@@ -1036,6 +1036,16 @@ Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN R
 # Writes preview-<k>.png, chat-<k>.png, cr-description-<k>.png and transcript.json to --out-dir.
 # --bin-dir holds sirio and sirio-host (sirioctl too, else rust/target/debug/sirioctl); the chat leg
 # needs rust/target/debug/examples/ely_chat_seed. --display :N, --only preview,chat,cr-description.
+# The chat leg also captures the states of the richer chat messages, each in an isolated world of the
+# richer E2E's driver (the stub `claude` of Scripts/Tests/stubs/richer): state-day-separators and
+# state-day-separators-top, state-limit-card, state-turn-failed, state-turn-failed-second, state-held-queue,
+# state-thought-settled and state-mid-reveal-<k> (a reply at each received size in $REVEAL_AT, default
+# 1800,6000,12000, which fails if the reply had ended when the frame was shot), and chat-states.json
+# (what the readout said at each). They go through socket calls a debug 0.47.1 already served, so a
+# build from before the delivery can be compared with the head: run both with debug builds. They need
+# Mesa's lavapipe (the script stops without it), and they depend on the date and on timing, so a
+# re-run differs in them: the separators' day labels, a limit card's reset time, the turn footers' time of day,
+# and how far a reveal has come.
 Scripts/Tests/capture-markdown-surfaces.sh --bin-dir DIR --out-dir DIR   # -> prints "MARKDOWN SURFACES CAPTURED (<n> frames)"
 
 # Markdown on ely-documents in the real app (spec 2026-11-20-ely-markdown-documents-design.md §6.2): an
