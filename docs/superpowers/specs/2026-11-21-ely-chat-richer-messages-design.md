@@ -311,6 +311,14 @@ which chooses among these:
 - **Persistence.** Not persisted, as today's warning. A restored transcript shows the error row if one was stored.
 - **Who gets it.** It is driven by data: only Claude sends `RateLimited`. ACP agents show nothing new.
 
+- **As built (Task 8, controller's calls, 2026-11-23).**
+  - **The clock.** The card's time is `resets_at` on the wall clock: the phase flips when `Local::now() >= resets_at`, and a machine that slept wakes to the right phase.
+  - **Its place.** The card is drawn on the row of the warning notice it replaces (still pushed, as an aside); the covered error row draws nothing.
+  - **Its text** is drawn through the transcript selection, as the line it replaces was.
+  - **While it counts** there is no Retry: the covered row's readout says `retry: none`, the socket's `retry` is refused, and a held queue's line reads "Waiting: send a message."
+  - **After a restore** the error row is drawn as every restored error is today: it comes back as a `Connection` row and goes at the next successful connect. Keeping the kind on disk is a follow-up.
+  - **Known gap.** The transport drops a repeated `RateLimited` with the same status, window and scope until an `allowed` event, so a second refused turn in the same window gets a plain error row under the first card.
+
 ### 5.5 Day separators
 
 - **Component.** Ely's `DateSeparator::new(day, today)` (`ely-chat/src/list.rs:228-284`) replaces `render_day_heading`.
