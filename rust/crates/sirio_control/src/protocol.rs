@@ -1214,8 +1214,10 @@ pub mod request {
 
     /// Debug-only `surface.chat.transcript {surfaceId, action, pixels?, turn?, entry?}`: scrolls a
     /// chat's transcript (`scrollBy`, by `pixels`), folds or unfolds a closed turn (`toggleTurn`,
-    /// by the turn's footer index `turn`), as the wheel and the turn's row do, or presses the
-    /// Retry of an error row (`retry`, by the row's index `entry`).
+    /// by the turn's footer index `turn`), as the wheel and the turn's row do, presses the
+    /// Retry of an error row (`retry`, by the row's index `entry`), presses Continue
+    /// (`continue`, which sits on no row of the caller's choosing), or presses Copy or Quote on a
+    /// message row (`copy`, `quote`, by the row's index `entry`).
     pub fn chat_transcript(
         surface_id: &str,
         action: &str,

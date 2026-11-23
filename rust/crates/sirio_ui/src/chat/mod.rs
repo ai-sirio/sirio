@@ -834,7 +834,7 @@ impl Entry {
             Self::Thought { text, .. } => text.clone(),
             // The page's text, not the markdown source: it is what the
             // reader sees, selects and copies (`reply_body`).
-            // The hover Copy control is the way to the source.
+            // The row's Copy button is the way to the source.
             Self::Assistant { document, .. } => document.text.text.clone(),
             Self::ToolCall {
                 title,
@@ -2410,7 +2410,7 @@ pub struct Chat {
     /// The transcript's secondary-click Copy / Select All menu, at the
     /// window point it was opened from. The transcript previously had no
     /// secondary-click handling at all, so agent output could only be
-    /// copied through the hover Copy control or the Ctrl/Cmd-C chord.
+    /// copied through a message's Copy button or the Ctrl/Cmd-C chord.
     transcript_context_menu: Popup<gpui::Point<Pixels>>,
     /// Overflow menu (Follow Edited Files / New Conversation / Chat History).
     overflow_open: bool,
@@ -5423,6 +5423,10 @@ impl Chat {
                         self.continue_refusal()
                     ));
                 }
+                // The same row the readout reads: a button the user cannot see is not pressed.
+                if !self.continue_drawn() {
+                    return Err("surface.chat.transcript continue: the turn is folded".to_string());
+                }
                 self.continue_turn(cx);
             }
             TranscriptAction::Copy(entry) => {
@@ -5603,6 +5607,7 @@ impl Chat {
         // for quoting belonged to the one that went.
         self.continue_reason = None;
         self.quote = None;
+        self.composer_focus_wanted = false;
         self.history_open = false;
         cx.notify();
     }
@@ -6604,6 +6609,7 @@ impl Chat {
         self.last_prompt = None;
         self.continue_reason = None;
         self.quote = None;
+        self.composer_focus_wanted = false;
         self.stop_end_pending = false;
         self.queue_held = false;
         self.after_connect = None;
@@ -22158,8 +22164,8 @@ two"
 
     /// The assistant's rendered markdown is part of the transcript's one
     /// selection: a drag across it selects its visible text, and the copy
-    /// reads that text — not the markdown source, which is what the hover
-    /// Copy control is for.
+    /// reads that text — not the markdown source, which is what the
+    /// message's Copy button is for.
     #[gpui::test]
     async fn dragging_across_an_assistant_response_selects_its_visible_text(
         cx: &mut TestAppContext,
@@ -22189,8 +22195,8 @@ two"
             .expect("the response is drawn");
         let y = response.top() + px(8.0);
         let start = point(response.left() + px(1.0), y);
-        // Well past the short paragraph's last glyph, and well short of the
-        // hover Copy control at the response's far right.
+        // Well past the short paragraph's last glyph, on its first line: the
+        // action row sits below the reply, out of the drag's way.
         let end = point(response.left() + px(250.0), y);
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());

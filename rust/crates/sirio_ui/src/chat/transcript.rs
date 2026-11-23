@@ -141,7 +141,10 @@ impl Chat {
         let is_notice = matches!(entry, Entry::Notice { .. });
         let body = match entry {
             Entry::User { text, .. } => {
-                let copy_text = SharedString::from(text.clone());
+                // What Copy takes, built once and only for a row that has the action row: one
+                // copy of the text, made from the borrow, before the bubble takes the owned one.
+                let copy_text = matches!(actions, Some(message_actions::RowActions::Message { .. }))
+                    .then(|| SharedString::from(text.as_str()));
                 let bubble = div()
                     .w_full()
                     .min_w_0()
@@ -160,11 +163,14 @@ impl Chat {
                 // bubble: never inside the selectable text, and the bubble's own box stays the
                 // bubble's. The group holds both, so the pointer going from the text to the row
                 // keeps it shown.
-                let bubble = match actions {
-                    Some(message_actions::RowActions::Message {
-                        shown,
-                        continue_here,
-                    }) => {
+                let bubble = match (actions, copy_text) {
+                    (
+                        Some(message_actions::RowActions::Message {
+                            shown,
+                            continue_here,
+                        }),
+                        Some(copy_text),
+                    ) => {
                         let hover_group = format!("user-message-{entry_index}");
                         div()
                             .id(("user-message", entry_index))

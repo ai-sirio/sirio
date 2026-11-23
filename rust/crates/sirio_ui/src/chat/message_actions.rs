@@ -118,6 +118,21 @@ impl Chat {
         }
     }
 
+    /// Whether Continue is drawn: its row draws a Continue button now. A turn the reader folded
+    /// stands in for itself with one row, so the row Continue sits on draws nothing, and the verb
+    /// must not press a button nobody can see.
+    pub(super) fn continue_drawn(&self) -> bool {
+        self.continue_row().is_some_and(|row| {
+            matches!(
+                self.row_actions_now(row),
+                Some(RowActions::Message {
+                    continue_here: true,
+                    ..
+                }) | Some(RowActions::ContinueOnly)
+            )
+        })
+    }
+
     /// The text Copy takes and Quote quotes: what the entry holds, as sent for a user message and
     /// as its Markdown source for a reply.
     pub(super) fn message_text(&self, index: usize) -> Option<&str> {
@@ -286,8 +301,14 @@ pub(super) fn render_message_actions(
     hover_group: SharedString,
 ) -> AnyElement {
     let quote_chat = chat.clone();
+    // Ely's Copy handles its own press. This slot hears the click after it, from outside, and
+    // ends it there, as the Copy it replaces did: no element around the row takes it too.
+    let copy_slot = div()
+        .id((id.clone(), "copy-slot"))
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .child(MessageActions::new((id.clone(), "actions"), text));
     let copy = measured(
-        MessageActions::new((id.clone(), "actions"), text),
+        copy_slot,
         &chat,
         entry,
         "copy",
