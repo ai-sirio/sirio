@@ -2,7 +2,10 @@
 # The `opencode` of test-chat-richer-messages-e2e.sh: the version probe answers at once, and `opencode acp` is the
 # ACP agent fixture in its `richer` mode (rust/crates/sirio_ui/tests/fixtures/chat_fixture.py): `fail prompt`
 # answers the first prompt of that text with a JSON-RPC error and stays up, `die` exits mid-turn, `cancel fail`
-# answers a cancelled turn with an error, anything else answers `reply ok`. Every call is recorded in
+# answers a cancelled turn with an error, `max tokens`, `max turns` and `slow` end a turn on `max_tokens`,
+# `max_turn_requests` and (after `session/cancel`) `cancelled`, `max tokens drop` is `max tokens` followed by the agent
+# closing its stdin and writing a line that is not JSON (the chat then learns the agent is gone), anything else answers
+# `reply ok`. A prompt that opens with a quote block picks its turn by the text after the block. Every call is recorded in
 # $SIRIO_STUB_LOG as `opencode<TAB>pid<TAB>arguments`, and the fixture records every start, session, prompt and cancel
 # in the same file with the pid. While the file $SIRIO_FIXTURE_REFUSE_FILE names exists, `opencode acp` exits at once.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
