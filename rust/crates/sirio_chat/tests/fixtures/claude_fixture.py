@@ -1136,7 +1136,6 @@ def trace_result(cost, started, interrupted=False):
         "is_error": interrupted,
         "duration_ms": int((time.time() - started) * 1000),
         "num_turns": 1,
-        "result": "Interrupted by user" if interrupted else "Done.",
         "stop_reason": None if interrupted else "end_turn",
         "total_cost_usd": TRACE_COST["total"],
         "modelUsage": usage,
@@ -1145,7 +1144,10 @@ def trace_result(cost, started, interrupted=False):
         "uuid": trace_uuid(),
     }
     if interrupted:
+        # The shape the real CLI captured for a Stop: no `result` text at all.
         body["terminal_reason"] = "aborted_streaming"
+    else:
+        body["result"] = "Done."
     send(body)
 
 
@@ -2698,9 +2700,9 @@ def cli_notices_prompt(message):
 # again. `unasked interrupt` is a result that reads like a Stop's (`error_during_execution`,
 # "Interrupted by user") that nobody asked for. `hold` streams a word and waits for the
 # `interrupt` request, then answers it the way the real CLI does: `error_during_execution`,
-# `is_error`, no stop reason. `hold late` is `hold` with the answer owed: the CLI winds the
-# stopped turn down after Stop freed the composer, so the stopped turn's result is written only
-# when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
+# `is_error`, no stop reason and no text. `hold late` is `hold` with the answer owed: the CLI
+# winds the stopped turn down after Stop freed the composer, so the stopped turn's result is
+# written only when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
 # ordinary answer, so a test can tell the client is still usable after a failure. The results
 # carry no `stop_reason`, as the CLI's own failures do.
 # Every result carries `queued_turn_count`, the prompts read and not yet run, as the real CLI's
@@ -2737,8 +2739,10 @@ def with_queued(line, queued):
 
 
 def interrupted_result(queued=0):
+    """The answer to a Stop, in the shape the real CLI captured: no `result` text, no stop reason,
+    `terminal_reason` `aborted_streaming`."""
     send(with_queued({"type": "result", "subtype": "error_during_execution", "is_error": True,
-                      "result": "Interrupted by user", "stop_reason": None,
+                      "stop_reason": None, "terminal_reason": "aborted_streaming",
                       "session_id": SESSION_ID, "uuid": trace_uuid()}, queued))
 
 
@@ -3314,8 +3318,7 @@ def main():
                     HOLDING_LATE.clear()
                     STOPPED_RESULT_OWED.set()
                 if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):
-                    result(subtype="error_during_execution", is_error=True,
-                           text_body="Interrupted by user")
+                    interrupted_result()
                     send_flush_and_exit()
             elif subtype == "set_permission_mode":
                 control_response(request_id, {"mode": request.get("mode")})

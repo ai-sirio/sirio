@@ -555,9 +555,8 @@ fn a_turn_limit_result_keeps_todays_events() {
 #[test]
 fn a_stop_is_not_a_failure() {
     // The CLI answers an interrupt with `error_during_execution`, `is_error`, no stop
-    // reason and (in this fixture) the words "Interrupted by user". The worker sent the
-    // interrupt, so that result closes a stopped turn with `TurnEnded`, as before: no string
-    // of the result decides it.
+    // reason and no text. The worker sent the interrupt, so that result closes a stopped turn
+    // with `TurnEnded` and the stop reason `Cancelled`: no string of the result decides it.
     let (mut client, events) = launch("trace");
     client.prompt("cancel").expect("prompt is accepted");
     loop {
@@ -567,9 +566,12 @@ fn a_stop_is_not_a_failure() {
     }
     client.cancel().expect("cancel is accepted");
     let seen = drain_until(&events, ends_the_turn);
-    assert!(
-        matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
-        "a stopped turn ends with TurnEnded, not TurnFailed: {seen:?}"
+    assert_eq!(
+        seen.last(),
+        Some(&ChatEvent::TurnEnded {
+            stop_reason: "Cancelled".into()
+        }),
+        "a stopped turn ends cancelled, not TurnFailed: {seen:?}"
     );
     client.shutdown().expect("clean shutdown");
 }
