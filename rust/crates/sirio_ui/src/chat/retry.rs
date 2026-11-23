@@ -104,6 +104,7 @@ pub(crate) enum AfterConnect {
 
 /// Why a press of Retry or Continue does nothing, in the words the control socket gives for the
 /// causes the two share.
+pub(crate) const TURN_RUNNING: &str = "a turn is running";
 pub(crate) const NOT_CONNECTED: &str = "the agent is not connected";
 pub(crate) const CONNECTING: &str = "the agent is connecting";
 pub(crate) const QUEUE_HELD: &str = "the queue is held";

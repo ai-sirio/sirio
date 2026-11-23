@@ -7795,22 +7795,21 @@ impl Chat {
         }
     }
 
-    /// Why Continue does nothing now, for the socket: the cause when there is one (a turn is
-    /// running, the agent is connecting or is not connected, the queue is held), in Retry's
-    /// words where it has them, else that there is no turn to continue.
+    /// Why Continue does nothing now, for the socket: the state that stops it, in Retry's words
+    /// where it has them, else that there is no turn to continue. The state is read first and on
+    /// its own: a running turn, a connecting agent and a held queue have no reason to continue
+    /// (`submit_prompt` and `fail_turn` clear it), and the cause is still the thing to say.
     fn continue_refusal(&self) -> &'static str {
-        let raw = self.continue_action_raw();
-        if raw != retry::RetryAction::None {
-            return self
-                .retry_refusal(raw)
-                .or_else(|| self.queue_held.then_some(retry::QUEUE_HELD))
-                .unwrap_or("no turn to continue");
-        }
-        // No action: either nothing stopped short, or the agent is gone and a relaunch could not
-        // continue the conversation.
-        if self.connecting {
+        if self.streaming {
+            retry::TURN_RUNNING
+        } else if self.connecting {
             retry::CONNECTING
-        } else if self.continue_reason.is_some() && !self.retry_client_up() {
+        } else if self.queue_held {
+            retry::QUEUE_HELD
+        } else if self.continue_reason.is_some()
+            && self.continue_action_raw() == retry::RetryAction::None
+        {
+            // A turn stopped short, and the agent is gone with no relaunch that resumes it (ACP).
             retry::NOT_CONNECTED
         } else {
             "no turn to continue"
@@ -7848,7 +7847,7 @@ impl Chat {
     fn retry_refusal(&self, action: retry::RetryAction) -> Option<&'static str> {
         match action {
             retry::RetryAction::None => Some("entry has no Retry"),
-            retry::RetryAction::Resend if self.streaming => Some("a turn is running"),
+            retry::RetryAction::Resend if self.streaming => Some(retry::TURN_RUNNING),
             retry::RetryAction::Resend if !self.retry_client_up() => Some(retry::NOT_CONNECTED),
             retry::RetryAction::Relaunch
             | retry::RetryAction::ResumeThenResend
