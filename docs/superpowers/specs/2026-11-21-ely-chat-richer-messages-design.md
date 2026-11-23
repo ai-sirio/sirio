@@ -421,6 +421,10 @@ Scenarios, each proved through the socket readouts of §5.7 and a capture:
    - after `retry`, the composer holds the text and the notice row is present;
    - nothing was sent;
    - a second run, with a draft already in the composer, keeps the draft.
+   - As built (Task 9): an ACP agent that exits while idle is not noticed until the next send (pre-existing on main:
+     `sirio_acp` learns of a closed transport only from a pending call), so that send lands on "lost mid-turn,
+     cannot resume" and the new message goes back to the composer. The idle-death row ("relaunch only") is proved
+     over Claude instead (killed after a finished turn: `retry: relaunch`, nothing sent) and by a failed ACP launch.
 7. **`limit`:**
    - a rejected rate limit with a `resets_at` a few seconds ahead gives a `limitCard` `counting`;
    - it turns into `retry`, and `retry` resends;
