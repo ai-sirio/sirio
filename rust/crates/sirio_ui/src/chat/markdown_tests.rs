@@ -1135,6 +1135,44 @@ async fn a_reply_the_reader_panicked_on_stays_plain_text_until_its_turn_ends(
     assert_eq!(reply.headings.len(), 1);
 }
 
+/// A row that comes in mid-turn (a tool call, an error) ends the live reply before it, and the
+/// reply is built whole from its text. One the reader panicked on is not: it stays plain text until
+/// its turn ends, where it is read once, so that the reader is asked no more often than the
+/// turn's end asks it, and a reply that panics it twice does not print two panic messages.
+#[gpui::test]
+async fn a_row_after_a_reply_the_reader_panicked_on_does_not_read_it_again(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = offline_chat_view(cx);
+    chat.update(cx, |chat, _| chat.streaming = true);
+    let fault = crate::markdown::reader_fault::on();
+    say(&chat, cx, "first ");
+    say(&chat, cx, "**bold**\n\n# Title");
+    let asked = crate::markdown::reader_fault::strikes();
+
+    chat.update(cx, |chat, _| {
+        chat.push_entry(Entry::Error {
+            message: "a tool failed".into(),
+            retryable: false,
+            kind: ErrorKind::McpWarning,
+        });
+    });
+
+    assert_eq!(
+        crate::markdown::reader_fault::strikes(),
+        asked,
+        "a row in mid-turn asked the reader about the reply again"
+    );
+    drop(fault);
+    let reply = the_reply(&chat, cx);
+    assert!(reply.reader_panicked, "the reply stays plain text");
+    assert_eq!(reply.text.text, "first **bold**\n\n# Title");
+    end_turn(&chat, cx);
+    let reply = the_reply(&chat, cx);
+    assert!(!reply.reader_panicked, "the turn's end read the whole reply");
+    assert_eq!(reply.headings.len(), 1);
+}
+
 /// The same for a reply that has no stream (a chunk after Stop, a turn the CLI started): the
 /// chunk arm looks at the flag before it picks a branch.
 #[gpui::test]
