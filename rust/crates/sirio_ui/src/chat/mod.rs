@@ -797,6 +797,20 @@ pub enum EffortListAction {
 }
 
 impl Entry {
+    /// A copy to draw a row from. A reply's stream builds its tree and is never drawn, and its
+    /// frozen text and segments are as long as the reply: a row is drawn at the reveal's pace, so
+    /// the copy leaves the stream out.
+    fn clone_for_draw(&self) -> Self {
+        match self {
+            Self::Assistant { text, document, .. } => Self::Assistant {
+                text: text.clone(),
+                document: document.clone(),
+                stream: None,
+            },
+            other => other.clone(),
+        }
+    }
+
     fn plain_text(&self) -> String {
         match self {
             Self::User { text, .. } => text.clone(),
@@ -9242,7 +9256,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                 let drawn = this.reveal_row(entry_index, window, cx);
                                 this.entries
                                     .get(entry_index)
-                                    .cloned()
+                                    .map(Entry::clone_for_draw)
                                     .map(|entry| {
                                         let bottom_padding =
                                             if matches!(entry, Entry::TurnFooter(_)) {

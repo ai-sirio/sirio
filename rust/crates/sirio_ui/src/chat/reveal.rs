@@ -401,6 +401,10 @@ impl Chat {
         if !self.revealing(entry) {
             return None;
         }
+        // The reveal's per-frame work: how far it has come, and the tail built for it. Only a
+        // reply that is being revealed makes a span, so a frame's cost against the tail budget
+        // (`TAIL_BUDGET`) reads off a trace.
+        let _perf = sirio_perf::span("Chat.reveal_row", entry as u64);
         let now = cx.background_executor().now();
         if self.advance_reveal(entry, cx.theme().reduced_motion, now) {
             window.request_animation_frame();
