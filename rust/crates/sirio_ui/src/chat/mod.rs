@@ -7677,6 +7677,9 @@ impl Chat {
             // flight) connected and sends nothing: a prompt still held would be resumed and sent
             // by a later idle death.
             self.last_prompt = None;
+            // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
+            // relaunch of an agent that is up.
+            self.retire_failed_turn_retries();
             return;
         };
         match after {

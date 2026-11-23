@@ -955,6 +955,53 @@ async fn a_plain_relaunch_forgets_the_prompt_it_did_not_resend(cx: &mut TestAppC
     );
 }
 
+/// A plain relaunch forgets the prompt, so the failed turn's row has nothing left to resend: its
+/// Retry would only relaunch the agent that is up again, and the row must not keep it.
+#[gpui::test]
+async fn a_plain_relaunch_takes_the_failed_turns_retry_off_its_row(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = offline_chat(cx, claude_launch("session_state", &logs));
+    chat.update(cx, |chat, cx| {
+        chat.agent_session_id = Some("fixture-session-1".to_string());
+        chat.submit_turn("silent failed".into(), Vec::new(), Vec::new(), cx);
+    });
+    event(&chat, cx, turn_failed());
+    event(
+        &chat,
+        cx,
+        sirio_chat::ChatEvent::TransportError("Claude Code requires authentication".into()),
+    );
+    let failed = chat.read_with(&cx.cx, |chat, _| {
+        chat.entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::TurnFailed,
+                        ..
+                    }
+                )
+            })
+            .expect("the failed turn's row")
+    });
+
+    let sign_in = error_row(&chat, cx);
+    retry_row(&chat, cx, sign_in);
+    pump_chat_until_within(cx, &chat, 3000, |chat| {
+        chat.client.is_some() && !chat.connecting
+    });
+
+    chat.read_with(&cx.cx, |chat, _| {
+        assert_eq!(
+            chat.retry_action_at(failed),
+            Some(retry::RetryAction::None),
+            "the failed turn's row has no Retry: there is no prompt left to send"
+        );
+    });
+}
+
 /// The socket's `retry` answers what happened: a click that the chat ignores is an error there, not a
 /// success an E2E could read.
 #[gpui::test]
