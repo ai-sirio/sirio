@@ -497,8 +497,9 @@ is running and, for a shell with no refusal, its tail.
 each Monitor line and for a shell's natural end; a shell or Monitor stopped with `stop_task` goes
 `idle` with no turn, and a stopped agent does start one, with no `running` line before it in the
 probe, so A2's rule does not see it. Any `result` is a `TurnEnded`, whether or not Sirio has a
-prompt in flight: it adds a turn footer, stops streaming, sends the next queued prompt and disarms
-the watchdog. So each CLI-started turn leaves a footer, and a prompt sent while one runs can be
+prompt in flight (but an `is_error` result that closes a prompt Sirio sent is a `TurnFailed`, which
+holds the queue: see Failed turns and Retry): it adds a turn footer, stops streaming, sends the next
+queued prompt and disarms the watchdog. So each CLI-started turn leaves a footer, and a prompt sent while one runs can be
 shown finished, and the next queued prompt sent, at that turn's `result`. That is existing
 behaviour, not changed here. A Monitor is a `local_bash` task, so it has the shell's entry, tail and
 Stop. How a Monitor expires is not probed; an expiry with no terminal line still ends its entry,
@@ -571,6 +572,11 @@ row lands is settled (`settle_open_thought` runs before the CLI's notice rows), 
 the thinking opens a second thought row. The CLI sends a refusal notice after its
 stream ends, which keeps this rare.
 
+**Failed turns and Retry.** An `is_error` result of a prompt Sirio sent is `ChatEvent::TurnFailed`, not
+error text and `TurnEnded` (a Stop, a CLI-started turn, `error_max_turns` and `error_max_budget_usd` keep
+today's events). The agent stays up, Retry resends `last_prompt` on the same client (after a lost client,
+with `--resume` where `LaunchSpec::resumes_on_retry`), and queued messages wait until a send lifts the hold.
+
 **Why Claude Code could not start.** A CLI that fails before the session writes an error `result`
 as its first stdout line, in place of the `initialize` answer, with `startup_failure_reason` and
 `errors`. Sirio reads it during the handshake, because it comes there and nowhere later (every one
@@ -635,6 +641,9 @@ unchanged (the second window shows only under `unifiedWindows`), so it has the s
 line.
 
 `sirio_ui::chat::limit_notice` writes the sentence. A part with no value is left out.
+
+A `rejected` status with a `resets_at` is a limit card (`chat::limit_card`: Ely's `Alert` and `Countdown`) in
+the warning's place; it covers its failed turn's error row, with no Retry until the reset has passed.
 
 - `allowed_warning`: `Approaching the {window} usage limit: {n}% used, resets at {time}.` The
   percent is capped at 99, since a warning is not a refusal. It never says "reached".

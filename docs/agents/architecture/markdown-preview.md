@@ -22,6 +22,11 @@ is applied first, the resulting path is checked (no network path, no DOS device 
 changes in any component, no non-UTF-8), and it is handed over encoded so that reading gives it back
 exactly (`address_of`, `preview_address`).
 `docs/superpowers/specs/2026-11-20-ely-markdown-documents-design.md` has the design.
+A streaming chat reply is parsed in parts (`markdown::stream`): blocks before a cut are frozen and a late
+definition, `$$` or nesting change rewinds or holds the cut, so the tree always equals `markdown::build`; the
+turn's end replaces it with one full build. `chat::reveal` draws it at Ely's pace with a `▍` painted on the
+tree, never in the source: copy and `transcriptText` read the received text, and a tail past 7 KiB stops the
+reveal. Design: `docs/superpowers/specs/2026-11-21-ely-chat-richer-messages-design.md`.
 
 The file view's Preview has no HTML engine. `expand_html` maps a GitHub-style
 subset of raw HTML onto the existing `Block`/`Inline` model and reduces the rest

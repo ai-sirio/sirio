@@ -13,7 +13,14 @@ set -eEuo pipefail
 #                    picture served by a loopback `python3 -m http.server`
 #                    (the harness of test-markdown-remote-image-e2e.sh).
 #   chat             a native chat whose scripted agent (chat_fixture.py, mode reply-file)
-#                    answers every prompt with showcase.md (the harness of test-ely-chat-ui-e2e.py).
+#                    answers every prompt with showcase.md (the harness of test-ely-chat-ui-e2e.py);
+#                    then the states of the richer chat messages (spec 2026-11-21-ely-chat-richer-messages-
+#                    design.md): a day separator, a limit card counting, a failed turn (and a second one,
+#                    and a queue behind one), a thought that settled before its reply, and a reply in
+#                    mid-reveal, each in a world of its own started by the driver of
+#                    test-chat-richer-messages-e2e.sh (the stub `claude` of Scripts/Tests/stubs/richer),
+#                    through the socket methods a debug build of 0.47.1 already served, so the two builds
+#                    that are compared are driven the same way. Run both with debug builds.
 #   cr-description   the detail tab of change request #101 on the loopback fake forge
 #                    (the fixtures of test-forge-ui-e2e.sh), its description being showcase.md.
 #
@@ -23,6 +30,11 @@ set -eEuo pipefail
 #
 # Files written to --out-dir:
 #   preview-<k>.png, chat-<k>.png, cr-description-<k>.png   the scrolled pages, k from 1
+#   state-<name>.png                                        the chat's states: day-separators (and
+#                                                           -top), limit-card, turn-failed, turn-failed-second,
+#                                                           held-queue, thought-settled, mid-reveal-<k>
+#   chat-states.json                                        what the app's readout said at each state's
+#                                                           frame (a build without a field leaves it out)
 #   transcript.json                                         the run: binaries, window size,
 #                                                           every sirioctl call, every frame
 #   logs/                                                   each leg's app.log and server logs
@@ -35,8 +47,12 @@ set -eEuo pipefail
 #                   same socket protocol)
 #   --display :N    the Xvfb this script starts and stops, on :120 to :139 (default :120)
 #
+# The mid-reveal frames are taken when the reply has arrived up to each size in $REVEAL_AT (bytes,
+# comma list, default 1800,6000,12000). A frame of a reply in mid-reveal moves with the clock: how far the
+# reveal has come, and a limit card's countdown, differ from one run to the next.
+#
 # Needs, from the checkout's own build: rust/target/debug/examples/ely_chat_seed (chat) and
-# sirioctl when --bin-dir has none.
+# sirioctl when --bin-dir has none. The chat's states also need Mesa's lavapipe (lvp_icd*.json).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -49,6 +65,7 @@ DISPLAY_TARGET=":120"
 ONLY="preview,chat,cr-description"
 SCROLL_CLICKS="${SCROLL_CLICKS:-8}"
 MAX_FRAMES="${MAX_FRAMES:-60}"
+REVEAL_AT="${REVEAL_AT:-1800,6000,12000}"
 WINDOW_SIZE="1600x1000"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -477,6 +494,219 @@ PY
   FRAMES=$((FRAMES + $(wc -l <"$CHAT_FRAMES")))
   cat "$CHAT_FRAMES" >>"$OUT_DIR/.frames.tsv"
   echo "OK: the chat reply was captured ($(wc -l <"$CHAT_FRAMES") frames)"
+  # The states of the richer chat messages. Each runs in a world of its own started by the driver of
+  # test-chat-richer-messages-e2e.sh (imported: its `World` is the isolated instance, the stub `claude` of
+  # Scripts/Tests/stubs/richer the agent). Only what a debug build of 0.47.1 already served is called (the
+  # chat's open, send, read and tabs), so a build from before this delivery is driven the same way; what a
+  # state looks like on each build is what the two frames show. The window is captured the moment the state
+  # is read.
+  echo "== chat states"
+  [ -n "$lvp" ] || fail "the chat states need Mesa's lavapipe (lvp_icd*.json in /usr/share/vulkan/icd.d)"
+  case "$REVEAL_AT" in "" | *[!0-9,]*) fail "REVEAL_AT is a comma list of byte counts (got '$REVEAL_AT')" ;; esac
+  STATES_DIR="$RUN_DIR/cs"
+  mkdir -p "$STATES_DIR/out/frames" "$STATES_DIR/out/scenarios" "$STATES_DIR/out/logs"
+  STATE_FRAMES="$OUT_DIR/.state-frames.tsv"
+  : >"$STATE_FRAMES"
+  env ROOT="$ROOT" RUN_DIR="$STATES_DIR" OUT="$STATES_DIR/out" DISP="$DISPLAY_TARGET" BIN="$BIN" CTL="$CTL" \
+    WINDOW_SIZE="$WINDOW_SIZE" VK_DRIVER_FILES="$lvp" VK_ICD_FILENAMES="$lvp" \
+    python3 -I - "$ROOT" "$OUT_DIR" "$STATE_FRAMES" "$REVEAL_AT" "$WINDOW_SIZE" <<'PY' \
+    || fail "the chat states failed (see $OUT_DIR/logs/chat-states)"
+import hashlib, importlib.util, json, os, sqlite3, subprocess, sys, time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+root, out_dir, frames_tsv, reveal_at, window_size = sys.argv[1:6]
+out_dir = Path(out_dir)
+spec = importlib.util.spec_from_file_location("richer", Path(root) / "Scripts/Tests/chat_richer_messages_e2e.py")
+richer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(richer)
+display = os.environ["DISP"]
+scenario = richer.Scenario("s")
+states = {}
+worlds = []
+
+
+def world(name):
+    made = richer.World(scenario, name)
+    worlds.append(made)
+    return made
+
+
+def user_texts(r):
+    return [row.get("text") for row in r["rows"] if row.get("kind") == "user"]
+
+
+def assistant_bytes(r):
+    return sum(len((row.get("text") or "").encode()) for row in r["rows"] if row.get("kind") == "assistant")
+
+
+def turn_over(text, rows):
+    """The turn of `text` was asked and is over (a failed turn leaves at least its user row, the reply and one more)."""
+    return lambda r: text in user_texts(r) and r["status"] != "streaming" and len(r["rows"]) >= rows
+
+
+def shoot(made, name, read):
+    """The window, right now, as state-<name>.png, with what the readout said just before it."""
+    destination = out_dir / f"state-{name}.png"
+    subprocess.run(["import", "-display", display, "-window", made.window, str(destination)], check=True, timeout=30)
+    size = subprocess.run(["identify", "-format", "%wx%h", str(destination)], capture_output=True, text=True, check=True).stdout
+    colours = int(subprocess.run(["identify", "-format", "%k", str(destination)], capture_output=True, text=True, check=True).stdout)
+    if size != window_size:
+        raise richer.Fail(f"{destination.name} is {size}, not {window_size}")
+    if colours < 200:
+        raise richer.Fail(f"{destination.name} is blank ({colours} colours)")
+    sha = hashlib.sha256(destination.read_bytes()).hexdigest()
+    with open(frames_tsv, "a") as handle:
+        handle.write(f"chat-state\tstate-{name}.png\t{sha}\n")
+    states[name] = {"file": destination.name, "readout": richer.compact(read)}
+    richer.log(f"FRAME: state-{name} ({colours} colours; pid {made.proc.pid})")
+
+
+def settle(seconds=2.0):
+    time.sleep(seconds)
+
+
+try:
+    # ---- a day separator: user turns on three days, written as the app stores them
+    w = world("day")
+    w.start()
+    w.open_chat("claude")
+    surface = w.surface
+    w.quit()
+    now = datetime.now(timezone.utc)
+    old = datetime(now.year - 1, 3, 12, 12, 0, tzinfo=timezone.utc)
+    yesterday = (now - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    earlier = (now - timedelta(days=17)).replace(hour=12, minute=0, second=0, microsecond=0)
+    turns = [("a question from last year", int(old.timestamp())), ("a question from before", int(earlier.timestamp())),
+             ("yesterday's question", int(yesterday.timestamp())), ("today's question", int(now.timestamp()))]
+    db = sqlite3.connect(w.dir / "session.sqlite")
+    try:
+        if db.execute("SELECT id FROM tab WHERE id = ?", (surface,)).fetchone() is None:
+            raise richer.Fail(f"the chat tab {surface} is not in the database")
+        for ordinal, (text, at) in enumerate(turns):
+            user = {"text": text} if at is None else {"text": text, "at": at}
+            payload = json.dumps({"entries": [{"UserMessage": user}, {"AssistantMessage": {"text": f"the answer to {text}"}},
+                                              {"TurnFooter": {"text": "12:00"}}]})
+            db.execute("INSERT INTO chat_turn (tab_id, ordinal, payload, updated_at) VALUES (?, ?, ?, ?)",
+                       (surface, ordinal, payload.encode(), int(time.time() * 1000)))
+        db.commit()
+    finally:
+        db.close()
+    w.start()
+    w.reopen_chat()
+    r = w.wait("the four turns are restored", lambda r: len(user_texts(r)) == 4)
+    settle()
+    shoot(w, "day-separators", w.read())
+    richer.move(w.window, 1090, 450)
+    richer.x("click", "--repeat", "60", "--delay", "5", "4")  # the wheel, up to the first turn
+    settle(1.5)
+    shoot(w, "day-separators-top", w.read())
+    w.keep_artifacts()
+    w.quit()
+
+    # ---- a usage limit reached: a rejected rate limit five minutes ahead, and the turn it failed
+    w = world("lim")
+    w.start()
+    w.open_chat("claude")
+    w.limit_file.write_text(str(int(time.time()) + 300))
+    w.send("limit rejected")
+    w.wait("the turn is over", turn_over("limit rejected", 3), timeout=40)
+    settle()
+    shoot(w, "limit-card", w.read())
+    w.keep_artifacts()
+    w.quit()
+
+    # ---- a failed turn, then a second one (the first one's Retry is then retired)
+    w = world("fail")
+    w.start()
+    w.open_chat("claude")
+    w.send("fail")
+    w.wait("the turn is over", turn_over("fail", 3), timeout=40)
+    settle()
+    shoot(w, "turn-failed", w.read())
+    w.send("fail hold")
+    w.release_gate(1)
+    w.wait("the second turn is over", lambda r: "fail hold" in user_texts(r) and r["status"] != "streaming"
+           and len(r["rows"]) >= 6, timeout=40)
+    settle()
+    shoot(w, "turn-failed-second", w.read())
+    w.keep_artifacts()
+    w.quit()
+
+    # ---- two messages queued behind a turn that fails: held since this delivery, sent before it
+    w = world("held")
+    w.start()
+    w.open_chat("claude")
+    w.send("fail hold")
+    w.wait("the turn streams", lambda r: r["status"] == "streaming")
+    w.send("first queued", queued=True)
+    w.send("second queued", queued=True)
+    w.wait("two messages are queued", lambda r: r["queue"] == ["first queued", "second queued"])
+    w.release_gate(1)
+    w.wait("the turn is over", lambda r: r["status"] != "streaming" and "fail hold" in user_texts(r)
+           and len(r["rows"]) >= 3, timeout=40)
+    settle(3.0)
+    shoot(w, "held-queue", w.read())
+    w.keep_artifacts()
+    w.quit()
+
+    # ---- a thought whose block closed 2 s before its reply's text
+    w = world("think")
+    w.start()
+    w.open_chat("claude")
+    w.send("think slow")
+    w.wait("the turn streams", lambda r: r["status"] == "streaming")
+    time.sleep(1.2)
+    shoot(w, "thought-settled", w.read())
+    w.keep_artifacts()
+    w.quit()
+
+    # ---- a reply in mid-reveal, at each size it has reached
+    w = world("rev")
+    w.start()
+    w.open_chat("claude")
+    w.send("showcase slow")
+    for step, wanted in enumerate((int(size) for size in reveal_at.split(",")), start=1):
+        deadline = time.time() + 60
+        while True:
+            try:
+                r = w.read()
+            except richer.RpcError as stalled:  # a debug build that builds the whole reply per chunk is slow to answer
+                richer.log(f"note: a read was not answered ({stalled})")
+                r = None
+            if r is not None and assistant_bytes(r) >= wanted:
+                break
+            if time.time() > deadline:
+                raise richer.Fail(f"the reply never reached {wanted} bytes")
+        shoot(w, f"mid-reveal-{step}", r)
+        states[f"mid-reveal-{step}"]["received_bytes"] = assistant_bytes(r)
+    w.wait("the reply ends", lambda r: r["status"] != "streaming", timeout=90)
+    w.keep_artifacts()
+    w.quit()
+    status = 0
+except BaseException as error:
+    richer.log(f"FAIL: {error!r}")
+    status = 1
+finally:
+    for made in worlds:
+        try:
+            made.keep_artifacts()
+        except Exception:
+            pass
+        made.quit()
+    richer.sweep()
+    (out_dir / "chat-states.json").write_text(json.dumps(states, indent=2) + "\n")
+    logs = out_dir / "logs" / "chat-states"
+    logs.mkdir(parents=True, exist_ok=True)
+    for kept in (Path(os.environ["OUT"]) / "logs").glob("*"):
+        (logs / kept.name).write_bytes(kept.read_bytes())
+    for kept in (Path(os.environ["OUT"]) / "scenarios").glob("*.stub.log"):
+        (logs / kept.name).write_bytes(kept.read_bytes())
+sys.exit(status)
+PY
+  FRAMES=$((FRAMES + $(wc -l <"$STATE_FRAMES")))
+  cat "$STATE_FRAMES" >>"$OUT_DIR/.frames.tsv"
+  echo "OK: the chat's states were captured ($(wc -l <"$STATE_FRAMES") frames)"
   stop_app
 fi
 
@@ -564,7 +794,7 @@ document = {
 (out / "transcript.json").write_text(json.dumps(document, indent=2) + "\n")
 print(len(frames))
 PY
-rm -f "$OUT_DIR/.ctl.tsv" "$OUT_DIR/.frames.tsv" "$OUT_DIR/.chat-frames.tsv"
+rm -f "$OUT_DIR/.ctl.tsv" "$OUT_DIR/.frames.tsv" "$OUT_DIR/.chat-frames.tsv" "$OUT_DIR/.state-frames.tsv"
 
 echo "artifact: $OUT_DIR"
 echo "MARKDOWN SURFACES CAPTURED ($FRAMES frames)"
