@@ -261,7 +261,7 @@ A reply that is not live (stored, restored, ended) never reveals.
 - **The wait shows.** A held queue has one line under it: "Waiting: press Retry or send a message." (t2s, 2026-11-21). It goes when the queue is released or emptied.
 - **The held items stay editable and removable** as today: ✕ on one, Clear all.
 
-**The error row.** `TurnFailed` pushes an `Entry::Error` with a new `ErrorKind::TurnFailed`, `retryable: true`. It
+**The error row.** `TurnFailed` pushes an `Entry::Error` with a new `ErrorKind::TurnFailed`, `retryable: true` when a prompt is held (otherwise `false`, see "As built" below). It
 ends the turn (`streaming = false`, the trace turn failed) and leaves the client alone. The row keeps today's look:
 Sirio's error row with its Retry button. That is my call, and §6 lists it as a visible non-change.
 
@@ -304,7 +304,7 @@ which chooses among these:
   - Body: `limit_notice::rate_limit_sentence` as today (window, scope, reset time).
   - The countdown runs to `resets_at`.
 - **When the turn failed with it.** If the same turn fails (`TurnFailed`, which Claude sends with the limit text), its `Entry::Error` is still pushed and persisted.
-  - While the card exists (in memory, from the `RateLimited` of that turn), the transcript draws the card in that row's place.
+  - While the card exists (in memory, from the `RateLimited` of that turn), the transcript draws the card in that row's place, when the row is retryable. A row with no prompt to resend is not covered (final review, 2026-11-23).
   - Its control row says `coveredBy: "limitCard"`.
   - After a restore there is no card, so the row is drawn.
 - **When the countdown ends.**
