@@ -68,24 +68,46 @@ pub(crate) const MAX_HTML_NESTING: usize = 32;
 pub(crate) mod reader_fault {
     use std::cell::Cell;
 
-    thread_local!(static ARMED: Cell<bool> = const { Cell::new(false) });
+    thread_local!(static ARMED: Cell<Option<usize>> = const { Cell::new(None) });
+    thread_local!(static STRIKES: Cell<usize> = const { Cell::new(0) });
 
-    /// While it lives, every read of a text on this thread panics.
+    /// While it lives, reads of a text on this thread panic, from the one after the first
+    /// `skip` of them on, and the count of reads begins again from zero.
     pub(crate) struct ReaderFault(());
 
+    /// Every read of a text panics.
     pub(crate) fn on() -> ReaderFault {
-        ARMED.with(|armed| armed.set(true));
+        on_after(0)
+    }
+
+    /// The first `skip` reads go through; every one after them panics.
+    pub(crate) fn on_after(skip: usize) -> ReaderFault {
+        ARMED.with(|armed| armed.set(Some(skip)));
+        STRIKES.with(|strikes| strikes.set(0));
         ReaderFault(())
+    }
+
+    /// How many texts the reader was asked to read since the fault was set: the ones that went
+    /// through, and the one that panicked, and every one asked after it.
+    pub(crate) fn strikes() -> usize {
+        STRIKES.with(Cell::get)
     }
 
     impl Drop for ReaderFault {
         fn drop(&mut self) {
-            ARMED.with(|armed| armed.set(false));
+            ARMED.with(|armed| armed.set(None));
         }
     }
 
     pub(super) fn strike() {
-        if ARMED.with(Cell::get) {
+        let Some(skip) = ARMED.with(Cell::get) else {
+            return;
+        };
+        let asked = STRIKES.with(|strikes| {
+            strikes.set(strikes.get() + 1);
+            strikes.get()
+        });
+        if asked > skip {
             panic!("a panic injected into the Markdown reader");
         }
     }
@@ -191,18 +213,23 @@ fn markdown_depth(source: &str) -> usize {
 
 /// The text Ely reads for `source` (a byte order mark dropped, lone CRs as line ends, `$$` fences
 /// as tildes): the first text `parts` hands the guard, taken without reading it into a tree. A
-/// guard that refuses it ends the reading there.
-pub(super) fn read_of(source: &str) -> String {
+/// guard that refuses it ends the reading there. `None` when Ely's reader panicked on the way to
+/// that text: it is vendored, and a panic left in it must not take the app down.
+pub(super) fn read_of(source: &str) -> Option<String> {
     let mut read = None;
-    let _ = parse_markdown_guarded(
-        source,
-        &|_: &str| -> Option<Vec<MarkdownBlock>> { None },
-        &mut |text| {
-            read = Some(text.to_owned());
-            false
-        },
-    );
-    read.unwrap_or_default()
+    let reader = catch_unwind(AssertUnwindSafe(|| {
+        parse_markdown_guarded(
+            source,
+            &|_: &str| -> Option<Vec<MarkdownBlock>> { None },
+            &mut |text| {
+                #[cfg(test)]
+                reader_fault::strike();
+                read = Some(text.to_owned());
+                false
+            },
+        )
+    }));
+    reader.is_ok().then(|| read.unwrap_or_default())
 }
 
 /// How deep `nodes` nest, a leaf counting one.
@@ -237,7 +264,8 @@ pub(crate) struct Parts {
     /// The first text Ely read for this source (a byte order mark dropped, lone CRs as line
     /// ends, `$$` fences as tildes), the one the guard saw first.
     pub read: Option<String>,
-    /// Ely's reader panicked on the source: `nodes` is the single plain paragraph.
+    /// Ely's reader panicked on the source: `nodes` is the single plain paragraph (`refused` is
+    /// set too), and nothing else of the parse is kept, since it was cut short.
     pub panicked: bool,
 }
 
@@ -270,7 +298,8 @@ fn parts(source: &str, policy: &mut Policy<'_>, within: Within, keep_read: bool)
     // read after every text was measured.
     //
     // The reader is vendored, and an `expect` left in it would take the app down from a reply:
-    // a panic in it leaves the source as the plain paragraph, marked so that a caller can tell.
+    // a panic in it leaves the source as the plain paragraph, marked so that a caller can tell,
+    // and none of what the cut-short parse had noted is kept.
     let deepest = Cell::new(0usize);
     let (declined, block_html) = (Cell::new(false), Cell::new(false));
     let (mut read, mut texts) = (None, 0usize);
@@ -331,6 +360,18 @@ fn parts(source: &str, policy: &mut Policy<'_>, within: Within, keep_read: bool)
             }
         }
     }
+    if panicked {
+        return Parts {
+            nodes,
+            missing: Vec::new(),
+            deepest: 0,
+            refused: true,
+            declined: false,
+            block_html: false,
+            read: None,
+            panicked: true,
+        };
+    }
     Parts {
         nodes,
         missing,
@@ -339,7 +380,7 @@ fn parts(source: &str, policy: &mut Policy<'_>, within: Within, keep_read: bool)
         declined: declined.get(),
         block_html: block_html.get(),
         read,
-        panicked,
+        panicked: false,
     }
 }
 

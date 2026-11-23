@@ -45,7 +45,7 @@
 //     tile the text up to the cut.
 
 use super::*;
-use crate::markdown::{Policy, Surface, build};
+use crate::markdown::{Policy, Surface, build, reader_fault};
 
 const SHOWCASE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -930,4 +930,35 @@ fn a_definition_continued_on_a_quote_line_is_still_a_mention() {
     }
     let (cuts, _) = cuts_by_step(text, 3);
     assert!(!rewinds(&cuts).is_empty(), "the definition rewound nothing: {cuts:?}");
+}
+
+/// A panic in the reader, wherever in an update it lands (reading the tail, freezing a block,
+/// parsing the tail), makes the update answer with the text as plain text, marked, and the stream
+/// asks the reader no more: not in the same update (a build of the whole text would panic a second
+/// time) and not in the next ones. The count of reads the injected fault saw is the proof.
+#[test]
+fn a_panic_in_an_update_ends_the_streams_parsing() {
+    let text = "alpha\n\nbeta\n\ngamma";
+    let more = "alpha\n\nbeta\n\ngamma delta\n\nepsilon";
+    let mut struck = 0;
+    for skip in 0..6 {
+        let mut stream = StreamingDoc::new();
+        let fault = reader_fault::on_after(skip);
+        let doc = stream.update(text, &mut chat());
+        let reads = reader_fault::strikes();
+        if !doc.reader_panicked {
+            // The fault was after every read this update makes.
+            continue;
+        }
+        struck += 1;
+        assert_eq!(reads, skip + 1, "skip {skip}: the reader was asked again after it panicked");
+        assert_eq!(doc.text.text, text, "skip {skip}");
+        assert_eq!((doc.nodes.len(), doc.headings.len()), (1, 0), "skip {skip}");
+        let doc = stream.update(more, &mut chat());
+        assert!(doc.reader_panicked, "skip {skip}: the next update read the text again");
+        assert_eq!(doc.text.text, more, "skip {skip}");
+        assert_eq!(reader_fault::strikes(), reads, "skip {skip}: the next update asked the reader");
+        drop(fault);
+    }
+    assert!(struck >= 3, "the fault landed in {struck} places of an update");
 }

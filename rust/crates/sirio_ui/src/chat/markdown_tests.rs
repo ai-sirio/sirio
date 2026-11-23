@@ -1045,10 +1045,14 @@ async fn streaming_math_and_html_with_rewinds_cost(cx: &mut TestAppContext) {
 
 // ---- a reply Ely's reader panics on -------------------------------------------------------
 
-fn say(chat: &Entity<Chat>, cx: &mut VisualTestContext, text: &str) {
+/// Delivers `text` as a chunk of the reply. How many texts the reader was asked to read to handle
+/// it (a read of the frame that follows is not counted).
+fn say(chat: &Entity<Chat>, cx: &mut VisualTestContext, text: &str) -> usize {
     chat.update(cx, |chat, cx| {
+        let before = crate::markdown::reader_fault::strikes();
         chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk(text.into()), cx);
-    });
+        crate::markdown::reader_fault::strikes() - before
+    })
 }
 
 fn end_turn(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
@@ -1077,8 +1081,8 @@ fn the_reply(chat: &Entity<Chat>, cx: &VisualTestContext) -> MarkdownBlocks {
 }
 
 /// A reply whose reader panicked is plain text for the rest of its turn: a later chunk that
-/// would make structure does not, since the reader is not asked again, and the full text is
-/// read once when the turn ends.
+/// would make structure does not, since the reader is not asked again (the count of reads the
+/// fault saw does not move), and the full text is read once when the turn ends.
 #[gpui::test]
 async fn a_reply_the_reader_panicked_on_stays_plain_text_until_its_turn_ends(
     cx: &mut TestAppContext,
@@ -1087,15 +1091,15 @@ async fn a_reply_the_reader_panicked_on_stays_plain_text_until_its_turn_ends(
     chat.update(cx, |chat, _| chat.streaming = true);
 
     let fault = crate::markdown::reader_fault::on();
-    say(&chat, cx, "first ");
-    drop(fault);
+    assert_eq!(say(&chat, cx, "first "), 1, "the first chunk asked the reader once, and it panicked");
     let reply = the_reply(&chat, cx);
     assert!(reply.reader_panicked);
     assert_eq!(reply.text.text, "first ");
     assert_eq!(reply.nodes.len(), 1);
 
-    // The fault is gone, and the reader would read a heading here.
-    say(&chat, cx, "**bold**\n\n# Title");
+    // A reader that was asked would read a heading here, or panic again.
+    assert_eq!(say(&chat, cx, "**bold**\n\n# Title"), 0, "a flagged reply was parsed again");
+    drop(fault);
     let reply = the_reply(&chat, cx);
     assert!(reply.reader_panicked, "the reader was not asked again");
     assert_eq!(reply.text.text, "first **bold**\n\n# Title");
@@ -1105,6 +1109,29 @@ async fn a_reply_the_reader_panicked_on_stays_plain_text_until_its_turn_ends(
     let reply = the_reply(&chat, cx);
     assert!(!reply.reader_panicked, "the turn's end read the whole reply");
     assert_eq!(reply.headings.len(), 1);
+}
+
+/// The same for a reply that has no stream (a chunk after Stop, a turn the CLI started): the
+/// chunk arm looks at the flag before it picks a branch.
+#[gpui::test]
+async fn a_reply_without_a_stream_the_reader_panicked_on_is_not_parsed_again(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = offline_chat_view(cx);
+    let fault = crate::markdown::reader_fault::on();
+    assert_eq!(say(&chat, cx, "first "), 1);
+    assert_eq!(say(&chat, cx, "**bold**\n\n# Title"), 0, "a flagged reply was parsed again");
+    drop(fault);
+    chat.read_with(&cx.cx, |chat, _| {
+        assert!(matches!(
+            chat.entries.last(),
+            Some(Entry::Assistant { stream: None, .. })
+        ));
+    });
+    let reply = the_reply(&chat, cx);
+    assert!(reply.reader_panicked);
+    assert_eq!(reply.text.text, "first **bold**\n\n# Title");
+    assert_eq!((reply.nodes.len(), reply.headings.len()), (1, 0));
 }
 
 /// The read at the turn's end is one try: a reader that panics again leaves the text plain.

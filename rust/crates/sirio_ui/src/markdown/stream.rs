@@ -42,7 +42,8 @@ use ely_gpui_component::documents::{MarkdownBlock, markdown_options};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 
 use super::{
-    MAX_NESTING, MarkdownBlocks, Parts, Policy, Within, build, join, parts, read_of, rewrite,
+    MAX_NESTING, MarkdownBlocks, Parts, Policy, Within, as_plain_text, build, join, parts, read_of,
+    rewrite,
 };
 use crate::markdown_preview::DiagramRequest;
 
@@ -485,6 +486,9 @@ pub(crate) struct StreamingDoc {
     frozen: String,
     /// The nesting guard refused a part: every build is a build of the whole reply.
     whole: bool,
+    /// Ely's reader panicked on a part, or on the whole reply: the stream asks it no more, and
+    /// answers with the text as plain text, marked (`whole` is set too).
+    panicked: bool,
     /// Until the reply is this long the stream does not look at it again: a chunk is the build of
     /// its text (see [`HOLD_FROM`]).
     hold_until: usize,
@@ -540,12 +544,17 @@ impl StreamingDoc {
         if !text.starts_with(&self.frozen) {
             *self = Self::new();
         }
+        if self.panicked {
+            return as_plain_text(text);
+        }
         if self.whole || text.len() < self.hold_until {
-            return build(text, policy);
+            return self.build_whole(text, policy);
         }
         let (read, scan, brackets, depth, math) = loop {
             let tail = &text[self.cut..];
-            let read = read_of(tail);
+            let Some(read) = read_of(tail) else {
+                return self.plain(text);
+            };
             let scan = Scan::of(&read);
             let brackets = Brackets::of(tail);
             let depth = scan.deepest;
@@ -566,7 +575,7 @@ impl StreamingDoc {
                     // and it skips the work of freezing what is held again: that is for the
                     // chunks after it.
                     if self.cut < text.len() - self.cut {
-                        return build(text, policy);
+                        return self.build_whole(text, policy);
                     }
                 }
                 None => break (read, scan, brackets, depth, math),
@@ -575,8 +584,11 @@ impl StreamingDoc {
         let deepest = self.deepest().max(depth);
         let cut_before = self.cut;
         self.freeze(text, &read, &scan, &brackets, deepest, policy);
+        if self.panicked {
+            return as_plain_text(text);
+        }
         if self.whole {
-            return build(text, policy);
+            return self.build_whole(text, policy);
         }
         let tail = parts(
             &text[self.cut..],
@@ -587,15 +599,18 @@ impl StreamingDoc {
             },
             false,
         );
+        if tail.panicked {
+            return self.plain(text);
+        }
         if tail.refused || tail.declined {
             self.whole = true;
-            return build(text, policy);
+            return self.build_whole(text, policy);
         }
         // That a reply with `\(` pairs has no block HTML was the scan's word: if the parse says
         // otherwise, the rooms were not right, and the reply is built whole from here on.
         if math && (tail.block_html || self.segments.iter().any(|s| s.has_block_html)) {
             self.whole = true;
-            return build(text, policy);
+            return self.build_whole(text, policy);
         }
         self.wait_if_nothing_froze(text.len(), cut_before);
         self.joined(tail)
@@ -614,9 +629,12 @@ impl StreamingDoc {
                 },
                 true,
             );
+            if tail.panicked {
+                return self.plain(text);
+            }
             if tail.refused || tail.declined {
                 self.whole = true;
-                return build(text, policy);
+                return self.build_whole(text, policy);
             }
             let read = tail.read.take().unwrap_or_default();
             let scan = Scan::of(&read);
@@ -626,7 +644,7 @@ impl StreamingDoc {
                     self.truncate(index);
                     // As in `update`: a rewind that leaves most of the reply to parse is a build.
                     if self.cut < text.len() - self.cut {
-                        return build(text, policy);
+                        return self.build_whole(text, policy);
                     }
                 }
                 None => break (tail, read, scan, brackets),
@@ -636,8 +654,32 @@ impl StreamingDoc {
         let document = self.joined(tail);
         let cut_before = self.cut;
         self.freeze(text, &read, &scan, &brackets, deepest, policy);
+        if self.panicked {
+            return as_plain_text(text);
+        }
         self.wait_if_nothing_froze(text.len(), cut_before);
         document
+    }
+
+    /// The build of the whole of `text`, which is what a stream answers when looking at the reply
+    /// in parts would cost more than it saves. The reader may panic in it too, and then the
+    /// stream is done with it, as for a panic in a part.
+    fn build_whole(&mut self, text: &str, policy: &mut Policy<'_>) -> MarkdownBlocks {
+        let document = build(text, policy);
+        if document.reader_panicked {
+            self.panicked = true;
+            self.whole = true;
+        }
+        document
+    }
+
+    /// The answer when the reader panicked on a part of `text`: the whole of it as plain text,
+    /// marked. A build of it would ask the reader again, and it would panic again, in the same
+    /// update. From here on the stream answers so without asking.
+    fn plain(&mut self, text: &str) -> MarkdownBlocks {
+        self.panicked = true;
+        self.whole = true;
+        as_plain_text(text)
     }
 
     /// After a look that froze nothing, with most of the reply still in the tail and the reply
@@ -766,6 +808,11 @@ impl StreamingDoc {
                 },
                 true,
             );
+            if made.panicked {
+                self.panicked = true;
+                self.whole = true;
+                break;
+            }
             if made.refused || made.declined {
                 // The segments made so far stay: they tile the text up to the cut.
                 self.whole = true;

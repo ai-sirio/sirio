@@ -1591,3 +1591,27 @@ fn a_source_nested_too_deep_is_plain_text_and_not_a_panic() {
     assert_eq!(built.nodes.to_vec(), vec![paragraph(&source)]);
     assert!(!built.reader_panicked);
 }
+
+/// `read_of` asks the same reader for the text it would read, and a panic there is no answer, not
+/// a crash: a stream that cannot read a tail does not parse it.
+#[test]
+fn a_panic_while_reading_the_text_ely_reads_is_no_text() {
+    let fault = reader_fault::on();
+    assert_eq!(read_of(STRUCTURED), None);
+    drop(fault);
+    assert_eq!(read_of(STRUCTURED).as_deref(), Some(STRUCTURED));
+}
+
+/// Tails the reveal and the stream build go through `parts`, and tell a panic by `panicked`, with
+/// the source as the one plain paragraph of the nodes and nothing else of the parse kept.
+#[test]
+fn a_part_the_reader_panics_on_is_flagged_and_plain() {
+    let fault = reader_fault::on();
+    let made = parts(STRUCTURED, &mut plain(Surface::Chat), Within::default(), true);
+    drop(fault);
+    assert!(made.panicked && made.refused);
+    assert_eq!(made.nodes, vec![paragraph(STRUCTURED)]);
+    assert_eq!((made.deepest, made.declined, made.block_html, made.read), (0, false, false, None));
+    let read = parts(STRUCTURED, &mut plain(Surface::Chat), Within::default(), true);
+    assert!(!read.panicked && !read.refused);
+}
