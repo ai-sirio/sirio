@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.47.1",
-  "notes": "Sirio 0.47.1 fixes two ways a chat reply could close the app, and the chat\nnow draws pictures by the same rule as the Markdown Preview.\n\n**A reply can no longer close Sirio**\n\n- A chat reply, or a Markdown file in the Preview, closed Sirio when it held\n  a reference link whose label broke across two lines of a quote, or a link\n  definition right after a list with text on the next line. Both now draw as\n  intended.\n- A reference link whose label matched two definitions only loosely (`ı` and\n  `i`, for example) could open the wrong address. It now opens the one the\n  Markdown rules pick.\n- If the Markdown reader still fails on some text, that text is shown plain\n  instead of closing the app. A chat reply that hits this stays plain until\n  its turn ends.\n\n**Pictures in the chat follow the Preview's rule**\n\n- A picture whose path holds `?`, `#` or `%` now draws the exact file the\n  path names.\n- A picture whose path names a Windows device name (`NUL`, `COM1`, `aux.png`\n  and the like), on any system, shows its alt text, as in the Preview. Sirio\n  no longer looks such a name up on disk, which on Windows could hang the\n  window.\n\n**Sidebar**\n\n- With a larger interface font, the pinned project header now changes to the\n  next project at the right place while you scroll.",
+  "version": "0.48.0",
+  "notes": "Chat replies in Sirio now show more about themselves: they appear at a steady\npace while they stream, a failed turn can be retried in place, and a usage\nlimit counts down to its reset.\n\n**Replies that stream in**\n\n- A reply appears at a steady pace as it arrives, with a caret after the last\n  word. Stopping, or the end of the turn, shows the rest at once. With the\n  system's reduced motion turned on, the reply is not paced.\n- Long replies cost much less to draw while they stream. On a 40 KiB reply,\n  each new chunk takes about a sixth of the time it did before. A reply\n  written without blank lines still costs what it did, and is drawn without\n  pacing once it grows long.\n\n**A failed turn says so, and Retry sends it again**\n\n- When a turn fails, for example because Claude is overloaded, the chat keeps\n  what had arrived and adds an error row with **Retry**. Before, Claude's\n  error was appended to the reply's text.\n- Retry sends your message again, in the same conversation when the agent\n  still has it. Before, it only restarted the agent. Only the newest failed\n  turn keeps its Retry.\n- Messages you queued behind a failed turn wait under \"Waiting: press Retry or\n  send a message.\" until you retry or send something.\n\n**Usage limits**\n\nWhen Claude's usage limit is reached, the chat shows \"Usage limit reached\"\nwith a countdown to the reset, then \"Try again\" or \"Usage limit lifted\".\n\n**Days and thoughts**\n\n- Days in the chat are marked by a separator in plain case: \"Today\",\n  \"Yesterday\", \"Friday, November 6\". They used to be uppercase headings such\n  as \"FRI 6 NOV\".\n- Claude's thinking shows its duration (\"Thought for N seconds\") from the\n  moment its thinking block ends, not when the next part of the reply starts.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.1/Sirio-0.47.1.dmg",
-      "sha256": "346071d689ae102560c9a3f9cad4442151af4d09cf372798d66705829acec405",
-      "signature": "ienejYDBMjv/Fvnt8v8SJiYRDExwTXgFiCzjrGwb2r5ySGwukqRRQ3RkzShg02JRbdvNgWCf0FWS2JMkWHEMDg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.48.0/Sirio-0.48.0.dmg",
+      "sha256": "36c176370b5001209751ccd09e6af0776aa3809f1fa87ca81c2d9dcb0f938aec",
+      "signature": "q0MhjO0GmyORGoq+EgnpJNvMFys+181ol0MdfmOaEA35prL8kIhK+gE4wbXpQ57drUC96M3kvHkocbdNRVmqCQ=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.1/Sirio-0.47.1-x86_64.AppImage",
-      "sha256": "b346d175586960e706c5247b41ff4a2d7fa7507b560b94d451c175812ea847d6",
-      "signature": "L/14lwVbna4qGj5ExwSIAyuM9qAtttQHr8EPBf8AQmYeRijtBXznkvRiLBoN97XbIoUs1glMGcOL7Z7jh7LFCg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.48.0/Sirio-0.48.0-x86_64.AppImage",
+      "sha256": "d707ba203143bf1e93e0dcdf867a5e78cfb51969c42467c6d2d53b7d33366f4c",
+      "signature": "jP9CVEyGYzi12elubWy+KZLkmOEBfPdn8JsA0bRu3L/O7bxqf+R48M3IEWvUuMQU6/shMW9wpYTElDBKssjSBg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.47.1/SirioSetup-0.47.1.exe",
-      "sha256": "4895b86c30a383c5cfad0f33f30e96ea57b374e6396b6032d3f37509f1c071b1",
-      "signature": "Tkvur6pOb5XWUeG7ulefHevuwSnvWnBQyXa+9JZgBxZ7oEOij8Kjv5yjk9X9tFEBoEpTYX5eLPUIZk61vpoPCw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.48.0/SirioSetup-0.48.0.exe",
+      "sha256": "2e3ed2f5c73ce2687ef4ebf36c34f307b14a4e99c9ea1f1c345896b7a34c29c5",
+      "signature": "0+lWU5ogq0ZIpy8f3n/G6Iy26FVt99rqnxIPewI4k7VLdI/4vf5U2HAAFOobMzECk3hL5eStIfSC7zsvlDdJBQ=="
     }
   }
 }
