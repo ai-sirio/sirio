@@ -4681,6 +4681,14 @@ impl Chat {
         // Stop clears `streaming` at once, and the end of the stopped turn arrives later: that end
         // (like a turn the CLI started on its own) is not the end of a turn of ours.
         let ended_our_turn = self.streaming;
+        // A prompt sent after the Stop, before the stopped turn's late end arrived, is streaming
+        // now: this end belongs to the stopped turn, not to the turn that runs, which has not
+        // stopped short. Continue must not be offered over it.
+        let continue_reason = if self.stop_end_pending && ended_our_turn {
+            None
+        } else {
+            continue_reason
+        };
         // Whatever this end is, a Stop's end is no longer pending after it.
         self.stop_end_pending = false;
         self.settle_turn(stop_reason, continue_reason, cx);
@@ -4714,8 +4722,9 @@ impl Chat {
         // the live agent is not offered a restart.
         if !self.streaming && self.stop_end_pending {
             // The agent's error answer carries its own stop reason ("Error"), which says nothing of
-            // the Stop: the turn is a stopped one, so Continue picks it up as after a clean Stop.
-            self.end_turn(stop_reason, Some(retry::ContinueReason::Stopped), cx);
+            // the Stop: the turn is a stopped one, so it ends as one (the footer says "cancelled")
+            // and Continue picks it up as after a clean Stop.
+            self.end_turn("Cancelled", Some(retry::ContinueReason::Stopped), cx);
             return;
         }
         // Any other failure is a real one, shown whether or not a turn streams: with none, a late
@@ -5386,12 +5395,10 @@ impl Chat {
             }
             TranscriptAction::Continue => {
                 if self.continue_action_now() == retry::RetryAction::None {
-                    let raw = self.continue_action_raw();
-                    let why = (raw != retry::RetryAction::None)
-                        .then(|| self.retry_refusal(raw))
-                        .flatten()
-                        .unwrap_or("no turn to continue");
-                    return Err(format!("surface.chat.transcript continue: {why}"));
+                    return Err(format!(
+                        "surface.chat.transcript continue: {}",
+                        self.continue_refusal()
+                    ));
                 }
                 self.continue_turn(cx);
             }
@@ -7788,6 +7795,28 @@ impl Chat {
         }
     }
 
+    /// Why Continue does nothing now, for the socket: the cause when there is one (a turn is
+    /// running, the agent is connecting or is not connected, the queue is held), in Retry's
+    /// words where it has them, else that there is no turn to continue.
+    fn continue_refusal(&self) -> &'static str {
+        let raw = self.continue_action_raw();
+        if raw != retry::RetryAction::None {
+            return self
+                .retry_refusal(raw)
+                .or_else(|| self.queue_held.then_some(retry::QUEUE_HELD))
+                .unwrap_or("no turn to continue");
+        }
+        // No action: either nothing stopped short, or the agent is gone and a relaunch could not
+        // continue the conversation.
+        if self.connecting {
+            retry::CONNECTING
+        } else if self.continue_reason.is_some() && !self.retry_client_up() {
+            retry::NOT_CONNECTED
+        } else {
+            "no turn to continue"
+        }
+    }
+
     /// The transcript row that carries Continue: the last reply of the last turn, or, when that
     /// turn has none (it stopped during a tool call), the last turn's footer. `None` when Continue
     /// has no button.
@@ -7820,15 +7849,13 @@ impl Chat {
         match action {
             retry::RetryAction::None => Some("entry has no Retry"),
             retry::RetryAction::Resend if self.streaming => Some("a turn is running"),
-            retry::RetryAction::Resend if self.client.is_none() => {
-                Some("the agent is not connected")
-            }
+            retry::RetryAction::Resend if !self.retry_client_up() => Some(retry::NOT_CONNECTED),
             retry::RetryAction::Relaunch
             | retry::RetryAction::ResumeThenResend
             | retry::RetryAction::RelaunchToComposer
                 if self.connecting =>
             {
-                Some("the agent is connecting")
+                Some(retry::CONNECTING)
             }
             _ => None,
         }
