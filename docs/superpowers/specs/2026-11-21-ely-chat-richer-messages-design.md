@@ -337,6 +337,11 @@ which chooses among these:
 - **New row kind** `limitCard`, with `resetsAt` and `phase` (`counting`, `retry`, `lifted`).
 - **The queue:** its readout gains `held` (bool) and `heldLine`, the line's text when it is shown. If the snapshot has no queue readout yet, add one with the item texts.
 - `daySeparator`: rows for the separators, with their label. The existing day headings had no row; check first.
+  - As built (Task 7): a separate debug result field `daySeparators`, rows `{kind: "daySeparator", entry, label}` where
+    `entry` is the index of the user entry the separator sits above. They are not rows of `transcript`, so entry
+    indices (`retry { entry }`, `firstVisibleEntry`) do not move.
+- **Unknown values** in a row are absent keys, not `null` (rows hold strings): `user.at` is absent for an undated
+  turn, `thought.durationMs` until the thought settles. Result fields keep their own convention (`heldLine` is `""`).
 
 **New `surface.chat.transcript` action:** `retry { entry }`. It presses the Retry of that error row or limit card, as a
 click would. It is refused when the entry has no Retry.
@@ -355,6 +360,7 @@ All of these are added to `served.rs`'s debug list only.
 | V6 | Claude usage limit reached: a card with a countdown, then "Try again" or "Usage limit lifted". |
 | V7 | After a failed turn, queued messages wait, with the line "Waiting: press Retry or send a message." under the queue. A successful Retry or send releases them. Today a failed Claude turn still sends the next queued message. |
 | V8 | Only the newest failed turn keeps its Retry button; sending a new prompt leaves older failed-turn rows with OK only. |
+| V9 | A native Claude thought settles (header "Thought for Ns", body collapses) when its thinking block closes, not when the reply's first text arrives. |
 | — | Not changed, by my call: the error row's look (Sirio's row with Retry, not Ely's `ErrorMessage`); the thought header. |
 
 ## 7. Testing
