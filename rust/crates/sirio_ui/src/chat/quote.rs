@@ -42,27 +42,28 @@ pub(crate) fn join_quote(quote: Option<&str>, typed: &str) -> String {
 pub(crate) fn split_quote(text: &str) -> (Option<String>, &str) {
     let mut quoted: Vec<&str> = Vec::new();
     let mut consumed = 0;
+    let mut rest = None;
     for raw in text.split_inclusive('\n') {
         consumed += raw.len();
         let line = raw.strip_suffix('\n').unwrap_or(raw);
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
-            // The empty line ends the block; a block needs at least one quoted line before it.
-            if quoted.is_empty() {
-                return (None, text);
-            }
-            return (Some(quoted.join("\n")), &text[consumed..]);
+            // The empty line ends the block.
+            rest = Some(&text[consumed..]);
+            break;
         }
         let Some(body) = line.strip_prefix('>') else {
             return (None, text);
         };
         quoted.push(body.strip_prefix(' ').unwrap_or(body));
     }
-    if quoted.is_empty() {
-        (None, text)
-    } else {
-        (Some(quoted.join("\n")), "")
+    let quote = quoted.join("\n");
+    // No quoted line before the empty line, or only blank ones: `join_quote` writes no such block,
+    // so it is plain text.
+    if quote.trim().is_empty() {
+        return (None, text);
     }
+    (Some(quote), rest.unwrap_or(""))
 }
 
 #[cfg(test)]
@@ -124,5 +125,28 @@ mod tests {
     #[test]
     fn a_whole_text_of_quote_is_all_quote() {
         assert_eq!(split_quote("> a"), (Some("a".to_string()), ""));
+    }
+
+    #[test]
+    fn a_blank_quote_block_is_not_a_quote() {
+        for text in [">\n\nciao", ">\n>\n\nciao", ">"] {
+            assert_eq!(split_quote(text), (None, text));
+        }
+    }
+
+    #[test]
+    fn crlf_is_read_as_lf() {
+        assert_eq!(split_quote("> a\r\n\r\nb"), (Some("a".to_string()), "b"));
+    }
+
+    #[test]
+    fn a_leading_empty_line_is_not_a_quote() {
+        assert_eq!(split_quote("\n> a"), (None, "\n> a"));
+    }
+
+    #[test]
+    fn typed_text_that_starts_with_a_quote_stays_typed() {
+        let text = join_quote(Some("a"), "> b\n\nc");
+        assert_eq!(split_quote(&text), (Some("a".to_string()), "> b\n\nc"));
     }
 }
