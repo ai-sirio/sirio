@@ -21,15 +21,11 @@ pub(crate) struct LastPrompt {
 }
 
 /// The prompt Continue sends.
-// Task 4 wires it.
-#[allow(dead_code)]
 pub(crate) const CONTINUE_PROMPT: &str = "Continue";
 
 impl LastPrompt {
     /// What a Continue holds as the turn in flight: the word, as sent and as it would refill the
     /// composer, with no mentions and no images.
-    // Task 4 wires it.
-    #[allow(dead_code)]
     pub(crate) fn continue_prompt() -> Self {
         Self {
             text: CONTINUE_PROMPT.to_string(),
@@ -55,8 +51,6 @@ pub(crate) enum ContinueReason {
 impl ContinueReason {
     /// The reason for a turn end's stop reason, `None` for every end Continue does not offer. The
     /// strings are the ones `turn_end_label` matches.
-    // Task 4 wires it.
-    #[allow(dead_code)]
     pub(crate) fn from_stop_reason(reason: &str) -> Option<Self> {
         match reason {
             "MaxTokens" => Some(Self::TokenLimit),
@@ -173,8 +167,6 @@ pub(crate) fn retry_action(
 ///
 /// A relaunch that would start a new conversation has no Continue: it is `None`, not Retry's
 /// `RelaunchToComposer`, because "Continue" means nothing there.
-// Task 4 wires it.
-#[allow(dead_code)]
 pub(crate) fn continue_action(
     reason: Option<ContinueReason>,
     client_up: bool,

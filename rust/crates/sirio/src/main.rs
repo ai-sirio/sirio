@@ -4027,10 +4027,12 @@ impl ControlHandler for AppControlHandler {
                             }
                         }
                     }
+                    Some("continue") => TranscriptAction::Continue,
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.chat.transcript requires action scrollBy, toggleTurn or retry",
+                            "surface.chat.transcript requires action scrollBy, toggleTurn, retry \
+                             or continue",
                         );
                     }
                 };
@@ -25853,6 +25855,15 @@ impl SirioWorkspace {
             "daySeparators".to_string(),
             sirio_control::protocol::rows::encode(&snapshot.day_separators),
         ));
+        // Debug builds only: what Continue does now (`none`, `resend` or `resume`) and the
+        // transcript row that carries it, absent when none does.
+        #[cfg(debug_assertions)]
+        {
+            fields.push(("continue".to_string(), snapshot.continue_action));
+            if let Some(row) = snapshot.continue_row {
+                fields.push(("continueRow".to_string(), row.to_string()));
+            }
+        }
         fields
     }
 

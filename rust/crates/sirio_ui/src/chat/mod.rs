@@ -748,6 +748,12 @@ pub struct ChatControlSnapshot {
     /// row between them would move every position the readouts and `retry { entry }` name.
     #[cfg(debug_assertions)]
     pub day_separators: Vec<BTreeMap<String, String>>,
+    /// Debug builds only: what Continue does now (`RetryAction::wire`, `none` when it has no
+    /// button), and the transcript row that carries it, `None` when none does.
+    #[cfg(debug_assertions)]
+    pub continue_action: String,
+    #[cfg(debug_assertions)]
+    pub continue_row: Option<usize>,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -784,6 +790,9 @@ pub enum TranscriptAction {
     ToggleTurn(usize),
     /// Presses the Retry of the error row at this entry index. Refused when the row has none.
     Retry(usize),
+    /// Presses Continue, which sits on no row of the caller's choosing: refused when the last
+    /// turn did not stop short, or Continue is hidden for the agent's state.
+    Continue,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -2171,6 +2180,10 @@ pub struct Chat {
     /// Set by every send, cleared by the end of the turn it started and by Stop; a failure or a
     /// lost client leaves it.
     last_prompt: Option<retry::LastPrompt>,
+    /// Why the last turn stopped short, when Continue can pick it up (token limit, turn limit, a
+    /// Stop). Set by the turn's end (`settle_turn`); cleared by a failure, by the next prompt, by
+    /// a new process and by a new or opened conversation. In memory only: a restored chat has none.
+    continue_reason: Option<retry::ContinueReason>,
     /// Stop ended a turn whose own end has not arrived yet. Set by `cancel_turn`, settled by the
     /// next turn end (`TurnEnded` or `TurnFailed`) and by a new process or conversation. While it
     /// is set, a `TurnFailed` with no turn of ours streaming is ACP's error answer to the prompt
@@ -2699,6 +2712,7 @@ impl Chat {
             queue_held: false,
             limit_card: None,
             last_prompt: None,
+            continue_reason: None,
             stop_end_pending: false,
             after_connect: None,
             connecting: false,
@@ -4419,7 +4433,11 @@ impl Chat {
                     });
                 }
             }
-            sirio_chat::ChatEvent::TurnEnded { stop_reason } => self.end_turn(&stop_reason, cx),
+            sirio_chat::ChatEvent::TurnEnded { stop_reason } => self.end_turn(
+                &stop_reason,
+                retry::ContinueReason::from_stop_reason(&stop_reason),
+                cx,
+            ),
             // A failed turn ends in place of `TurnEnded`: its error row, the turn settled, and the
             // queue held. The agent is up, so unlike a `TransportError` the client stays.
             sirio_chat::ChatEvent::TurnFailed {
@@ -4614,7 +4632,16 @@ impl Chat {
     /// (`TurnFailed`): settles the live reply and thought, states why the turn stopped and
     /// persists the transcript. What follows is not shared: a finished turn sends the next
     /// queued item (`end_turn`), a failed one holds the queue (`fail_turn`).
-    fn settle_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+    ///
+    /// `continue_reason` is why the turn stopped short, when Continue can pick it up: `None` for
+    /// every other end.
+    fn settle_turn(
+        &mut self,
+        stop_reason: &str,
+        continue_reason: Option<retry::ContinueReason>,
+        cx: &mut Context<Self>,
+    ) {
+        self.continue_reason = continue_reason;
         self.settle_open_thought();
         self.reread_plain_replies();
         self.finish_reply();
@@ -4643,14 +4670,20 @@ impl Chat {
         }
     }
 
-    /// `TurnEnded`: the turn is over, whether it completed or was cancelled.
-    fn end_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+    /// `TurnEnded`: the turn is over, whether it completed or was cancelled. `continue_reason`
+    /// is as in `settle_turn`.
+    fn end_turn(
+        &mut self,
+        stop_reason: &str,
+        continue_reason: Option<retry::ContinueReason>,
+        cx: &mut Context<Self>,
+    ) {
         // Stop clears `streaming` at once, and the end of the stopped turn arrives later: that end
         // (like a turn the CLI started on its own) is not the end of a turn of ours.
         let ended_our_turn = self.streaming;
         // Whatever this end is, a Stop's end is no longer pending after it.
         self.stop_end_pending = false;
-        self.settle_turn(stop_reason, cx);
+        self.settle_turn(stop_reason, continue_reason, cx);
         if ended_our_turn {
             // Answered: nothing is left to resend, and a hold is over.
             self.last_prompt = None;
@@ -4680,7 +4713,9 @@ impl Chat {
         // is the late end of a stopped turn, as a late `TurnEnded` is: no error row, no hold, and
         // the live agent is not offered a restart.
         if !self.streaming && self.stop_end_pending {
-            self.end_turn(stop_reason, cx);
+            // The agent's error answer carries its own stop reason ("Error"), which says nothing of
+            // the Stop: the turn is a stopped one, so Continue picks it up as after a clean Stop.
+            self.end_turn(stop_reason, Some(retry::ContinueReason::Stopped), cx);
             return;
         }
         // Any other failure is a real one, shown whether or not a turn streams: with none, a late
@@ -4700,7 +4735,8 @@ impl Chat {
         if resendable {
             self.cover_with_limit_card(self.entries.len() - 1);
         }
-        self.settle_turn(stop_reason, cx);
+        // The failure's row has the Retry, whatever stop reason the failure carried: no Continue.
+        self.settle_turn(stop_reason, None, cx);
         self.queue_held = true;
         cx.emit(ChatEvent::TurnEnded);
     }
@@ -5241,6 +5277,10 @@ impl Chat {
             transcript_text_rows: transcript_text_row_boxes(&self.transcript_links.borrow()),
             #[cfg(debug_assertions)]
             day_separators: self.day_separator_rows(),
+            #[cfg(debug_assertions)]
+            continue_action: self.continue_action_now().wire().to_string(),
+            #[cfg(debug_assertions)]
+            continue_row: self.continue_row(),
             effort: self
                 .effort
                 .as_ref()
@@ -5343,6 +5383,17 @@ impl Chat {
                     return Err(format!("surface.chat.transcript retry: {why}"));
                 }
                 self.retry(entry, cx);
+            }
+            TranscriptAction::Continue => {
+                if self.continue_action_now() == retry::RetryAction::None {
+                    let raw = self.continue_action_raw();
+                    let why = (raw != retry::RetryAction::None)
+                        .then(|| self.retry_refusal(raw))
+                        .flatten()
+                        .unwrap_or("no turn to continue");
+                    return Err(format!("surface.chat.transcript continue: {why}"));
+                }
+                self.continue_turn(cx);
             }
         }
         Ok(())
@@ -5508,6 +5559,8 @@ impl Chat {
             }
         }
         self.has_completed_turn = !self.entries.is_empty();
+        // A past session's transcript is a restored one: it has no Continue.
+        self.continue_reason = None;
         self.history_open = false;
         cx.notify();
     }
@@ -6529,6 +6582,7 @@ impl Chat {
         self.streaming = false;
         // The old conversation's prompt and hold are not the new one's: a resend must never reach it.
         self.last_prompt = None;
+        self.continue_reason = None;
         self.stop_end_pending = false;
         self.queue_held = false;
         self.after_connect = None;
@@ -6702,6 +6756,8 @@ impl Chat {
         self.last_prompt = Some(last);
         // Any prompt is the user's move after a failure: the queue waits on this turn instead.
         self.queue_held = false;
+        // The next turn is under way: the one that stopped short is no longer the last.
+        self.continue_reason = None;
         self.push_entry(Entry::User {
             text: text.clone(),
             at: Some(chrono::Local::now()),
@@ -7306,6 +7362,10 @@ impl Chat {
         self.after_connect = after;
         // The process that was asked to stop a turn is replaced: its answer never comes.
         self.stop_end_pending = false;
+        // A new process is a new session as far as Continue goes: an ACP restart has no
+        // conversation to continue. Continue's own resume passes here too, and is spent by it: the
+        // prompt it resends is already held (`continue_turn`).
+        self.continue_reason = None;
 
         // The client and the pump that read it are replaced below, so a turn
         // still open here would never hear of its end.
@@ -7646,8 +7706,24 @@ impl Chat {
             retry::RetryAction::Relaunch => self.start_connection(cx),
             retry::RetryAction::Resend => {
                 self.dismiss_error(index, cx);
-                self.resend_last_prompt(cx);
+                self.dispatch_resend(action, cx);
             }
+            retry::RetryAction::ResumeThenResend | retry::RetryAction::RelaunchToComposer => {
+                if failed_turn_row {
+                    self.dismiss_error(index, cx);
+                }
+                self.dispatch_resend(action, cx);
+            }
+        }
+    }
+
+    /// Sends the held prompt again, the way `action` says (see [`retry::retry_action`]): on the
+    /// same client (`Resend`), on a relaunch that resumes the conversation (`ResumeThenResend`) or
+    /// on one that hands the prompt back to the composer (`RelaunchToComposer`). The one dispatch
+    /// Retry and Continue share. Any other action sends nothing.
+    fn dispatch_resend(&mut self, action: retry::RetryAction, cx: &mut Context<Self>) {
+        match action {
+            retry::RetryAction::Resend => self.resend_last_prompt(cx),
             retry::RetryAction::ResumeThenResend | retry::RetryAction::RelaunchToComposer => {
                 let resume = match (action, &self.agent_session_id) {
                     (retry::RetryAction::ResumeThenResend, Some(session)) => Some(session.clone()),
@@ -7660,16 +7736,81 @@ impl Chat {
                     }
                     (launch, _) => launch,
                 });
-                if failed_turn_row {
-                    self.dismiss_error(index, cx);
-                }
                 let after = match resume {
                     Some(session) => retry::AfterConnect::Resend { session },
                     None => retry::AfterConnect::Composer,
                 };
                 self.connect(launch, Some(after), cx);
             }
+            retry::RetryAction::None | retry::RetryAction::Relaunch => {}
         }
+    }
+
+    /// Continue: sends `Continue` as the next turn of a chat whose last turn stopped short, by
+    /// the path Retry takes for the same state (`continue_action_now`). Does nothing when there is
+    /// nothing to continue.
+    fn continue_turn(&mut self, cx: &mut Context<Self>) {
+        let action = self.continue_action_now();
+        if action == retry::RetryAction::None {
+            return;
+        }
+        self.last_prompt = Some(retry::LastPrompt::continue_prompt());
+        self.dispatch_resend(action, cx);
+    }
+
+    /// Whether the client a turn ran on is still there. Retry reads a failed turn's row as a loss
+    /// when it is not (`retry_action_at`), and Continue reads a cut-short turn the same way
+    /// (`continue_action_raw`): one rule, so a change to it moves both.
+    fn retry_client_up(&self) -> bool {
+        self.client.is_some()
+    }
+
+    /// What Continue would do on the live state, before any refusal: `retry::continue_action`.
+    fn continue_action_raw(&self) -> retry::RetryAction {
+        retry::continue_action(
+            self.continue_reason,
+            self.retry_client_up(),
+            self.agent_launch
+                .as_ref()
+                .is_some_and(LaunchSpec::resumes_on_retry),
+            self.agent_session_id.is_some(),
+        )
+    }
+
+    /// What Continue does now; `None` when it has no button. That is when `retry_refusal` would
+    /// refuse the action (a turn is running, the agent is connecting) and when the queue is held.
+    fn continue_action_now(&self) -> retry::RetryAction {
+        let action = self.continue_action_raw();
+        if self.queue_held || self.retry_refusal(action).is_some() {
+            retry::RetryAction::None
+        } else {
+            action
+        }
+    }
+
+    /// The transcript row that carries Continue: the last reply of the last turn, or, when that
+    /// turn has none (it stopped during a tool call), the last turn's footer. `None` when Continue
+    /// has no button.
+    // Debug builds read it for now (`surface.chat.read`); the row draws it next.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    fn continue_row(&self) -> Option<usize> {
+        if self.continue_action_now() == retry::RetryAction::None {
+            return None;
+        }
+        let turn_start = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::User { .. }))
+            .map_or(0, |user| user + 1);
+        self.entries[turn_start..]
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Assistant { .. }))
+            .map(|reply| turn_start + reply)
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .rposition(|entry| matches!(entry, Entry::TurnFooter(_)))
+            })
     }
 
     /// Why Retry would do nothing on a row whose action is `action`, `None` when it acts. A resend
@@ -7772,7 +7913,7 @@ impl Chat {
         }
         // A resend needs the client the turn failed on: a failed turn's row whose client has
         // gone since is a loss like any other.
-        let kind = if *kind == ErrorKind::TurnFailed && self.client.is_none() {
+        let kind = if *kind == ErrorKind::TurnFailed && !self.retry_client_up() {
             ErrorKind::Connection
         } else {
             *kind
