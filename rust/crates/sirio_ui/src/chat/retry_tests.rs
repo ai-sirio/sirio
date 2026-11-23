@@ -805,6 +805,72 @@ async fn a_failure_after_stop_is_the_late_end_of_the_stopped_turn(cx: &mut TestA
     assert_eq!(logs.heard()[1][0]["text"], "silent after", "the queue went on");
 }
 
+/// A turn's end that is not the prompt's own can be taken as its end (a turn the CLI started while
+/// the prompt ran, or the late end of a stopped turn after a quick resend). The prompt's real
+/// failure then arrives with no turn streaming, and it is still a failure: an error row with its
+/// Retry, and the queue held. Dropping it would leave the footer of an ordinary end.
+#[gpui::test]
+async fn a_failure_after_a_stray_end_is_still_shown(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    event(&chat, cx, turn_ended());
+    assert!(!chat.read_with(&cx.cx, |chat, _| chat.streaming), "taken as the prompt's end");
+
+    event(&chat, cx, turn_failed());
+
+    chat.read_with(&cx.cx, |chat, _| {
+        let row = chat
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Error {
+                    message,
+                    retryable,
+                    kind,
+                } => Some((message.as_str(), *retryable, *kind)),
+                _ => None,
+            })
+            .expect("the failure is in the transcript");
+        assert_eq!(row, ("API Error: 529 overloaded", true, ErrorKind::TurnFailed));
+        assert!(chat.queue_held, "the queue waits on the user");
+        assert!(chat.client.is_some(), "the agent is up and not relaunched");
+    });
+}
+
+/// A Stop's pending end is settled by the turn end that arrives, a `TurnEnded` as much as a
+/// `TurnFailed`. A failure that comes after that end is not the stopped turn's answer: it is shown.
+#[gpui::test]
+async fn a_stops_end_settles_the_pending_flag_for_a_later_failure(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent stop me");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    chat.update(cx, |chat, cx| chat.cancel_turn(cx));
+    event(&chat, cx, turn_ended());
+    chat.read_with(&cx.cx, |chat, _| {
+        assert!(
+            !chat
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Error { .. })),
+            "the stopped turn's own end leaves no row"
+        );
+    });
+
+    event(&chat, cx, turn_failed());
+
+    assert_eq!(
+        readout(&chat, cx).0,
+        "turnFailed",
+        "a failure after the Stop's end is a failed turn"
+    );
+    chat.read_with(&cx.cx, |chat, _| assert!(chat.queue_held, "and holds the queue"));
+}
+
 /// A held queue whose Retry is gone says so: the prompt went back to the composer, and the failed
 /// turn's row was retired. The queue stays held.
 #[gpui::test]

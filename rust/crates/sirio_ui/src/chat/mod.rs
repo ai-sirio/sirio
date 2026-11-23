@@ -2156,6 +2156,11 @@ pub struct Chat {
     /// Set by every send, cleared by the end of the turn it started and by Stop; a failure or a
     /// lost client leaves it.
     last_prompt: Option<retry::LastPrompt>,
+    /// Stop ended a turn whose own end has not arrived yet. Set by `cancel_turn`, settled by the
+    /// next turn end (`TurnEnded` or `TurnFailed`) and by a new process or conversation. While it
+    /// is set, a `TurnFailed` with no turn of ours streaming is ACP's error answer to the prompt
+    /// Stop cancelled, and `fail_turn` drops it; without it, such a failure is a real one.
+    stop_end_pending: bool,
     /// What the relaunch Retry started does when it connects.
     after_connect: Option<retry::AfterConnect>,
     connecting: bool,
@@ -2679,6 +2684,7 @@ impl Chat {
             queue_held: false,
             limit_card: None,
             last_prompt: None,
+            stop_end_pending: false,
             after_connect: None,
             connecting: false,
             pending_send: None,
@@ -4617,6 +4623,8 @@ impl Chat {
         // Stop clears `streaming` at once, and the end of the stopped turn arrives later: that end
         // (like a turn the CLI started on its own) is not the end of a turn of ours.
         let ended_our_turn = self.streaming;
+        // Whatever this end is, a Stop's end is no longer pending after it.
+        self.stop_end_pending = false;
         self.settle_turn(stop_reason, cx);
         if ended_our_turn {
             // Answered: nothing is left to resend, and a hold is over.
@@ -4642,14 +4650,18 @@ impl Chat {
     /// sends the same prompt again; the prompt is kept for it, and the queue is held so that no
     /// other prompt replaces it first.
     fn fail_turn(&mut self, message: String, stop_reason: &str, cx: &mut Context<Self>) {
-        // No turn of ours streams: Stop ended it, and this is the agent's error answer to the
-        // prompt it cancelled (ACP's cancel is a notification, answered like any prompt). It is
-        // the late end of a stopped turn, as a late `TurnEnded` is: no error row, no hold, and the
-        // live agent is not offered a restart.
-        if !self.streaming {
+        // No turn of ours streams and Stop's end is pending: this is the agent's error answer to
+        // the prompt it cancelled (ACP's cancel is a notification, answered like any prompt). It
+        // is the late end of a stopped turn, as a late `TurnEnded` is: no error row, no hold, and
+        // the live agent is not offered a restart.
+        if !self.streaming && self.stop_end_pending {
             self.end_turn(stop_reason, cx);
             return;
         }
+        // Any other failure is a real one, shown whether or not a turn streams: with none, a late
+        // `TurnEnded` was taken as this prompt's end (a Stop and a quick resend, or a turn the CLI
+        // started ending while the prompt ran), and the failure must not vanish with it.
+        self.stop_end_pending = false;
         self.fail_trace_turn(&message, cx);
         self.push_entry(Entry::Error {
             message,
@@ -6486,6 +6498,7 @@ impl Chat {
         self.streaming = false;
         // The old conversation's prompt and hold are not the new one's: a resend must never reach it.
         self.last_prompt = None;
+        self.stop_end_pending = false;
         self.queue_held = false;
         self.after_connect = None;
         self.has_completed_turn = false;
@@ -7228,6 +7241,8 @@ impl Chat {
                 let _ = client.cancel();
             }
             self.streaming = false;
+            // The agent has yet to answer the cancelled prompt: its end is not a failure of ours.
+            self.stop_end_pending = true;
             // The user ended this turn: a later death must not send it again.
             self.last_prompt = None;
             self.finish_reply();
@@ -7258,6 +7273,8 @@ impl Chat {
             return;
         };
         self.after_connect = after;
+        // The process that was asked to stop a turn is replaced: its answer never comes.
+        self.stop_end_pending = false;
 
         // The client and the pump that read it are replaced below, so a turn
         // still open here would never hear of its end.
