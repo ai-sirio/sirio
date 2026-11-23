@@ -20,9 +20,8 @@ from pathlib import Path
 # `python3 -I` leaves the script's own directory off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chat_e2e_harness import (  # noqa: E402
-    DISP, E, OUT, ClipboardOwner, Fail, RpcError, World, alive, assistant_rows, brief, byte_len, clipboard_get,
-    error_row, kill_stub, last_reply, log, main, move, plain_by_row, press, row_with_text, rows_of, scenario, scroll,
-    teardown, user_texts, x,
+    E, ClipboardOwner, Fail, RpcError, World, assistant_rows, brief, byte_len, clipboard_get, error_row, kill_stub,
+    last_reply, main, move, plain_by_row, press, row_with_text, rows_of, scenario, teardown, user_texts, x,
 )
 
 # ---------------------------------------------------------------- what a row and the chat read as

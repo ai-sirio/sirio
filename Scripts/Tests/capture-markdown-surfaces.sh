@@ -17,8 +17,8 @@ set -eEuo pipefail
 #                    then the states of the richer chat messages (spec 2026-11-21-ely-chat-richer-messages-
 #                    design.md): a day separator, a limit card counting, a failed turn (and a second one,
 #                    and a queue behind one), a thought that settled before its reply, and a reply in
-#                    mid-reveal, each in a world of its own started by the driver of
-#                    test-chat-richer-messages-e2e.sh (the stub `claude` of Scripts/Tests/stubs/richer),
+#                    mid-reveal, each in a world of its own started by the harness of the chat E2Es
+#                    (Scripts/Tests/chat_e2e_harness.py; the stub `claude` of Scripts/Tests/stubs/richer),
 #                    through the socket methods a debug build of 0.47.1 already served, so the two builds
 #                    that are compared are driven the same way. Run both with debug builds.
 #   cr-description   the detail tab of change request #101 on the loopback fake forge
@@ -499,8 +499,8 @@ PY
   FRAMES=$((FRAMES + $(wc -l <"$CHAT_FRAMES")))
   cat "$CHAT_FRAMES" >>"$OUT_DIR/.frames.tsv"
   echo "OK: the chat reply was captured ($(wc -l <"$CHAT_FRAMES") frames)"
-  # The states of the richer chat messages. Each runs in a world of its own started by the driver of
-  # test-chat-richer-messages-e2e.sh (imported: its `World` is the isolated instance, the stub `claude` of
+  # The states of the richer chat messages. Each runs in a world of its own started by the harness of the chat
+  # E2Es (Scripts/Tests/chat_e2e_harness.py, imported: its `World` is the isolated instance, the stub `claude` of
   # Scripts/Tests/stubs/richer the agent). Only what a debug build of 0.47.1 already served is called (the
   # chat's open, send, read and tabs), so a build from before this delivery is driven the same way; what a
   # state looks like on each build is what the two frames show. The window is captured the moment the state
@@ -522,7 +522,7 @@ from pathlib import Path
 
 root, out_dir, frames_tsv, reveal_at, window_size = sys.argv[1:6]
 out_dir = Path(out_dir)
-spec = importlib.util.spec_from_file_location("richer", Path(root) / "Scripts/Tests/chat_richer_messages_e2e.py")
+spec = importlib.util.spec_from_file_location("richer", Path(root) / "Scripts/Tests/chat_e2e_harness.py")
 richer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(richer)
 display = os.environ["DISP"]

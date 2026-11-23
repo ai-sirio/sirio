@@ -1077,7 +1077,7 @@ Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN R
 # --bin-dir holds sirio and sirio-host (sirioctl too, else rust/target/debug/sirioctl); the chat leg
 # needs rust/target/debug/examples/ely_chat_seed. --display :N, --only preview,chat,cr-description.
 # The chat leg also captures the states of the richer chat messages, each in an isolated world of the
-# richer E2E's driver (the stub `claude` of Scripts/Tests/stubs/richer): state-day-separators and
+# chat E2Es' harness (Scripts/Tests/chat_e2e_harness.py; the stub `claude` of Scripts/Tests/stubs/richer): state-day-separators and
 # state-day-separators-top, state-limit-card, state-turn-failed, state-turn-failed-second, state-held-queue,
 # state-thought-settled and state-mid-reveal-<k> (a reply at each received size in $REVEAL_AT, default
 # 1800,6000,12000, which fails if the reply had ended when the frame was shot), and chat-states.json
