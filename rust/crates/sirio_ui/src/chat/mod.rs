@@ -3627,9 +3627,20 @@ impl Chat {
             sirio_chat::ChatEvent::ThoughtChunk(text) => {
                 let streamed = self.streamed_entry();
                 if let Some(index) = streamed
-                    && let Some(Entry::Thought { text: existing, .. }) = self.entries.get_mut(index)
+                    && let Some(Entry::Thought {
+                        text: existing,
+                        started,
+                        duration_ms,
+                        ..
+                    }) = self.entries.get_mut(index)
                 {
                     existing.push_str(&text);
+                    // A block that follows a closed one with no row between joins its thought,
+                    // which is thinking again: the next close (or the fallbacks) times the whole
+                    // span. A restored thought has no `started` and is left as it was.
+                    if self.streaming && started.is_some() && duration_ms.is_some() {
+                        *duration_ms = None;
+                    }
                     self.remeasure_entry(index);
                 } else {
                     // A new thought re-follows: drop any stale scroll state
@@ -10624,6 +10635,48 @@ two"
         });
     }
 
+    /// A thinking block that follows a closed one with no row between joins its thought, and the
+    /// thought is open again: the next close times the whole span, not just the first block.
+    #[gpui::test]
+    async fn a_second_block_reopens_the_thought_it_joins(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        let began = std::time::Instant::now();
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk("first block".into()), cx);
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+            assert!(
+                !chat.thought_is_streaming(0),
+                "the first close settles the thought"
+            );
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk(" second block".into()), cx);
+            assert_eq!(chat.entries.len(), 1, "the second block joins the thought");
+            assert!(
+                chat.thought_is_streaming(0),
+                "and the thought is thinking again"
+            );
+        });
+        // The second block takes a while. A thought reads the real clock, so the wait is real.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtEnded, cx);
+        });
+        let elapsed = began.elapsed().as_millis() as u64;
+        chat.read_with(cx, |chat, _| {
+            let Some(Entry::Thought { duration_ms, .. }) = chat.entries.first() else {
+                panic!("the first entry is the thought");
+            };
+            assert!(
+                duration_ms.is_some_and(|ms| (50..=elapsed).contains(&ms)),
+                "the second close times the whole span, first block to second close: \
+                 {duration_ms:?} of {elapsed} ms"
+            );
+            assert!(!chat.thought_is_streaming(0));
+        });
+    }
+
     /// The turn's end settles a thought that no answer followed.
     #[gpui::test]
     async fn a_turn_end_settles_a_trailing_thought(cx: &mut TestAppContext) {
@@ -14351,8 +14404,16 @@ two"
     async fn day_headings_are_drawn_above_the_first_question_of_a_day(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(crate::ely::init);
+        // One reading of the clock. Yesterday is the previous calendar date at noon, which no
+        // clock change lands on, not `now` less 24 hours: that is the day before yesterday on
+        // the evening after a spring-forward night.
         let now = chrono::Local::now();
-        let yesterday = now - chrono::Duration::days(1);
+        let yesterday = now
+            .date_naive()
+            .pred_opt()
+            .and_then(|day| day.and_hms_opt(12, 0, 0))
+            .and_then(|noon| noon.and_local_timezone(chrono::Local).earliest())
+            .expect("yesterday at noon exists");
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.push_entry(Entry::User {

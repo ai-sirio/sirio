@@ -227,7 +227,8 @@ impl Chat {
     /// `Info` and `InfoWarning` rows stop the search), if one is still open:
     /// stores its elapsed time and remeasures the row (the header's word and
     /// the body's auto-open both change). Called before any entry other than
-    /// a thought or a notice is pushed, before the CLI's own notice rows, and
+    /// a thought or a notice is pushed, before the CLI's own notice rows, when
+    /// the thought's block closes (`ThoughtEnded`, native Claude only), and
     /// when the turn ends.
     pub(crate) fn settle_open_thought(&mut self) {
         let index = self.streamed_entry();
