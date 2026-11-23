@@ -97,10 +97,11 @@ pub(crate) fn retry_action(
         ErrorKind::McpWarning | ErrorKind::Unavailable => RetryAction::None,
         // "Sign in out of band, then retry": a new process, whatever was in flight.
         ErrorKind::AuthRequired => RetryAction::Relaunch,
-        // The agent is up and has the conversation. With no prompt held there is nothing to send:
-        // as for any row with none, a new process is all Retry can offer.
+        // The agent is up and has the conversation. With no prompt held there is nothing to send
+        // (a turn end taken as the prompt's cleared it), and relaunching would only kill a working
+        // process and resend nothing: the row has no Retry (spec §5.3, final review).
         ErrorKind::TurnFailed if has_last_prompt => RetryAction::Resend,
-        ErrorKind::TurnFailed => RetryAction::Relaunch,
+        ErrorKind::TurnFailed => RetryAction::None,
         // The client is gone.
         ErrorKind::Connection | ErrorKind::Disconnected => {
             if !has_last_prompt {
@@ -145,6 +146,12 @@ mod tests {
         assert_eq!(
             retry_action(ErrorKind::Disconnected, false, true, true, true),
             RetryAction::Relaunch
+        );
+        // A failed turn, the agent up, and no prompt to resend (a turn end taken as the prompt's
+        // cleared it): relaunching would only kill a working process, so there is no Retry.
+        assert_eq!(
+            retry_action(ErrorKind::TurnFailed, false, true, true, true),
+            RetryAction::None
         );
         // A row with no button.
         assert_eq!(

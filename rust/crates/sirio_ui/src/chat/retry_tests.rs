@@ -810,8 +810,11 @@ async fn a_failure_after_stop_is_the_late_end_of_the_stopped_turn(cx: &mut TestA
 
 /// A turn's end that is not the prompt's own can be taken as its end (a turn the CLI started while
 /// the prompt ran, or the late end of a stopped turn after a quick resend). The prompt's real
-/// failure then arrives with no turn streaming, and it is still a failure: an error row with its
-/// Retry, and the queue held. Dropping it would leave the footer of an ordinary end.
+/// failure then arrives with no turn streaming, and it is still a failure: an error row, and the
+/// queue held. The end that was taken as the prompt's cleared it, so there is nothing to resend and
+/// the agent is up: the row offers no Retry (a relaunch would only kill a working process), keeps
+/// its OK, and the held queue says to send a message. Dropping it would leave the footer of an
+/// ordinary end.
 #[gpui::test]
 async fn a_failure_after_a_stray_end_is_still_shown(cx: &mut TestAppContext) {
     let dir = TempDir::new();
@@ -823,6 +826,8 @@ async fn a_failure_after_a_stray_end_is_still_shown(cx: &mut TestAppContext) {
     assert!(!chat.read_with(&cx.cx, |chat, _| chat.streaming), "taken as the prompt's end");
 
     event(&chat, cx, turn_failed());
+    chat.update(cx, |chat, _| chat.queue.push_back("waiting".into()));
+    refresh_frame(cx);
 
     chat.read_with(&cx.cx, |chat, _| {
         let row = chat
@@ -837,10 +842,22 @@ async fn a_failure_after_a_stray_end_is_still_shown(cx: &mut TestAppContext) {
                 _ => None,
             })
             .expect("the failure is in the transcript");
-        assert_eq!(row, ("API Error: 529 overloaded", true, ErrorKind::TurnFailed));
+        assert_eq!(row, ("API Error: 529 overloaded", false, ErrorKind::TurnFailed));
         assert!(chat.queue_held, "the queue waits on the user");
         assert!(chat.client.is_some(), "the agent is up and not relaunched");
     });
+    assert_eq!(
+        readout(&chat, cx),
+        ("turnFailed".to_string(), "none".to_string()),
+        "nothing to resend, and no relaunch of the agent that is up"
+    );
+    assert!(cx.debug_bounds("chat-retry").is_none(), "no Retry is drawn");
+    assert!(cx.debug_bounds("chat-error-ok").is_some(), "the row keeps its OK");
+    assert_eq!(
+        held_line(&chat, cx).as_deref(),
+        Some(HELD_LINE_NO_RETRY),
+        "no Retry to press"
+    );
 }
 
 /// A Stop's pending end is settled by the turn end that arrives, a `TurnEnded` as much as a
@@ -893,7 +910,11 @@ async fn a_failure_after_a_stop_and_a_resend_is_shown(cx: &mut TestAppContext) {
 
     event(&chat, cx, turn_failed());
 
-    assert_eq!(readout(&chat, cx).0, "turnFailed", "the resent prompt's failure is shown");
+    assert_eq!(
+        readout(&chat, cx),
+        ("turnFailed".to_string(), "none".to_string()),
+        "the resent prompt's failure is shown, with no prompt left to resend"
+    );
     chat.read_with(&cx.cx, |chat, _| assert!(chat.queue_held, "and holds the queue"));
 }
 
@@ -1265,6 +1286,46 @@ async fn a_limit_with_no_failed_turn_lifts_with_no_button(cx: &mut TestAppContex
     let (entry, failed) = card_state(&chat, cx).unwrap();
     assert_eq!(failed, None);
     assert_eq!(rows(&chat, cx)[entry]["phase"], "lifted");
+}
+
+/// A turn failed with the limit and has nothing to resend (a stray end cleared the prompt, and the
+/// agent is up): its row has no Retry, so the card has no Try again to offer. It counts, leaves the
+/// error row drawn with its OK, and says the limit lifted when the reset passes, with no button.
+#[gpui::test]
+async fn a_limit_on_a_failed_turn_with_nothing_to_resend_lifts_with_no_button(
+    cx: &mut TestAppContext,
+) {
+    let dir = TempDir::new();
+    let logs = Logs::in_dir(&dir.0);
+    let (chat, cx) = silent_chat(cx, &dir.0, &logs);
+    send(&chat, cx, "silent first");
+    wait_for_prompts(&chat, cx, &logs, 1);
+    notice(&chat, cx, rejected(3600));
+    event(&chat, cx, turn_ended());
+    event(&chat, cx, turn_failed());
+    refresh_frame(cx);
+
+    let (entry, failed) = card_state(&chat, cx).expect("a card exists");
+    assert_eq!(failed, None, "the card does not own a row with no Retry");
+    assert!(cx.debug_bounds("limit-card-countdown").is_some(), "it counts");
+    let error = error_row(&chat, cx);
+    assert!(
+        cx.debug_bounds(Box::leak(format!("chat-error-message-{error}").into_boxed_str()))
+            .is_some(),
+        "the failed turn's row is drawn: the card does not cover it"
+    );
+    assert!(cx.debug_bounds("chat-retry").is_none(), "and has no Retry");
+    assert_eq!(rows(&chat, cx)[error]["retry"], "none");
+
+    pass_the_reset(&chat, cx);
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("limit-card-lifted").is_some(), "the card says the limit lifted");
+    assert!(cx.debug_bounds("limit-card-retry").is_none(), "with no Try again");
+    assert_eq!(rows(&chat, cx)[entry]["phase"], "lifted");
+    assert_eq!(
+        chat.update(cx, |chat, cx| chat.transcript_act(TranscriptAction::Retry(entry), cx)),
+        Err("surface.chat.transcript retry: entry has no Retry".to_string())
+    );
 }
 
 /// The card's sentence is read through the transcript's selection, as the line it replaces was:

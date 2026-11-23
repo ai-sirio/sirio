@@ -4686,12 +4686,18 @@ impl Chat {
         // started ending while the prompt ran), and the failure must not vanish with it.
         self.stop_end_pending = false;
         self.fail_trace_turn(&message, cx);
+        // Retry resends the prompt: with none held (a late `TurnEnded` taken as the prompt's end
+        // cleared it) the agent is up and a relaunch would only kill it, so the row has no Retry,
+        // keeps its OK, and is no failed turn for a limit card to offer Try again on.
+        let resendable = self.last_prompt.is_some();
         self.push_entry(Entry::Error {
             message,
-            retryable: true,
+            retryable: resendable,
             kind: ErrorKind::TurnFailed,
         });
-        self.cover_with_limit_card(self.entries.len() - 1);
+        if resendable {
+            self.cover_with_limit_card(self.entries.len() - 1);
+        }
         self.settle_turn(stop_reason, cx);
         self.queue_held = true;
         cx.emit(ChatEvent::TurnEnded);

@@ -61,7 +61,6 @@ pub(crate) struct LimitCard {
     pub(super) entry: usize,
     /// When the limit resets, on the wall clock: the phase (`phase`) and the countdown's anchor
     /// (`countdown_until`) read it, and so does the debug readout.
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub(super) resets_at: DateTime<Local>,
     /// Where the countdown counts to, on the executor's clock. Only the countdown reads it: the
     /// phase is read off `resets_at` and the wall clock, which run through a sleep. It is set

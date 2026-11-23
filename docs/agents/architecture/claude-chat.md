@@ -584,7 +584,10 @@ none streaming, a late `TurnEnded` was taken as the prompt's end (after a Stop a
 turn the CLI started ended while the prompt ran), and a real failure must not vanish with it. The one case
 dropped is the error answer to the prompt Stop cancelled, the late end of the stopped turn: it leaves no error
 row and no hold, and only while a Stop's end is pending (`Chat::stop_end_pending`, set by Stop and settled by the
-next `TurnEnded` or `TurnFailed`, a new process or a new conversation).
+next `TurnEnded` or `TurnFailed`, a new process or a new conversation). A failure shown after such a stray end has
+no prompt to resend (the end cleared `last_prompt`), and relaunching an agent that is up would only kill it, so
+its row has no Retry (`retry_action` answers `None`, and the row is pushed with `retryable: false`): it keeps OK, a
+held queue reads "Waiting: send a message.", and a limit card does not cover it or offer Try again.
 
 **Why Claude Code could not start.** A CLI that fails before the session writes an error `result`
 as its first stdout line, in place of the `initialize` answer, with `startup_failure_reason` and
