@@ -579,6 +579,13 @@ error text and `TurnEnded` (a Stop, a CLI-started turn, `error_max_turns`, `erro
 Queued messages are held: the next send, Retry's or the user's, lifts the hold, and the queue drains only at
 that send's `TurnEnded`.
 
+A `TurnFailed` is shown whether or not a turn of ours streams: its error row, its Retry and the hold. With
+none streaming, a late `TurnEnded` was taken as the prompt's end (after a Stop and a quick resend, or when a
+turn the CLI started ended while the prompt ran), and a real failure must not vanish with it. The one case
+dropped is the error answer to the prompt Stop cancelled, the late end of the stopped turn: it leaves no error
+row and no hold, and only while a Stop's end is pending (`Chat::stop_end_pending`, set by Stop and settled by the
+next `TurnEnded` or `TurnFailed`, a new process or a new conversation).
+
 **Why Claude Code could not start.** A CLI that fails before the session writes an error `result`
 as its first stdout line, in place of the `initialize` answer, with `startup_failure_reason` and
 `errors`. Sirio reads it during the handshake, because it comes there and nowhere later (every one
@@ -663,7 +670,7 @@ the warning's place; it covers its failed turn's error row, with no Retry until 
 
 Every CLI token goes through `visible_text`. The row is a `Warning` notice, so it is never
 persisted, as before. The CLI's own refusal sentence in a failed `result` is a `TurnFailed` (see Failed
-turns and Retry): an error row, which the limit card covers while it counts.
+turns and Retry): an error row, which the limit card covers while it counts and while it offers Try again.
 
 **A local command's output.** `/usage` and `/context` are answered by the CLI itself, with no model
 call. The answer, already in 2.1.301 (the oldest version probed above the floor; 2.1.258-2.1.300

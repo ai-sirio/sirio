@@ -956,8 +956,8 @@ clone of upstream at `8d7723ec`).
 
 ## ely-documents reference labels (L13)
 
-Numbered after L11 (`ely-chat` host seams) and L12 (`ely-documents` `next_run`) of the chat delivery, which may
-land after it, so the three do not collide.
+Numbered after L11 (`ely-chat` host seams) and L12 (`ely-documents` `next_run`) of the chat delivery, so the
+three do not collide. L13 reached main first, with #841 (0.47.1); L11 and L12 land with the chat delivery.
 
 Paths: `ely-documents` `src/markdown/build.rs`, `src/markdown/build/node.rs`, `src/markdown/shape.rs` and
 `src/tree/mod.rs` (tests in `src/tree/tests.rs`). Issue #839: a Markdown build panicked
@@ -1108,8 +1108,8 @@ files are committed.
 
 ## ely-documents definitions after a list (L14)
 
-Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
-the entries do not collide.
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), so the entries do not
+collide. It reached main with #841 (0.47.1), as L13 did; L11 and L12 land with the chat delivery.
 
 Path: `ely-documents` `src/markdown/shape.rs`, `place` (tests in `src/tree/tests.rs` and
 `src/markdown/build/tests.rs`). Issue #840: a Markdown build panicked (`a list holds items, not Definition`, in
@@ -1151,8 +1151,8 @@ the definition) turns the same five red as before.
 
 ## ely-documents the address a reference resolved to (L15)
 
-Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), which may land after it, so
-the entries do not collide.
+Numbered after L11 to L13 (the chat delivery's seams and the label fix of issue #839), so the entries do not
+collide. It reached main with #841 (0.47.1), as L13 did; L11 and L12 land with the chat delivery.
 
 Paths: `ely-documents` `src/markdown/mdast.rs`, `src/markdown/build/node.rs`, `src/tree/mod.rs` and
 `src/document/point.rs` (tests in `src/tree/tests.rs` and, for `point.rs`, in the file). Issue #840, its second

@@ -59,7 +59,8 @@ impl LimitPhase {
 pub(crate) struct LimitCard {
     /// The row it sits on: the warning notice it stands in for.
     pub(super) entry: usize,
-    /// When the limit resets, on the wall clock. Read by the debug readout only.
+    /// When the limit resets, on the wall clock: the phase (`phase`) and the countdown's anchor
+    /// (`countdown_until`) read it, and so does the debug readout.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub(super) resets_at: DateTime<Local>,
     /// Where the countdown counts to, on the executor's clock. Only the countdown reads it: the
@@ -167,14 +168,17 @@ pub(crate) fn phase(card: &LimitCard, wall_now: DateTime<Local>) -> LimitPhase {
 /// Ely's `Countdown` rolls the digit of each second for 640 ms (`AnimatedNumber`), and gpui asks
 /// for a frame on every frame of a roll: a card that counts for hours would redraw the whole
 /// window about two thirds of the time. With the flag on, the digits change in place once a
-/// second (the roll is 1 ms), as they do for a user who asked for reduced motion.
+/// second (the roll is 1 ms), and the card draws about 2 frames a second. A user who asked for
+/// reduced motion gets 1 frame a second from it, so this is close to their draw and not equal.
 ///
 /// The flag is Ely's theme's, a global that every component reads while it is built, and a
 /// component is built when its parent's layout is requested, so setting it around the child's
 /// `request_layout` covers the countdown and nothing else: the rest of the window is laid out
-/// outside it. It is set and put back in the one call; nothing observes Ely's theme global, so
-/// the effect `global_mut` queues wakes no one, and a user who has reduced motion on already is
-/// left as they are.
+/// outside it. It is set and put back in the one call. No production code observes Ely's theme
+/// global, so the effect `global_mut` queues wakes no one; a test does (`ely_tests.rs`), and a
+/// production observer that redraws would turn this into a redraw loop for as long as a card
+/// counts, since each layout of the countdown sets the flag and puts it back. A user who has
+/// reduced motion on already is left as they are.
 struct StillMotion {
     child: AnyElement,
 }
