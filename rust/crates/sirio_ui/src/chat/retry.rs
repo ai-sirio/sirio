@@ -20,6 +20,53 @@ pub(crate) struct LastPrompt {
     pub(crate) mentions: Vec<String>,
 }
 
+/// The prompt Continue sends.
+// Task 4 wires it.
+#[allow(dead_code)]
+pub(crate) const CONTINUE_PROMPT: &str = "Continue";
+
+impl LastPrompt {
+    /// What a Continue holds as the turn in flight: the word, as sent and as it would refill the
+    /// composer, with no mentions and no images.
+    // Task 4 wires it.
+    #[allow(dead_code)]
+    pub(crate) fn continue_prompt() -> Self {
+        Self {
+            text: CONTINUE_PROMPT.to_string(),
+            mention_paths: Vec::new(),
+            images: Vec::new(),
+            draft: CONTINUE_PROMPT.to_string(),
+            mentions: Vec::new(),
+        }
+    }
+}
+
+/// Why a turn stopped short, when Continue can pick it up from there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ContinueReason {
+    /// The turn hit the model's token limit.
+    TokenLimit,
+    /// The turn hit the agent's turn-request limit.
+    TurnLimit,
+    /// The user pressed Stop.
+    Stopped,
+}
+
+impl ContinueReason {
+    /// The reason for a turn end's stop reason, `None` for every end Continue does not offer. The
+    /// strings are the ones `turn_end_label` matches.
+    // Task 4 wires it.
+    #[allow(dead_code)]
+    pub(crate) fn from_stop_reason(reason: &str) -> Option<Self> {
+        match reason {
+            "MaxTokens" => Some(Self::TokenLimit),
+            "MaxTurnRequests" => Some(Self::TurnLimit),
+            "Cancelled" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+}
+
 /// What a row's Retry does now.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RetryAction {
@@ -112,6 +159,39 @@ pub(crate) fn retry_action(
                 RetryAction::RelaunchToComposer
             }
         }
+    }
+}
+
+/// What a turn end's Continue does now, from Retry's own table (no second one):
+/// `retry_action` on the kind of failure the agent's state stands for, with a prompt held and a
+/// button drawn.
+///
+/// - `reason`: why the turn stopped short, `None` for any other end (no Continue);
+/// - `client_up`: the agent's process is still connected, so the turn failed as `TurnFailed` does;
+///   otherwise the connection is gone, as `Connection` is;
+/// - `resumes_on_retry`, `session_known`: as in [`retry_action`].
+///
+/// A relaunch that would start a new conversation has no Continue: it is `None`, not Retry's
+/// `RelaunchToComposer`, because "Continue" means nothing there.
+// Task 4 wires it.
+#[allow(dead_code)]
+pub(crate) fn continue_action(
+    reason: Option<ContinueReason>,
+    client_up: bool,
+    resumes_on_retry: bool,
+    session_known: bool,
+) -> RetryAction {
+    if reason.is_none() {
+        return RetryAction::None;
+    }
+    let kind = if client_up {
+        ErrorKind::TurnFailed
+    } else {
+        ErrorKind::Connection
+    };
+    match retry_action(kind, true, resumes_on_retry, session_known, true) {
+        RetryAction::RelaunchToComposer => RetryAction::None,
+        action => action,
     }
 }
 
@@ -212,5 +292,95 @@ mod tests {
                 "{kind:?} without a button"
             );
         }
+    }
+
+    /// Continue and Retry are one table: the agent up resends, a relaunch that resumes a known
+    /// session resumes then resends, and every other relaunch has no Continue (it would start a
+    /// new conversation, and "Continue" means nothing there).
+    #[test]
+    fn continue_follows_retrys_table() {
+        for reason in [
+            ContinueReason::TokenLimit,
+            ContinueReason::TurnLimit,
+            ContinueReason::Stopped,
+        ] {
+            for client_up in [false, true] {
+                for resumes_on_retry in [false, true] {
+                    for session_known in [false, true] {
+                        let expected = if client_up {
+                            RetryAction::Resend
+                        } else if resumes_on_retry && session_known {
+                            RetryAction::ResumeThenResend
+                        } else {
+                            RetryAction::None
+                        };
+                        assert_eq!(
+                            continue_action(
+                                Some(reason),
+                                client_up,
+                                resumes_on_retry,
+                                session_known
+                            ),
+                            expected,
+                            "{reason:?}: up {client_up}, resumes {resumes_on_retry}, \
+                             known {session_known}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A turn that ended any other way has no Continue, whatever the agent's state.
+    #[test]
+    fn no_reason_no_continue() {
+        for client_up in [false, true] {
+            for resumes_on_retry in [false, true] {
+                for session_known in [false, true] {
+                    assert_eq!(
+                        continue_action(None, client_up, resumes_on_retry, session_known),
+                        RetryAction::None,
+                        "up {client_up}, resumes {resumes_on_retry}, known {session_known}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Only the three ends the transcript labels as cut short offer Continue: a finished turn, a
+    /// refusal, an error and an unknown end do not.
+    #[test]
+    fn only_three_ends_continue() {
+        assert_eq!(
+            ContinueReason::from_stop_reason("MaxTokens"),
+            Some(ContinueReason::TokenLimit)
+        );
+        assert_eq!(
+            ContinueReason::from_stop_reason("MaxTurnRequests"),
+            Some(ContinueReason::TurnLimit)
+        );
+        assert_eq!(
+            ContinueReason::from_stop_reason("Cancelled"),
+            Some(ContinueReason::Stopped)
+        );
+        for reason in ["EndTurn", "Refusal", "error_during_execution", ""] {
+            assert_eq!(
+                ContinueReason::from_stop_reason(reason),
+                None,
+                "{reason:?} does not continue"
+            );
+        }
+    }
+
+    /// Continue sends the word and nothing else: no mentions, no images, and a draft that matches
+    /// the text, so a refill puts back what was sent.
+    #[test]
+    fn the_continue_prompt_is_the_word() {
+        let prompt = LastPrompt::continue_prompt();
+        assert_eq!(prompt.text, "Continue");
+        assert_eq!(prompt.draft, "Continue");
+        assert!(prompt.mention_paths.is_empty());
+        assert!(prompt.images.is_empty());
+        assert!(prompt.mentions.is_empty());
     }
 }
