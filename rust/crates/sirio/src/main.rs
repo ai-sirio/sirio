@@ -4028,11 +4028,25 @@ impl ControlHandler for AppControlHandler {
                         }
                     }
                     Some("continue") => TranscriptAction::Continue,
+                    Some(verb @ ("copy" | "quote")) => {
+                        match request.params.get("entry").map(|entry| entry.parse::<usize>()) {
+                            Some(Ok(entry)) if verb == "copy" => TranscriptAction::Copy(entry),
+                            Some(Ok(entry)) => TranscriptAction::Quote(entry),
+                            _ => {
+                                return ControlResponse::failure(
+                                    &request.id,
+                                    format!(
+                                        "surface.chat.transcript {verb} requires a numeric entry"
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.chat.transcript requires action scrollBy, toggleTurn, retry \
-                             or continue",
+                            "surface.chat.transcript requires action scrollBy, toggleTurn, retry, \
+                             continue, copy or quote",
                         );
                     }
                 };

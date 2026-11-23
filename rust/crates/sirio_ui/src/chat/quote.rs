@@ -4,8 +4,6 @@
 
 /// A message held in the composer to be quoted: the author is only for the composer's card and is
 /// never sent.
-// Task 5/6 (the composer and the user row) are its first callers.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Quote {
     pub(crate) author: String,

@@ -65,6 +65,7 @@ mod limit_card;
 mod limit_notice;
 pub(crate) mod list_scroll;
 mod menus;
+mod message_actions;
 mod mode_cycle;
 mod prompt_history;
 pub use prompt_history::PromptRecord;
@@ -793,6 +794,12 @@ pub enum TranscriptAction {
     /// Presses Continue, which sits on no row of the caller's choosing: refused when the last
     /// turn did not stop short, or Continue is hidden for the agent's state.
     Continue,
+    /// Presses Copy on the message row at this entry index: puts on the clipboard what the row's
+    /// Copy takes. Refused when the row draws no action row.
+    Copy(usize),
+    /// Presses Quote on the message row at this entry index, as a click does. Refused when the row
+    /// draws no action row.
+    Quote(usize),
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -1529,13 +1536,6 @@ struct TranscriptSelection {
     head_entry: Option<usize>,
 }
 
-/// The assistant-response copy affordance currently showing its short-lived
-/// confirmation. Code blocks own their own copy state.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CopyTarget {
-    Assistant(usize),
-}
-
 /// The composer's secondary-click menu, in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerContextItem {
@@ -2184,6 +2184,19 @@ pub struct Chat {
     /// Stop). Set by the turn's end (`settle_turn`); cleared by a failure, by the next prompt, by
     /// a new process and by a new or opened conversation. In memory only: a restored chat has none.
     continue_reason: Option<retry::ContinueReason>,
+    /// The message the user chose to quote, held for the next prompt (`quote_message`). The
+    /// transcript's Quote button sets it, replacing any held; a new or opened conversation clears
+    /// it. In memory only.
+    quote: Option<quote::Quote>,
+    /// Quoting asks for the composer's focus, which only a render can give: the press and the
+    /// control socket's verb have no window. Read, and cleared, by the next render.
+    composer_focus_wanted: bool,
+    /// Debug builds only: where the last paint drew each action button, by transcript row and
+    /// button (`copy`, `quote` or `continue`, and `row` for the action row's own place, painted
+    /// even when the row is hidden), as `[x, y, width, height]` in window pixels.
+    /// Cleared as the chat renders and refilled by each button painted, like `transcript_links`.
+    #[cfg(debug_assertions)]
+    action_bounds: Rc<RefCell<BTreeMap<(usize, &'static str), [f32; 4]>>>,
     /// Stop ended a turn whose own end has not arrived yet. Set by `cancel_turn`, settled by the
     /// next turn end (`TurnEnded` or `TurnFailed`) and by a new process or conversation. While it
     /// is set, a `TurnFailed` with no turn of ours streaming is ACP's error answer to the prompt
@@ -2323,7 +2336,6 @@ pub struct Chat {
     /// wrong for a chat restored with turns the trace never saw. Dropped with
     /// the entries it counts.
     trace_users: BTreeMap<usize, usize>,
-    copied_target: Option<CopyTarget>,
     edit_summaries: BTreeMap<usize, EditSummaryState>,
     /// When each live tool call started, by protocol id, so its first
     /// terminal status can store the elapsed time on the entry. Consumed on
@@ -2713,6 +2725,10 @@ impl Chat {
             limit_card: None,
             last_prompt: None,
             continue_reason: None,
+            quote: None,
+            composer_focus_wanted: false,
+            #[cfg(debug_assertions)]
+            action_bounds: Rc::default(),
             stop_end_pending: false,
             after_connect: None,
             connecting: false,
@@ -2755,7 +2771,6 @@ impl Chat {
             folded_turns: BTreeSet::new(),
             trace: TraceStore::default(),
             trace_users: BTreeMap::new(),
-            copied_target: None,
             edit_summaries: BTreeMap::new(),
             tool_started: HashMap::new(),
             pending_subagents: HashMap::new(),
@@ -5248,6 +5263,12 @@ impl Chat {
         } else {
             "idle"
         };
+        // What each row draws as actions, decided once for the whole readout.
+        #[cfg(debug_assertions)]
+        let (actions_frame, turn_roles) = (
+            self.actions_frame(),
+            turn_row_roles(&self.entries, &self.folded_turns),
+        );
         ChatControlSnapshot {
             status: status.to_string(),
             composer_text: self.draft.to_string(),
@@ -5268,6 +5289,8 @@ impl Chat {
                     self.limit_card_columns(index, &mut row);
                     #[cfg(debug_assertions)]
                     self.reveal_columns(index, &mut row);
+                    #[cfg(debug_assertions)]
+                    self.action_columns(index, &actions_frame, &turn_roles, &mut row);
                     #[cfg(debug_assertions)]
                     entry_time_columns(entry, &mut row);
                     #[cfg(not(debug_assertions))]
@@ -5401,6 +5424,16 @@ impl Chat {
                     ));
                 }
                 self.continue_turn(cx);
+            }
+            TranscriptAction::Copy(entry) => {
+                self.require_message_row("copy", entry)?;
+                // What Ely's Copy writes when pressed, from the text it was given.
+                let text = self.message_text(entry).unwrap_or_default().to_string();
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            TranscriptAction::Quote(entry) => {
+                self.require_message_row("quote", entry)?;
+                self.quote_message(entry, cx);
             }
         }
         Ok(())
@@ -5566,8 +5599,10 @@ impl Chat {
             }
         }
         self.has_completed_turn = !self.entries.is_empty();
-        // A past session's transcript is a restored one: it has no Continue.
+        // A past session's transcript is a restored one: it has no Continue, and the message held
+        // for quoting belonged to the one that went.
         self.continue_reason = None;
+        self.quote = None;
         self.history_open = false;
         cx.notify();
     }
@@ -5708,28 +5743,6 @@ impl Chat {
         if let Some(selected) = self.selected_transcript_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(selected));
         }
-    }
-
-    /// Copies a local transcript fragment and gives just that control a
-    /// brief acknowledgement. The delayed clear is deliberately keyed to
-    /// the target, so a second click cannot have its confirmation cleared by
-    /// the first click's already-scheduled timer.
-    fn copy_local_text(&mut self, target: CopyTarget, text: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.copied_target = Some(target.clone());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(2))
-                .await;
-            let _ = this.update(cx, |chat, cx| {
-                if chat.copied_target.as_ref() == Some(&target) {
-                    chat.copied_target = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     fn request_edit_revert(&mut self, entry: usize, path: PathBuf, cx: &mut Context<Self>) {
@@ -6590,6 +6603,7 @@ impl Chat {
         // The old conversation's prompt and hold are not the new one's: a resend must never reach it.
         self.last_prompt = None;
         self.continue_reason = None;
+        self.quote = None;
         self.stop_end_pending = false;
         self.queue_held = false;
         self.after_connect = None;
@@ -7819,8 +7833,6 @@ impl Chat {
     /// The transcript row that carries Continue: the last reply of the last turn, or, when that
     /// turn has none (it stopped during a tool call), the last turn's footer. `None` when Continue
     /// has no button.
-    // Debug builds read it for now (`surface.chat.read`); the row draws it next.
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     fn continue_row(&self) -> Option<usize> {
         if self.continue_action_now() == retry::RetryAction::None {
             return None;
@@ -9104,6 +9116,13 @@ impl Render for Chat {
         }
         // The responses painted from here on refill it.
         self.transcript_links.borrow_mut().clear();
+        // So do the action buttons.
+        #[cfg(debug_assertions)]
+        self.action_bounds.borrow_mut().clear();
+        // Quoting asked for the composer's focus: this render has the window to give it in.
+        if std::mem::take(&mut self.composer_focus_wanted) {
+            cx.defer_in(window, |chat, window, cx| chat.focus_composer(window, cx));
+        }
         // Fetched fresh every frame from the global, so a change of
         // appearance is picked up without the chat surface holding a stale
         // copy — never `Theme::dark()`, never a field.
@@ -9124,6 +9143,8 @@ impl Render for Chat {
         // row — segmenting the transcript is O(entries), and the virtualizer
         // calls its row processor separately for every visible index.
         let turn_roles = turn_row_roles(&self.entries, &self.folded_turns);
+        // Likewise which rows draw an action row, and the one that draws it always.
+        let actions_frame = self.actions_frame();
         let transcript_focus = self.transcript_focus.clone();
         // The answer field's caret, resolved before the tree is built so the
         // card and the composer agree within one frame.
@@ -9299,7 +9320,8 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                                             |entry| {
                                                                 Chat::render_entry(entry, transcript::TranscriptRowContext {
     index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
-    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    focus: transcript_focus.clone(), source_start,
+    actions: this.entries.get(entry_index).and_then(|real| actions_frame.row(entry_index, real)),
     edit_summary: None, thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
     day_heading: None, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
@@ -9449,7 +9471,8 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         };
                                         let body = Chat::render_entry(entry, transcript::TranscriptRowContext {
     index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
-    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    focus: transcript_focus.clone(), source_start,
+    actions: this.entries.get(entry_index).and_then(|real| actions_frame.row(entry_index, real)),
     edit_summary: this.edit_summaries.get(&entry_index).cloned(), thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
     day_heading, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
@@ -12331,53 +12354,6 @@ two"
             "the turn footer is laid out in the drawn transcript"
         );
         assert!(cx.debug_bounds("chat-status").is_some());
-    }
-
-    /// F-CHAT-29: hovering an assistant response reveals a local Copy control;
-    /// its click writes the response and replaces its label with a checkmark.
-    #[gpui::test]
-    async fn assistant_response_copy_writes_text_and_confirms(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(crate::ely::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.push_entry(Entry::Assistant {
-                text: "copy this assistant response".into(),
-                document: parse_chat_markdown("copy this assistant response"),
-                stream: None,
-            });
-            chat
-        });
-        refresh_frame(cx);
-
-        let response = cx
-            .debug_bounds("assistant-response-0")
-            .expect("assistant response is drawn");
-        cx.simulate_mouse_move(response.center(), None, Modifiers::none());
-        cx.run_until_parked();
-
-        let copy = cx
-            .debug_bounds("assistant-copy-0")
-            .expect("hovering an assistant response reveals Copy");
-        cx.simulate_click(copy.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(
-            cx.cx.read_from_clipboard().and_then(|item| item.text()),
-            Some("copy this assistant response".into()),
-            "Copy writes only the assistant response"
-        );
-        assert!(
-            cx.debug_bounds("assistant-copy-confirmed-0").is_some(),
-            "the clicked Copy control visibly acknowledges success"
-        );
-        let _ = chat;
     }
 
     /// F-CHAT-30: a fenced code block exposes a local Copy control whose

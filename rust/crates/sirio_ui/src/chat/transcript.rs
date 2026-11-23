@@ -64,7 +64,9 @@ pub(super) struct TranscriptRowContext<'a> {
     pub chat: Entity<Chat>,
     pub focus: FocusHandle,
     pub source_start: usize,
-    pub copied_target: Option<CopyTarget>,
+    /// What the row draws as actions (`message_actions`), decided from the transcript's own entry:
+    /// the entry drawn here has lost its stream. `None` draws none.
+    pub actions: Option<message_actions::RowActions>,
     pub edit_summary: Option<EditSummaryState>,
     pub thought_streaming: bool,
     pub thought_scroll: &'a HashMap<usize, thought::ThoughtScroll>,
@@ -100,7 +102,7 @@ impl Chat {
             chat: entity,
             focus: transcript_focus,
             source_start,
-            copied_target,
+            actions,
             edit_summary,
             thought_streaming,
             thought_scroll,
@@ -139,6 +141,7 @@ impl Chat {
         let is_notice = matches!(entry, Entry::Notice { .. });
         let body = match entry {
             Entry::User { text, .. } => {
+                let copy_text = SharedString::from(text.clone());
                 let bubble = div()
                     .w_full()
                     .min_w_0()
@@ -153,6 +156,40 @@ impl Chat {
                         )),
                     )
                     .into_any_element();
+                // The action row is the bubble's sibling, under it and to the right like the
+                // bubble: never inside the selectable text, and the bubble's own box stays the
+                // bubble's. The group holds both, so the pointer going from the text to the row
+                // keeps it shown.
+                let bubble = match actions {
+                    Some(message_actions::RowActions::Message {
+                        shown,
+                        continue_here,
+                    }) => {
+                        let hover_group = format!("user-message-{entry_index}");
+                        div()
+                            .id(("user-message", entry_index))
+                            .group(hover_group.clone())
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(bubble)
+                            .child(div().w_full().flex().justify_end().child(
+                                message_actions::render_message_actions(
+                                    id.clone(),
+                                    entry_index,
+                                    copy_text,
+                                    shown,
+                                    continue_here,
+                                    entity.clone(),
+                                    hover_group.into(),
+                                ),
+                            ))
+                            .into_any_element()
+                    }
+                    _ => bubble,
+                };
                 // The heading row belongs to the `User` entry's row, so no
                 // extra list index is needed: it sits above the question.
                 match day_heading {
@@ -167,44 +204,25 @@ impl Chat {
                 }
             }
             Entry::Assistant { text, document, .. } => {
-                let target = CopyTarget::Assistant(entry_index);
-                let copied = copied_target.as_ref() == Some(&target);
                 let hover_group = format!("assistant-response-{entry_index}");
-                let copy_entity = entity.clone();
-                let copy_target = target.clone();
-                let copy_text = text;
-                let mut copy = div()
-                    .id(("assistant-copy", entry_index))
-                    .debug_selector(move || format!("assistant-copy-{entry_index}"))
-                    .px(px(7.0))
-                    .py(px(4.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.ely.surface)
-                    .text_size(typography.footnote)
-                    .text_color(theme.ely.fg_subtle)
-                    .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(theme.sirio.overlay))
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        copy_entity.update(cx, |chat, cx| {
-                            chat.copy_local_text(copy_target.clone(), copy_text.clone(), cx);
-                        });
-                    });
-                if copied {
-                    copy = copy.child(
-                        div()
-                            .id(("assistant-copy-confirmed", entry_index))
-                            .debug_selector(move || {
-                                format!("assistant-copy-confirmed-{entry_index}")
-                            })
-                            .child("Copied ✓"),
-                    );
-                } else {
-                    copy = copy
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .child("Copy");
-                }
+                // Under the reply, in the bubble's footer: a sibling of the selectable body.
+                let footer = match actions {
+                    Some(message_actions::RowActions::Message {
+                        shown,
+                        continue_here,
+                    }) => Some(
+                        MessageFooter::new().child(message_actions::render_message_actions(
+                            id.clone(),
+                            entry_index,
+                            text.into(),
+                            shown,
+                            continue_here,
+                            entity.clone(),
+                            hover_group.clone().into(),
+                        )),
+                    ),
+                    _ => None,
+                };
                 div()
                     .id(("assistant-response", entry_index))
                     .group(hover_group)
@@ -242,7 +260,7 @@ impl Chat {
                                         source_start,
                                     )),
                             )
-                            .footer(MessageFooter::new().child(copy)),
+                            .when_some(footer, |bubble, footer| bubble.footer(footer)),
                     )
                     .child(
                         div()
@@ -648,12 +666,31 @@ impl Chat {
                     )
                     .into_any_element()
             }
-            Entry::TurnFooter(at) => div()
-                .w_full()
-                .flex()
-                .justify_center()
-                .child(MessageFooter::new().fact(at))
-                .into_any_element(),
+            Entry::TurnFooter(at) => {
+                let facts = div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(MessageFooter::new().fact(at));
+                match actions {
+                    // A turn with no reply to carry Continue (it stopped during a tool call):
+                    // the footer draws it alone, under the time.
+                    Some(message_actions::RowActions::ContinueOnly) => div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1()
+                        .child(facts)
+                        .child(message_actions::render_lone_continue(
+                            id.clone(),
+                            entry_index,
+                            entity.clone(),
+                        ))
+                        .into_any_element(),
+                    _ => facts.into_any_element(),
+                }
+            }
             Entry::Notice { text, kind } => {
                 let selector = kind.selector();
                 match kind {
