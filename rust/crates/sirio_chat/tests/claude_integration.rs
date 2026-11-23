@@ -587,9 +587,12 @@ fn a_stop_excuses_only_its_own_turn() {
     }
     client.cancel().expect("cancel is accepted");
     let seen = drain_until(&events, ends_the_turn);
-    assert!(
-        matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })),
-        "the turn the worker interrupted ends with TurnEnded: {seen:?}"
+    assert_eq!(
+        seen.last(),
+        Some(&ChatEvent::TurnEnded {
+            stop_reason: "Cancelled".into()
+        }),
+        "the turn the worker interrupted ends cancelled: {seen:?}"
     );
 
     // The same words with no Stop behind them are a failure: the next turn's result is
@@ -637,9 +640,12 @@ fn stop_then_a_prompt_before_the_stopped_result(hold: &str) {
     client.prompt("overloaded").expect("second prompt is accepted");
 
     let stopped = drain_until(&events, ends_the_turn);
-    assert!(
-        matches!(stopped.last(), Some(ChatEvent::TurnEnded { .. })),
-        "the stopped turn ends with TurnEnded, though a prompt was written after the Stop: {stopped:?}"
+    assert_eq!(
+        stopped.last(),
+        Some(&ChatEvent::TurnEnded {
+            stop_reason: "Cancelled".into()
+        }),
+        "the stopped turn ends cancelled, though a prompt was written after the Stop: {stopped:?}"
     );
     let second = drain_until(&events, ends_the_turn);
     assert!(

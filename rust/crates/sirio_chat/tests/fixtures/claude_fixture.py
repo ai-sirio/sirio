@@ -2702,9 +2702,9 @@ def cli_notices_prompt(message):
 # `interrupt` request, then answers it the way the real CLI does: `error_during_execution`,
 # `is_error`, no stop reason and no text. `hold late` is `hold` with the answer owed: the CLI
 # winds the stopped turn down after Stop freed the composer, so the stopped turn's result is
-# written only when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
-# ordinary answer, so a test can tell the client is still usable after a failure. The results
-# carry no `stop_reason`, as the CLI's own failures do.
+# written only when the next prompt arrives, ahead of that prompt's own result. Any other
+# prompt is an ordinary answer, so a test can tell the client is still usable after a failure.
+# The results carry no `stop_reason`, as the CLI's own failures do.
 # Every result carries `queued_turn_count`, the prompts read and not yet run, as the real CLI's
 # do: `hold late`'s stopped result says 1 (the prompt that made it due is read and waits).
 # `hold late bare` is `hold late` with that field left out, the shape of an older or synthetic
