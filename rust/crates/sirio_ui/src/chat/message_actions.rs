@@ -185,6 +185,58 @@ impl Chat {
         self.composer_focus_wanted = true;
         cx.notify();
     }
+
+    /// The one entry the transcript's selection lies in, `None` when nothing is selected or the
+    /// selection runs over more than one. A drag names its entries (the ends of a live reply are
+    /// offsets of the text drawn for it, which can run past its row, so they are never compared
+    /// with the rows' ranges); Select All names none and is read by its offsets.
+    fn selection_entry(&self) -> Option<usize> {
+        let selection = self.transcript_selection.as_ref()?;
+        if selection.is_empty() {
+            return None;
+        }
+        if let (Some(anchor), Some(head)) = (selection.anchor_entry, selection.head_entry) {
+            return (anchor == head).then_some(anchor);
+        }
+        let range = selection.range();
+        self.transcript_entry_ranges()
+            .iter()
+            .position(|row| row.start <= range.start && range.end <= row.end)
+    }
+
+    /// What Quote selection would hold: the selected text, by the entry it lies in, `None` when the
+    /// menu has no such item to offer (nothing selected, a selection over several messages, or only
+    /// whitespace). The author is `You` for a user message and the agent's name for any other
+    /// row, which is the agent's or the app's output about its work.
+    fn selection_quote(&self) -> Option<super::quote::Quote> {
+        let entry = self.selection_entry()?;
+        let text = self.selected_transcript_text()?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        let author = match self.entries.get(entry)? {
+            Entry::User { .. } => "You".to_string(),
+            _ => self.agent_badge_name(),
+        };
+        Some(super::quote::Quote { author, text })
+    }
+
+    /// Whether the transcript's menu offers Quote selection now.
+    pub(super) fn quote_selection_available(&self) -> bool {
+        self.selection_quote().is_some()
+    }
+
+    /// Quote selection: holds the selected text as the quote of the next prompt, replacing any
+    /// held, and focuses the composer, as Quote on a row does. Nothing happens when
+    /// `quote_selection_available` says no.
+    pub(super) fn quote_selection(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(quote) = self.selection_quote() else {
+            return;
+        };
+        self.quote = Some(quote);
+        self.composer_focus_wanted = true;
+        cx.notify();
+    }
 }
 
 impl ActionsFrame {

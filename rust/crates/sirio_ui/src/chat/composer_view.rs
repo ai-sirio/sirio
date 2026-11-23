@@ -703,7 +703,7 @@ use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
-    chat::{Attachment, AttachmentChip, PromptInput},
+    chat::{Attachment, AttachmentChip, PromptInput, QuoteReply},
     menus::Hang,
     primitives::{Icon, IconName},
     theme::{ActiveTheme as _, ControlSize, IconSize, Radius, TextSize},
@@ -1320,6 +1320,35 @@ impl Chat {
                 }))
         });
 
+        // The message held to be quoted by the next prompt: Ely's card over the field, with its
+        // ✕. The card shows the quote's first line and no more, so that is all it is given: a
+        // reply quoted whole is not copied into every frame. It sits beside the field, never in
+        // it, and what it says is not selectable text.
+        let quote_card = self.quote.as_ref().map(|quote| {
+            let remove_entity = entity.clone();
+            div()
+                .id("composer-quote")
+                .debug_selector(|| "composer-quote".into())
+                .min_w_0()
+                .child(
+                    QuoteReply::new(
+                        "composer-quote-card",
+                        quote.author.clone(),
+                        quote.text.lines().next().unwrap_or_default().to_string(),
+                    )
+                    .on_remove(move |window, cx| {
+                        remove_entity.update(cx, |chat, cx| {
+                            chat.quote = None;
+                            chat.composer_field
+                                .read(cx)
+                                .focus_handle(cx)
+                                .focus(window, cx);
+                            cx.notify();
+                        });
+                    }),
+                )
+        });
+
         // The field is Ely's raw `TextInput`: it paints text, selection and
         // caret and no frame or fill, so the shell's themed surface shows
         // through (`PromptInput::custom`) and the shell is the one frame the
@@ -1388,6 +1417,9 @@ impl Chat {
             prompt = prompt.busy(move |_, cx| {
                 stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
             });
+        }
+        if let Some(card) = quote_card {
+            prompt = prompt.above(card);
         }
         if let Some(chips) = attachment_chips {
             prompt = prompt.above(chips);

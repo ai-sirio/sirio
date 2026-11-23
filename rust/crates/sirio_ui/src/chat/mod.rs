@@ -755,6 +755,9 @@ pub struct ChatControlSnapshot {
     pub continue_action: String,
     #[cfg(debug_assertions)]
     pub continue_row: Option<usize>,
+    /// Debug builds only: the text of the quote held for the next prompt, `None` when none is.
+    #[cfg(debug_assertions)]
+    pub composer_quote: Option<String>,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -800,6 +803,9 @@ pub enum TranscriptAction {
     /// Presses Quote on the message row at this entry index, as a click does. Refused when the row
     /// draws no action row.
     Quote(usize),
+    /// Picks Quote selection from the transcript's menu: quotes what is selected. Refused, with the
+    /// reason, when the menu would not offer it.
+    QuoteSelection,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -1572,6 +1578,9 @@ impl ComposerContextItem {
 enum TranscriptContextItem {
     Copy,
     SelectAll,
+    /// Over a selection that lies in one message: holds it as the quote of the next prompt.
+    /// Offered by `quote_selection_available`, so it is not in `ALL`.
+    QuoteSelection,
     /// Over a link of a reply: opens it as a click would.
     OpenLink,
     /// Over a link of a reply: puts its address on the clipboard.
@@ -1587,6 +1596,7 @@ impl TranscriptContextItem {
         match self {
             Self::Copy => "Copy",
             Self::SelectAll => "Select All",
+            Self::QuoteSelection => "Quote selection",
             Self::OpenLink => "Open link",
             Self::CopyLink => "Copy link address",
         }
@@ -1596,6 +1606,7 @@ impl TranscriptContextItem {
         match self {
             Self::Copy => "copy",
             Self::SelectAll => "select-all",
+            Self::QuoteSelection => "quote-selection",
             Self::OpenLink => "open-link",
             Self::CopyLink => "copy-link",
         }
@@ -4795,6 +4806,15 @@ impl Chat {
             && self.pending_question().is_none()
     }
 
+    /// The text of the quote held for the next prompt, `None` when none is held or it is only
+    /// whitespace: `join_quote` writes no block for such a quote, so it makes no prompt.
+    fn quote_text(&self) -> Option<&str> {
+        self.quote
+            .as_ref()
+            .map(|quote| quote.text.as_str())
+            .filter(|text| !text.trim().is_empty())
+    }
+
     fn can_send(&self) -> bool {
         // F-CHAT-05: an unresolved permission/plan question must block Send
         // in its own right, not merely ride along with `streaming` (a
@@ -4805,7 +4825,10 @@ impl Chat {
         // same contract row: the reference disables Send while disconnected
         // too, it just never needed a separate flag for it because
         // `.disabled(!canInteract)` covers the whole editor at once.
-        self.accepts_sends() && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
+        self.accepts_sends()
+            && (!self.draft.trim().is_empty()
+                || !self.attachments.is_empty()
+                || self.quote_text().is_some())
     }
 
     /// Whether the row at `index` has text in the transcript's copy: the error row a limit card
@@ -5049,14 +5072,31 @@ impl Chat {
     }
 
     /// Puts a message that could not be sent back in the composer. Whatever
-    /// the user has typed stays, below the message.
+    /// the user has typed stays, below the message. A quote at the head of the
+    /// message goes back to the composer's quote card, unless the composer holds
+    /// one already: that one stays, and the message keeps its block in the field,
+    /// so neither is lost.
     fn restore_held_text(&mut self, held: &str, cx: &mut Context<Self>) {
         let typed = self.draft_text();
-        let text = if typed.trim().is_empty() {
+        let (quote, held) = if self.quote_text().is_none() {
+            quote::split_quote(held)
+        } else {
+            (None, held)
+        };
+        // A message that was a quote alone has nothing to put above what was typed.
+        let text = if held.is_empty() {
+            typed
+        } else if typed.trim().is_empty() {
             held.to_string()
         } else {
             format!("{held}\n\n{typed}")
         };
+        if let Some(text) = quote {
+            self.quote = Some(quote::Quote {
+                author: quote::READ_BACK_AUTHOR.to_string(),
+                text,
+            });
+        }
         self.set_composer_text(text, cx);
         cx.notify();
     }
@@ -5313,6 +5353,8 @@ impl Chat {
             continue_action: self.continue_action_now().wire().to_string(),
             #[cfg(debug_assertions)]
             continue_row: self.continue_row(),
+            #[cfg(debug_assertions)]
+            composer_quote: self.quote.as_ref().map(|quote| quote.text.clone()),
             effort: self
                 .effort
                 .as_ref()
@@ -5438,6 +5480,15 @@ impl Chat {
             TranscriptAction::Quote(entry) => {
                 self.require_message_row("quote", entry)?;
                 self.quote_message(entry, cx);
+            }
+            TranscriptAction::QuoteSelection => {
+                // The menu's own rule: a verb that quotes what the menu would not offer is a lie.
+                if !self.quote_selection_available() {
+                    return Err("surface.chat.transcript quoteSelection: nothing is selected \
+                         within one message"
+                        .to_string());
+                }
+                self.quote_selection(cx);
             }
         }
         Ok(())
@@ -6365,6 +6416,7 @@ impl Chat {
         match item {
             TranscriptContextItem::Copy => self.copy_transcript(&CopyTranscript, window, cx),
             TranscriptContextItem::SelectAll => self.select_all_transcript(cx),
+            TranscriptContextItem::QuoteSelection => self.quote_selection(cx),
             TranscriptContextItem::OpenLink => {
                 if let Some(link) = self.transcript_menu_link.take() {
                     self.open_reply_link(&link, cx);
@@ -6726,14 +6778,19 @@ impl Chat {
         if !self.can_send() {
             return;
         }
-        let (text, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
-        let draft = self.draft.to_string();
+        // The held quote goes at the head of the draft before the mentions are lifted, so the typed
+        // part is read as it always was. `draft` is what a hand-back puts back: the block and the
+        // field.
+        let draft = quote::join_quote(self.quote_text(), &self.draft);
+        let (text, mention_paths) = assemble_prompt(&draft, &self.accepted_mentions);
         let mentions = self.accepted_mentions.clone();
         self.remember_prompt();
         let images = std::mem::take(&mut self.attachments);
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
+        // The quote is in the prompt now: it is not the next one's.
+        self.quote = None;
         self.submit_prompt(
             retry::LastPrompt {
                 text,
@@ -6853,17 +6910,22 @@ impl Chat {
 
     /// D-CHAT-03: while a turn streams, a send commits the draft as a new
     /// entry at the back of the queue. Mirrors `send`'s consumption of the
-    /// composer; an empty draft commits nothing and leaves the queue as
-    /// it was.
+    /// composer, the held quote included; an empty draft with no quote
+    /// commits nothing and leaves the queue as it was.
     fn commit_queued_item(&mut self, cx: &mut Context<Self>) {
-        if self.draft.trim().is_empty() && self.attachments.is_empty() {
+        if self.draft.trim().is_empty()
+            && self.attachments.is_empty()
+            && self.quote_text().is_none()
+        {
             return;
         }
-        let (text, _) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let draft = quote::join_quote(self.quote_text(), &self.draft);
+        let (text, _) = assemble_prompt(&draft, &self.accepted_mentions);
         self.remember_prompt();
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
+        self.quote = None;
         self.queue.push_back(text);
         cx.notify();
     }
@@ -7926,8 +7988,19 @@ impl Chat {
         // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
         // relaunch of an agent that is up.
         self.retire_failed_turn_retries();
-        let text = if self.draft.trim().is_empty() && self.attachments.is_empty() {
-            self.set_composer_text(last.draft, cx);
+        // A held quote is the user's composing, as a typed draft is: the prompt does not go over it.
+        let text = if self.draft.trim().is_empty()
+            && self.attachments.is_empty()
+            && self.quote_text().is_none()
+        {
+            // The block at the head of the draft goes back as the quote card, the rest in the field.
+            let (quoted, rest) = quote::split_quote(&last.draft);
+            let rest = rest.to_string();
+            self.quote = quoted.map(|text| quote::Quote {
+                author: quote::READ_BACK_AUTHOR.to_string(),
+                text,
+            });
+            self.set_composer_text(rest, cx);
             self.reset_composer_popups();
             self.accepted_mentions = last.mentions;
             self.attachments = last.images;

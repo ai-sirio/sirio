@@ -4028,6 +4028,7 @@ impl ControlHandler for AppControlHandler {
                         }
                     }
                     Some("continue") => TranscriptAction::Continue,
+                    Some("quoteSelection") => TranscriptAction::QuoteSelection,
                     Some(verb @ ("copy" | "quote")) => {
                         match request.params.get("entry").map(|entry| entry.parse::<usize>()) {
                             Some(Ok(entry)) if verb == "copy" => TranscriptAction::Copy(entry),
@@ -4046,7 +4047,7 @@ impl ControlHandler for AppControlHandler {
                         return ControlResponse::failure(
                             &request.id,
                             "surface.chat.transcript requires action scrollBy, toggleTurn, retry, \
-                             continue, copy or quote",
+                             continue, copy, quote or quoteSelection",
                         );
                     }
                 };
@@ -25876,6 +25877,10 @@ impl SirioWorkspace {
             fields.push(("continue".to_string(), snapshot.continue_action));
             if let Some(row) = snapshot.continue_row {
                 fields.push(("continueRow".to_string(), row.to_string()));
+            }
+            // The quote held for the next prompt, absent when none is.
+            if let Some(quote) = snapshot.composer_quote {
+                fields.push(("composerQuote".to_string(), quote));
             }
         }
         fields

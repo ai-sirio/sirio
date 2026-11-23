@@ -14,7 +14,7 @@ use sirio_theme::Theme;
 use super::*;
 use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::chat::{
-    DateSeparator, MessageAvatar, MessageBubble, MessageFooter, MessageHeader, Role,
+    DateSeparator, MessageAvatar, MessageBubble, MessageFooter, MessageHeader, QuoteReply, Role,
 };
 use ely_gpui_component::theme::ControlSize;
 
@@ -142,21 +142,42 @@ impl Chat {
         let body = match entry {
             Entry::User { text, .. } => {
                 // What Copy takes, built once and only for a row that has the action row: one
-                // copy of the text, made from the borrow, before the bubble takes the owned one.
+                // copy of the whole text, made from the borrow.
                 let copy_text = matches!(actions, Some(message_actions::RowActions::Message { .. }))
                     .then(|| SharedString::from(text.as_str()));
+                // A prompt that starts with a quote block draws it as a card above the rest
+                // (`split_quote`, the rule every reader of a user text shares). The row's text in
+                // the transcript's offset space is still the whole `text`, block included: the
+                // rest is its tail, so it is drawn where its bytes are, and a drag or Select All
+                // reads the same bytes it highlights. Copy keeps taking the whole text.
+                let (quoted, rest) = quote::split_quote(&text);
+                let rest_at = source_start + (text.len() - rest.len());
+                let card = quoted.map(|quoted| {
+                    QuoteReply::new(
+                        (id.clone(), "quote-card"),
+                        quote::READ_BACK_AUTHOR,
+                        // The card shows one line: the quote is not copied whole into the frame.
+                        quoted.lines().next().unwrap_or_default().to_string(),
+                    )
+                });
+                // A prompt that is a quote alone has no text to draw.
+                let rest = (!rest.is_empty()).then(|| {
+                    Self::render_plain_text(
+                        rest.to_string(),
+                        theme,
+                        format!("user-entry-{entry_index}"),
+                        rest_at,
+                        Some(&interaction),
+                    )
+                });
                 let bubble = div()
                     .w_full()
                     .min_w_0()
                     .debug_selector(move || format!("user-bubble-{entry_index}"))
                     .child(
-                        MessageBubble::new(Role::User).child(Self::render_plain_text(
-                            text,
-                            theme,
-                            format!("user-entry-{entry_index}"),
-                            source_start,
-                            Some(&interaction),
-                        )),
+                        MessageBubble::new(Role::User)
+                            .children(card)
+                            .children(rest),
                     )
                     .into_any_element();
                 // The action row is the bubble's sibling, under it and to the right like the

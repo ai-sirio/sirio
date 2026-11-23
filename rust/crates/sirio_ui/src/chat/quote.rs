@@ -10,13 +10,15 @@ pub(crate) struct Quote {
     pub(crate) text: String,
 }
 
+/// The author a quote read back from a prompt's text is given: the text does not carry who wrote
+/// it, because the author is never sent.
+pub(crate) const READ_BACK_AUTHOR: &str = "Quote";
+
 /// The prompt text for `typed` with `quote` at its head: every line of the quote prefixed with
 /// `> ` (an empty line becomes `>`), an empty line, then `typed`.
 ///
 /// Returns `typed` unchanged when there is no quote or it is blank. With nothing typed it returns
 /// the block alone, with no trailing blank line.
-// Task 5/6 (the composer and the user row) are its first callers.
-#[allow(dead_code)]
 pub(crate) fn join_quote(quote: Option<&str>, typed: &str) -> String {
     let Some(quote) = quote.filter(|quote| !quote.trim().is_empty()) else {
         return typed.to_string();
@@ -35,8 +37,6 @@ pub(crate) fn join_quote(quote: Option<&str>, typed: &str) -> String {
 /// The inverse of `join_quote`: when the leading lines of `text` all start with `>` and are
 /// followed by an empty line or by the end of the text, the quoted text (one `> ` or `>` stripped
 /// per line) and the text after the empty line. Anything else gives `(None, text)`.
-// Task 5/6 (the composer and the user row) are its first callers.
-#[allow(dead_code)]
 pub(crate) fn split_quote(text: &str) -> (Option<String>, &str) {
     let mut quoted: Vec<&str> = Vec::new();
     let mut consumed = 0;
