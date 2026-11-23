@@ -10,9 +10,10 @@ use chrono::{DateTime, Local};
 use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::feedback::{Alert, Countdown};
 use ely_gpui_component::primitives::Severity;
-use ely_gpui_component::theme::{ControlSize, TextSize};
+use ely_gpui_component::theme::{ActiveTheme as _, ControlSize, TextSize, Theme as ElyTheme};
 use gpui::{
-    AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Role,
+    AnyElement, App, Bounds, Element, ElementId, FontWeight, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, Role,
     StatefulInteractiveElement, Styled, Task, Window, div,
 };
 use sirio_theme::Theme;
@@ -161,6 +162,87 @@ pub(crate) fn phase(card: &LimitCard, wall_now: DateTime<Local>) -> LimitPhase {
     }
 }
 
+/// Lays out `child` with Ely's reduced-motion flag on, so that what it builds does not animate.
+///
+/// Ely's `Countdown` rolls the digit of each second for 640 ms (`AnimatedNumber`), and gpui asks
+/// for a frame on every frame of a roll: a card that counts for hours would redraw the whole
+/// window about two thirds of the time. With the flag on, the digits change in place once a
+/// second (the roll is 1 ms), as they do for a user who asked for reduced motion.
+///
+/// The flag is Ely's theme's, a global that every component reads while it is built, and a
+/// component is built when its parent's layout is requested, so setting it around the child's
+/// `request_layout` covers the countdown and nothing else: the rest of the window is laid out
+/// outside it. It is set and put back in the one call; nothing observes Ely's theme global, so
+/// the effect `global_mut` queues wakes no one, and a user who has reduced motion on already is
+/// left as they are.
+struct StillMotion {
+    child: AnyElement,
+}
+
+impl IntoElement for StillMotion {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for StillMotion {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let already = cx.theme().reduced_motion;
+        if !already {
+            cx.global_mut::<ElyTheme>().reduced_motion = true;
+        }
+        let layout = self.child.request_layout(window, cx);
+        if !already {
+            cx.global_mut::<ElyTheme>().reduced_motion = false;
+        }
+        (layout, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
 /// The card, drawn: Ely's warning `Alert` holding the title and `sentence` (the caller draws it
 /// through the transcript's selection, as the line it replaces was), and under them the
 /// countdown to `until`, the Try again button or the words that the limit lifted, by `phase`.
@@ -199,7 +281,11 @@ pub(super) fn render(
         LimitPhase::Counting => alert.action(
             div()
                 .debug_selector(|| "limit-card-countdown".into())
-                .child(Countdown::new((id, "limit-countdown"), until).size(TextSize::Md)),
+                .child(StillMotion {
+                    child: Countdown::new((id, "limit-countdown"), until)
+                        .size(TextSize::Md)
+                        .into_any_element(),
+                }),
         ),
         LimitPhase::Retry => alert.action(
             div().debug_selector(|| "limit-card-retry".into()).child(
