@@ -2975,12 +2975,12 @@ def richer_showcase_x8():
 
 
 def richer_compact():
-    """24 KiB with no blank line (headings on their text, `Run:` on its fence): the stream never freezes a block of
+    """28 KiB with no blank line (headings on their text, `Run:` on its fence): the stream never freezes a block of
     it, so past the reveal's 7 KiB tail budget the reveal hands over to drawing the reply as it arrives. (A debug
-    build builds the whole reply for every chunk of such a reply: this one is short and slow enough for the control
-    socket to be answered while it streams.)"""
+    build builds the whole reply for every chunk of such a reply: this one arrives in 70 chunks 150 ms apart, so that
+    the UI thread has idle time between chunks and the control socket is answered while it streams.)"""
     text, step = "", 0
-    while len(text.encode("utf-8")) < 24 * 1024:
+    while len(text.encode("utf-8")) < 28 * 1024:
         step += 1
         text += (
             f"## Step {step}\nRead `src/lib.rs` and **check** the [notes](https://example.com/{step}).\n"
@@ -3070,9 +3070,9 @@ def richer_turn(prompt):
     if base in ("showcase", "showcase slow", "showcase x8", "compact"):
         body = {"showcase x8": richer_showcase_x8, "compact": richer_compact}.get(base, richer_showcase)()
         # `showcase slow` is the same reply at 40 ms a chunk (8 s), long enough to select and copy while it streams;
-        # `compact` is 120 chunks 40 ms apart.
-        pause = RICHER_CHUNK_SECONDS * (2 if base in ("showcase slow", "compact") else 1)
-        if not richer_stream("msg_showcase", richer_chunks(body, 120 if base == "compact" else RICHER_CHUNKS), pause):
+        # `compact` is 70 chunks 150 ms apart.
+        pause = {"showcase slow": RICHER_CHUNK_SECONDS * 2, "compact": 0.15}.get(base, RICHER_CHUNK_SECONDS)
+        if not richer_stream("msg_showcase", richer_chunks(body, 70 if base == "compact" else RICHER_CHUNKS), pause):
             richer_interrupted()
             return
         result()

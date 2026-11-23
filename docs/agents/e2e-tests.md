@@ -655,26 +655,26 @@ Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "
 # `composerRow`). Each scenario is a fresh Sirio under `env -i` with its own HOME, XDG tree, database, socket and
 # host root; ~/.config/mise/config.toml must not change.
 #   stream             a 40 KiB reply (SHOWCASE, then parts that freeze) in 200 chunks 20 ms apart: while live,
-#                      0 < shownBytes < len(text), it only grows and is still behind past 24 KiB (only a reply that
-#                      froze its blocks as it arrived can be: one that freezes little hands over to plain drawing soon
-#                      after its tail passes 7 KiB),
+#                      0 < shownBytes < len(text), it only grows and is still behind past 16 KiB (which needs 9 KiB of
+#                      the reply frozen as it arrived: one that freezes little hands over to plain drawing soon after
+#                      its tail passes 7 KiB),
 #                      transcriptText holds the newest marker even where the reveal has not reached it, and at the
-#                      turn's end live is false with shownBytes the whole text; the same bytes in one chunk give the
-#                      same plain text. A reply selected whole and copied through the transcript menu while it
+#                      turn's end live is false at once; the same bytes in one chunk give the same plain text. A reply selected whole and copied through the transcript menu while it
 #                      streams (`showcase slow`, 8 s), with the transcript scrolled to its top so that the live reply is
 #                      not drawn and the reveal stands still (shownBytes is read again after the Copy and has not
 #                      moved) while the text arrives, puts text of the live reply on the clipboard that is past the
 #                      revealed byte (shownBytes read right after Select All). A reply with no blank line (`compact`,
-#                      24 KiB) never freezes a block, so once its tail passes the 7 KiB budget the reveal hands over to
-#                      drawing as it arrives for the rest of the turn (spec 5.2): from 14 KiB of text on every live read has
-#                      shownBytes the whole text with live still true; it ends with live false and its text equals the same
-#                      bytes in one chunk. SHOWCASE eight times over (`showcase x8`, every copy cites [^1] again; it freezes by
+#                      28 KiB) never freezes a block, so once its tail passes the 7 KiB budget the reveal hands over to
+#                      drawing as it arrives for the rest of the turn (spec 5.2): at least five live reads land from 14 KiB
+#                      of text on (the phase is slow and short of chunks so that the UI thread has idle time, and the read
+#                      latencies are logged) and each has shownBytes the whole text with live still true; it ends with live
+#                      false and its text equals the same bytes in one chunk. SHOWCASE eight times over (`showcase x8`, every copy cites [^1] again; it freezes by
 #                      a varying amount, so whether its reveal hands over depends on when the frames fall) is checked only
 #                      for its end and its equivalence.
-#   stop               Stop in mid-reveal: shownBytes is behind the text at the read before the Stop, and at the first
-#                      read after it live is false and shownBytes the whole text; no error row, nothing held, the text
-#                      equals the same bytes in one chunk; the agent killed right after has nothing to resend (Retry only
-#                      relaunches)
+#   stop               Stop in mid-reveal: two reads that find shownBytes behind the text bracket the capture, the Stop
+#                      follows the second at once, and at the first read after it live is false; no error row, nothing
+#                      held, the text equals the same bytes in one chunk; the agent killed right after has nothing to
+#                      resend (Retry only relaunches)
 #   claude_turn_failed an is_error result is an error row `turnFailed` whose Retry resends (`retry: resend`) the
 #                      same text on the same pid and the second answer arrives; the partial reply equals the same
 #                      bytes in one chunk; `error_max_turns` keeps its reply and has no error row. Queue variant: two

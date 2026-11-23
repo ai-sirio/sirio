@@ -4,7 +4,7 @@
 # `richer` mode (rust/crates/sirio_chat/tests/fixtures/claude_fixture.py). The prompt picks the turn:
 #   showcase           the SHOWCASE document, then parts of a few blocks each, 40 KiB in 200 chunks 20 ms apart
 #   showcase x8        SHOWCASE eight times over (each copy mentions [^1] again: a long reply that holds much of its text in the tail)
-#   compact            24 KiB with no blank line, in 120 chunks 40 ms apart: the stream never freezes a block of it, so past the
+#   compact            28 KiB with no blank line, in 70 chunks 150 ms apart: the stream never freezes a block of it, so past the
 #                      reveal's 7 KiB tail budget the reveal hands over to drawing it as it arrives
 #   showcase slow      the same reply at 40 ms a chunk (8 s), long enough to select and copy it while it streams
 #   fail               streams a partial reply, then fails (an is_error result); the next `fail` answers `recovered`
