@@ -261,10 +261,11 @@ impl ShellRun {
 }
 
 impl ShellRun {
-    /// Kills the command's whole session at once, with no SIGTERM first and no wait: what the chat's
-    /// Escape does to a command that was asked to stop and is still there (the SIGKILL of
-    /// [`Self::stop`] comes 2 s after it, and a second `stop` only repeats the SIGTERM). The run
-    /// still ends with `Exited { stopped: true, .. }`. Does nothing once the command has ended.
+    /// Kills the command's whole session at once, with no SIGTERM first and no wait. It is what the
+    /// chat's Escape does to a command that was asked to stop and is still there (the SIGKILL of
+    /// [`Self::stop`] comes 2 s after it, and a second `stop` only repeats the SIGTERM), what it
+    /// does to a run that has no block left to say so, and what [`Drop`] does. The run still ends
+    /// with `Exited { stopped: true, .. }`. Does nothing once the command has ended.
     pub fn kill(&self) {
         let mut life = self.shared.life();
         if !life.finished {

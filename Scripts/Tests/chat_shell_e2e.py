@@ -32,7 +32,7 @@ from pathlib import Path
 # `python3 -I` leaves the script's own directory off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chat_e2e_harness import (  # noqa: E402
-    MARKER, OUT, Fail, World, alive, assistant_rows, error_row, log, main, scenario, shell_rows, teardown, user_texts,
+    MARKER, OUT, Fail, RpcError, World, alive, assistant_rows, error_row, log, main, scenario, shell_rows, teardown, user_texts,
 )
 
 # ---------------------------------------------------------------- what the agent reads
@@ -436,20 +436,22 @@ def scenario_stop(scn):
 # ---------------------------------------------------------------- stubborn
 
 
-# The second key goes out this soon after the first, and the block must read stopped this soon after the first: the
-# runner's own SIGKILL comes 2.0 s after the first key (`STOP_GRACE`), so a block that is stopped by 1.2 s was killed by the
-# second Escape. Measured in a green run: the second key at 0.45 s, the block stopped at 0.71 s, which leaves 0.5 s of margin
-# to the bound and 1.3 s to the runner's SIGKILL; with `kill()` doing nothing the block stopped at 2.25 s.
-STUBBORN_KILLED_WITHIN = 1.2
-# A second key later than this missed its window (a slow host): the run says nothing about the product, and is retried.
+# The runner's own SIGKILL comes 2.0 s after the app handled the first Escape (`STOP_GRACE`), so never before 2.0 s after the key
+# was sent. A block that reads stopped before that was killed by the second Escape, whatever the host's speed; a no-op `kill()`
+# leaves it running until 2.25 s (measured). Any stop before this bound is therefore the product's, and a loaded host can only
+# push a correct product past it by delaying it for the whole of the margin (1.3 s in a green run, which stopped at 0.71 s).
+STUBBORN_RUNNER_KILLS_AT = 2.0
+# The second key must go out this soon after the first, to be well inside that window; a later one missed it (a slow host): the
+# run says nothing about the product, and is retried.
 STUBBORN_LATEST_SECOND_KEY = 0.8
 
 
-def stubborn_once(scn):
-    """One run of `stubborn`: None when it judged the product (every check passed; a failed one raises), or why it could not
-    (the host was too slow for the timing this checks), which says nothing about the product."""
+def stubborn_once(scn, name):
+    """One run of `stubborn` in the world `name` (a directory of its own): None when it judged the product (every check passed;
+    a failed one raises), or why it could not (the host was too slow for the timing this checks), which says nothing about the
+    product."""
     need = checker(scn, "claude")
-    w = World(scn, "claude")
+    w = World(scn, name)
     shell_pid = None
     try:
         w.start()
@@ -463,20 +465,35 @@ def stubborn_once(scn):
 
         first = w.escape()
         # The second key, as soon as the first has been seen to leave the command running.
-        r = w.read()
-        running = newest(r)[1].get("status") == "running" and alive(shell_pid)
+        try:
+            r = w.read()
+        except (RpcError, OSError) as error:
+            r = None
+            socket_error = error
+        read_at = time.time()
+        running = r is not None and newest(r)[1].get("status") == "running" and alive(shell_pid)
         second = w.key("Escape")
-        if not running:
-            return f"the command was not running {time.time() - first:.1f} s after the first Escape (it ignores SIGTERM)"
+        if r is None:
+            return f"the socket did not answer {read_at - first:.1f} s after the first Escape ({socket_error!r})"
+        if not running and read_at >= first + STUBBORN_RUNNER_KILLS_AT:
+            return (f"the command was not running {read_at - first:.1f} s after the first Escape, past the runner's own SIGKILL at "
+                    f"{STUBBORN_RUNNER_KILLS_AT} s (a slow host)")
+        # Before that moment only a defect can have ended the command: the first Escape killing it, or an escalation that is shorter
+        # than the runner's 2 s, or a trap that did not hold. It is a failure, never a slow host.
+        need(running, "control: the first Escape asked the command to stop, and it ignores that: its block still reads running and "
+                      "the shell lives, as it must until the runner's own SIGKILL at 2 s",
+             f"block {newest(r)[1].get('status')!r}, shell alive {alive(shell_pid)}, {read_at - first:.2f} s after the first key", read=r)
         if second - first > STUBBORN_LATEST_SECOND_KEY:
             return f"the second Escape went out {second - first:.1f} s after the first, later than {STUBBORN_LATEST_SECOND_KEY} s"
-        need(True, "control: the first Escape asked the command to stop, and it ignores that: its block still reads running and "
-                   "the shell lives", f"the second key went out {second - first:.2f} s after the first")
 
         # Killed by the second Escape, not by the runner's own SIGKILL 2 s after the first.
         stopped_at = None
-        while time.time() < first + STUBBORN_KILLED_WITHIN:
-            r = w.read()
+        while time.time() < first + STUBBORN_RUNNER_KILLS_AT:
+            try:
+                r = w.read()
+            except (RpcError, OSError):
+                time.sleep(0.05)
+                continue
             if newest(r)[1].get("status") == "stopped":
                 stopped_at = time.time()
                 break
@@ -484,9 +501,9 @@ def stubborn_once(scn):
         if stopped_at is None:
             r = w.wait("the block reads stopped (late)", lambda r: newest(r)[1].get("status") == "stopped", timeout=5)
             stopped_at = time.time()
-        need(stopped_at - first <= STUBBORN_KILLED_WITHIN and r["status"] == "streaming",
-             "an Escape while the command is dying is for the command: it is killed at once (stopped within "
-             f"{STUBBORN_KILLED_WITHIN} s of the first key, well before the runner's own SIGKILL at 2 s) and the turn goes on",
+        need(stopped_at - first < STUBBORN_RUNNER_KILLS_AT and r["status"] == "streaming",
+             "an Escape while the command is dying is for the command: it is killed at once (stopped before the runner's own "
+             f"SIGKILL, {STUBBORN_RUNNER_KILLS_AT} s after the first key) and the turn goes on",
              f"block stopped {stopped_at - first:.2f} s after the first key, {stopped_at - second:.2f} s after the second; "
              f"chat {r['status']!r}", detail={"first": 0.0, "second": second - first, "stopped": stopped_at - first}, read=r)
         left, members = leftovers([shell_pid], shell_pid, second)
@@ -514,10 +531,12 @@ def scenario_stubborn(scn):
     """A command that ignores SIGTERM is still running after the Escape that stopped it, for the 2 s the runner waits before its
     SIGKILL. An Escape in that window is for the command (spec 5.5: the turn is stopped only "with no command running"): it
     kills the command at once and leaves the turn alone; only an Escape after the block reads stopped ends the turn. The check
-    is about timing, so a run whose host was too slow to keep it is retried once with a new Sirio, not failed."""
+    is about timing, so a run whose host was too slow to keep it (the second key late, or the first Escape's SIGTERM-ignoring
+    command already past the runner's own SIGKILL when read) is run once more, in a world of its own (its own profile, database,
+    repo and stub log), not failed. A run that shows a defect is failed at once: no slowness explains it."""
     why = None
-    for attempt in (1, 2):
-        why = stubborn_once(scn)
+    for attempt, name in ((1, "claude"), (2, "claude-retry")):
+        why = stubborn_once(scn, name)
         if why is None:
             return
         log(f"stubborn: inconclusive ({why}); " + ("running it again" if attempt == 1 else "giving up"))

@@ -33,9 +33,10 @@ set -eEuo pipefail
 #                Escape stops the turn (claude: a second turn held at a gate nobody releases ends and never answers; opencode: the
 #                stub logs one `session/cancel`)
 #   stubborn     a command that ignores SIGTERM (`trap '' TERM; echo $$; sleep 300`) in a chat whose turn is held: the first Escape
-#                leaves it running, a second one, 0.4 s after the first, kills it at once (stopped within 1.2 s of the first key,
-#                well before the runner's own SIGKILL at 2 s) and the turn goes on; an Escape after the block reads stopped ends
-#                the turn. A run whose host is too slow for that timing is run once more, not failed
+#                leaves it running (read before the runner's own SIGKILL, 2 s after the key, it must still be running), a second
+#                one, at most 0.8 s after the first, kills it at once (stopped before that SIGKILL) and the turn goes on; an Escape
+#                after the block reads stopped ends the turn. A run whose host is too slow for that timing (the second key late,
+#                or the first read already past the runner's SIGKILL) is run once more in a world of its own, not failed
 #   offline      in a chat whose agent died, an ordinary draft is still refused, `!echo offline` typed with the X server's keys is
 #                kept, and Enter runs it; a `!` typed in front of a prose draft is kept, and deleting it gives the prose back
 #   fold         `!seq 1 5000` has 5000 lines and draws the last 40 (4961 to 5000); toggleShell expands it to all 5000 lines,
@@ -87,7 +88,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,77p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,78p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
