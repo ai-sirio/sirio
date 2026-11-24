@@ -146,8 +146,9 @@ Behaviour:
     Codex, Pi and Oh-My-Pi have a chip at all; and when a session's modes are a copy of its
     effort levels, as pi-acp publishes them, the chat shows the effort chip alone, with no
     mode pill. A level whose name repeats its selector's name, as pi-acp's "Thinking: low"
-    under "Thinking" does, reads without that prefix (Enzo's call), with its first letter
-    raised to match codex-acp's own "Low" and "Xhigh" (*Claude's call*).
+    under "Thinking" does, reads without that prefix, and every level's first letter is raised,
+    so Oh-My-Pi's raw ids ("medium") read as codex-acp's own names do ("Medium") (Enzo's
+    calls, the same day).
 - **Scope of a choice:** it holds for that chat only. The next new chat starts on High again
   (on the agent's level for Codex, Pi and Oh-My-Pi).
   Effort is not persisted today, and this change does not start persisting it.

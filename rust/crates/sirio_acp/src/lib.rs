@@ -1750,17 +1750,20 @@ fn effort_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<Eff
 
 /// The name a level is shown under. An agent may repeat its selector's own
 /// name before each level (pi-acp sends "Thinking: low" under the option
-/// "Thinking"): that prefix is dropped and the first letter raised, so the
-/// level reads "Low", as codex-acp names its own. Any other name is kept as
-/// the agent sent it.
+/// "Thinking"): that prefix is dropped, as is the space after the colon. A
+/// prefix with nothing after it leaves the name as sent. Every level's first
+/// letter is raised, so omp's raw ids ("medium") read as codex-acp's own names
+/// do ("Medium").
 fn level_name(option_name: &str, name: String) -> String {
-    let Some(rest) = name
+    let rest = name
         .strip_prefix(option_name)
-        .and_then(|rest| rest.strip_prefix(": "))
-    else {
-        return name;
+        .and_then(|rest| rest.strip_prefix(": "));
+    let shown = match rest {
+        Some(rest) if rest.trim().is_empty() => return name,
+        Some(rest) => rest.trim(),
+        None => name.as_str(),
     };
-    let mut chars = rest.trim().chars();
+    let mut chars = shown.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => name,
@@ -2253,6 +2256,37 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // A level is shown under its own name: a selector's name repeated before it is
+    // dropped, and the first letter is raised whatever the name's origin, so omp's raw
+    // id "medium" reads as codex-acp's own "Medium". Every other name is kept as sent.
+    #[test]
+    fn level_names_read_as_their_level() {
+        let rows = [
+            ("Thinking", "Thinking: low", "Low"),
+            ("Thinking", "Thinking: xhigh", "Xhigh"),
+            ("Thinking", "medium", "Medium"),
+            ("Thinking", "xhigh", "Xhigh"),
+            ("Reasoning effort", "Low", "Low"),
+            ("Effort", "Extra high", "Extra high"),
+            ("Thinking", "Off", "Off"),
+            ("Effort", "extra high", "Extra high"),
+            ("Effort", "Thinking: low", "Thinking: low"),
+            ("Thinking", "Thinking:low", "Thinking:low"),
+            ("Thinking", "Thinking: ", "Thinking: "),
+            ("Thinking", "", ""),
+        ];
+        let mut wrong = Vec::new();
+        for (option_name, name, expected) in rows {
+            let shown = level_name(option_name, name.to_string());
+            if shown != expected {
+                wrong.push(format!(
+                    "row option {option_name:?}, name {name:?}: expected {expected:?}, got {shown:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "level names read wrong:\n{}", wrong.join("\n"));
     }
 
     #[test]
