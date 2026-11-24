@@ -1,9 +1,9 @@
 use std::{path::PathBuf, rc::Rc};
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, ExternalPaths, InteractiveElement, IntoElement,
-    ParentElement, PathPromptOptions, Pixels, RenderOnce, SharedString, Styled, Window, canvas,
-    div, prelude::*, px,
+    AnyElement, App, Bounds, ElementId, Entity, ExternalPaths, Hsla, InteractiveElement,
+    IntoElement, ParentElement, PathPromptOptions, Pixels, RenderOnce, SharedString, Styled, Window,
+    canvas, div, prelude::*, px,
 };
 use smallvec::SmallVec;
 
@@ -362,6 +362,8 @@ pub struct PromptInput {
     on_drop: Option<OnPaths>,
     /// The band look of [`Self::band`]: the content column's widest.
     band: Option<Pixels>,
+    /// The colour of [`Self::band`]'s top rule; `border` without one.
+    band_rule: Option<Hsla>,
     /// Told where the band's send control was laid out (see [`Self::send_probe`]).
     send_probe: Option<OnBounds>,
 }
@@ -388,6 +390,7 @@ impl PromptInput {
             context: (Vec::new(), None),
             on_drop: None,
             band: None,
+            band_rule: None,
             send_probe: None,
         }
     }
@@ -419,6 +422,7 @@ impl PromptInput {
             context: (Vec::new(), None),
             on_drop: None,
             band: None,
+            band_rule: None,
             send_probe: None,
         }
     }
@@ -433,6 +437,13 @@ impl PromptInput {
     /// Without a host editor this does nothing.
     pub fn band(mut self, column: Pixels) -> Self {
         self.band = Some(column);
+        self
+    }
+
+    /// Colours [`Self::band`]'s top rule in `color` instead of `border`.
+    /// Without the band this does nothing.
+    pub fn band_rule(mut self, color: impl Into<Hsla>) -> Self {
+        self.band_rule = Some(color.into());
         self
     }
 
@@ -605,7 +616,7 @@ impl RenderOnce for PromptInput {
                 .pt(px(10.0))
                 .pb(px(8.0))
                 .border_t_1()
-                .border_color(colors.border)
+                .border_color(self.band_rule.unwrap_or(colors.border))
                 .child(
                     div()
                         .w_full()

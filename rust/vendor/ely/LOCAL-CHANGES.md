@@ -498,6 +498,12 @@ unchanged default path are named: they ran green on this code (each alone, 1 tes
   Rows 33 (`variant`), 44 and 45 (`enter`): unproven (no Sirio test asserts the button variant, the
   card's text colour, or the hint's Enter wording). The default constructor stays proven by
   `tests::compose::enter_sends_and_shift_enter_breaks_the_line` (ran, 1 test).
+- `PromptInput::band_rule` (no checklist row; Sirio's command mode, where a draft that starts with `!`
+  is a shell command): the colour of the band's 1px top rule, `band_rule: Option<Hsla>`, drawn as
+  `unwrap_or(colors.border)`, so a host that does not call it sees the same rule as before. Without
+  `band` it does nothing. Proof: the `band` scenario of `Scripts/Tests/chat_shell_e2e.py` (`bandRule`
+  differs for `!ls` and `ls`, and the two frames differ at the band's top edge). That scenario runs
+  once Sirio sets the colour, so the row is unproven until then.
 
 ### Messages (rows 22, 23, 171; `crates/ely-chat/src/message.rs`)
 
