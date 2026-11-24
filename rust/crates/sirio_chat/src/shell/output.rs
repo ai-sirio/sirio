@@ -4,7 +4,7 @@
 //! unfinished line until its newline comes: an escape sequence split across two reads is still
 //! removed whole. Finished lines are stored normalised.
 
-use std::collections::VecDeque;
+use std::collections::{VecDeque, vec_deque};
 
 /// The most a command's output keeps in memory (and in [`ShellOutput::text`], bar its marker line).
 pub const KEEP_BYTES: usize = 1024 * 1024;
@@ -12,17 +12,23 @@ pub const KEEP_BYTES: usize = 1024 * 1024;
 /// How much of the first lines stay when the output is longer than [`KEEP_BYTES`].
 pub const HEAD_BYTES: usize = 64 * 1024;
 
-/// What the lines after the head and the unfinished line share between them, and so the longest a
-/// single line can be.
+/// What the lines after the head and the unfinished line share between them, and so the most one
+/// line can take.
 const TAIL_BYTES: usize = KEEP_BYTES - HEAD_BYTES;
+
+/// What a kept line costs beyond its text and its `\n`: its entry in the index of lengths (4 bytes,
+/// and as much again for the room a growing queue keeps free). It is charged to the cap, so a flood
+/// of tiny lines holds about [`KEEP_BYTES`] of memory and not a multiple of it.
+const LINE_INDEX_BYTES: usize = 8;
 
 /// One line of output as it is shown and sent, without its `\n`.
 ///
 /// - Bytes are decoded as UTF-8, lossily.
 /// - Trailing `\r`s (CRLF) are dropped, and for an inner `\r` only what follows the last one is kept,
 ///   so a progress bar that redraws collapses to its last state.
-/// - CSI (`ESC [ … final byte`) and OSC (`ESC ] … BEL` or `ESC \`) sequences are removed, and so is
-///   any other `ESC x` pair.
+/// - Escape sequences are removed whole: CSI (`ESC [ … final byte`), OSC, DCS, SOS, PM and APC
+///   strings (`ESC ] … BEL` or `ESC \`, and likewise for `P`, `X`, `^` and `_`), nF sequences
+///   (`ESC`, intermediate bytes, a final byte) and any other `ESC x` pair.
 /// - Every other control character except `\t` is removed.
 #[must_use]
 pub fn normalize_line(raw: &[u8]) -> String {
@@ -79,7 +85,8 @@ fn escape_end(text: &str, esc: usize) -> usize {
             }
             at
         }
-        Some(b']') => {
+        // OSC, DCS, SOS, PM and APC: a string, up to its terminator.
+        Some(b']' | b'P' | b'X' | b'^' | b'_') => {
             at += 1;
             while let Some(&b) = bytes.get(at) {
                 match b {
@@ -94,6 +101,16 @@ fn escape_end(text: &str, esc: usize) -> usize {
         }
         // `ESC ESC`: this one is dropped and the next starts its own sequence.
         Some(0x1b) => at,
+        // nF: intermediate bytes, then one final byte (`ESC ( B`, `ESC # 8`, `ESC % G`).
+        Some(0x20..=0x2f) => {
+            while matches!(bytes.get(at), Some(0x20..=0x2f)) {
+                at += 1;
+            }
+            if matches!(bytes.get(at), Some(0x30..=0x7e)) {
+                at += 1;
+            }
+            at
+        }
         // Any other pair, whole: the second one may be a multi-byte character.
         Some(_) => at + text[at..].chars().next().map_or(1, char::len_utf8),
     }
@@ -112,37 +129,126 @@ fn keep_last(line: &mut String, max: usize) -> usize {
     cut
 }
 
+/// Lines back to back in one buffer, each with its `\n`, and an index of their lengths: a short line
+/// costs its bytes and [`LINE_INDEX_BYTES`], not an allocation of its own.
+#[derive(Clone, Debug, Default)]
+struct LineStore {
+    /// The live lines from `start` on. Before `start` are lines already dropped, until the next
+    /// compaction.
+    text: String,
+    start: usize,
+    /// The length of each live line, without its `\n`.
+    lens: VecDeque<u32>,
+}
+
+impl LineStore {
+    /// What a line of `len` bytes is charged to the cap.
+    fn cost(len: usize) -> usize {
+        len + 1 + LINE_INDEX_BYTES
+    }
+
+    fn len(&self) -> usize {
+        self.lens.len()
+    }
+
+    /// What the live lines are charged to the cap.
+    fn charged(&self) -> usize {
+        self.text.len() - self.start + self.lens.len() * LINE_INDEX_BYTES
+    }
+
+    fn push(&mut self, line: &str) {
+        self.text.push_str(line);
+        self.text.push('\n');
+        self.lens
+            .push_back(u32::try_from(line.len()).expect("a kept line is shorter than the cap"));
+    }
+
+    /// Drops the oldest line and says what it was charged.
+    fn pop_front(&mut self) -> Option<usize> {
+        let len = self.lens.pop_front()? as usize;
+        self.start += len + 1;
+        // Once a quarter of the buffer is dead, move the live part down: each byte moves a bounded
+        // number of times, however many lines go.
+        if self.start * 4 >= self.text.len() {
+            self.text.drain(..self.start);
+            self.start = 0;
+        }
+        Some(Self::cost(len))
+    }
+
+    fn iter(&self) -> Lines<'_> {
+        Lines {
+            text: &self.text,
+            front: self.start,
+            back: self.text.len(),
+            lens: self.lens.iter(),
+        }
+    }
+}
+
+/// The lines of a [`LineStore`], from either end.
+struct Lines<'a> {
+    text: &'a str,
+    front: usize,
+    back: usize,
+    lens: vec_deque::Iter<'a, u32>,
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        let len = *self.lens.next()? as usize;
+        let line = &self.text[self.front..self.front + len];
+        self.front += len + 1;
+        Some(line)
+    }
+}
+
+impl DoubleEndedIterator for Lines<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let len = *self.lens.next_back()? as usize;
+        self.back -= len + 1;
+        Some(&self.text[self.back..self.back + len])
+    }
+}
+
 /// The output of one command: its lines, normalised, within [`KEEP_BYTES`].
 ///
 /// - Past the cap the first [`HEAD_BYTES`] of lines stay, the oldest lines after them are dropped,
 ///   and one marker line, `[… {n} bytes not kept …]`, sits between the head and the rest.
 /// - A line longer than the cap keeps only its last bytes, whether it is finished or not.
+/// - A line that a `\r` redraws is not a loss: what the redraw replaces costs nothing and is not in
+///   the marker.
 /// - The marker is a line of [`Self::text`], [`Self::tail`] and [`Self::kept_lines`], and it is not
 ///   one of [`Self::total_lines`], so `kept_lines` can be one more than `total_lines`.
 #[derive(Clone, Debug, Default)]
 pub struct ShellOutput {
-    /// The first lines, normalised, while they fit [`HEAD_BYTES`] (each counted with its `\n`).
-    head: Vec<String>,
-    head_bytes: usize,
-    /// Set by the first line that did not fit the head: no later line goes there.
+    /// The first lines, normalised, while they fit [`HEAD_BYTES`] (each charged [`LineStore::cost`]).
+    head: LineStore,
+    /// Set by the first line that did not fit the head, and by the first bytes dropped: no later
+    /// line goes to the head, so the marker never comes after a line that arrived later.
     head_closed: bool,
     /// The most recent finished lines, normalised. With the raw unfinished line they hold at most
-    /// [`TAIL_BYTES`] (each line counted with its `\n`).
-    tail: VecDeque<String>,
-    tail_bytes: usize,
+    /// [`TAIL_BYTES`].
+    tail: LineStore,
     /// What was cut from the output to hold the caps, in bytes.
     dropped_bytes: u64,
-    /// The raw bytes of the line that has not ended, its last [`TAIL_BYTES`] at most.
+    /// The raw bytes of the line that has not ended, its last [`TAIL_BYTES`] at most, and with no
+    /// `\r` that more text follows: a redraw has replaced what came before it.
     pending: VecDeque<u8>,
+    /// What was cut from the front of `pending`. It is lost only if the line ends as it is: a
+    /// redraw clears it.
+    pending_cut: u64,
     /// Every line that ended, the dropped ones included.
     lines_done: u64,
 }
 
 /// What [`ShellOutput`] shows: its lines in order, with the marker and the unfinished line in place.
 struct Shown<'a> {
-    head: &'a [String],
+    head: &'a LineStore,
     marker: Option<String>,
-    tail: &'a VecDeque<String>,
+    tail: &'a LineStore,
     unfinished: Option<String>,
 }
 
@@ -157,9 +263,8 @@ impl Shown<'_> {
     fn iter(&self) -> impl DoubleEndedIterator<Item = &str> {
         self.head
             .iter()
-            .map(String::as_str)
             .chain(self.marker.as_deref())
-            .chain(self.tail.iter().map(String::as_str))
+            .chain(self.tail.iter())
             .chain(self.unfinished.as_deref())
     }
 }
@@ -173,6 +278,8 @@ impl ShellOutput {
             rest = &rest[newline + 1..];
             let line = normalize_line(self.pending.make_contiguous());
             self.pending.clear();
+            let cut = std::mem::take(&mut self.pending_cut);
+            self.drop_bytes(cut);
             self.add_line(line);
         }
         self.append_pending(rest);
@@ -183,6 +290,8 @@ impl ShellOutput {
     pub fn finish(&mut self) {
         let line = self.unfinished_line();
         self.pending.clear();
+        let cut = std::mem::take(&mut self.pending_cut);
+        self.drop_bytes(cut);
         if let Some(line) = line {
             self.add_line(line);
         }
@@ -240,15 +349,13 @@ impl ShellOutput {
     }
 
     fn shown(&self) -> Shown<'_> {
-        let (unfinished, cut) = match self.unfinished_line() {
-            Some(mut line) => {
-                // The unfinished line shares the cap with the lines before it.
-                let cut = keep_last(&mut line, TAIL_BYTES.saturating_sub(self.tail_bytes));
-                (Some(line), cut)
-            }
-            None => (None, 0),
-        };
-        let dropped = self.dropped_bytes + cut as u64;
+        let mut dropped = self.dropped_bytes + self.pending_cut;
+        let unfinished = self.unfinished_line().map(|mut line| {
+            // The unfinished line shares the cap with the lines before it.
+            let room = TAIL_BYTES.saturating_sub(self.tail.charged());
+            dropped += keep_last(&mut line, room) as u64;
+            line
+        });
         Shown {
             head: &self.head,
             marker: (dropped > 0).then(|| format!("[… {dropped} bytes not kept …]")),
@@ -268,53 +375,74 @@ impl ShellOutput {
     }
 
     /// Adds the bytes of the unfinished line, keeping its last [`TAIL_BYTES`].
-    fn append_pending(&mut self, bytes: &[u8]) {
+    fn append_pending(&mut self, mut bytes: &[u8]) {
+        // A `\r` that more text follows is a redraw: `normalize_line` keeps only what comes after
+        // it, so what came before is dropped here, at no cost to the cap and with no marker. The
+        // pending bytes hold no such `\r`, so only the new ones and the pending line's own trailing
+        // `\r` can be one.
+        if let Some(last) = bytes.iter().rposition(|&b| b != b'\r') {
+            match bytes[..last].iter().rposition(|&b| b == b'\r') {
+                Some(redraw) => {
+                    self.pending.clear();
+                    self.pending_cut = 0;
+                    bytes = &bytes[redraw + 1..];
+                }
+                None if self.pending.back() == Some(&b'\r') => {
+                    self.pending.clear();
+                    self.pending_cut = 0;
+                }
+                None => {}
+            }
+        }
         let skipped = bytes.len().saturating_sub(TAIL_BYTES);
         self.pending.extend(&bytes[skipped..]);
         let over = self.pending.len().saturating_sub(TAIL_BYTES);
         self.pending.drain(..over);
-        let mut dropped = skipped + over;
-        if dropped > 0 {
+        let mut cut = skipped + over;
+        if cut > 0 {
             // The new front may be inside a multi-byte character: skip what is left of it.
             for _ in 0..3 {
                 if !matches!(self.pending.front(), Some(0x80..=0xbf)) {
                     break;
                 }
                 self.pending.pop_front();
-                dropped += 1;
+                cut += 1;
             }
         }
-        self.dropped_bytes += dropped as u64;
+        self.pending_cut += cut as u64;
     }
 
     /// Adds a finished line, normalised, to the head while the head has room, else to the tail.
     fn add_line(&mut self, mut line: String) {
         self.lines_done += 1;
-        // Room for its `\n` too.
-        self.dropped_bytes += keep_last(&mut line, TAIL_BYTES - 1) as u64;
-        let size = line.len() + 1;
+        let cut = keep_last(&mut line, TAIL_BYTES - LineStore::cost(0));
+        self.drop_bytes(cut as u64);
         if !self.head_closed {
-            if self.head_bytes + size <= HEAD_BYTES {
-                self.head_bytes += size;
-                self.head.push(line);
+            if self.head.charged() + LineStore::cost(line.len()) <= HEAD_BYTES {
+                self.head.push(&line);
                 return;
             }
             self.head_closed = true;
         }
-        self.tail_bytes += size;
-        self.tail.push_back(line);
+        self.tail.push(&line);
         self.evict_tail();
     }
 
     /// Drops the oldest lines of the tail until it and the unfinished line fit [`TAIL_BYTES`].
     fn evict_tail(&mut self) {
-        while self.tail_bytes + self.pending.len() > TAIL_BYTES {
-            let Some(oldest) = self.tail.pop_front() else {
+        while self.tail.charged() + self.pending.len() > TAIL_BYTES {
+            let Some(cost) = self.tail.pop_front() else {
                 break;
             };
-            let size = oldest.len() + 1;
-            self.tail_bytes -= size;
-            self.dropped_bytes += size as u64;
+            self.drop_bytes((cost - LINE_INDEX_BYTES) as u64);
+        }
+    }
+
+    /// Counts bytes as not kept, and closes the head: whatever comes next belongs after the marker.
+    fn drop_bytes(&mut self, bytes: u64) {
+        if bytes > 0 {
+            self.dropped_bytes += bytes;
+            self.head_closed = true;
         }
     }
 }
@@ -402,6 +530,31 @@ mod tests {
         assert_eq!(normalize_line(&wall), "");
         let wall = b"\x1b\x1b[".repeat(500_000);
         assert_eq!(normalize_line(&wall), "");
+    }
+
+    #[test]
+    fn nf_escape_sequences_are_removed_whole() {
+        // `tput sgr0` on xterm is `ESC ( B` then `ESC [ m`: the `B` is part of the first.
+        assert_eq!(normalize_line(b"\x1b[1mbold\x1b(B\x1b[m done"), "bold done");
+        assert_eq!(normalize_line(b"a\x1b#8b\x1b%Gc"), "abc");
+        assert_eq!(normalize_line(b"a\x1b Fb\x1b$)Cc"), "abc");
+    }
+
+    #[test]
+    fn an_nf_sequence_cut_short_shows_nothing_of_itself() {
+        assert_eq!(normalize_line(b"a\x1b("), "a");
+        assert_eq!(normalize_line(b"a\x1b($"), "a");
+        assert_eq!(normalize_line(b"a\x1b(\x07b"), "ab");
+    }
+
+    #[test]
+    fn device_control_and_application_strings_are_removed_with_their_payload() {
+        // Sixel (DCS), kitty graphics (APC), then PM and SOS.
+        assert_eq!(normalize_line(b"a\x1bPq#0;2;0;0;0\x1b\\b"), "ab");
+        assert_eq!(normalize_line(b"a\x1b_Gf=100;AAAA\x1b\\b"), "ab");
+        assert_eq!(normalize_line(b"a\x1b^private\x1b\\b\x1bXtext\x07c"), "abc");
+        assert_eq!(normalize_line(b"ok\x1bPq never ends"), "ok");
+        assert_eq!(normalize_line(b"a\x1b_x\x1b[31mb"), "ab");
     }
 
     // ---- ShellOutput: lines and escapes across pushes ---------------------
@@ -548,9 +701,9 @@ mod tests {
             assert_eq!(number(pair[1]), number(pair[0]) + 1);
         }
         assert!(number(lines[at + 1]) > number(lines[at - 1]) + 1, "lines were dropped");
-        // The head is about HEAD_BYTES of lines.
+        // The head is HEAD_BYTES of lines, each charged for its index entry too.
         let head_len: usize = lines[..at].iter().map(|l| l.len() + 1).sum();
-        assert!(head_len <= HEAD_BYTES && head_len + 32 > HEAD_BYTES, "head is {head_len}");
+        assert!(head_len <= HEAD_BYTES && head_len * 2 > HEAD_BYTES, "head is {head_len}");
         // The oldest lines after the head are the ones dropped: the tail reaches the last line.
         assert_eq!(number(lines[lines.len() - 1]), 199_999);
         assert_eq!(o.kept_lines(), lines.len());
@@ -680,6 +833,144 @@ mod tests {
         let text = o.text();
         let body = text.split('\n').nth(1).unwrap();
         assert!(body.len() > HEAD_BYTES && body.chars().all(|c| c == '\u{e9}'));
+    }
+
+    fn real_lines(count: usize) -> ShellOutput {
+        let mut o = ShellOutput::default();
+        for i in 0..count {
+            o.push(format!("real line {i:05}\n").as_bytes());
+        }
+        o
+    }
+
+    #[test]
+    fn a_long_redraw_on_an_unfinished_line_evicts_nothing_and_adds_no_marker() {
+        // A progress bar: the line so far is replaced again and again, and costs nothing.
+        let mut o = real_lines(20_000);
+        let before = o.kept_lines();
+        for i in 0..100_000 {
+            o.push(format!("\rprogress {i:06}").as_bytes());
+        }
+        assert_eq!(o.kept_lines(), before + 1);
+        assert!(!o.text().contains("not kept"));
+        assert!(o.text().contains("real line 19999"));
+        assert!(o.text().ends_with("progress 099999"));
+        // The same with the `\r` at the end of each read, then a CRLF.
+        let mut o = real_lines(20_000);
+        for i in 0..100_000 {
+            o.push(format!("progress {i:06}\r").as_bytes());
+        }
+        assert_eq!(o.kept_lines(), before + 1);
+        assert!(!o.text().contains("not kept"));
+        o.push(b"\ndone\n");
+        assert!(o.text().contains("real line 19999\nprogress 099999\ndone"));
+        assert_eq!(o.total_lines(), 20_002);
+    }
+
+    #[test]
+    fn redraws_between_lines_leave_no_marker_and_the_lines_in_order() {
+        let mut o = ShellOutput::default();
+        o.push(b"a\n");
+        for i in 0..200_000 {
+            o.push(format!("\r{i:06}%").as_bytes());
+        }
+        o.push(b"\nb\n");
+        assert_eq!(o.text(), "a\n199999%\nb");
+        assert_eq!(o.total_lines(), 3);
+    }
+
+    #[test]
+    fn a_redraw_that_arrives_late_drops_the_collapsed_line_without_a_marker() {
+        let mut o = ShellOutput::default();
+        o.push(b"a\n");
+        for _ in 0..2 * 1024 {
+            o.push(&[b'j'; 1024]);
+        }
+        o.push(b"\rok\nb\n");
+        assert_eq!(o.text(), "a\nok\nb");
+        assert_eq!(o.total_lines(), 3);
+        // The `\r` and the text after it in reads of their own.
+        let mut o = ShellOutput::default();
+        o.push(b"a\n");
+        for _ in 0..2 * 1024 {
+            o.push(&[b'j'; 1024]);
+        }
+        o.push(b"\r");
+        o.push(b"ok\nb\n");
+        assert_eq!(o.text(), "a\nok\nb");
+    }
+
+    #[test]
+    fn the_marker_never_comes_after_a_line_that_arrived_later() {
+        // The unfinished line is cut and ends as a line that shows nothing: it would fit the head,
+        // but lines were dropped before it, so it and every later line belong after the marker.
+        let mut o = ShellOutput::default();
+        o.push(b"a\n");
+        let junk = b"\x1b[0m".repeat(1024);
+        for _ in 0..600 {
+            o.push(&junk);
+        }
+        o.push(b"\nb\nc\n");
+        let text = o.text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines[0], "a");
+        assert!(lines[1].contains("not kept"), "{lines:?}");
+        assert_eq!(&lines[lines.len() - 2..], ["b", "c"]);
+        // A long line that is cut and then pushed out by the next one.
+        let mut o = ShellOutput::default();
+        o.push(b"a\n");
+        for _ in 0..2 * 1024 {
+            o.push(&[b'j'; 1024]);
+        }
+        o.push(b"\nb\n");
+        let text = o.text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "a");
+        assert!(lines[1].contains("not kept"));
+        assert_eq!(lines[2], "b");
+    }
+
+    #[test]
+    fn a_flood_of_tiny_lines_keeps_a_bounded_number_of_them() {
+        // A kept line costs memory beyond its text, so the cap cannot be met by a million of them.
+        let mut o = ShellOutput::default();
+        let yes = b"y\n".repeat(64 * 1024);
+        for _ in 0..32 {
+            o.push(&yes);
+        }
+        assert_eq!(o.total_lines(), 32 * 64 * 1024);
+        assert!(o.kept_lines() <= KEEP_BYTES / 8, "{} lines", o.kept_lines());
+        assert!(o.text().len() <= KEEP_BYTES);
+        assert!(o.text().contains("not kept"));
+        let mut o = ShellOutput::default();
+        o.push(&b"\n".repeat(2 * 1024 * 1024));
+        assert_eq!(o.total_lines(), 2 * 1024 * 1024);
+        assert!(o.kept_lines() <= KEEP_BYTES / 8, "{} lines", o.kept_lines());
+    }
+
+    #[test]
+    fn lines_of_every_length_come_back_intact_after_many_evictions() {
+        let mut o = ShellOutput::default();
+        for i in 0..150_000u32 {
+            o.push(format!("{i}:{}\n", "x".repeat((i % 37) as usize)).as_bytes());
+        }
+        let text = o.text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        let (mut last, mut gaps) = (None, 0);
+        for line in lines.iter().filter(|l| !l.contains("not kept")) {
+            let (n, xs) = line.split_once(':').unwrap();
+            let n: u32 = n.parse().unwrap();
+            assert_eq!(xs.len(), (n % 37) as usize, "line {n} is whole");
+            if last.is_some_and(|p| n != p + 1) {
+                gaps += 1;
+            }
+            last = Some(n);
+        }
+        assert_eq!(gaps, 1);
+        assert_eq!(last, Some(149_999));
+        assert_eq!(o.tail(5), lines[lines.len() - 5..].join("\n"));
+        assert_eq!(o.kept_lines(), lines.len());
     }
 
     // ---- ShellOutput: tail, counts, restore -------------------------------
