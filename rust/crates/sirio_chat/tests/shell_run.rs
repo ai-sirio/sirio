@@ -67,7 +67,7 @@ mod unix {
         std::env::temp_dir().canonicalize().expect("a temporary directory")
     }
 
-    /// The pid a command prints on its first line.
+    /// The pid a command prints on its first line. A chunk can hold more than that line.
     fn read_pid(events: &Receiver<ShellEvent>) -> i32 {
         let mut seen = Vec::new();
         while !seen.contains(&b'\n') {
@@ -76,12 +76,17 @@ mod unix {
                 other => panic!("expected a pid, got {other:?}"),
             }
         }
-        String::from_utf8_lossy(&seen).trim().parse().expect("a pid")
+        let line = seen.split(|byte| *byte == b'\n').next().unwrap_or_default();
+        String::from_utf8_lossy(line).trim().parse().expect("a pid")
     }
 
     /// A process a test must not leave behind. It is killed at the end of a test that panics,
     /// unless the test has seen it gone: a pid that is gone may be anyone's by now, and a test
     /// that passed has nothing to clean up.
+    ///
+    /// Never one for a pid the runner reaps (the shell's): from the moment `Exited` is sent that
+    /// pid is free, whatever a later assertion does. The shell is only ever looked at, with
+    /// `Stray::new(pid).is_gone()` in one expression; `ShellRun`'s own drop cleans up before that.
     struct Stray {
         pid: i32,
         seen_gone: Cell<bool>,
@@ -92,16 +97,23 @@ mod unix {
             Self { pid, seen_gone: Cell::new(false) }
         }
 
-        /// Whether the process is gone, giving init up to 2 s to reap a killed orphan: a zombie
-        /// still answers `kill(pid, 0)`.
+        /// Whether the process is there: a zombie still answers `kill(pid, 0)`. Seeing it gone is
+        /// remembered, so a failed assertion after that does not signal the pid.
+        fn is_alive(&self) -> bool {
+            // SAFETY: signal 0 only checks that the pid exists.
+            let alive = unsafe { libc::kill(self.pid, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+            if !alive {
+                self.seen_gone.set(true);
+            }
+            alive
+        }
+
+        /// Whether the process is gone, giving init up to 2 s to reap a killed orphan.
         fn is_gone(&self) -> bool {
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
-                // SAFETY: signal 0 only checks that the pid exists.
-                let alive = unsafe { libc::kill(self.pid, 0) } == 0
-                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-                if !alive {
-                    self.seen_gone.set(true);
+                if !self.is_alive() {
                     return true;
                 }
                 if Instant::now() >= deadline {
@@ -250,11 +262,12 @@ mod unix {
         let run = ShellRun::start("sleep 300 & echo $!; sleep 300", &cwd()).expect("starts");
         let events = run.events();
         let child = Stray::new(read_pid(&events));
-        let shell = Stray::new(run.pid() as i32);
+        let shell = run.pid() as i32;
         drop(run);
         let done = finish(&events, Duration::from_secs(3));
         assert_eq!((done.code, done.stopped), (Some(128 + libc::SIGKILL), true));
-        assert!(shell.is_gone(), "the shell is gone");
+        // The shell was reaped before `Exited` was sent, so it gets no guard of its own.
+        assert!(Stray::new(shell).is_gone(), "the shell is gone");
         assert!(child.is_gone(), "the background sleep is gone");
     }
 
@@ -314,7 +327,9 @@ mod unix {
         assert_eq!((done.code, done.stopped), (Some(0), false));
         let text = String::from_utf8_lossy(&done.output);
         assert!(text.contains("hi\n"), "the shell's own output is there: {text:?}");
-        // Not ours to sweep: it is still writing, and it is the test's to kill.
+        // Out of the session, so not ours to sweep: a sweep that reached it would turn this red.
+        // It is the test's to kill, and it is seen alive just before.
+        assert!(stranger.is_alive(), "the stranger, in a session of its own, was left alone");
         stranger.kill();
         assert!(stranger.is_gone(), "the stranger is gone");
     }

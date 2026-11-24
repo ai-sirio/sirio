@@ -448,8 +448,11 @@ impl Shared {
 ///
 /// Found by a scan of every process, now: a session's members are not kept anywhere, and the ones
 /// that matter (a program that moved to a group of its own) are not the shell's children for long.
-/// A process that exits during the scan is simply missed or already gone; the pid cannot be taken
-/// by another session in between, as the unreaped shell holds `sid` (see `Life::finished`).
+/// A process that exits during the scan is simply missed or already gone. The unreaped shell holds
+/// `sid` (see `Life::finished`), so no other session can take the session's number; the members'
+/// own pids are not held by anything. A member that exits, is reaped and has its pid reused by an
+/// unrelated process between the scan and the kill would be signalled in its place. That takes the
+/// whole pid space turning over within the milliseconds between the two, and it is accepted.
 #[cfg(target_os = "linux")]
 fn session_members(sid: libc::pid_t) -> Vec<libc::pid_t> {
     let Ok(processes) = std::fs::read_dir("/proc") else {
