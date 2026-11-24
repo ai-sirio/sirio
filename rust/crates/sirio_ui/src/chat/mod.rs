@@ -1013,6 +1013,20 @@ fn rewind_report_text(
     text
 }
 
+/// Whether a stored entry is part of a turn's conversation (what the user said, what the agent
+/// did), as opposed to a note beside it: an error row, a notice, a shell block.
+fn belongs_to_a_turn(entry: &ChatEntry) -> bool {
+    matches!(
+        entry,
+        ChatEntry::UserMessage { .. }
+            | ChatEntry::AssistantMessage { .. }
+            | ChatEntry::Thought { .. }
+            | ChatEntry::ToolCall { .. }
+            | ChatEntry::Permission { .. }
+            | ChatEntry::Plan { .. }
+    )
+}
+
 /// Whether restored entries hold a turn. A group of shell blocks alone is not one: the chat it
 /// came from had run commands and no turn, and reads idle, as it did before the restart.
 fn holds_a_turn(entries: &[Entry]) -> bool {
@@ -4958,10 +4972,17 @@ impl Chat {
     /// A card in `held` is one whose background task still runs: it is stored
     /// as its launch left it, Completed, because nothing restored would ever
     /// end it (the live card keeps its own status until the task ends).
+    ///
+    /// What follows the last footer is saved as far as the user's shell blocks go (spec 5.6
+    /// Grouping): every finished block run since is kept as a group of its own, whatever stands
+    /// between them (an error row, a notice, the rows of a turn that died). Only a turn still in
+    /// flight (`turn_in_flight`) holds its blocks back: those that sit behind its user row are
+    /// saved with the turn, at its footer.
     fn transcript_from_entries(
         tab_id: &str,
         entries: &[Entry],
         held: &[&str],
+        turn_in_flight: bool,
     ) -> ChatTranscript {
         let mut turns = Vec::new();
         let mut current = Vec::new();
@@ -4980,19 +5001,25 @@ impl Chat {
                 }
             }
         }
-        // What follows the last footer is a turn in flight and is dropped, except for the blocks
-        // that lead it: commands run before the turn began (and the ones it carried) are the
-        // user's, and are kept as a group of their own. A block run during the turn sits behind
-        // its first entry and is lost with it. A block that still runs is not in `current` yet.
-        let leading = current
-            .iter()
-            .take_while(|entry| {
-                matches!(entry, ChatEntry::Notice { shell: Some(_), .. })
-            })
-            .count();
-        if leading > 0 {
-            current.truncate(leading);
-            turns.push(ChatTurn { entries: current });
+        // `current` is what follows the last footer: a turn that never closed is dropped, and the
+        // blocks are kept. A block that still runs is not in it yet.
+        let scanned = if turn_in_flight {
+            // The in-flight turn starts at its user row (the last one: an earlier one belongs to a
+            // turn that died), or, for a turn the CLI began on its own, at its first entry.
+            current
+                .iter()
+                .rposition(|entry| matches!(entry, ChatEntry::UserMessage { .. }))
+                .or_else(|| current.iter().position(belongs_to_a_turn))
+                .unwrap_or(current.len())
+        } else {
+            current.len()
+        };
+        let blocks: Vec<ChatEntry> = current
+            .drain(..scanned)
+            .filter(|entry| matches!(entry, ChatEntry::Notice { shell: Some(_), .. }))
+            .collect();
+        if !blocks.is_empty() {
+            turns.push(ChatTurn { entries: blocks });
         }
         ChatTranscript {
             tab_id: tab_id.to_string(),
@@ -5010,7 +5037,12 @@ impl Chat {
     pub fn persisted_transcript(&self) -> Option<ChatTranscript> {
         let persistence = self.persistence.as_ref()?;
         let held = self.held_card_ids();
-        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries, &held);
+        let transcript = Self::transcript_from_entries(
+            &persistence.tab_id,
+            &self.entries,
+            &held,
+            self.streaming,
+        );
         (!transcript.turns.is_empty()).then_some(transcript)
     }
 
@@ -5826,7 +5858,12 @@ impl Chat {
             }
         };
         let held = self.held_card_ids();
-        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries, &held);
+        let transcript = Self::transcript_from_entries(
+            &persistence.tab_id,
+            &self.entries,
+            &held,
+            self.streaming,
+        );
         if let Err(error) = database.save_chat_transcript(&transcript) {
             eprintln!("[chat] failed to save transcript: {error}");
         }
@@ -8117,8 +8154,13 @@ impl Chat {
         let Some(after) = self.after_connect.take() else {
             // A plain relaunch (an AuthRequired row's Retry, a Restart agent with nothing in
             // flight) connected and sends nothing: a prompt still held would be resumed and sent
-            // by a later idle death.
-            self.last_prompt = None;
+            // by a later idle death. It carried commands that no agent has now: they are pending
+            // again, as in a hand-back, for the next prompt.
+            if let Some(last) = self.last_prompt.take()
+                && let Some(carry) = &last.shell
+            {
+                self.release_shell_carry(carry);
+            }
             // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
             // relaunch of an agent that is up.
             self.retire_failed_turn_retries();
@@ -9210,6 +9252,9 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                 row.insert("exit".into(), exit.to_string());
             }
             row.insert("sent".into(), block.sent.to_string());
+            if let Some(caption) = block.caption() {
+                row.insert("caption".into(), caption.into());
+            }
             row.insert("lines".into(), block.total_lines().to_string());
             row.insert("expanded".into(), block.expanded.to_string());
             row.insert("output".into(), block.drawn_output().to_string());
@@ -12129,7 +12174,7 @@ two"
                 at: None,
             },
         ];
-        let transcript = Chat::transcript_from_entries("tab-chat", &entries, &[]);
+        let transcript = Chat::transcript_from_entries("tab-chat", &entries, &[], true);
         assert_eq!(transcript.turns.len(), 1);
         assert_eq!(transcript.turns[0].entries.len(), 3);
     }

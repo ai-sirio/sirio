@@ -278,10 +278,8 @@ impl ShellBlock {
         };
     }
 
-    /// What the footer says: how it ended (`exit 0 · 0.4s`, `exit 3 · 0.4s`, `Stopped · 2.0s`), then
-    /// `goes with your next message` while the agent has not been given the block. It is text the
-    /// user reads, so it is part of the block's selectable text. `None` while the command runs, and
-    /// for a command that never started once its block has been sent.
+    /// `exit 0 · 0.4s`, `exit 3 · 0.4s` or `Stopped · 2.0s`: what the footer says of how it ended.
+    /// `None` while it runs and for a command that never started.
     fn footer_text(&self) -> Option<String> {
         let ShellState::Finished {
             exit,
@@ -292,19 +290,24 @@ impl ShellBlock {
         else {
             return None;
         };
+        if failed {
+            return None;
+        }
         let mut parts = Vec::new();
-        if !failed {
-            if stopped {
-                parts.push("Stopped".to_string());
-            } else if let Some(code) = exit {
-                parts.push(format!("exit {code}"));
-            }
-            parts.push(duration_text(duration_ms));
+        if stopped {
+            parts.push("Stopped".to_string());
+        } else if let Some(code) = exit {
+            parts.push(format!("exit {code}"));
         }
-        if !self.sent {
-            parts.push(CAPTION.to_string());
-        }
-        (!parts.is_empty()).then(|| parts.join(" · "))
+        parts.push(duration_text(duration_ms));
+        Some(parts.join(" · "))
+    }
+
+    /// What the footer says after how it ended while the agent has not been given the block. It
+    /// is drawn beside the footer's text and is no part of it: not selected, not copied, not in
+    /// the text a closed tab keeps. The read row reports it (`caption`), from here.
+    pub(super) fn caption(&self) -> Option<&'static str> {
+        (self.is_finished() && !self.sent).then_some(CAPTION)
     }
 
     /// The block as the agent is told of it: the command, everything its output kept, and how it
@@ -778,8 +781,9 @@ impl Chat {
         }
     }
 
-    /// Sets `sent` on the blocks with these ids. Returns whether any block changed. The footer's
-    /// words change with it, so the rows are measured again and a selection is kept inside the text.
+    /// Sets `sent` on the blocks with these ids. Returns whether any block changed. The caption
+    /// goes or comes back with it, so the rows are measured again (it is no part of the selectable
+    /// text, so no selection moves).
     fn mark_shell_sent(&mut self, ids: &[u64], sent: bool) -> bool {
         let mut changed = Vec::new();
         for (index, entry) in self.entries.iter_mut().enumerate() {
@@ -793,9 +797,6 @@ impl Chat {
         }
         for &index in &changed {
             self.remeasure_entry(index);
-        }
-        if !changed.is_empty() {
-            self.clamp_transcript_selection();
         }
         !changed.is_empty()
     }
@@ -964,6 +965,7 @@ pub(super) fn render(
 
     let control = block.fold_control();
     let footer = block.footer_text();
+    let has_footer = footer.is_some();
     let ShellState::Finished {
         exit,
         stopped,
@@ -1013,7 +1015,13 @@ pub(super) fn render(
                 interaction,
                 theme,
             )
-        }));
+        }))
+        .when_some(block.caption(), |status, caption| {
+            // After the words of how it ended, a separator; after the mark alone, nothing.
+            status
+                .when(has_footer, |status| status.child(div().child("·")))
+                .child(div().child(caption))
+        });
     div()
         .id(("shell-block", index))
         .debug_selector(move || format!("shell-block-{index}"))
