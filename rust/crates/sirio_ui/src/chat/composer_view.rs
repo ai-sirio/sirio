@@ -166,25 +166,39 @@ pub(crate) fn effort_rows(choices: &[EffortChoice]) -> EffortRows {
     }
 }
 
-/// The level every chat starts on, when the agent offers it.
+/// The level the chats of the agents that start there begin on, when the
+/// agent offers it.
 pub(crate) const EFFORT_HIGH: &str = "high";
+
+/// Whether a chat with this agent starts on High, asking the agent for it.
+///
+/// Codex, Pi and omp chats start on the level their agent reports and Sirio
+/// asks them for nothing on its own (the owner's call of 2026-11-24 for Codex
+/// and Pi, extended to omp, whose chip arrived the same day); Claude, OpenCode
+/// and a chat with no agent id start on High. `agent_id` is the adapter id, as
+/// `Chat::agent_id` holds it.
+pub(crate) fn starts_on_high(agent_id: Option<&str>) -> bool {
+    !matches!(agent_id, Some("codex" | "pi" | "omp"))
+}
 
 /// The level Sirio should ask the agent for, or `None` when the session is
 /// where it should be.
 ///
 /// A level the user chose wins when the agent offers it, and is asked for
 /// only if it is not the current one. Without one (or when this model does
-/// not offer it) every chat starts on High, when High is offered. An agent
-/// that offers no High keeps whatever it reports.
+/// not offer it) a chat that `start_on_high` starts on High, when High is
+/// offered; the others, and an agent that offers no High, keep whatever the
+/// agent reports.
 pub(crate) fn effort_target(
     current: Option<&str>,
     choices: &[EffortChoice],
     user_choice: Option<&str>,
+    start_on_high: bool,
 ) -> Option<String> {
     let offered = |value: &str| choices.iter().any(|choice| choice.value == value);
     let wanted = match user_choice {
         Some(value) if offered(value) => value,
-        _ if offered(EFFORT_HIGH) => EFFORT_HIGH,
+        _ if start_on_high && offered(EFFORT_HIGH) => EFFORT_HIGH,
         _ => return None,
     };
     (current != Some(wanted)).then(|| wanted.to_string())
@@ -326,7 +340,8 @@ mod tests {
 
     /// What Sirio asks a session's agent for, case by case. `L` is Claude's
     /// own ladder, `T` the three levels an ACP agent offers, `X` and `M`
-    /// ladders with no `high` in them.
+    /// ladders with no `high` in them. The rows with `false` are the agents
+    /// that start on the level they report (Codex, Pi, omp).
     #[test]
     fn effort_target_covers_every_case() {
         fn ladder(values: &[&str]) -> Vec<EffortChoice> {
@@ -351,34 +366,47 @@ mod tests {
         let x = ladder(&["xhigh"]);
         let m = ladder(&["low", "max"]);
 
-        // (current, choices, user's choice, expected)
+        // (current, choices, user's choice, starts on High, expected)
         let cases = [
             // a fresh session
-            (Some("default"), &l, None, Some("high")),
+            (Some("default"), &l, None, true, Some("high")),
             // already there
-            (Some("high"), &l, None, None),
+            (Some("high"), &l, None, true, None),
             // an ACP agent's own level
-            (Some("medium"), &t, None, Some("high")),
+            (Some("medium"), &t, None, true, Some("high")),
             // no high offered
-            (Some("xhigh"), &x, None, None),
-            (Some("low"), &m, None, None),
+            (Some("xhigh"), &x, None, true, None),
+            (Some("low"), &m, None, true, None),
             // the user's level, offered
-            (Some("high"), &l, Some("low"), Some("low")),
+            (Some("high"), &l, Some("low"), true, Some("low")),
             // the user's level, already current
-            (Some("low"), &l, Some("low"), None),
+            (Some("low"), &l, Some("low"), true, None),
             // the user's level, not offered
-            (Some("default"), &t, Some("xhigh"), Some("high")),
+            (Some("default"), &t, Some("xhigh"), true, Some("high")),
             // the user chose Default
-            (Some("high"), &l, Some("default"), Some("default")),
+            (Some("high"), &l, Some("default"), true, Some("default")),
             // the agent reported no current
-            (None, &t, None, Some("high")),
+            (None, &t, None, true, Some("high")),
+            // an agent that starts on its own level: nothing is asked of it, High
+            // offered or not, whatever level it reports
+            (Some("medium"), &t, None, false, None),
+            (Some("high"), &t, None, false, None),
+            (None, &t, None, false, None),
+            (Some("xhigh"), &x, None, false, None),
+            // the user's level, offered and not current
+            (Some("medium"), &t, Some("low"), false, Some("low")),
+            // the user's level, already current
+            (Some("low"), &t, Some("low"), false, None),
+            // the user's level, not offered: no High to fall back on
+            (Some("medium"), &t, Some("xhigh"), false, None),
         ];
-        for (current, choices, user_choice, expected) in cases {
+        for (current, choices, user_choice, start_on_high, expected) in cases {
             let offered: Vec<&str> = choices.iter().map(|c| c.value.as_str()).collect();
             assert_eq!(
-                effort_target(current, choices, user_choice).as_deref(),
+                effort_target(current, choices, user_choice, start_on_high).as_deref(),
                 expected,
-                "current {current:?}, offered {offered:?}, user choice {user_choice:?}"
+                "current {current:?}, offered {offered:?}, user choice {user_choice:?}, \
+                 starts on High {start_on_high}"
             );
         }
     }

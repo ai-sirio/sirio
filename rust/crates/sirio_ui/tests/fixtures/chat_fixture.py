@@ -75,6 +75,24 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   effort-error     Like `composer`, but an agent that refuses a change of
                    effort outright: `session/set_config_option` is answered
                    with a JSON-RPC error (the request is still logged).
+  effort-codex     Codex's wire shape (codex-acp), as far as the chat reads it: `session/new`'s
+                   result itself carries codex-acp's three session modes (read-only, agent,
+                   agent-full-access; it starts on "agent") and its selectors `mode`, `model`
+                   and `reasoning_effort`, in that order, and no `config_option_update` follows.
+                   The effort selector has the id `reasoning_effort` (low, medium, high, xhigh,
+                   max, ultra; it starts on "xhigh"), not `effort`, while its category is ACP's
+                   standard `thought_level`. The modes are real ones, not a copy of the levels:
+                   the chat must keep its mode catalogue. It leaves out codex-acp's
+                   `collaboration_mode` and fast-mode selectors.
+  effort-pi        Pi's wire shape (pi-acp): `session/new`'s result carries both `modes` and
+                   `configOptions`, and the thinking levels (off, minimal, low, medium, high,
+                   xhigh; it starts on "medium") are published twice: as the session modes
+                   and as an option under the id `thought_level` with ACP's standard
+                   `thought_level` category (not `effort`), after a model selector. Setting
+                   `thought_level` sends a `current_mode_update` and a `config_option_update`
+                   before the answer, as pi-acp does. `session/set_mode`, which pi-acp serves
+                   as the same change of level, sends the same two notifications and answers
+                   `{}`, so a stray set_mode can never hang the fixture.
   auth-required    initialize advertises one login auth method, then every
                    session/new is rejected with wire code -32000
                    "Authentication required" — ACP's auth_required shape, so
@@ -91,9 +109,9 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                    clean, so a Restart click reconnects and then sits idle.
 
 Every mode answers `session/set_config_option` with the options it advertised
-(`ely-catalogue` and `effort-full` their own, every other mode `composer`'s, advertised or not), the
-requested one set to the requested value; `effort-stubborn` and `effort-error`
-answer as their entries above say. When the environment variable
+(`ely-catalogue`, `effort-full`, `effort-codex` and `effort-pi` their own, every other mode
+`composer`'s, advertised or not), the requested one set to the requested value;
+`effort-stubborn` and `effort-error` answer as their entries above say. When the environment variable
 CHAT_FIXTURE_CONFIG_LOG names a file, the request's params are appended to it
 as one JSON line, before the answer goes out: the file is what a test reads to
 see what actually reached the agent.
@@ -112,6 +130,27 @@ SESSION_ID = "chat-fixture-session"
 
 # The modes that advertise composer's commands, options and context fill.
 COMPOSER_LIKE = ("composer", "effort-stubborn", "effort-error", "effort-full")
+
+# The modes whose effort selector is tagged with ACP's `thought_level` category under an id other
+# than `effort`. They do not advertise composer's options by a `config_option_update`: the
+# selectors arrive in the `session/new` result, as with the real adapters.
+THOUGHT_LEVEL_MODES = ("effort-codex", "effort-pi")
+
+# pi-acp's thinking levels, in its order.
+PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+
+# codex-acp's approval presets: (id, name, description, `_meta.kind`). It publishes them twice, as
+# the session's modes and as the options of its `mode` selector.
+CODEX_MODES = (
+    ("read-only", "Ask for approval", "Always ask to edit external files and use the internet", "standard"),
+    ("agent", "Approve for me", "Only ask for actions detected as potentially unsafe", "auto_review"),
+    (
+        "agent-full-access",
+        "Full access",
+        "Unrestricted access to the internet and any file on your computer",
+        "full_access",
+    ),
+)
 
 
 def send(message):
@@ -237,12 +276,113 @@ def effort_full_config_options():
     return options
 
 
+def codex_modes():
+    """codex-acp's session modes: its three approval presets, "agent" current."""
+    return {
+        "currentModeId": "agent",
+        "availableModes": [
+            {"id": mode_id, "name": name, "description": description, "_meta": {"kind": kind}}
+            for mode_id, name, description, kind in CODEX_MODES
+        ],
+    }
+
+
+def codex_config_options():
+    """The selectors of codex-acp that the chat reads: `mode` (its approval presets, ACP's `mode`
+    category), `model`, and the effort selector, tagged with ACP's `thought_level` category under
+    the id `reasoning_effort`. It leaves out `collaboration_mode` and fast-mode."""
+    return [
+        {
+            "id": "mode",
+            "name": "Mode",
+            "description": "Approval and sandboxing preset for the session",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "agent",
+            "options": [
+                {"value": mode_id, "name": name, "description": description, "_meta": {"kind": kind}}
+                for mode_id, name, description, kind in CODEX_MODES
+            ],
+        },
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "gpt-6-astra",
+            "options": [
+                {"value": "gpt-6-astra", "name": "6 Astra"},
+                {"value": "gpt-5.6-sol", "name": "5.6 Sol"},
+            ],
+        },
+        {
+            "id": "reasoning_effort",
+            "name": "Reasoning effort",
+            "description": "How much reasoning effort the model should use",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "xhigh",
+            "options": [
+                {"value": "low", "name": "Low"},
+                {"value": "medium", "name": "Medium"},
+                {"value": "high", "name": "High"},
+                {"value": "xhigh", "name": "Xhigh"},
+                {"value": "max", "name": "Max"},
+                {"value": "ultra", "name": "Ultra"},
+            ],
+        },
+    ]
+
+
+def pi_config_options():
+    """The selectors pi-acp announces: a model selector, then the thinking levels as an option
+    under the id `thought_level`, tagged with ACP's `thought_level` category."""
+    return [
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "openai/gpt-6-luna",
+            "options": [
+                {"value": "openai/gpt-6-luna", "name": "GPT-6 Luna"},
+                {"value": "anthropic/claude-sonnet-5-5", "name": "Claude Sonnet 5.5"},
+            ],
+        },
+        {
+            "id": "thought_level",
+            "name": "Thinking",
+            "description": "Set the reasoning effort for this session",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "medium",
+            "options": [
+                {"value": level, "name": f"Thinking: {level}"} for level in PI_THINKING_LEVELS
+            ],
+        },
+    ]
+
+
+def pi_modes():
+    """pi-acp's session modes: the same thinking levels, published a second time."""
+    return {
+        "currentModeId": "medium",
+        "availableModes": [
+            {"id": level, "name": f"Thinking: {level}"} for level in PI_THINKING_LEVELS
+        ],
+    }
+
+
 def config_options(mode):
     """The selectors a mode advertises, and answers `set_config_option` with."""
     if mode == "ely-catalogue":
         return catalogue_config_options()
     if mode == "effort-full":
         return effort_full_config_options()
+    if mode == "effort-codex":
+        return codex_config_options()
+    if mode == "effort-pi":
+        return pi_config_options()
     return composer_config_options()
 
 
@@ -318,7 +458,9 @@ def answer_set_config_option(request, mode):
     """Log the request, then answer with the options the mode advertised and
     the requested one set to the requested value. `effort-stubborn` is an
     agent that keeps its own level: it answers with every option unchanged.
-    `effort-error` refuses with a JSON-RPC error, after logging the request."""
+    `effort-error` refuses with a JSON-RPC error, after logging the request.
+    `effort-pi`, asked for a thinking level, first announces the new level as a session mode
+    and the options as they now stand, the two notifications pi-acp sends before it answers."""
     params = request.get("params", {})
     log_path = os.environ.get("CHAT_FIXTURE_CONFIG_LOG")
     if log_path:
@@ -332,7 +474,25 @@ def answer_set_config_option(request, mode):
         for option in options:
             if option["id"] == params.get("configId"):
                 option["currentValue"] = params.get("value")
+    if mode == "effort-pi" and params.get("configId") == "thought_level":
+        notification({"sessionUpdate": "current_mode_update", "currentModeId": params.get("value")})
+        notification({"sessionUpdate": "config_option_update", "configOptions": options})
     response(request["id"], {"configOptions": options})
+
+
+def answer_set_mode(request, mode):
+    """pi-acp's `session/set_mode`: its modes are its thinking levels, so this is the same change
+    as `session/set_config_option` on `thought_level`, announced in the same order: a
+    `current_mode_update` with the new id, a `config_option_update` with the options carrying that
+    level, then the answer, `{}`."""
+    level = request.get("params", {}).get("modeId")
+    options = config_options(mode)
+    for option in options:
+        if option["id"] == "thought_level":
+            option["currentValue"] = level
+    notification({"sessionUpdate": "current_mode_update", "currentModeId": level})
+    notification({"sessionUpdate": "config_option_update", "configOptions": options})
+    response(request["id"], {})
 
 
 def rich_turn(request):
@@ -706,12 +866,22 @@ def main():
                     },
                 )
                 advertise_catalogue()
+            elif mode in THOUGHT_LEVEL_MODES:
+                # The selectors ride on the result itself, as with codex-acp and pi-acp.
+                result = {"sessionId": SESSION_ID, "configOptions": config_options(mode)}
+                if mode == "effort-codex":
+                    result["modes"] = codex_modes()
+                elif mode == "effort-pi":
+                    result["modes"] = pi_modes()
+                response(request["id"], result)
             else:
                 response(request["id"], {"sessionId": SESSION_ID})
             if mode in COMPOSER_LIKE:
                 advertise(mode)
         elif method == "session/set_config_option":
             answer_set_config_option(request, mode)
+        elif method == "session/set_mode" and mode == "effort-pi":
+            answer_set_mode(request, mode)
         elif method == "session/prompt" and mode == "richer":
             richer_prompt(request)
         elif method == "session/prompt":
@@ -733,7 +903,7 @@ def main():
                 with open(os.path.join(extra, "reply.md"), encoding="utf-8") as reply:
                     message_chunk(reply.read())
                 response(request["id"], {"stopReason": "end_turn"})
-            if mode in COMPOSER_LIKE or mode == "ely-catalogue":
+            if mode in COMPOSER_LIKE or mode in THOUGHT_LEVEL_MODES or mode == "ely-catalogue":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "echo-blocks":

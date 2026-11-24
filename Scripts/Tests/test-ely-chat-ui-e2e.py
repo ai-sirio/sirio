@@ -13,7 +13,13 @@ and recovery across a relaunch, authentication required, restore across a
 relaunch, and the effort list (`effort`, `effort_light`: High asked of the agent
 at start, the list opened and a level chosen, High asked again after a
 relaunch; `effort_full`, `effort_full_light`: the whole ladder, Default and
-Ultracode included, drawn, and Default chosen from it). Three more need a display and
+Ultracode included, drawn, and Default chosen from it; `effort_codex`, `effort_pi`: run as the
+`codex` and `pi` adapters, Codex's and Pi's effort selector shapes, ACP's `thought_level` category
+under the ids `reasoning_effort` and `thought_level`: the chat starts on the level its agent
+reports and asks it for nothing, Codex's real modes keep the mode pill while Pi's modes, a copy
+of its levels, give none, even after the agent's own `current_mode_update`, and a pick from the
+list reaches the agent by the selector's own id). `effort_pi` needs a display too (its mode pill is
+read from a painted frame), so --state-only skips it. Three more need a display and
 real X input or windows, and are skipped under --state-only: `composer_keys` (the composer's
 keys through xdotool: Return, Shift+Return, Up and Down, the slash popup, and the frame check
 `composer_field_has_no_fill`: the field paints no fill or frame of its own over the card), `reduced_motion`
@@ -28,7 +34,14 @@ The seeded chat tab records the OpenCode adapter, and an executable named
 resolves OpenCode's built-in `opencode acp` and launches it, so the fixture is
 reached the way a real agent would be. (A tab with no recorded agent is refused
 on restore -- `SIRIO_ACP_PROGRAM` serves only a new chat opened with no agent
-picked -- so the fixture cannot ride that variable here.)
+picked -- so the fixture cannot ride that variable here.) A scenario that must
+run as another adapter (`Scenario(..., agent="codex")`, `"pi"`) records that
+adapter instead, and the fixture is reached through an installed manifest in a
+scratch agent store, since Codex and Pi have no ACP subcommand of their own:
+the instance's XDG_DATA_HOME is moved into the scenario's directory and
+`sirio/agents/<registry id>/manifest.json` is written there, its executable the
+same wrapper. The user's own store, which may hold the real adapter, is never
+read.
 
 Control methods used are the existing ones: `surface.chat.open` selects an
 already rendered chat (it does not create one -- the seeded database does),
@@ -40,7 +53,9 @@ parameter is a string.
 
 Artifacts under --out-dir: transcript.log, responses.jsonl (every control
 request and its reply), summary.json, and per scenario: app.log,
-agent-traffic.jsonl (the fixture's stdin/stdout), exit-status and frames/*.png.
+agent-traffic.jsonl (the fixture's stdin/stdout), exit-status and frames/*.png. The Codex and
+Pi scenarios also leave agent-manifest.json (the scratch agent store's manifest) in their scenario
+directory.
 
 Usage: Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir PATH [--state-only]
            [--display :N] [--no-build] [--no-identity] [--window-size WxH]
@@ -86,6 +101,9 @@ PROBE = TARGET / "debug" / "examples" / "ely_chat_probe"
 FOCUS_THIEF = TARGET / "debug" / "examples" / "surfaces_probe"
 FIXTURE = ROOT / "rust" / "crates" / "sirio_ui" / "tests" / "fixtures" / "chat_fixture.py"
 AGENTS = ["claude", "codex", "opencode", "pi", "omp"]
+# The adapters a scenario can run as through an installed manifest, by their registry id
+# (`sirio_registry::registry_id`): Codex and Pi have no ACP subcommand of their own.
+REGISTRY_IDS = {"codex": "codex-acp", "pi": "pi-acp"}
 
 _IDS = itertools.count(1)
 
@@ -468,9 +486,14 @@ class Scenario:
         appearance: str = "dark",
         ui_size: int = 13,
         env: dict[str, str | None] | None = None,
+        agent: str = "opencode",
     ) -> None:
         self.run = run
         self.name = name
+        # The adapter the seeded tab records, and so the one the chat runs as.
+        self.agent_id = agent
+        # The manifest of the scratch agent store, for an adapter that is not OpenCode.
+        self.manifest: Path | None = None
         # Merged into the instance's environment; None unsets a variable.
         self.env: dict[str, str | None] = dict(env or {})
         self.dir = run.work / name
@@ -482,7 +505,8 @@ class Scenario:
         self.database = self.dir / "session.sqlite"
         self.agent_dir = self.dir / "agent"
         self.agent_dir.mkdir()
-        # The stand-in for the adapter's binary (`opencode acp`).
+        # The stand-in for the adapter's binary (`opencode acp`; for another adapter, the manifest's
+        # executable, see `_install_agent`).
         (self.dir / "bin").mkdir()
         self.agent = self.dir / "bin" / "opencode"
         self.traffic = self.dir / "agent-traffic.jsonl"
@@ -494,6 +518,42 @@ class Scenario:
             f'"{mode}" "{self.agent_dir}" "{self.traffic}"\n'
         )
         self.agent.chmod(self.agent.stat().st_mode | stat.S_IXUSR)
+        if agent != "opencode":
+            self._install_agent(agent)
+
+    def _install_agent(self, agent: str) -> None:
+        """Make the adapter `agent` resolve to the wrapper, through a scratch agent store.
+
+        Sirio finds Codex's and Pi's ACP programs by the manifest at
+        `<data home>/sirio/agents/<registry id>/manifest.json` (`InstallStore::default_root`, the
+        data home being $XDG_DATA_HOME). The instance inherits the user's real HOME and
+        XDG_DATA_HOME, and the user's store may hold the real adapter, which would run with real
+        credentials: so the data home is moved into this scenario's own directory, the manifest is
+        written there and its executable is the wrapper. Nothing under the user's store is read or
+        written.
+        """
+        registry_id = REGISTRY_IDS.get(agent)
+        if registry_id is None:
+            raise Failure(f"{self.name}: no scratch store for the adapter {agent!r} (known: {sorted(REGISTRY_IDS)})")
+        data_home = self.dir / "xdg-data"
+        directory = data_home / "sirio" / "agents" / registry_id
+        directory.mkdir(parents=True)
+        self.manifest = directory / "manifest.json"
+        self.manifest.write_text(
+            json.dumps(
+                {
+                    "id": registry_id,
+                    "version": "0.0.0-e2e",
+                    "executable": str(self.agent),
+                    "args": [],
+                    "integrity": "none",
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        # Absolute, as `InstallStore::default_root` requires; the instance's environment takes it.
+        self.env["XDG_DATA_HOME"] = str(data_home)
 
     def _seed(self, appearance: str, ui_size: int) -> None:
         self.repo.mkdir()
@@ -511,7 +571,7 @@ class Scenario:
                 "--worktree", str(self.repo),
                 "--appearance", appearance,
                 "--ui-size", str(ui_size),
-                "--agent", "opencode",
+                "--agent", self.agent_id,
             ],
             capture_output=True,
             text=True,
@@ -533,6 +593,8 @@ class Scenario:
             if (self.dir / artifact).exists():
                 shutil.copy(self.dir / artifact, self.out / artifact)
         shutil.copy(self.database, self.out / "session.sqlite")
+        if self.manifest is not None:
+            shutil.copy(self.manifest, self.out / "agent-manifest.json")
 
 
 def rows(state: dict, kind: str) -> list[dict]:
@@ -948,34 +1010,74 @@ def effort_act(chat: Instance, action: str, value: str | None = None) -> None:
         raise Failure(f"{chat.scenario.name}: surface.chat.effort {action} {value or ''} failed: {reply}")
 
 
-def effort_requests(scenario: Scenario) -> list[str]:
-    """The levels the app asked the agent for, in order.
-
-    Read from the harness's record of what reached the fixture: the client-to-agent
-    `session/set_config_option` requests whose `configId` is `effort`.
-    """
-    asked: list[str] = []
+def traffic_messages(scenario: Scenario) -> list[tuple[str, dict]]:
+    """What the harness recorded between the app and the fixture, in order: `(direction, message)`,
+    the direction `to-agent` or `from-agent` and the message the JSON-RPC object on that line."""
+    messages: list[tuple[str, dict]] = []
     if not scenario.traffic.exists():
-        return asked
+        return messages
     for raw in scenario.traffic.read_text().splitlines():
         try:
             record = json.loads(raw)
             message = json.loads(record["line"])
         except (ValueError, KeyError, TypeError):
             continue
-        if record.get("dir") != "to-agent" or message.get("method") != "session/set_config_option":
+        if isinstance(message, dict):
+            messages.append((record.get("dir", ""), message))
+    return messages
+
+
+def effort_requests(scenario: Scenario, config_id: str = "effort") -> list[str]:
+    """The levels the app asked the agent for, in order.
+
+    Read from the harness's record of what reached the fixture: the client-to-agent
+    `session/set_config_option` requests whose `configId` is `config_id` (`effort`, unless
+    the agent names its effort selector otherwise).
+    """
+    asked: list[str] = []
+    for direction, message in traffic_messages(scenario):
+        if direction != "to-agent" or message.get("method") != "session/set_config_option":
             continue
         params = message.get("params") or {}
-        if params.get("configId") == "effort":
+        if params.get("configId") == config_id:
             asked.append(params.get("value"))
     return asked
 
 
-def effort_asked(chat: Instance, what: str, enough) -> list[str]:
+def agent_requests(scenario: Scenario) -> list[tuple[str, str | None, str | None]]:
+    """Every request the app sent the agent that changes the session's configuration, in order: a
+    `session/set_config_option` as `(method, configId, value)`, a `session/set_mode` as `(method, modeId, None)`."""
+    requests: list[tuple[str, str | None, str | None]] = []
+    for direction, message in traffic_messages(scenario):
+        method = message.get("method")
+        if direction != "to-agent" or method not in ("session/set_config_option", "session/set_mode"):
+            continue
+        params = message.get("params") or {}
+        if method == "session/set_mode":
+            requests.append((method, params.get("modeId"), None))
+        else:
+            requests.append((method, params.get("configId"), params.get("value")))
+    return requests
+
+
+def agent_mode_updates(scenario: Scenario) -> list[str]:
+    """The modes the agent itself announced as current, in order: the `current_mode_update`s of the
+    fixture's `session/update` notifications. The app never sends one, so these are the agent's own."""
+    announced: list[str] = []
+    for direction, message in traffic_messages(scenario):
+        if direction != "from-agent" or message.get("method") != "session/update":
+            continue
+        update = (message.get("params") or {}).get("update") or {}
+        if update.get("sessionUpdate") == "current_mode_update":
+            announced.append(update.get("currentModeId"))
+    return announced
+
+
+def effort_asked(chat: Instance, what: str, enough, config_id: str = "effort") -> list[str]:
     """The effort requests once `enough` accepts them: a chip moves before its request is written."""
 
     def probe() -> list[str]:
-        asked = effort_requests(chat.scenario)
+        asked = effort_requests(chat.scenario, config_id)
         if not enough(asked):
             raise Failure(f"asked so far: {asked}")
         return asked
@@ -1031,6 +1133,84 @@ def effort_full_steps(run: Run, name: str, appearance: str) -> None:
     scenario.finish()
 
 
+def agent_reached_through_the_store(chat: Instance, adapter: str) -> None:
+    """Waits until the chat's `session/new` has reached the fixture, the first request a chat sends,
+    so the chat is wired to the fixture before anything is sent to it. Then the chat ran as `adapter`:
+    for Codex and Pi that is reachable only through the manifest of the scenario's scratch agent
+    store (no ACP subcommand answers for them, and `SIRIO_ACP_PROGRAM` is not set), which is also
+    what keeps the user's own store, and a real codex-acp in it, out of the run."""
+    scenario = chat.scenario
+
+    def probe() -> None:
+        methods = [
+            message.get("method") for direction, message in traffic_messages(scenario) if direction == "to-agent"
+        ]
+        if "session/new" not in methods:
+            raise Failure(f"requests so far: {methods}")
+
+    chat.wait("the fixture receives session/new", probe, timeout=20)
+    chat.run.log(
+        f"OK {scenario.name}: the chat ran as {adapter} through the scratch store {scenario.manifest} (session/new reached the fixture)"
+    )
+
+
+def nothing_asked_of_the_agent(chat: Instance, config_id: str, level: str) -> None:
+    """The chat is on the agent's own level and the app has asked the agent for nothing at all: no
+    `session/set_config_option`, not even for `config_id` (the selector's own id), and no `session/set_mode`."""
+    requests = agent_requests(chat.scenario)
+    if requests:
+        raise Failure(f"{chat.scenario.name}: the app asked the agent on its own, on {level}: {requests}")
+    chat.run.log(
+        f"OK {chat.scenario.name}: the chat is on the agent's own level, {level}, through the selector {config_id}, "
+        f"and the app asked for nothing at all"
+    )
+
+
+def mode_pill(run: Run, chat: Instance, name: str, drawn: bool, when: str) -> None:
+    """Whether the permission pill drew a mode icon (a mode catalogue) at `when`, as the last
+    paint drew it: `modeIcon` of `composerRow`. A painted frame is what it is read from, so it
+    needs a display, as the composer_band scenarios do."""
+    if run.state_only:
+        run.log(f"SKIP {name}: the mode pill {when}: it is read from a painted frame")
+        return
+    chat.until("the composer band is painted", lambda s: s["composerRow"]["band"] is not None, quiet=True)
+    if drawn:
+        state = chat.until(
+            f"the pill draws a mode icon {when}", lambda s: s["composerRow"]["modeIcon"] is not None, timeout=20
+        )
+        run.log(f"OK {name}: the mode pill keeps its catalogue {when} (icon {state['composerRow']['modeIcon']})")
+        return
+    icon = chat.read()["composerRow"]["modeIcon"]
+    if icon is not None:
+        raise Failure(f"{name}: the pill drew a mode icon ({icon}) {when}, from modes that are a copy of the effort levels")
+    run.log(f"OK {name}: the pill draws no mode icon {when}")
+
+
+def agent_asked_mode(chat: Instance, mode_id: str) -> list[str]:
+    """The modes the agent announced as current, once `mode_id` is among them."""
+
+    def probe() -> list[str]:
+        announced = agent_mode_updates(chat.scenario)
+        if mode_id not in announced:
+            raise Failure(f"announced so far: {announced}")
+        return announced
+
+    return chat.wait(f"the agent announces the mode {mode_id}", probe, timeout=15)
+
+
+def choose_low(chat: Instance, name: str, config_id: str) -> None:
+    """The effort list opened and Low picked: the agent is asked for exactly that, by the id of its own selector."""
+    effort_act(chat, "open")
+    chat.frame(f"{name}-list")
+    effort_act(chat, "choose", "low")
+    chat.until("the chat is on Low", lambda s: s["effort"] == "low")
+    asked = effort_asked(chat, "choosing Low reaches the agent", lambda asked: asked[-1:] == ["low"], config_id)
+    requests = agent_requests(chat.scenario)
+    if requests != [("session/set_config_option", config_id, "low")]:
+        raise Failure(f"{name}: the agent was asked for {requests}, not only {config_id} to low")
+    chat.run.log(f"OK {name}: choosing Low reached the agent by {config_id}, and it was asked for nothing else (asked: {asked})")
+
+
 def effort(run: Run) -> None:
     effort_steps(run, "effort", "dark")
 
@@ -1045,6 +1225,89 @@ def effort_full(run: Run) -> None:
 
 def effort_full_light(run: Run) -> None:
     effort_full_steps(run, "effort-full-light", "light")
+
+
+def effort_codex(run: Run) -> None:
+    """Codex: its effort selector is ACP's `thought_level` under the id `reasoning_effort`, and its
+    modes are real ones. The chat starts on the agent's own level, asks for nothing, keeps the mode
+    pill, and a pick reaches the agent by that id."""
+    name = "effort-codex"
+    scenario = Scenario(run, name, "effort-codex", agent="codex")
+    chat = scenario.instance
+    chat.start()
+    agent_reached_through_the_store(chat, "Codex")
+    chat.send("hi")
+    chat.until(
+        "the turn completes on the agent's own level, xhigh",
+        lambda s: s["status"] == "completed" and s["effort"] == "xhigh",
+    )
+    nothing_asked_of_the_agent(chat, "reasoning_effort", "xhigh")
+    # The control: codex-acp's modes are real ones (read-only, agent, agent-full-access), so they stay.
+    mode_pill(run, chat, name, True, "with codex-acp's real modes")
+    choose_low(chat, name, "reasoning_effort")
+    chat.frame(f"{name}-low")
+    scenario.finish()
+
+
+def effort_pi(run: Run) -> str | None:
+    """Pi: its effort selector is ACP's `thought_level` under the id `thought_level`, and the same
+    levels are published again as the session's modes. The chat starts on the agent's own level,
+    asks for nothing, shows the chip alone (no mode pill), a pick reaches the agent by that id, and
+    neither the agent's own `current_mode_update` that follows nor anything else asks again, sends
+    it a `session/set_mode`, or brings the pill back. The pill is read from a painted frame, so this
+    needs a display."""
+    if run.state_only:
+        run.log("SKIP effort_pi: needs a display (the pill is read from a painted frame)")
+        return "skipped"
+    name = "effort-pi"
+    scenario = Scenario(run, name, "effort-pi", agent="pi")
+    chat = scenario.instance
+    chat.start()
+    agent_reached_through_the_store(chat, "Pi")
+    chat.send("hi")
+    chat.until(
+        "the turn completes on the agent's own level, medium",
+        lambda s: s["status"] == "completed" and s["effort"] == "medium",
+    )
+    nothing_asked_of_the_agent(chat, "thought_level", "medium")
+    mode_pill(run, chat, name, False, "with modes that copy the effort levels")
+    choose_low(chat, name, "thought_level")
+    # pi-acp announces the level it was asked for a second way, as the session's current mode.
+    announced = agent_asked_mode(chat, "low")
+    # The app reads the agent's pipe on its own thread, so whatever the echo moves is moved a moment
+    # later: sample the chat for about two seconds rather than read it once.
+    samples = 0
+    deadline = time.time() + 2.0
+    while True:
+        state = chat.read()
+        samples += 1
+        if state["effort"] != "low":
+            raise Failure(
+                f"{name}: the agent's current_mode_update {announced} moved the chat off Low: "
+                f"{state['effort']!r} (sample {samples})"
+            )
+        requests = agent_requests(scenario)
+        if requests != [("session/set_config_option", "thought_level", "low")]:
+            raise Failure(
+                f"{name}: the agent's current_mode_update {announced} made the app ask again: {requests} "
+                f"(sample {samples})"
+            )
+        icon = state["composerRow"]["modeIcon"]
+        if icon is not None:
+            raise Failure(
+                f"{name}: the pill drew a mode icon ({icon}) after the agent's current_mode_update {announced}, "
+                f"from modes that are a copy of the effort levels (sample {samples})"
+            )
+        if time.time() >= deadline:
+            break
+        time.sleep(0.3)
+    run.log(
+        f"OK {name}: for about 2 s after the agent's own current_mode_update {announced} the chat stayed on Low, "
+        f"asked for nothing more (no session/set_mode either) and drew no mode icon ({samples} samples)"
+    )
+    chat.frame(f"{name}-low")
+    scenario.finish()
+    return None
 
 
 # --- real X input, and the scenarios that need it ----------------------------------
@@ -1897,6 +2160,8 @@ SCENARIOS = [
     effort_light,
     effort_full,
     effort_full_light,
+    effort_codex,
+    effort_pi,
     composer_keys,
     composer_band,
     composer_band_light,
