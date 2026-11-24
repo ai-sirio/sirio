@@ -2682,6 +2682,7 @@ fn sample_shell_notice() -> ChatEntry {
             stopped: false,
             duration_ms: 42,
             sent: true,
+            original_chars: None,
         }),
     }
 }
@@ -2805,6 +2806,55 @@ fn shell_notice_decodes_under_the_pre_change_shape() {
             kind: "shell".into(),
         }],
         "an older build shows the block as a plain notice with the fallback text"
+    );
+}
+
+/// The run inside the first shell notice of a stored turn, as the stored JSON spells it.
+fn stored_shell_run(path: &Path) -> serde_json::Value {
+    let stored: serde_json::Value =
+        serde_json::from_slice(&first_turn_payload(path)).expect("stored turn is JSON");
+    stored["entries"][0]["Notice"]["shell"].clone()
+}
+
+#[test]
+fn a_shell_run_stored_before_the_original_count_existed_loads_without_one() {
+    // What a build that did not know `original_chars` wrote: the key is absent.
+    let stored = r#"{"entries":[{"Notice":{"text":"! ls","kind":"shell","shell":{
+        "command":"ls","output":"a","total_lines":1,"exit":0,"stopped":false,"duration_ms":3,"sent":false}}}]}"#;
+    let turn: ChatTurn = serde_json::from_str(stored).expect("an earlier run must still load");
+    let ChatEntry::Notice { shell: Some(run), .. } = &turn.entries[0] else {
+        panic!("a shell notice, got {:?}", turn.entries[0]);
+    };
+    assert_eq!(run.original_chars, None);
+    assert_eq!(run.output, "a");
+}
+
+#[test]
+fn a_cut_shell_run_keeps_its_original_count_and_a_whole_one_writes_no_key() {
+    let dir = TempDir::new();
+    let cut_path = dir.db_path("shell-cut");
+    let whole_path = dir.db_path("shell-whole");
+    let mut cut = sample_shell_notice();
+    if let ChatEntry::Notice { shell: Some(run), .. } = &mut cut {
+        run.original_chars = Some(1_258_928);
+    }
+    {
+        let db = AppDatabase::open(&cut_path).expect("open");
+        save_one_turn(&db, vec![cut.clone()]);
+        let db = AppDatabase::open(&whole_path).expect("open");
+        save_one_turn(&db, vec![sample_shell_notice()]);
+    }
+
+    let db = AppDatabase::open(&cut_path).expect("reopen");
+    let loaded = db
+        .load_chat_transcript("tab-chat")
+        .expect("load transcript")
+        .expect("transcript exists");
+    assert_eq!(loaded.turns[0].entries, vec![cut], "the count survives a save and a load");
+    assert_eq!(stored_shell_run(&cut_path)["original_chars"], 1_258_928);
+    assert!(
+        stored_shell_run(&whole_path).get("original_chars").is_none(),
+        "a run whose output is whole stores exactly the keys it always did"
     );
 }
 

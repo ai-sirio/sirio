@@ -136,6 +136,10 @@ pub(super) struct ShellBlock {
     /// does not count as running for the next Escape, which then reaches the turn; the block reads
     /// running until its run really ends.
     killed: bool,
+    /// How many characters the command's output had before `output` was cut to the context
+    /// budget, when `output` is such a cut: a block restored from a store that kept it cut. A
+    /// fact the store carried, never read out of the text. `None` for every other block.
+    original_chars: Option<u64>,
 }
 
 impl ShellBlock {
@@ -155,6 +159,7 @@ impl ShellBlock {
             folded,
             stop_asked: false,
             killed: false,
+            original_chars: None,
         }
     }
 
@@ -323,6 +328,7 @@ impl ShellBlock {
             output: self.output.text(),
             exit,
             stopped,
+            cut_from: self.original_chars.map(|chars| usize::try_from(chars).unwrap_or(usize::MAX)),
         })
     }
 
@@ -340,10 +346,19 @@ impl ShellBlock {
         else {
             return None;
         };
-        let output = if self.sent {
-            last_bytes(self.output.tail(FOLD_LINES), STORED_SENT_BYTES)
+        let (output, original_chars) = if self.sent {
+            // The fold alone, which says by `total_lines` how much there was.
+            (last_bytes(self.output.tail(FOLD_LINES), STORED_SENT_BYTES), None)
         } else {
-            cap_output(&self.output.text(), CONTEXT_OUTPUT_BUDGET)
+            let text = self.output.text();
+            let chars = text.chars().count();
+            if chars <= CONTEXT_OUTPUT_BUDGET {
+                // All of it (or what an earlier cut left, whose original count goes on being kept).
+                (text, self.original_chars)
+            } else {
+                let printed = self.original_chars.unwrap_or(chars as u64);
+                (cap_output(&text, CONTEXT_OUTPUT_BUDGET), Some(printed))
+            }
         };
         Some(ChatShellRun {
             command: self.command.clone(),
@@ -353,6 +368,7 @@ impl ShellBlock {
             stopped,
             duration_ms,
             sent: self.sent,
+            original_chars,
         })
     }
 
@@ -381,6 +397,7 @@ impl ShellBlock {
             },
         );
         block.sent = run.sent;
+        block.original_chars = run.original_chars;
         block
     }
 

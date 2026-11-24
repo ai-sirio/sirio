@@ -23,6 +23,12 @@ pub struct ShellRecord {
     pub exit: Option<i32>,
     /// The user stopped the command before it finished.
     pub stopped: bool,
+    /// How many characters the output had before `output` was cut to what it holds, when `output`
+    /// already is such a cut (a block restored from a store that kept it cut). It is a fact the
+    /// store carries, never read out of the text: a command can print anything. [`context_for`]
+    /// does not cut such an output a second time, which could say only what the second cut
+    /// removed of the text it was given.
+    pub cut_from: Option<usize>,
 }
 
 /// Turns `<` into `<\` wherever it opens one of the block tags, in either form (`<name` or
@@ -77,7 +83,7 @@ pub fn cap_output(output: &str, room: usize) -> String {
     // The count has at most as many digits as the length: reserve them all.
     let marker = MARKER_OPEN.chars().count() + digits(total) + MARKER_CLOSE.chars().count();
     if room <= marker {
-        return format!("[output omitted, {total} characters]");
+        return omitted_line(total);
     }
     let kept = room - marker;
     let head = kept / 3;
@@ -92,6 +98,11 @@ pub fn cap_output(output: &str, room: usize) -> String {
     )
 }
 
+/// The line that stands for an output that has no room: how long it was.
+fn omitted_line(chars: usize) -> String {
+    format!("[output omitted, {chars} characters]")
+}
+
 /// The byte offset of the `n`th character of `text`, or its length when there are not that many.
 fn byte_offset_of_char(text: &str, n: usize) -> usize {
     text.char_indices().nth(n).map_or(text.len(), |(at, _)| at)
@@ -102,12 +113,18 @@ fn byte_offset_of_char(text: &str, n: usize) -> usize {
 ///
 /// The output budget is [`CONTEXT_OUTPUT_BUDGET`] for the whole prompt and is spent newest first,
 /// each block taking up to what remains, the line that says what was cut from it included. The
-/// command and the exit line are never charged to it.
+/// command and the exit line are never charged to it. An output that is a cut already
+/// ([`ShellRecord::cut_from`]) is never cut a second time: it goes whole when it fits what
+/// remains, and otherwise as the line that says how long the command's output was.
 pub fn context_for(records: &[ShellRecord]) -> String {
     let mut remaining = CONTEXT_OUTPUT_BUDGET;
     let mut blocks: Vec<String> = Vec::with_capacity(records.len());
     for record in records.iter().rev() {
-        let output = cap_output(&record.output, remaining);
+        let output = match record.cut_from {
+            Some(printed) if record.output.chars().count() > remaining => omitted_line(printed),
+            Some(_) => record.output.clone(),
+            None => cap_output(&record.output, remaining),
+        };
         remaining = remaining.saturating_sub(output.chars().count());
         blocks.push(block_for(record, &output));
     }
@@ -144,14 +161,14 @@ mod tests {
 
     #[test]
     fn one_block_in_claude_tags() {
-        let r = ShellRecord { command: "git status".into(), output: "clean".into(), exit: Some(0), stopped: false };
+        let r = ShellRecord { command: "git status".into(), output: "clean".into(), exit: Some(0), stopped: false, cut_from: None };
         assert_eq!(context_for(&[r]), "<bash-input>git status</bash-input>\n<bash-stdout>clean</bash-stdout>");
     }
 
     #[test]
     fn nonzero_exit_and_stop_are_said() {
-        let a = ShellRecord { command: "false".into(), output: String::new(), exit: Some(3), stopped: false };
-        let b = ShellRecord { command: "sleep 9".into(), output: String::new(), exit: None, stopped: true };
+        let a = ShellRecord { command: "false".into(), output: String::new(), exit: Some(3), stopped: false, cut_from: None };
+        let b = ShellRecord { command: "sleep 9".into(), output: String::new(), exit: None, stopped: true, cut_from: None };
         let c = context_for(&[a, b]);
         assert!(c.contains("<bash-exit>3</bash-exit>"));
         assert!(c.ends_with("<bash-exit>stopped</bash-exit>"));
@@ -168,8 +185,8 @@ mod tests {
     #[test]
     fn budget_is_per_prompt_newest_first() {
         let big = "z".repeat(25_000);
-        let old = ShellRecord { command: "old".into(), output: big.clone(), exit: Some(0), stopped: false };
-        let new = ShellRecord { command: "new".into(), output: big, exit: Some(0), stopped: false };
+        let old = ShellRecord { command: "old".into(), output: big.clone(), exit: Some(0), stopped: false, cut_from: None };
+        let new = ShellRecord { command: "new".into(), output: big, exit: Some(0), stopped: false, cut_from: None };
         let c = context_for(&[old, new]);
         assert!(c.contains(&"z".repeat(25_000))); // newest whole
         assert!(c.contains("characters omitted …]")); // oldest cut to the 5,000 left
@@ -183,8 +200,8 @@ mod tests {
 
     #[test]
     fn no_room_left_sends_command_and_status() {
-        let full = ShellRecord { command: "new".into(), output: "b".repeat(30_000), exit: Some(0), stopped: false };
-        let old = ShellRecord { command: "old".into(), output: "c".repeat(10), exit: Some(1), stopped: false };
+        let full = ShellRecord { command: "new".into(), output: "b".repeat(30_000), exit: Some(0), stopped: false, cut_from: None };
+        let old = ShellRecord { command: "old".into(), output: "c".repeat(10), exit: Some(1), stopped: false, cut_from: None };
         let c = context_for(&[old, full]);
         assert!(c.contains("<bash-input>old</bash-input>\n<bash-stdout>[output omitted, 10 characters]</bash-stdout>\n<bash-exit>1</bash-exit>"));
     }
@@ -230,9 +247,57 @@ mod tests {
         assert_eq!((kept_again, stated_again), (kept, stated));
     }
 
+    /// A block as a restart gives it back: the output cut to the budget that was stored, and what the command printed.
+    fn restored_cut(printed: usize) -> ShellRecord {
+        let original = "0123456789\n".repeat(printed / 11 + 1);
+        ShellRecord {
+            command: "old".into(),
+            output: cap_output(&original, CONTEXT_OUTPUT_BUDGET),
+            exit: Some(0),
+            stopped: false,
+            cut_from: Some(original.chars().count()),
+        }
+    }
+
+    fn pending(command: &str, output: &str) -> ShellRecord {
+        ShellRecord { command: command.into(), output: output.into(), exit: Some(0), stopped: false, cut_from: None }
+    }
+
+    #[test]
+    fn a_record_that_is_a_cut_already_goes_whole_when_it_fits() {
+        let old = restored_cut(1_300_000);
+        let stored = old.output.clone();
+        assert!(stored.contains("characters omitted"));
+        // Alone, it has the whole budget: its own marker, with the count it was given, is what the agent reads.
+        assert!(context_for(&[old]).contains(&format!("<bash-stdout>{stored}</bash-stdout>")));
+    }
+
+    #[test]
+    fn a_record_that_is_a_cut_already_states_what_the_command_printed_when_it_does_not_fit() {
+        let old = restored_cut(1_300_000);
+        let printed = old.cut_from.unwrap();
+        // One newer character is enough to leave it less room than its own length: it is not cut again, whose marker would state
+        // the characters of the stored text that the second cut removed, and none of the command's.
+        let text = context_for(&[old, pending("new", "x")]);
+        let body = text.split("<bash-stdout>").nth(1).unwrap().split("</bash-stdout>").next().unwrap();
+        assert_eq!(body, format!("[output omitted, {printed} characters]"));
+        assert!(!text.contains("characters omitted"));
+    }
+
+    #[test]
+    fn a_stored_cut_with_no_recorded_original_is_cut_as_before() {
+        // Data saved before the original count existed: nothing says the output is a cut, so it is capped like any other.
+        let mut old = restored_cut(1_300_000);
+        old.cut_from = None;
+        let text = context_for(&[old, pending("new", "x")]);
+        assert!(text.contains("characters omitted …]"));
+        let body = text.split("<bash-stdout>").nth(1).unwrap().split("</bash-stdout>").next().unwrap();
+        assert!(body.chars().count() <= CONTEXT_OUTPUT_BUDGET - 1);
+    }
+
     #[test]
     fn could_not_start_is_said() {
-        let r = ShellRecord { command: "x".into(), output: "Could not run: No such file".into(), exit: None, stopped: false };
+        let r = ShellRecord { command: "x".into(), output: "Could not run: No such file".into(), exit: None, stopped: false, cut_from: None };
         assert!(context_for(&[r]).ends_with("<bash-exit>not run</bash-exit>"));
     }
 }

@@ -446,6 +446,13 @@ pub struct ChatShellRun {
     pub duration_ms: u64,
     /// Whether the block went to the agent with a message.
     pub sent: bool,
+    /// How many characters the block's output had before `output` was cut to what it holds,
+    /// when it was: a block the agent was never given is stored cut to the context budget, and
+    /// the text alone says only how much of it the cut removed from the stored text, never how
+    /// much the command printed. `None` when `output` is all the block kept, and then no key is
+    /// written; a run stored before this field existed has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_chars: Option<u64>,
 }
 
 /// One file a persisted tool call touched.
