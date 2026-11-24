@@ -158,10 +158,12 @@ def captioned(r, command):
 
 
 def footer_says(r, command, words):
-    """Whether the block's footer, in the transcript's own text, says `words`: how the command ended. A check that the caption is
-    gone says this too, so that it cannot pass on a footer that is gone altogether."""
+    """Whether the block's footer, in the transcript's own text, says `words` (`exit 3`, `Stopped`): how the command ended. The
+    footer is `words · duration`, so the words are looked for with the separator after them: a command that says `exit 3` itself
+    does not make a footer that is gone say it. A check that the caption is gone asserts this too, so that it cannot pass on a
+    footer that is gone altogether."""
     shown = block_text(r, command)
-    return shown is not None and words in shown
+    return shown is not None and f"{words} · " in shown
 
 
 def send_and_read(w, text, what):
@@ -950,6 +952,23 @@ def restart_for(scn, agent):
              "command's output that the cut removed, not what a second cut of the stored text removed",
              f"{len(bodies)} bodies, the first of {len(bodies[0]) if bodies else 0} characters, its marker states "
              f"{marker.group(1) if marker else None}, the output had {len(big)} characters", read=r)
+
+        # ---- the same, with a command run after the restart: the restored block has less room than its own length, and it is not
+        # cut again (a second cut states what it removed of the stored text, a few dozen characters, and the first marker is lost).
+        # It goes as the line that says how long the command's output was, which the store kept for the purpose.
+        big2 = "\n".join(str(n) for n in range(1, 30_501))
+        run_block(w, "seq 1 30500", end=30)
+        w.quit()
+        w.start()
+        w.reopen_chat()
+        w.wait("the restored chat holds the second long block",
+               lambda r: any(x.get("command") == "seq 1 30500" for _, x in shell_rows(r)), timeout=15)
+        run_block(w, "echo newer")
+        prompt, r = send_and_read(w, "big2", "`big2`")
+        need(prompt == prompt_with([block("seq 1 30500", f"[output omitted, {len(big2)} characters]"), block("echo newer", "newer")], "big2"),
+             "with a newer block taking some of the budget, the restored long block goes as `[output omitted, N characters]` with N "
+             "the characters the command printed, never a second cut's small count",
+             f"prompt of {len(prompt)} characters, begins {prompt[:140]!r}, the output had {len(big2)} characters", read=r)
     finally:
         teardown(w)
 

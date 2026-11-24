@@ -59,7 +59,9 @@ set -eEuo pipefail
 #                turn that is still in flight at a second quit: both blocks come back as sent, `seq 1 100` with its last 40 lines
 #                and still 100 lines, the unfinished turn is gone, and the next prompt carries nothing; then `!seq 1 30000`, never
 #                sent, survives a third quit and goes with the next prompt cut to the budget, its marker stating the count the cut
-#                removed from the command's output (a second cut of the stored text would state a smaller one)
+#                removed from the command's output (a second cut of the stored text would state a smaller one); and `!seq 1 30500`,
+#                never sent, survives a fourth quit, then `!echo newer` takes some of the budget: the prompt carries the restored
+#                block as `[output omitted, N characters]` with N what the command printed, and `newer`
 #   retry        (claude) `!echo one`, a turn `fail` that carries it, `!echo two`, then Retry: the resent prompt carries `one`
 #                and not `two`, and the next prompt carries `two` only
 #   hand_back    (opencode) `!echo back`, a turn the agent dies on, then Retry: the message is back in the composer, the block
@@ -98,7 +100,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,88p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,90p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
