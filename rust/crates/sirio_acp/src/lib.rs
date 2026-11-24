@@ -1742,10 +1742,29 @@ fn effort_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<Eff
             .into_iter()
             .map(|choice| EffortChoice {
                 value: choice.value.to_string(),
-                name: choice.name,
+                name: level_name(&option.name, choice.name),
             })
             .collect(),
     })
+}
+
+/// The name a level is shown under. An agent may repeat its selector's own
+/// name before each level (pi-acp sends "Thinking: low" under the option
+/// "Thinking"): that prefix is dropped and the first letter raised, so the
+/// level reads "Low", as codex-acp names its own. Any other name is kept as
+/// the agent sent it.
+fn level_name(option_name: &str, name: String) -> String {
+    let Some(rest) = name
+        .strip_prefix(option_name)
+        .and_then(|rest| rest.strip_prefix(": "))
+    else {
+        return name;
+    };
+    let mut chars = rest.trim().chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => name,
+    }
 }
 
 /// Extracts the session-mode selector from a session configuration option

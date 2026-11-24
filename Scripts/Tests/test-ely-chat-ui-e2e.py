@@ -1186,6 +1186,28 @@ def mode_pill(run: Run, chat: Instance, name: str, drawn: bool, when: str) -> No
     run.log(f"OK {name}: the pill draws no mode icon {when}")
 
 
+def effort_chip(run: Run, chat: Instance, name: str, expected: str, when: str) -> None:
+    """The word the effort chip drew at `when`, as the last paint drew it: `effortLabel` of
+    `composerRow`. A painted frame is what it is read from, so it needs a display, as `mode_pill`.
+    Only the full composer row draws the word: in the compact, narrow and minimal rows the bars
+    stand in for it and the record is null, so this relies on the default window's full row."""
+    if run.state_only:
+        run.log(f"SKIP {name}: the effort chip {when}: it is read from a painted frame")
+        return
+    seen: list[str | None] = []
+
+    def drew(state: dict) -> bool:
+        seen.append(state["composerRow"].get("effortLabel"))
+        return seen[-1] == expected
+
+    try:
+        chat.until(f"the effort chip reads {expected!r} {when}", drew, timeout=20, quiet=True)
+    except Failure:
+        last = seen[-1] if seen else None
+        raise Failure(f"{name}: the effort chip never read {expected!r} {when}; the last word it drew was {last!r}") from None
+    run.log(f"OK {name}: the effort chip reads {expected!r} {when}")
+
+
 def agent_asked_mode(chat: Instance, mode_id: str) -> list[str]:
     """The modes the agent announced as current, once `mode_id` is among them."""
 
@@ -1242,9 +1264,11 @@ def effort_codex(run: Run) -> None:
         lambda s: s["status"] == "completed" and s["effort"] == "xhigh",
     )
     nothing_asked_of_the_agent(chat, "reasoning_effort", "xhigh")
+    effort_chip(run, chat, name, "Xhigh", "on the agent's own level")
     # The control: codex-acp's modes are real ones (read-only, agent, agent-full-access), so they stay.
     mode_pill(run, chat, name, True, "with codex-acp's real modes")
     choose_low(chat, name, "reasoning_effort")
+    effort_chip(run, chat, name, "Low", "after the pick")
     chat.frame(f"{name}-low")
     scenario.finish()
 
@@ -1270,8 +1294,10 @@ def effort_pi(run: Run) -> str | None:
         lambda s: s["status"] == "completed" and s["effort"] == "medium",
     )
     nothing_asked_of_the_agent(chat, "thought_level", "medium")
+    effort_chip(run, chat, name, "Medium", "on the agent's own level")
     mode_pill(run, chat, name, False, "with modes that copy the effort levels")
     choose_low(chat, name, "thought_level")
+    effort_chip(run, chat, name, "Low", "after the pick")
     # pi-acp announces the level it was asked for a second way, as the session's current mode.
     announced = agent_asked_mode(chat, "low")
     # The app reads the agent's pipe on its own thread, so whatever the echo moves is moved a moment
@@ -1297,6 +1323,12 @@ def effort_pi(run: Run) -> str | None:
             raise Failure(
                 f"{name}: the pill drew a mode icon ({icon}) after the agent's current_mode_update {announced}, "
                 f"from modes that are a copy of the effort levels (sample {samples})"
+            )
+        word = state["composerRow"].get("effortLabel")
+        if word != "Low":
+            raise Failure(
+                f"{name}: the effort chip read {word!r} after the agent's current_mode_update {announced}, "
+                f"not 'Low' (sample {samples})"
             )
         if time.time() >= deadline:
             break

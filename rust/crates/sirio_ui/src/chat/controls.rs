@@ -102,7 +102,9 @@ impl Chat {
             .unwrap_or_else(|| "Claude Code".into())
     }
 
-    /// The effort level's own name, as the agent reported it. Not uppercased
+    /// The effort level's own name, as the agent reported it (an ACP agent's
+    /// less a prefix that repeats its selector's name, see
+    /// `sirio_acp::level_name`). Not uppercased
     /// any more: it used to be a bare caption that needed to read as chrome,
     /// and now it stands on its own, as the model's name does.
     pub(super) fn effort_level_name(&self) -> Option<String> {
@@ -606,6 +608,7 @@ impl Chat {
         let frame = &self.composer_row;
         frame.mode_icon.set(None);
         frame.mode_danger.set(false);
+        *frame.effort_label.borrow_mut() = None;
         let mode_lead = match current_mode {
             Some(mode_id) => {
                 let icon = mode_icon(mode_id);
@@ -803,6 +806,8 @@ impl Chat {
             .filter(|_| self.effort_chip_drawn())
             .map(|label| {
                 let bars_stand_in = compact && effort_bars.is_some();
+                // The chip draws its word unless its bars stand in for it.
+                *frame.effort_label.borrow_mut() = (!bars_stand_in).then(|| label.clone());
                 let effort_entity = entity.clone();
                 div()
                     .id("effort-chip")

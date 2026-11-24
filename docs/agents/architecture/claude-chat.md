@@ -153,7 +153,7 @@ to grow to, at rest), `storedMaxRows` (the app-wide `chat.composerMaxRows` the c
 of the edge has moved and is held, so the field is pinned to its rows),
 `docked`, `overflow` (what the layout moved into ⋯: `model` or `agent`, `attach` (both only in `minimal`), `fast`, `thinking`, `session-panel`,
 `background-tasks`, `context`), `modeIcon` and `modeDanger` (what the render drew for the permission
-pill, null and false when it drew no icon), `menu` (while ⋯ is open, the rows its render built, in order,
+pill, null and false when it drew no icon), `effortLabel` (the word the effort chip drew; null when it drew no chip or bars alone), `menu` (while ⋯ is open, the rows its render built, in order,
 as `{id, enabled, tooltip}`; Fast's tooltip is the CLI's reason it is blocked) and `picker` (the open
 composer picker: `mode`, `model`, `effort`, `thinking`, `overflow`, `history` or `context`; null when none
 is); geometry, enums and labels only; not `composer`, which is the draft's text), and reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last

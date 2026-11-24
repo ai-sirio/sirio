@@ -622,6 +622,9 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 # chat for about 2 s after the agent's `current_mode_update` (not one read), failing on the first
 # sample off Low, asked again (any `session/set_config_option` or `session/set_mode`), or with a mode
 # icon. effort_codex and effort_pi wait until `session/new` reaches the fixture before they send `hi`.
+# Both also read the word the effort chip drew (`effortLabel` of `composerRow`, from a painted frame,
+# so SKIPped under --state-only): Codex's chip reads "Xhigh", then "Low" after the pick; Pi's reads
+# "Medium", then "Low" (the agent's "Thinking: " prefix dropped).
 # Six scenarios need a display (effort_pi above, composer_keys, reduced_motion and unfocused_spinner
 # below, and the two composer_band ones after them) and are skipped under --state-only (`SKIP <name>: needs a
 # display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,

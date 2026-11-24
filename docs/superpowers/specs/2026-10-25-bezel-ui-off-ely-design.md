@@ -139,13 +139,15 @@ Behaviour:
     a later model too. For them this replaces the High of the three bullets below: a new or a
     restored chat starts on the agent's level, and a model switch keeps the user's pick when
     the new model offers it, else takes what the agent reports. Oh-My-Pi follows the same rule
-    (*Claude's call*, the same day: its chip is new, and Enzo's rule is that Sirio does not
-    override an agent's own level). Claude and OpenCode keep the High start. The same day an
-    ACP effort selector became recognised by ACP's own `thought_level` category (codex-acp
-    names it `reasoning_effort`, pi-acp `thought_level`, Oh-My-Pi's option is "Thinking"), so
+    (Enzo's call too, the same day: its chip is new with this change; not yet seen live).
+    Claude and OpenCode keep the High start. The same day an ACP effort selector became
+    recognised by ACP's own `thought_level` category (codex-acp names it `reasoning_effort`,
+    pi-acp `thought_level`, Oh-My-Pi's option is "Thinking"), so
     Codex, Pi and Oh-My-Pi have a chip at all; and when a session's modes are a copy of its
     effort levels, as pi-acp publishes them, the chat shows the effort chip alone, with no
-    mode pill.
+    mode pill. A level whose name repeats its selector's name, as pi-acp's "Thinking: low"
+    under "Thinking" does, reads without that prefix (Enzo's call), with its first letter
+    raised to match codex-acp's own "Low" and "Xhigh" (*Claude's call*).
 - **Scope of a choice:** it holds for that chat only. The next new chat starts on High again
   (on the agent's level for Codex, Pi and Oh-My-Pi).
   Effort is not persisted today, and this change does not start persisting it.
@@ -320,9 +322,6 @@ changes (*Claude's call*):
 - Choosing a level closes the list.
 - A restored chat starts on High (Codex, Pi and Oh-My-Pi: on the agent's level, since
   2026-11-24). A model switch keeps a chosen level if the new model has it.
-- Oh-My-Pi starts on its agent's level like Codex and Pi (2026-11-24). Enzo's call covered
-  Codex and Pi; Oh-My-Pi's chip is new the same day, and its rule follows his principle that
-  Sirio does not override an agent's own level. Not yet seen live.
 - Enzo decided (2026-10-25, "Aspetto di Ely") that a piece Ely has a component for takes Ely's
   look. From that, my calls: icons become Ely's Lucide icons; bars over a `ScrollHandle` become
   Ely's bar, while the bars Sirio computes itself stay Sirio's; Ghost/Prominent buttons map to

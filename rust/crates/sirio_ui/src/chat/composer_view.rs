@@ -173,10 +173,9 @@ pub(crate) const EFFORT_HIGH: &str = "high";
 /// Whether a chat with this agent starts on High, asking the agent for it.
 ///
 /// Codex, Pi and omp chats start on the level their agent reports and Sirio
-/// asks them for nothing on its own (the owner's call of 2026-11-24 for Codex
-/// and Pi, extended to omp, whose chip arrived the same day); Claude, OpenCode
-/// and a chat with no agent id start on High. `agent_id` is the adapter id, as
-/// `Chat::agent_id` holds it.
+/// asks them for nothing on its own (the owner's call of 2026-11-24); Claude,
+/// OpenCode and a chat with no agent id start on High. `agent_id` is the
+/// adapter id, as `Chat::agent_id` holds it.
 pub(crate) fn starts_on_high(agent_id: Option<&str>) -> bool {
     !matches!(agent_id, Some("codex" | "pi" | "omp"))
 }
