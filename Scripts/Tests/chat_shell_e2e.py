@@ -339,23 +339,39 @@ def stop_for(scn, agent):
         w.capture(f"stop-stopped-{agent}")
 
         if agent == "claude":
+            def ok_replies(r):
+                return len([1 for _, a in assistant_rows(r) if a["text"] == "ok"])
+
             # The held turn goes on: released, it answers `ok` (a turn the first Escape had interrupted never does).
             w.release_gate(1)
-            r = w.wait("the released turn answers", lambda r: idle(r) and any(a["text"] == "ok" for _, a in assistant_rows(r)),
-                       timeout=30)
-            need(newest(r)[1].get("status") == "stopped",
-                 "the first Escape left the turn alone: the held turn, once released, answered `ok`",
-                 f"replies {[a['text'] for _, a in assistant_rows(r)]}", read=r)
-            # A second turn, held at a gate nobody releases: only the Escape can end it.
+            r = w.wait("the released turn answers ok", lambda r: idle(r) and ok_replies(r) == 1, timeout=30)
+            need(ok_replies(r) == 1 and idle(r),
+                 "the first Escape left the turn alone: the held turn, once released, answered `ok` and ended",
+                 f"replies {[a['text'] for _, a in assistant_rows(r)]}, status {r['status']!r}", read=r)
+
+            # The stopped block is pending (spec 5.4): the next prompt carries it, with `<bash-exit>stopped</bash-exit>`. A plain
+            # prompt that the stub answers at once, so that nothing waits on a clock; the block's output is what the readout draws.
+            prompt, r = send_and_read(w, "go", "`go`")
+            index, row = newest(r)
+            need(prompt == prompt_with([block(SLEEPERS, row.get("output", ""), "stopped")], "go")
+                 and "<bash-exit>stopped</bash-exit>" in prompt and row.get("sent") == "true",
+                 "the block that Escape stopped reaches the agent with the next prompt, marked `<bash-exit>stopped</bash-exit>`, and is sent",
+                 f"prompt {prompt!r}, sent {row.get('sent')!r}", read=r)
+
+            # A second turn, held at a gate nobody releases: only the Escape can end it. The stub numbers a gate by how often it has
+            # read the same whole prompt, so this one must go out plain (the stopped block went with `go`): `ok hold` is then
+            # number 2, and `gate.1`, released above, does not open it.
+            replies = ok_replies(r)
             w.send("ok hold")
-            w.wait("the second held turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
-            replies = len([1 for _, a in assistant_rows(w.read()) if a["text"] == "ok"])
+            r = w.wait("the second held turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
+            need(last_prompt(w) == "ok hold" and ok_replies(r) == replies,
+                 "the second `ok hold` went out plain, and is held: it has not answered",
+                 f"prompt {last_prompt(w)!r}, `ok` replies {replies} then {ok_replies(r)}", read=r)
             w.escape()
             r = w.wait("the second Escape stops the turn", lambda r: r["status"] != "streaming", timeout=10)
-            after = len([1 for _, a in assistant_rows(r) if a["text"] == "ok"])
-            need(len(shell_rows(r)) == 1 and after == replies,
+            need(len(shell_rows(r)) == 1 and ok_replies(r) == replies,
                  "a second Escape, with no command running, stops the turn: it was held at a gate nobody released, and it never answered",
-                 f"status {r['status']!r}, `ok` replies {replies} then {after}", read=r)
+                 f"status {r['status']!r}, `ok` replies {replies} then {ok_replies(r)}", read=r)
         else:
             # `slow` keeps streaming (its text grows) and has heard no cancel until the second Escape.
             def streamed(r):
