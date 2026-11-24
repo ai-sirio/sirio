@@ -21,6 +21,16 @@ const TAIL_BYTES: usize = KEEP_BYTES - HEAD_BYTES;
 /// of tiny lines holds about [`KEEP_BYTES`] of memory and not a multiple of it.
 const LINE_INDEX_BYTES: usize = 8;
 
+/// The least a buffer grows by, and the room it may keep empty when it is small.
+const MIN_GROW: usize = 4 * 1024;
+
+/// How much room to ask for when a buffer holding `len` is full and `need` more must fit: a quarter
+/// of what it holds, so growth is amortised without the doubling that would leave up to half of a
+/// buffer empty, and never less than `floor`.
+fn grow_by(len: usize, need: usize, floor: usize) -> usize {
+    need.max(len / 4).max(floor)
+}
+
 /// One line of output as it is shown and sent, without its `\n`.
 ///
 /// - Bytes are decoded as UTF-8, lossily.
@@ -156,24 +166,59 @@ impl LineStore {
         self.text.len() - self.start + self.lens.len() * LINE_INDEX_BYTES
     }
 
+    /// Adds a line. The buffers grow by a quarter, never by doubling, and a dead prefix of an eighth
+    /// or more is dropped before they do, so a store that only turns over keeps the size it has.
     fn push(&mut self, line: &str) {
+        let need = line.len() + 1;
+        if self.text.capacity() - self.text.len() < need {
+            if self.start * 8 >= self.text.len() {
+                self.compact();
+            }
+            if self.text.capacity() - self.text.len() < need {
+                self.text
+                    .reserve_exact(grow_by(self.text.len(), need, MIN_GROW));
+            }
+        }
         self.text.push_str(line);
         self.text.push('\n');
+        if self.lens.len() == self.lens.capacity() {
+            self.lens
+                .reserve_exact(grow_by(self.lens.len(), 1, MIN_GROW / size_of::<u32>()));
+        }
         self.lens
             .push_back(u32::try_from(line.len()).expect("a kept line is shorter than the cap"));
     }
 
-    /// Drops the oldest line and says what it was charged.
+    /// Drops the oldest line and says what it was charged. The buffers are given back once they are
+    /// half again as big as what is left, so a store that empties does not keep its room.
     fn pop_front(&mut self) -> Option<usize> {
         let len = self.lens.pop_front()? as usize;
         self.start += len + 1;
-        // Once a quarter of the buffer is dead, move the live part down: each byte moves a bounded
-        // number of times, however many lines go.
-        if self.start * 4 >= self.text.len() {
+        let live = self.text.len() - self.start;
+        if self.text.capacity() > live + live / 2 + MIN_GROW {
+            self.compact();
+            self.text.shrink_to(live + live / 4);
+        }
+        let held = self.lens.len();
+        if self.lens.capacity() > held + held / 2 + MIN_GROW / size_of::<u32>() {
+            self.lens.shrink_to(held + held / 4);
+        }
+        Some(Self::cost(len))
+    }
+
+    /// Moves the live lines to the front of the buffer.
+    fn compact(&mut self) {
+        if self.start > 0 {
             self.text.drain(..self.start);
             self.start = 0;
         }
-        Some(Self::cost(len))
+    }
+
+    /// Gives back every byte of room.
+    fn shrink_to_fit(&mut self) {
+        self.compact();
+        self.text.shrink_to_fit();
+        self.lens.shrink_to_fit();
     }
 
     fn iter(&self) -> Lines<'_> {
@@ -277,24 +322,25 @@ impl ShellOutput {
             self.append_pending(&rest[..newline]);
             rest = &rest[newline + 1..];
             let line = normalize_line(self.pending.make_contiguous());
-            self.pending.clear();
+            self.clear_pending();
             let cut = std::mem::take(&mut self.pending_cut);
             self.drop_bytes(cut);
             self.add_line(line);
         }
         self.append_pending(rest);
-        self.evict_tail();
+        self.evict_tail(0);
     }
 
     /// The output has ended: the line that had no newline is a line, unless it shows nothing.
     pub fn finish(&mut self) {
         let line = self.unfinished_line();
-        self.pending.clear();
+        self.clear_pending();
         let cut = std::mem::take(&mut self.pending_cut);
         self.drop_bytes(cut);
         if let Some(line) = line {
             self.add_line(line);
         }
+        self.shrink_to_fit();
     }
 
     /// Every line kept, joined by `\n`, with no `\n` after the last one. The unfinished line, when it
@@ -345,7 +391,17 @@ impl ShellOutput {
             }
         }
         output.lines_done = output.lines_done.max(total_lines);
+        output.shrink_to_fit();
         output
+    }
+
+    /// What the buffers have allocated, in bytes: the memory this holds, not the text it holds.
+    #[cfg(test)]
+    fn capacity_bytes(&self) -> usize {
+        self.head.text.capacity()
+            + self.tail.text.capacity()
+            + (self.head.lens.capacity() + self.tail.lens.capacity()) * size_of::<u32>()
+            + self.pending.capacity()
     }
 
     fn shown(&self) -> Shown<'_> {
@@ -383,21 +439,28 @@ impl ShellOutput {
         if let Some(last) = bytes.iter().rposition(|&b| b != b'\r') {
             match bytes[..last].iter().rposition(|&b| b == b'\r') {
                 Some(redraw) => {
-                    self.pending.clear();
+                    self.clear_pending();
                     self.pending_cut = 0;
                     bytes = &bytes[redraw + 1..];
                 }
                 None if self.pending.back() == Some(&b'\r') => {
-                    self.pending.clear();
+                    self.clear_pending();
                     self.pending_cut = 0;
                 }
                 None => {}
             }
         }
         let skipped = bytes.len().saturating_sub(TAIL_BYTES);
-        self.pending.extend(&bytes[skipped..]);
-        let over = self.pending.len().saturating_sub(TAIL_BYTES);
+        let new = &bytes[skipped..];
+        // Drop the oldest pending bytes before adding, so the queue never holds more than the cap.
+        let over = (self.pending.len() + new.len()).saturating_sub(TAIL_BYTES);
         self.pending.drain(..over);
+        if self.pending.capacity() - self.pending.len() < new.len() {
+            let grow = grow_by(self.pending.len(), new.len(), MIN_GROW);
+            self.pending
+                .reserve_exact(grow.min(TAIL_BYTES - self.pending.len()));
+        }
+        self.pending.extend(new);
         let mut cut = skipped + over;
         if cut > 0 {
             // The new front may be inside a multi-byte character: skip what is left of it.
@@ -424,13 +487,31 @@ impl ShellOutput {
             }
             self.head_closed = true;
         }
+        // Make room first, so the tail never holds more than the cap, not even for a moment.
+        self.evict_tail(LineStore::cost(line.len()));
+        debug_assert!(self.tail.charged() + LineStore::cost(line.len()) <= TAIL_BYTES);
         self.tail.push(&line);
-        self.evict_tail();
     }
 
-    /// Drops the oldest lines of the tail until it and the unfinished line fit [`TAIL_BYTES`].
-    fn evict_tail(&mut self) {
-        while self.tail.charged() + self.pending.len() > TAIL_BYTES {
+    /// Empties the unfinished line, and gives back its room unless it is small.
+    fn clear_pending(&mut self) {
+        self.pending.clear();
+        if self.pending.capacity() > 2 * MIN_GROW {
+            self.pending.shrink_to(MIN_GROW);
+        }
+    }
+
+    /// Gives back all the room the buffers hold. The output has ended.
+    fn shrink_to_fit(&mut self) {
+        self.head.shrink_to_fit();
+        self.tail.shrink_to_fit();
+        self.pending.shrink_to_fit();
+    }
+
+    /// Drops the oldest lines of the tail until it, the unfinished line and `extra` more bytes fit
+    /// [`TAIL_BYTES`].
+    fn evict_tail(&mut self, extra: usize) {
+        while self.tail.charged() + self.pending.len() + extra > TAIL_BYTES {
             let Some(cost) = self.tail.pop_front() else {
                 break;
             };
@@ -971,6 +1052,95 @@ mod tests {
         assert_eq!(last, Some(149_999));
         assert_eq!(o.tail(5), lines[lines.len() - 5..].join("\n"));
         assert_eq!(o.kept_lines(), lines.len());
+    }
+
+    // ---- ShellOutput: the memory held, not only the text kept --------------
+
+    /// Room the buffers may keep empty at any size.
+    const CAPACITY_SLACK: usize = 64 * 1024;
+
+    /// Feeds the chunks, then ends the output. The buffers must hold at most 1.5 x the cap while the
+    /// command runs, and the cap once it has ended.
+    fn assert_memory_is_bounded(shape: &str, chunks: impl IntoIterator<Item = Vec<u8>>) {
+        let mut o = ShellOutput::default();
+        let mut worst = 0;
+        for chunk in chunks {
+            o.push(&chunk);
+            worst = worst.max(o.capacity_bytes());
+        }
+        assert!(
+            worst <= KEEP_BYTES * 3 / 2 + CAPACITY_SLACK,
+            "{shape}: {worst} bytes held while running"
+        );
+        o.finish();
+        assert!(
+            o.capacity_bytes() <= KEEP_BYTES + CAPACITY_SLACK,
+            "{shape}: {} bytes held after finish",
+            o.capacity_bytes()
+        );
+        // The text is still there: bounding the memory did not cut the output.
+        // (A line is kept whole or not at all, so two lines of 500 KB keep only one of them.)
+        assert!(o.text().len() > KEEP_BYTES / 4, "{shape}: kept {} bytes", o.text().len());
+    }
+
+    fn lines_of(len: usize, count: usize) -> impl Iterator<Item = Vec<u8>> {
+        (0..count).map(move |_| {
+            let mut line = vec![b'k'; len];
+            line.push(b'\n');
+            line
+        })
+    }
+
+    #[test]
+    fn memory_is_bounded_for_one_kilobyte_lines() {
+        assert_memory_is_bounded("1 KB lines", lines_of(1024, 6_000));
+    }
+
+    #[test]
+    fn memory_is_bounded_for_twenty_kilobyte_lines() {
+        assert_memory_is_bounded("20 KB lines", lines_of(20 * 1024, 300));
+    }
+
+    #[test]
+    fn memory_is_bounded_for_lines_a_third_and_a_half_of_the_cap() {
+        assert_memory_is_bounded("300 KB lines", lines_of(300 * 1024, 20));
+        assert_memory_is_bounded("500 KB lines", lines_of(500 * 1024, 12));
+    }
+
+    #[test]
+    fn memory_is_bounded_for_one_endless_unfinished_line() {
+        let chunks = (0..2 * 1024).map(|_| vec![b'z'; 1024]);
+        assert_memory_is_bounded("one 2 MiB unfinished line", chunks);
+    }
+
+    #[test]
+    fn memory_is_bounded_for_small_lines_then_one_almost_as_big_as_the_cap() {
+        let chunks = lines_of(20 * 1024, 100).chain(lines_of(950 * 1024, 1));
+        assert_memory_is_bounded("20 KB lines then a 950 KB line", chunks);
+    }
+
+    #[test]
+    fn memory_is_bounded_after_a_flood_of_tiny_lines_gave_way_to_big_ones() {
+        let flood = (0..32).map(|_| b"y\n".repeat(64 * 1024));
+        let chunks = flood
+            .chain(lines_of(20 * 1024, 100))
+            .chain(lines_of(950 * 1024, 1));
+        assert_memory_is_bounded("tiny flood then 20 KB lines then a 950 KB line", chunks);
+    }
+
+    #[test]
+    fn memory_is_bounded_when_big_lines_give_way_to_an_endless_one() {
+        // The tail's buffers are released as the unfinished line takes its share of the cap.
+        let chunks = lines_of(1024, 1_500)
+            .chain((0..1024).map(|_| vec![b'z'; 1024]));
+        assert_memory_is_bounded("1 KB lines then a 1 MiB unfinished line", chunks);
+    }
+
+    #[test]
+    fn a_restored_block_holds_no_more_than_its_text() {
+        let text = (0..3_000).map(|i| format!("{i:04} {}", "r".repeat(300))).collect::<Vec<_>>().join("\n");
+        let o = ShellOutput::from_text(&text, 3_000);
+        assert!(o.capacity_bytes() <= o.text().len() + o.kept_lines() * 8 + CAPACITY_SLACK / 4);
     }
 
     // ---- ShellOutput: tail, counts, restore -------------------------------
