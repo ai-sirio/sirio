@@ -362,11 +362,16 @@ def stop_for(scn, agent):
             # read the same whole prompt, so this one must go out plain (the stopped block went with `go`): `ok hold` is then
             # number 2, and `gate.1`, released above, does not open it.
             replies = ok_replies(r)
+            count = len(w.prompts())
             w.send("ok hold")
-            r = w.wait("the second held turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
-            need(last_prompt(w) == "ok hold" and ok_replies(r) == replies,
-                 "the second `ok hold` went out plain, and is held: it has not answered",
-                 f"prompt {last_prompt(w)!r}, `ok` replies {replies} then {ok_replies(r)}", read=r)
+            # The chat is `streaming` as soon as the prompt is queued for the agent, before the stub has read and logged it.
+            wait_prompts(w, count + 1, "the agent reads the second `ok hold`")
+            w.wait("the second held turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
+            time.sleep(1.0)  # a turn that was not held would have answered by now
+            r = w.read()
+            need(last_prompt(w) == "ok hold" and r["status"] == "streaming" and ok_replies(r) == replies,
+                 "the second `ok hold` went out plain and is held: a second later it is still streaming and has not answered",
+                 f"prompt {last_prompt(w)!r}, status {r['status']!r}, `ok` replies {replies} then {ok_replies(r)}", read=r)
             w.escape()
             r = w.wait("the second Escape stops the turn", lambda r: r["status"] != "streaming", timeout=10)
             need(len(shell_rows(r)) == 1 and ok_replies(r) == replies,
@@ -611,7 +616,9 @@ def scenario_retry(scn):
         w.start()
         w.open_chat("claude")
         run_block(w, "echo one")
+        count = len(w.prompts())
         w.send("fail")
+        wait_prompts(w, count + 1, "the agent reads `fail`")
         r = w.wait("the failed turn is an error row", lambda r: error_row(r) is not None and r["status"] != "streaming", timeout=30)
         index, row = error_row(r)
         failed = last_prompt(w)
@@ -623,6 +630,7 @@ def scenario_retry(scn):
         w.retry(index)
         r = w.wait("the retried turn is answered", lambda r: idle(r) and error_row(r) is None
                    and any(a["text"] == "recovered" for _, a in assistant_rows(r)), timeout=40)
+        wait_prompts(w, count + 1, "the agent reads the resent prompt")
         resent = w.prompts()
         need(len(resent) == count + 1 and resent[-1][1] == failed and "two" not in resent[-1][1],
              "Retry resends exactly what the failed prompt carried: the block `one`, and not `two`, which finished since",
@@ -647,7 +655,9 @@ def scenario_hand_back(scn):
         w.start()
         w.open_chat("opencode")
         run_block(w, "echo back")
+        count = len(w.prompts())
         w.send("die")
+        wait_prompts(w, count + 1, "the agent reads `die`")
         r = w.wait("the lost agent is an error row", lambda r: error_row(r) is not None and r["status"] != "streaming", timeout=30)
         index, row = error_row(r)
         need(row.get("retry") == "composer" and newest(r)[1].get("sent") == "true",
