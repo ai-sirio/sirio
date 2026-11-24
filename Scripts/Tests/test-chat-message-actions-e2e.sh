@@ -9,7 +9,8 @@ set -eEuo pipefail
 # `slow late`, a held `Continue`; ACP `max tokens`, `max turns`, `max tokens drop`, `slow`). It is driven over the debug
 # control socket and read through `surface.chat.read` (per row `actions`, `actionsShown`, `actionBounds.<copy|quote|continue|
 # row>` and a user row's `quote`; for the chat `continue`, `continueRow`, `composerQuote`, `composerQuoteBounds`, `queued`,
-# `transcriptText`), and the debug verbs of `surface.chat.transcript` (`continue`, `toggleTurn`). Every press a user makes
+# `transcriptText`), and the debug verbs of `surface.chat.transcript` (`continue`, `toggleTurn`, `copy`, `quote`,
+# `quoteSelection`). Every press a user makes
 # with a pointer is a real X click (xdotool) at the pixels the readout reports: Copy, Quote and Continue on a row, the
 # quote card's cross, the transcript menu's Select All, Copy and Quote selection. The system clipboard is read back through
 # GTK on the E2E's own display (`env -i`, no WAYLAND_DISPLAY), with another application owning it before every press. Each
@@ -19,7 +20,8 @@ set -eEuo pipefail
 # Scenarios (each starts a fresh Sirio; the names are the ones --only takes):
 #   copy             real clicks on Copy: on a user row (hovered first: with the pointer away it has no button painted), on an
 #                    older reply (hovered; Markdown: the clipboard holds the source with its asterisks) and on the last reply
-#                    (always shown); each time the clipboard is compared with the row's text
+#                    (always shown); each time the clipboard is compared with the row's text; then the `copy` verb on a reply
+#                    (the same clipboard) and on a turn footer (refused, clipboard untouched)
 #   rows             the last reply shows `always`, every other row `hover`, a footer none; a streaming reply has none, and no
 #                    row is shown always while it streams; at its end the row appears; Select All and Copy through the menu put
 #                    `transcriptText` on the clipboard, with no label of the action row in it
@@ -30,6 +32,9 @@ set -eEuo pipefail
 #   continue_claude  `max tokens`, `fail max turns` and a Stop of `slow`, each in turn: the footer says why, Continue is on the
 #                    last reply's row only (`continueRow`, `actions`), a folded turn draws none and the verb is refused, a real
 #                    press sends a visible user row `Continue` that the stub hears on the same process; nothing after an ordinary end
+#   continue_footer  a Stop before the first text (`think slow`): the turn has a thought and no reply, so Continue sits alone on its
+#                    footer, which is itself the click that folds the turn; a real press on it sends the visible user row `Continue`
+#                    (the stub hears it) and does not fold the turn (the control: the `toggleTurn` verb does, and the readout shows it)
 #   continue_acp     the same with the opencode stub, with a typed draft and an accepted mention in the composer, both unchanged by
 #                    a Continue (the draft, sent after it, carries the file block); an agent's error answer to the cancel is the
 #                    late end of a stopped turn: the footer says cancelled, not ended, and Continue is offered
@@ -48,7 +53,9 @@ set -eEuo pipefail
 #                    quote replaces the first; a quote sent while a turn streams is queued with its block (the `queued` readout); a
 #                    command (`/compact`) goes without the quote and keeps it, `/etc/hosts is wrong` goes with it; an `@path` inside the
 #                    quote reaches the agent unchanged; after an app relaunch the restored row still shows its quote; an ACP agent lost
-#                    with the message hands the quote and the field back
+#                    with the message hands the quote and the field back; the `quote` verb (a reply; a footer is refused) and
+#                    `quoteSelection` with nothing selected (refused); Copy on a quoted user row (the block and the typed text); a
+#                    quote sent with no typed text (the stub hears the block alone, the row draws the card)
 #
 # Every check prints `OK: <scenario>: <what>`; a failed one prints `FAIL: <scenario>: <why>`, its scenario ends there and the
 # run goes on with the next one. The run prints MESSAGE ACTIONS E2E OK (<n> checks) and exits 0 only if every check of every
@@ -80,7 +87,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,69 p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,76 p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

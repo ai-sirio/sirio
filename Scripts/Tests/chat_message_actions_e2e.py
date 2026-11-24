@@ -9,7 +9,10 @@ What the scenarios read is the debug readout of `surface.chat.read` (per row `ac
 `actionBounds.<copy|quote|continue|row|quoteCard>`, a user row's `quote`; for the chat `continue`, `continueRow`,
 `composerQuote`, `composerQuoteBounds`, `queued`, `transcriptText`) and the debug verbs of `surface.chat.transcript`
 (`continue`, `copy`, `quote`, `quoteSelection`, `toggleTurn`). Every press that the user makes with a pointer is a
-real X click at the pixels the readout reports.
+real X click at the pixels the readout reports. The verbs are driven where a real press cannot say more: `continue` and
+`toggleTurn` for their refusals and the fold, `copy` and `quote` once each on a message (the clipboard, `composerQuote`) and
+once on a row that draws no such action, `quoteSelection` for its refusal with nothing selected (the accepted path is the
+transcript menu's own item, pressed for real).
 """
 import json
 import os
@@ -109,11 +112,16 @@ def press_button(w, index, name, hover=False):
 
 
 def clipboard_after_press(scn, w, index, hover, sentinel):
-    """What the system clipboard holds after a real click on Copy, with another application owning it until then: a Copy
-    that did nothing leaves the sentinel, and a clipboard left over from an earlier press cannot pass for this one."""
+    """What the system clipboard holds after a real click on Copy (see `clipboard_after`)."""
+    return clipboard_after(sentinel, lambda: press_button(w, index, "copy", hover=hover))
+
+
+def clipboard_after(sentinel, act):
+    """What the system clipboard holds after `act()`, with another application owning it until then: an `act` that did
+    nothing leaves the sentinel, and a clipboard left over from an earlier press cannot pass for this one."""
     owner = ClipboardOwner(sentinel)
     try:
-        press_button(w, index, "copy", hover=hover)
+        act()
         copied = clipboard_get()
         for _ in range(40):
             if copied != sentinel:
@@ -196,6 +204,20 @@ def scenario_copy(scn):
         scn.need(copied == LAST, "a real click on the last reply's always-shown Copy puts its text on the clipboard",
                  f"clipboard {copied!r}", detail={"clipboard": copied}, read=w.read())
         w.capture("copy-last-reply")
+        # ---- the socket's copy verb writes the clipboard itself, with the text a click puts there, and refuses a row with no Copy
+        park(w)
+        accepted = []
+        copied = clipboard_after("sentinel before the verb's copy", lambda: accepted.append(verb(w, "copy", entry=str(older[0]))))
+        scn.need(accepted == [None] and copied == OLDER,
+                 "the socket's copy verb on an older reply puts its Markdown source on the clipboard, as the click does",
+                 f"verb {accepted}, clipboard {copied!r}", detail={"clipboard": copied}, read=w.read())
+        footer = rows_of(w.read(), "turn")[0][0]
+        refused = []
+        kept = clipboard_after("sentinel before the refused copy", lambda: refused.append(verb(w, "copy", entry=str(footer))))
+        scn.need(len(refused) == 1 and refused[0] is not None and refused[0].endswith(f"entry {footer} draws no copy action")
+                 and kept == "sentinel before the refused copy",
+                 "the socket's copy verb on a turn footer is refused (the row draws no copy action) and writes nothing to the clipboard",
+                 f"verb {refused}, clipboard {kept!r}", read=w.read())
     finally:
         teardown(w)
 
@@ -553,6 +575,51 @@ def scenario_continue_claude(scn):
 
 
 @scenario
+def scenario_continue_footer(scn):
+    """The lone Continue of a turn that has no reply sits on that turn's footer, inside the click that folds the turn (spec
+    5.3, Where): a real press on it must send Continue and must not fold the turn it is on."""
+    w = World(scn, "cf")
+    try:
+        w.start()
+        w.open_chat("claude")
+        turn(w, "ok")
+        past = len(w.read()["rows"]) - 1
+        # `think slow` thinks for under a second, then waits 2 s before its first text: a Stop in that wait ends a turn that has
+        # a thought and no reply
+        w.send("think slow")
+        w.wait("the thought is on screen", lambda r: r["status"] == "streaming"
+               and any(row.get("kind") == "thought" for row in r["rows"][past + 1:]), timeout=30, every=0.1)
+        time.sleep(1.0)
+        w.stop_turn()
+        r = wait_closed(w, "the stopped turn is over", timeout=30)
+        rows = r["rows"][past + 1:]
+        at = int(r["continueRow"]) if "continueRow" in r else None
+        stopped = [i for i, row in rows_of(r, "user") if row["text"] == "think slow"][-1]
+        scn.need(not any(row.get("kind") == "assistant" for row in rows) and at is not None and r["rows"][at].get("kind") == "turn"
+                 and "cancelled" in r["rows"][at]["text"] and actions_of(r["rows"][at]) == ["continue"] and continue_rows(r) == [at]
+                 and r.get("continue") == "resend" and actions_of(r["rows"][stopped]) == ["copy", "quote"],
+                 "a Stop before the first text ends a turn with a thought and no reply: Continue sits alone on its footer (cancelled), "
+                 "on no other row, and the turn is open (its prompt row draws its actions)",
+                 f"continueRow={at}, rows {[row.get('kind') for row in rows]}, footer actions "
+                 f"{r['rows'][at].get('actions') if at is not None else None!r}", read=r)
+        w.capture("continue-footer-lone")
+        # ---- control: folding that turn by the verb empties its prompt row's actions, so the check after the press can see a fold
+        scn.need(verb(w, "toggleTurn", turn=str(at)) is None and actions_of(w.read()["rows"][stopped]) == [],
+                 "control: the fold of the turn (the verb) empties its prompt row's actions: a fold is visible in the readout",
+                 f"actions after the fold {w.read()['rows'][stopped].get('actions')!r}", read=w.read())
+        scn.need(verb(w, "toggleTurn", turn=str(at)) is None and actions_of(w.read()["rows"][stopped]) == ["copy", "quote"],
+                 "control: the second fold verb opens the turn again", f"actions {w.read()['rows'][stopped].get('actions')!r}", read=w.read())
+        # ---- the press: a real click at the button's own pixels, on the footer
+        after = press_continue(scn, w, "claude", "ok", "Stop before any reply (the footer's Continue)")
+        scn.need(actions_of(after["rows"][stopped]) == ["copy", "quote"] and after["rows"][at].get("kind") == "turn",
+                 "the press on the footer's Continue did not fold the turn it is on: its prompt row still draws its actions",
+                 f"actions of the prompt row {after['rows'][stopped].get('actions')!r}", read=after)
+        w.capture("continue-footer-pressed")
+    finally:
+        teardown(w)
+
+
+@scenario
 def scenario_continue_acp(scn):
     w = World(scn, "ca")
     try:
@@ -854,6 +921,17 @@ def scenario_quote(scn):
         w.capture("quote-in-composer")
         r = remove_quote(w, r)
         scn.ok("the cross at the right end of the quote card removes the quote (composerQuote and its bounds are gone)", read=r)
+        # ---- the socket's quote verb holds the reply as the click does, and refuses a row that draws no Quote
+        accepted = verb(w, "quote", entry=str(reply_row(w.read(), QUOTED)))
+        r = w.wait("the verb quoted the reply", lambda r: r.get("composerQuote") == QUOTED and "composerQuoteBounds" in r, timeout=10)
+        footer = rows_of(r, "turn")[0][0]
+        refused = verb(w, "quote", entry=str(footer))
+        held = w.read()
+        scn.need(accepted is None and refused is not None and refused.endswith(f"entry {footer} draws no quote action")
+                 and held.get("composerQuote") == QUOTED,
+                 "the socket's quote verb on a reply holds it in the composer, and on a turn footer is refused and leaves the held quote",
+                 f"verb {accepted!r}, refusal {refused!r}, composerQuote {held.get('composerQuote')!r}", read=held)
+        remove_quote(w, held)
         # ---- a quote and typed text are sent as a block, and the user row reads the quote back
         quote_reply(w, QUOTED, hover=False)
         w.send("my comment")
@@ -870,6 +948,28 @@ def scenario_quote(scn):
                  "of positive size), next to the whole text it sent",
                  f"quote {user.get('quote')!r}, card {card}", detail={"quoteCard": card}, read=after)
         w.capture("quote-sent-row")
+        # ---- Copy on that user row puts everything it sent on the clipboard: the `> ` block and the typed text (spec 5.4)
+        park(w)
+        copied = clipboard_after_press(scn, w, index, True, "sentinel before the quoted row's copy")
+        scn.need(copied == expected,
+                 "a real click on a quoted user row's Copy puts the `> ` block and the typed text on the clipboard, not the typed text alone",
+                 f"clipboard {copied!r}, expected {expected!r}", detail={"clipboard": copied}, read=w.read())
+        park(w)
+        # ---- a quote with nothing typed is a prompt (the composer's can_send allows it): the stub hears the `> ` block alone
+        quote_reply(w, QUOTED)
+        focus_composer(w)
+        x("key", "Return")
+        alone = quote_block(QUOTED)
+        after = sent(w, alone, "the quote alone is answered")
+        scn.need(w.prompts()[-1] == (pid, alone) and "composerQuote" not in after,
+                 "a quote with no typed text is sent: the stub heard just the `> ` block, and the composer's quote is spent",
+                 f"{w.prompts()[-1]!r}", detail={"prompt": w.prompts()[-1][1]}, read=after)
+        index, user = rows_of(after, "user")[-1]
+        after, card = wait_bounds(w, index, "quoteCard")
+        user = after["rows"][index]
+        scn.need(user.get("quote") == QUOTED and user["text"] == alone and card[2] > 0 and card[3] > 0,
+                 "the user row of a quote sent alone draws the quote card (quote column and actionBounds.quoteCard of positive size)",
+                 f"quote {user.get('quote')!r}, card {card}", detail={"quoteCard": card}, read=after)
         # ---- Quote selection through the context menu: a part of a reply, not the reply
         r = reply_turn(w, "replyfile", SELECTABLE_REPLY)
         park(w)
@@ -881,6 +981,11 @@ def scenario_quote(scn):
         advance = width / len(SELECTABLE)  # a monospace row is as wide as its characters
         first = SELECTABLE.index(PICKED)
         start_x, end_x, middle_y = left + first * advance, left + (first + len(PICKED)) * advance, top + height / 2
+        refused = verb(w, "quoteSelection")
+        none_held = w.read()
+        scn.need(refused is not None and refused.endswith("nothing is selected within one entry") and "composerQuote" not in none_held,
+                 "the socket's quoteSelection with nothing selected is refused, as the menu offers no item then, and holds no quote",
+                 f"{refused!r}, composerQuote {none_held.get('composerQuote')!r}", read=none_held)
         move(w.window, start_x, middle_y)
         time.sleep(0.1)
         x("mousedown", "1")
@@ -895,9 +1000,10 @@ def scenario_quote(scn):
                  "Quote selection in the transcript menu (right click, then the item) quotes the selected part of the reply, "
                  "not the whole message",
                  f"composerQuote {r['composerQuote']!r}, the reply's text {SELECTABLE!r}", read=r)
-        # a second quote replaces the first
-        r = quote_reply(w, QUOTED)
-        scn.need(r["composerQuote"] == QUOTED, "a second quote replaces the first one", f"composerQuote {r['composerQuote']!r}", read=r)
+        # a second quote replaces the first (the last reply, always shown: the earlier replies are far up the transcript by now)
+        r = quote_reply(w, SELECTABLE_REPLY, hover=False)
+        scn.need(r["composerQuote"] == SELECTABLE_REPLY and r["composerQuote"] != PICKED, "a second quote replaces the first one",
+                 f"composerQuote {r['composerQuote']!r}", read=r)
         remove_quote(w, r)  # (a prompt sent now would carry it)
         # ---- a quote held while a turn streams is queued with its block
         reply_turn(w, "replyfile", QUOTED)  # the reply to quote is on screen: the transcript scrolls to its end

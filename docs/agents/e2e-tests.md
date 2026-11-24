@@ -722,12 +722,13 @@ Scripts/Tests/test-chat-richer-messages-e2e.sh --only limit,thought_end   # -> p
 # `max tokens`, `max turns`, `max tokens drop` and `slow`; their headers list them). It reads `surface.chat.read`'s debug
 # readouts (a row's `actions`, `actionsShown` and `actionBounds.<copy|quote|continue|row|quoteCard>`, a user row's `quote`, the chat's
 # `continue`, `continueRow`, `composerQuote`, `composerQuoteBounds`, `queued`, `transcriptText`) and drives the debug
-# `surface.chat.transcript` verbs `continue` and `toggleTurn`; every press a user makes is a real X click (xdotool) at the pixels
+# `surface.chat.transcript` verbs `continue`, `toggleTurn`, `copy`, `quote` and `quoteSelection`; every press a user makes is a real X click (xdotool) at the pixels
 # the readout reports: Copy, Quote and Continue on a row, the quote card's cross, the transcript menu's Select All, Copy and Quote
 # selection. The clipboard is read back through GTK on the E2E's own display (no WAYLAND_DISPLAY), another application owning
 # it before each press. Each scenario is a fresh Sirio under `env -i` with its own HOME, XDG tree, database, socket and host root.
 #   copy             Copy on a user row, an older reply (Markdown: the clipboard holds the source) and the last reply (always
-#                    shown), each a real click, the first two after hovering; the clipboard equals the row's text
+#                    shown), each a real click, the first two after hovering; the clipboard equals the row's text; the `copy` verb
+#                    does the same on a reply and is refused on a turn footer, leaving the clipboard alone
 #   rows             the last reply `always`, the others `hover`, a footer none; a streaming reply none; Select All and Copy
 #                    through the menu equal `transcriptText`, with no label of the row in it
 #   idle_cost        redraws (`Chat.render` and `SirioWorkspace.render` spans of the performance trace) over 5 s of an idle
@@ -736,6 +737,9 @@ Scripts/Tests/test-chat-richer-messages-e2e.sh --only limit,thought_end   # -> p
 #   continue_claude  `max tokens`, `fail max turns` and a Stop of `slow`: the footer says why, Continue sits on the last
 #                    reply's row only, a folded turn draws none and the verb is refused, a real press sends a visible `Continue`
 #                    user row that the stub hears on the same process
+#   continue_footer  a Stop before the first text (`think slow`) leaves a turn with a thought and no reply, so Continue sits alone on
+#                    its footer, which is the click that folds the turn: a real press on it sends the visible `Continue` and does
+#                    not fold the turn (the `toggleTurn` verb is the control that a fold shows in the readout)
 #   continue_acp     the same over ACP, with a typed draft and an accepted mention that a Continue leaves alone; an agent's error
 #                    answer to the cancel still ends the turn as cancelled and offers Continue
 #   continue_hidden  `continue` is `none` after an ACP agent was lost and after it restarted, after an ordinary end, while a turn
@@ -747,12 +751,14 @@ Scripts/Tests/test-chat-richer-messages-e2e.sh --only limit,thought_end   # -> p
 #                    Continue; Stop, another prompt, then the stopped turn's late end offers none
 #   quote            Quote on a reply, the card's cross, a send as a `> ` block with the user row reading its quote, Quote selection
 #                    through the menu, a quote queued with its block while a turn streams, `/compact` sent without the quote and
-#                    `/etc/hosts is wrong` with it, a quoted `@path` unchanged, the quote on the row after a relaunch, a hand-back
+#                    `/etc/hosts is wrong` with it, a quoted `@path` unchanged, the quote on the row after a relaunch, a hand-back,
+#                    the `quote` verb (and its refusal on a footer), `quoteSelection` refused with nothing selected, Copy on a quoted
+#                    user row (the block and the typed text), a quote sent with no typed text
 # `--out-dir DIR` (default artifacts/message-actions-e2e) keeps transcript.log, checks.jsonl, scenarios/<name>.json and
 # .stub.log, logs/ and frames/*.png as the richer E2E does; `--display :N` (:140 to :159, default :141) and `--only
 # NAME[,NAME]` (prints "MESSAGE ACTIONS E2E PARTIAL") likewise. Needs the same tools. Run it under `env -u WAYLAND_DISPLAY`.
 Scripts/Tests/test-chat-message-actions-e2e.sh   # -> prints "MESSAGE ACTIONS E2E OK (<n> checks)"
-Scripts/Tests/test-chat-message-actions-e2e.sh --only quote   # -> prints "MESSAGE ACTIONS E2E PARTIAL (1 of 10 scenarios: quote; <n> checks)"
+Scripts/Tests/test-chat-message-actions-e2e.sh --only quote   # -> prints "MESSAGE ACTIONS E2E PARTIAL (1 of 11 scenarios: quote; <n> checks)"
 
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
