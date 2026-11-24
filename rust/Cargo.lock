@@ -7626,6 +7626,7 @@ dependencies = [
  "async-io",
  "async-process",
  "futures",
+ "libc",
  "serde_json",
  "sirio_acp",
  "sirio_chat_child",
@@ -7634,6 +7635,7 @@ dependencies = [
  "sirio_env",
  "sirio_mcp_apps",
  "sirio_persistence",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

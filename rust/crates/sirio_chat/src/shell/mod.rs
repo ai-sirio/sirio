@@ -5,3 +5,6 @@
 
 pub mod context;
 pub mod output;
+mod run;
+
+pub use run::{ShellEvent, ShellRun, shell_invocation};
