@@ -9,8 +9,8 @@ What the scenarios read is the debug readout of `surface.chat.read` (per row `ac
 `actionBounds.<copy|quote|continue|row|quoteCard>`, a user row's `quote`; for the chat `continue`, `continueRow`,
 `composerQuote`, `composerQuoteBounds`, `queued`, `transcriptText`) and the debug verbs of `surface.chat.transcript`
 (`continue`, `copy`, `quote`, `quoteSelection`, `toggleTurn`). Every press that the user makes with a pointer is a
-real X click at the pixels the readout reports. The verbs are driven where a real press cannot say more: `continue` and
-`toggleTurn` for their refusals and the fold, `copy` and `quote` once each on a message (the clipboard, `composerQuote`) and
+real X click at the pixels the readout reports. The verbs are driven where a real press cannot say more: `continue` for
+a double press and its refusals, `toggleTurn` for the fold, `copy` and `quote` once each on a message (the clipboard, `composerQuote`) and
 once on a row that draws no such action, `quoteSelection` for its refusal with nothing selected (the accepted path is the
 transcript menu's own item, pressed for real).
 """

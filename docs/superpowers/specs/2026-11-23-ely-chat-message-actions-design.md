@@ -400,8 +400,8 @@ captures. Scenarios:
    than 3 a second. This catches an Ely animation that loops. It compares nothing with a build of main.
 
 **Captures:** before and after, light and dark, of a transcript with the rows, a hovered row, Continue (on a reply's row
-and alone on a footer), and a quote in the composer and in a sent row. As built they were taken by a local driver over
-the E2E's harness (`chat_e2e_harness.py`), which is not in the repo, the "before" set from a build of `origin/main`. They
+and alone on a footer), and a quote in the composer and in a sent row. As built they were taken by a local driver, not in
+the repo, built on the E2E's harness (`Scripts/Tests/chat_e2e_harness.py`); the "before" set from a build of `origin/main`. They
 are local evidence attached to the PR description and cannot be re-run from the repo; what the repo re-runs is the
 E2E's own captures (`frames/` of its artifact).
 
