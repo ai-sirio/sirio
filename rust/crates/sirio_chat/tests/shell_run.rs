@@ -97,16 +97,51 @@ mod unix {
             Self { pid, seen_gone: Cell::new(false) }
         }
 
-        /// Whether the process is there: a zombie still answers `kill(pid, 0)`. Seeing it gone is
-        /// remembered, so a failed assertion after that does not signal the pid.
+        /// Whether the process is running. A zombie still answers `kill(pid, 0)` until init reaps
+        /// it, so on Linux a process `/proc` shows as a zombie does not count; elsewhere it does,
+        /// and init is given time. Seeing it gone is remembered, so a failed assertion after that
+        /// does not signal the pid.
         fn is_alive(&self) -> bool {
             // SAFETY: signal 0 only checks that the pid exists.
-            let alive = unsafe { libc::kill(self.pid, 0) } == 0
+            let answers = unsafe { libc::kill(self.pid, 0) } == 0
                 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+            let alive = answers && !self.is_zombie();
             if !alive {
                 self.seen_gone.set(true);
             }
             alive
+        }
+
+        /// Whether `/proc` shows the process as dead and waiting to be reaped. The state is the
+        /// first field after the last `)`: the name before it can hold anything.
+        #[cfg(target_os = "linux")]
+        fn is_zombie(&self) -> bool {
+            let Ok(stat) = std::fs::read(format!("/proc/{}/stat", self.pid)) else {
+                return false;
+            };
+            let stat = String::from_utf8_lossy(&stat);
+            stat.rfind(')')
+                .and_then(|end| stat[end + 1..].split_ascii_whitespace().next())
+                .is_some_and(|state| state == "Z" || state == "X")
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        fn is_zombie(&self) -> bool {
+            false
+        }
+
+        /// Whether the process stays running for the whole of `period`, looked at every 5 ms: a
+        /// process that is killed at the start of it is a zombie within microseconds and reaped
+        /// within milliseconds, so this cannot pass for one.
+        fn stays_alive_for(&self, period: Duration) -> bool {
+            let until = Instant::now() + period;
+            while Instant::now() < until {
+                if !self.is_alive() {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            self.is_alive()
         }
 
         /// Whether the process is gone, giving init up to 2 s to reap a killed orphan.
@@ -327,9 +362,16 @@ mod unix {
         assert_eq!((done.code, done.stopped), (Some(0), false));
         let text = String::from_utf8_lossy(&done.output);
         assert!(text.contains("hi\n"), "the shell's own output is there: {text:?}");
-        // Out of the session, so not ours to sweep: a sweep that reached it would turn this red.
-        // It is the test's to kill, and it is seen alive just before.
-        assert!(stranger.is_alive(), "the stranger, in a session of its own, was left alone");
+        // Out of the session, so not ours to sweep. Its death would not be seen at once: the pipe
+        // closes with it, so `Exited` can come before init has reaped it, and a zombie answers
+        // `kill(pid, 0)`. It has to stay running for a while after `Exited`: init reaps a killed
+        // orphan within milliseconds, so a sweep that reached it turns this red. Then it is the
+        // test's to kill, and it has just been seen running.
+        assert!(
+            stranger.stays_alive_for(Duration::from_millis(500)),
+            "the stranger, in a session of its own, was left alone"
+        );
+        eprintln!("stranger {} (started with `{detach}`) ran on 500 ms after Exited", stranger.pid);
         stranger.kill();
         assert!(stranger.is_gone(), "the stranger is gone");
     }
