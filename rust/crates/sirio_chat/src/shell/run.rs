@@ -4,8 +4,13 @@
 //! Two threads serve a run. The reader copies the merged output of the shell (one pipe holds both
 //! its stdout and its stderr, so the lines keep their order) into the events channel. The waiter
 //! waits for the shell, gives the reader a moment to drain the pipe, kills whatever the shell left
-//! in its group (a background job holds the pipe open, and would hold the block with it), and ends
-//! the stream with [`ShellEvent::Exited`].
+//! in its session (a background job holds the pipe open, and would hold the block with it), and
+//! ends the stream with [`ShellEvent::Exited`].
+//!
+//! On Unix the shell is a session leader, and "the command" is every process of that session: a
+//! program the shell runs can leave the shell's process group for one of its own (coreutils
+//! `timeout` does) and stay in the session. Only a program that starts a session of its own, as a
+//! daemon does, is out of reach.
 //!
 //! The channel is bounded, so a consumer that is slower than a command (`yes`) holds the command
 //! back through the full pipe instead of growing memory without limit. The same bound means a
@@ -17,10 +22,11 @@ use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 
@@ -34,10 +40,18 @@ const QUEUE: usize = 32;
 /// the leftover is killed.
 const GRACE: Duration = Duration::from_millis(200);
 
-/// How long the reader has, after the leftover is killed, to reach the end of the pipe. A process
-/// outside the group (a daemon that called `setsid`) can hold the pipe open for good, and the block
-/// ends without waiting for it.
+/// How long the reader may sit in `read` without a byte arriving, after the leftover is killed,
+/// before the block ends without it. A process outside the session (a daemon that called `setsid`)
+/// can hold the pipe open for good, and says nothing. A reader that is getting somewhere (bytes
+/// arriving, or chunks going to a consumer that is behind) is never cut off.
 const DRAIN: Duration = Duration::from_secs(2);
+
+/// How often the waiter looks at what the reader is doing while it waits for it.
+const DRAIN_STEP: Duration = Duration::from_millis(50);
+
+/// How often the waiter looks again at a shell that `waitid` reports as stopped, not exited.
+#[cfg(unix)]
+const STOPPED_POLL: Duration = Duration::from_millis(50);
 
 /// How long a shell has to die of the SIGTERM [`ShellRun::stop`] sends before it gets a SIGKILL.
 #[cfg(unix)]
@@ -61,7 +75,10 @@ pub enum ShellEvent {
 ///
 /// - Unix: `$SHELL` when it is set and not empty, else `/bin/zsh` on macOS, else the first of
 ///   `/bin/bash` and `/bin/sh` that exists. The argument is `-c`.
-/// - Windows: `%COMSPEC%`, else `cmd.exe`. The argument is `/C`.
+/// - Windows: `%COMSPEC%`, else `cmd.exe`. The arguments are `/D` (no AutoRun commands before
+///   ours), `/S` and `/C`; [`ShellRun::start`] puts the command in quotes after them, which is the
+///   one pair of quotes `/S` takes off, so a command that starts with a quote of its own is read
+///   as written.
 #[must_use]
 pub fn shell_invocation() -> (OsString, Vec<OsString>) {
     #[cfg(unix)]
@@ -74,7 +91,8 @@ pub fn shell_invocation() -> (OsString, Vec<OsString>) {
         let shell = std::env::var_os("COMSPEC")
             .filter(|shell| !shell.is_empty())
             .unwrap_or_else(|| OsString::from("cmd.exe"));
-        (shell, vec![OsString::from("/C")])
+        let args = ["/D", "/S", "/C"].map(OsString::from);
+        (shell, args.to_vec())
     }
 }
 
@@ -98,8 +116,8 @@ fn choose_shell(env_shell: Option<&OsStr>, exists: impl Fn(&Path) -> bool) -> Os
     OsString::from(chosen.copied().unwrap_or("/bin/sh"))
 }
 
-/// One running shell command. Dropping it kills the command's whole group; the events of a dropped
-/// run still arrive, ending in `Exited { stopped: true, .. }`.
+/// One running shell command. Dropping it kills the command's whole session; the events of a
+/// dropped run still arrive, ending in `Exited { stopped: true, .. }`.
 pub struct ShellRun {
     shared: Arc<Shared>,
     events: Receiver<ShellEvent>,
@@ -122,6 +140,8 @@ impl ShellRun {
         let outbox = Arc::new(Outbox {
             events: events_tx,
             sealed: Mutex::new(false),
+            progress: AtomicU64::new(0),
+            reading: AtomicBool::new(false),
         });
         let (reader_done, reader_ended) = mpsc::channel();
         let (handoff, handoff_rx) = mpsc::channel::<(Child, Arc<Shared>)>();
@@ -143,8 +163,9 @@ impl ShellRun {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            // cmd.exe does not read its command line the way `arg` quotes it.
-            shell_command.raw_arg(command);
+            // cmd.exe does not read its command line the way `arg` quotes it. With `/S` it takes
+            // off the first quote and the last one, and runs what is between them as written.
+            shell_command.raw_arg(format!("\"{command}\""));
             shell_command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
         }
         #[cfg(not(windows))]
@@ -160,7 +181,7 @@ impl ShellRun {
         {
             use std::os::unix::process::CommandExt;
             // SAFETY: `setsid` is async-signal-safe and touches no memory. It makes the shell the
-            // leader of a session and of a group of its own, which `killpg` reaches whole.
+            // leader of a session and of a group of its own: the session is what a stop reaches.
             unsafe {
                 shell_command.pre_exec(|| {
                     if libc::setsid() == -1 {
@@ -176,22 +197,19 @@ impl ShellRun {
         // cannot see the end of the output.
         drop(shell_command);
 
+        // The command is running by now, and a run that could not be put in a job (a very fast
+        // command can be gone before it is assigned) is still a run: it has no job to kill, and a
+        // stop reaches the shell alone.
         #[cfg(windows)]
-        let job = match Job::adopt(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                let mut child = child;
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
+        let job = Job::adopt(&child).ok();
         let shared = Arc::new(Shared {
             pid: child.id(),
             life: Mutex::new(Life::default()),
             finished: Condvar::new(),
             #[cfg(windows)]
             job,
+            #[cfg(windows)]
+            process: Process::of(&child),
         });
         // The waiter thread is blocked on this message, so the send fails only if it has died.
         if let Err(lost) = handoff.send((child, Arc::clone(&shared))) {
@@ -210,14 +228,14 @@ impl ShellRun {
         self.events.clone()
     }
 
-    /// The shell's process id (on Unix, also its process group's and its session's).
+    /// The shell's process id (on Unix, also its process group's and its session's id).
     #[must_use]
     pub fn pid(&self) -> u32 {
         self.shared.pid
     }
 
-    /// Asks the command to end: SIGTERM to its whole group, and SIGKILL after 2 s if the shell has
-    /// not ended by then. On Windows the job is terminated at once. Never waits.
+    /// Asks the command to end: SIGTERM to its whole session, and SIGKILL after 2 s if the shell
+    /// has not ended by then. On Windows the job is terminated at once. Never waits.
     pub fn stop(&self) {
         let mut life = self.shared.life();
         if life.finished {
@@ -234,7 +252,8 @@ impl ShellRun {
 }
 
 impl Drop for ShellRun {
-    /// Kills the group at once. Never waits: the waiter thread cleans up on its own.
+    /// Kills the whole session at once. Never waits (a scan of the processes takes a few
+    /// milliseconds): the waiter thread cleans up on its own.
     fn drop(&mut self) {
         let mut life = self.shared.life();
         if !life.finished {
@@ -258,15 +277,21 @@ struct Shared {
     life: Mutex<Life>,
     /// Notified when `life.finished` turns true.
     finished: Condvar,
+    /// What a stop and a leftover kill reach on Windows. `None` when the shell could not be put in
+    /// a job.
     #[cfg(windows)]
-    job: Job,
+    job: Option<Job>,
+    /// The shell's own handle, for a run without a job. It is the waiter's `Child` handle, valid
+    /// for as long as `life.finished` is false.
+    #[cfg(windows)]
+    process: Process,
 }
 
 #[derive(Default)]
 struct Life {
     /// The shell has been reaped and the leftover killed. Nothing is signalled after that: on Unix
-    /// the number that named the group is free to name an unrelated process group, and a chat block
-    /// can be dropped hours later.
+    /// the number that named the session is free to name an unrelated process group, and a chat
+    /// block can be dropped hours later.
     finished: bool,
     /// [`ShellRun::stop`] or the drop came while the shell was still there to be stopped.
     stopped: bool,
@@ -281,8 +306,13 @@ impl Shared {
         self.life.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Signals the shell's group, if it is still the shell's: the caller holds the lock, so no
-    /// reap can slip in between the check and the signal.
+    /// Signals the command, if it is still the shell's: the caller holds the lock, so no reap can
+    /// slip in between the check and the signal.
+    ///
+    /// On Unix the command is the shell's group (it, and whatever kept that group) and every
+    /// process of its session, found by a scan each time: a program that left the group for one of
+    /// its own (`timeout` does) is in the session still. The shell's pid is held by the unreaped
+    /// shell for as long as `finished` is false, and so is the session's id.
     fn signal(&self, life: &Life, signal: Signal) {
         if life.finished {
             return;
@@ -293,14 +323,28 @@ impl Shared {
                 Signal::Term => libc::SIGTERM,
                 Signal::Kill => libc::SIGKILL,
             };
-            // SAFETY: a plain syscall. Its error (ESRCH, a group that is already empty) is not one
-            // there is anything to do about.
-            unsafe { libc::killpg(self.pid as libc::pid_t, signal) };
+            let leader = self.pid as libc::pid_t;
+            if leader <= 1 {
+                // Not a shell of ours, and `killpg(0, ..)` would be the caller's own group.
+                return;
+            }
+            // SAFETY: plain syscalls. Their errors (ESRCH, a group or a process that is already
+            // gone) are not ones there is anything to do about.
+            unsafe { libc::killpg(leader, signal) };
+            for member in session_members(leader) {
+                // SAFETY: as above; `session_members` gives only pids above 1 other than ours.
+                unsafe { libc::kill(member, signal) };
+            }
         }
         #[cfg(windows)]
         {
             let _ = signal;
-            self.job.terminate();
+            match &self.job {
+                Some(job) => job.terminate(),
+                // No job: only the shell is reachable. Once it has exited this fails, and that is
+                // the whole of the leftover kill for such a run.
+                None => self.process.terminate(),
+            }
         }
     }
 
@@ -324,7 +368,15 @@ impl Shared {
                     )
                 };
                 if waited == 0 {
-                    return;
+                    let code = info.si_code;
+                    if matches!(code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED) {
+                        return;
+                    }
+                    // A stop or a continue is not an exit: macOS reports them even without
+                    // WSTOPPED (golang/go#19314). WNOWAIT leaves the event there to be reported
+                    // again, so wait a moment rather than spin.
+                    thread::sleep(STOPPED_POLL);
+                    continue;
                 }
                 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
@@ -343,7 +395,7 @@ impl Shared {
         }
     }
 
-    /// Kills what the shell left in its group, reaps the shell and lets signals stop.
+    /// Kills what the shell left in its session, reaps the shell and lets signals stop.
     fn end(&self, child: &mut Child) -> io::Result<ExitStatus> {
         let mut life = self.life();
         if life.finished {
@@ -380,11 +432,96 @@ impl Shared {
     }
 }
 
+/// Every process of the session `sid` that the shell's own `killpg` does not reach: the session's
+/// members outside the group `sid`, with the shell and `sid`'s group left out, and never this
+/// process or pid 1.
+///
+/// Found by a scan of every process, now: a session's members are not kept anywhere, and the ones
+/// that matter (a program that moved to a group of its own) are not the shell's children for long.
+/// A process that exits during the scan is simply missed or already gone; the pid cannot be taken
+/// by another session in between, as the unreaped shell holds `sid` (see `Life::finished`).
+#[cfg(target_os = "linux")]
+fn session_members(sid: libc::pid_t) -> Vec<libc::pid_t> {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    // SAFETY: `getpid` cannot fail.
+    let me = unsafe { libc::getpid() };
+    let mut members = Vec::new();
+    for process in processes.flatten() {
+        let name = process.file_name();
+        let Some(pid) = name.to_str().and_then(|name| name.parse::<libc::pid_t>().ok()) else {
+            continue;
+        };
+        if pid <= 1 || pid == me || pid == sid {
+            continue;
+        }
+        // A process that exits during the scan has no stat file any more.
+        let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        if let Some((group, session)) = parse_stat(&String::from_utf8_lossy(&stat))
+            && session == sid
+            && group != sid
+        {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+/// The process group and the session of a process, from its `/proc/<pid>/stat`:
+/// `pid (comm) state ppid pgrp session ...`. The name is whatever the process called itself,
+/// spaces and parentheses included, so the fields are counted from the last `)`.
+#[cfg(target_os = "linux")]
+fn parse_stat(stat: &str) -> Option<(libc::pid_t, libc::pid_t)> {
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    let mut fields = after_name.split_ascii_whitespace().skip(2);
+    let group = fields.next()?.parse().ok()?;
+    let session = fields.next()?.parse().ok()?;
+    Some((group, session))
+}
+
+/// macOS has no `/proc`: libproc lists the pids and `getsid` names the session of each one.
+#[cfg(target_os = "macos")]
+fn session_members(sid: libc::pid_t) -> Vec<libc::pid_t> {
+    // SAFETY: with no buffer, `proc_listallpids` only says how many pids there are.
+    let listed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let Ok(count) = usize::try_from(listed) else {
+        return Vec::new();
+    };
+    // Room for the processes born between the two calls.
+    let mut pids: Vec<libc::pid_t> = vec![0; count + count / 8 + 16];
+    let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    // SAFETY: the buffer is `bytes` long.
+    let filled = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    // libproc reports the number of pids it copied, not a byte count.
+    pids.truncate(usize::try_from(filled).unwrap_or(0));
+    // SAFETY: `getpid` cannot fail.
+    let me = unsafe { libc::getpid() };
+    pids.into_iter()
+        .filter(|&pid| pid > 1 && pid != me && pid != sid)
+        // SAFETY: plain syscalls; a process that is gone or not ours to ask gives -1, which is
+        // not `sid`.
+        .filter(|&pid| unsafe { libc::getsid(pid) } == sid && unsafe { libc::getpgid(pid) } != sid)
+        .collect()
+}
+
+/// Other Unixes have no scan here: a stop reaches the shell's group only.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn session_members(_sid: libc::pid_t) -> Vec<libc::pid_t> {
+    Vec::new()
+}
+
 /// Where the reader and the waiter put events, so that `Exited` is the last one.
 struct Outbox {
     events: Sender<ShellEvent>,
     /// True once `Exited` is on its way; held by the reader across a send.
     sealed: Mutex<bool>,
+    /// Counts what the reader gets done: a read that returned bytes, a send that completed.
+    progress: AtomicU64,
+    /// The reader is inside `read`, waiting for the pipe: not behind a consumer, not working.
+    reading: AtomicBool,
 }
 
 impl Outbox {
@@ -413,9 +550,16 @@ impl Outbox {
 fn read_output(mut pipe: io::PipeReader, outbox: &Outbox, _done: mpsc::Sender<()>) {
     let mut buffer = vec![0u8; CHUNK];
     loop {
-        match pipe.read(&mut buffer) {
+        outbox.reading.store(true, Ordering::SeqCst);
+        let read = pipe.read(&mut buffer);
+        outbox.reading.store(false, Ordering::SeqCst);
+        match read {
             Ok(0) => return,
-            Ok(read) => outbox.output(buffer[..read].to_vec()),
+            Ok(read) => {
+                outbox.progress.fetch_add(1, Ordering::SeqCst);
+                outbox.output(buffer[..read].to_vec());
+                outbox.progress.fetch_add(1, Ordering::SeqCst);
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => return,
         }
@@ -426,6 +570,28 @@ fn read_output(mut pipe: io::PipeReader, outbox: &Outbox, _done: mpsc::Sender<()
 fn reader_ended(reader: &mpsc::Receiver<()>, within: Duration) -> bool {
     // The reader never sends: its end is its sender being dropped.
     matches!(reader.recv_timeout(within), Err(RecvTimeoutError::Disconnected))
+}
+
+/// Waits for the reader thread to end, for as long as it is getting somewhere: bytes arriving from
+/// the pipe, or chunks going to a consumer that is behind (however long that takes). What ends the
+/// wait early is a reader that has sat in `read` for `silence` with nothing arriving, which is a
+/// process outside the session that holds the pipe and says nothing.
+fn wait_for_reader(reader: &mpsc::Receiver<()>, outbox: &Outbox, silence: Duration) {
+    let mut seen = outbox.progress.load(Ordering::SeqCst);
+    let mut silent_since: Option<Instant> = None;
+    loop {
+        // The reader never sends: its end is its sender being dropped.
+        if !matches!(reader.recv_timeout(DRAIN_STEP), Err(RecvTimeoutError::Timeout)) {
+            return;
+        }
+        let progress = outbox.progress.load(Ordering::SeqCst);
+        if progress != seen || !outbox.reading.load(Ordering::SeqCst) {
+            seen = progress;
+            silent_since = None;
+        } else if silent_since.get_or_insert_with(Instant::now).elapsed() >= silence {
+            return;
+        }
+    }
 }
 
 /// The waiter thread: from the shell's exit to the last event.
@@ -440,7 +606,7 @@ fn wait_for_shell(
     let stopped = shared.life().stopped;
     reader_ended(reader, GRACE);
     let status = shared.end(&mut child);
-    reader_ended(reader, DRAIN);
+    wait_for_reader(reader, outbox, DRAIN);
     outbox.finish(ShellEvent::Exited {
         code: Some(exit_code(status)),
         stopped,
@@ -459,6 +625,31 @@ fn exit_code(status: io::Result<ExitStatus>) -> i32 {
         }
     }
     status.code().unwrap_or(-1)
+}
+
+/// The shell's process handle, borrowed from the `Child` the waiter holds.
+#[cfg(windows)]
+struct Process(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: a process handle is a kernel handle, usable from any thread; `Shared::life` says for how
+// long the `Child` it belongs to is there.
+#[cfg(windows)]
+unsafe impl Send for Process {}
+#[cfg(windows)]
+unsafe impl Sync for Process {}
+
+#[cfg(windows)]
+impl Process {
+    fn of(child: &Child) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        Self(child.as_raw_handle() as _)
+    }
+
+    fn terminate(&self) {
+        // SAFETY: the caller holds `Shared::life` with `finished` false, so the `Child` that owns
+        // the handle is alive. Terminating a process that has exited fails, harmlessly.
+        unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.0, 1) };
+    }
 }
 
 /// A job object that kills everything in it when its last handle closes, and on `terminate`.
@@ -518,13 +709,16 @@ impl Drop for Job {
     }
 }
 
-// macOS picks /bin/zsh, which always exists, so this is the Linux and BSD rule.
-#[cfg(all(test, unix, not(target_os = "macos")))]
+#[cfg(all(test, unix))]
 mod tests {
-    use super::*;
-
+    // macOS picks /bin/zsh, which always exists, so this is the Linux and BSD rule.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn shell_choice_falls_back_from_bash_to_sh() {
+        use super::choose_shell;
+        use std::ffi::OsStr;
+        use std::path::Path;
+
         let has_bash = |path: &Path| path == Path::new("/bin/bash");
         let has_neither = |_: &Path| false;
         assert_eq!(choose_shell(None, has_bash), OsStr::new("/bin/bash"));
@@ -535,5 +729,17 @@ mod tests {
             choose_shell(Some(OsStr::new("/usr/bin/fish")), has_bash),
             OsStr::new("/usr/bin/fish")
         );
+    }
+
+    /// The name of a process is whatever it called itself: spaces, parentheses and all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_is_read_from_the_last_parenthesis() {
+        use super::parse_stat;
+
+        assert_eq!(parse_stat("4242 (bash) S 4000 4242 4242 34816 4242"), Some((4242, 4242)));
+        assert_eq!(parse_stat("77 (a) b (c d) R 1 55 66 0 -1 0"), Some((55, 66)));
+        assert_eq!(parse_stat("77 (x) Z 1 2"), None);
+        assert_eq!(parse_stat("77 no parentheses"), None);
     }
 }

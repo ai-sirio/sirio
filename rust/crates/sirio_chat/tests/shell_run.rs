@@ -9,6 +9,9 @@ use sirio_chat::shell::ShellRun;
 
 #[cfg(unix)]
 mod unix {
+    use std::cell::Cell;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     use async_channel::Receiver;
@@ -76,31 +79,97 @@ mod unix {
         String::from_utf8_lossy(&seen).trim().parse().expect("a pid")
     }
 
-    /// Kills the pid when a test ends, so an assertion that fails does not leave it running.
-    struct KillOnDrop(i32);
+    /// A process a test must not leave behind. It is killed at the end of a test that panics,
+    /// unless the test has seen it gone: a pid that is gone may be anyone's by now, and a test
+    /// that passed has nothing to clean up.
+    struct Stray {
+        pid: i32,
+        seen_gone: Cell<bool>,
+    }
 
-    impl Drop for KillOnDrop {
-        fn drop(&mut self) {
-            // SAFETY: a plain syscall; a pid that is gone just answers ESRCH.
-            unsafe { libc::kill(self.0, libc::SIGKILL) };
+    impl Stray {
+        fn new(pid: i32) -> Self {
+            Self { pid, seen_gone: Cell::new(false) }
+        }
+
+        /// Whether the process is gone, giving init up to 2 s to reap a killed orphan: a zombie
+        /// still answers `kill(pid, 0)`.
+        fn is_gone(&self) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                // SAFETY: signal 0 only checks that the pid exists.
+                let alive = unsafe { libc::kill(self.pid, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+                if !alive {
+                    self.seen_gone.set(true);
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 
-    /// Whether `pid` is gone, giving init up to 2 s to reap a killed orphan: a zombie still
-    /// answers `kill(pid, 0)`.
-    fn gone(pid: i32) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            // SAFETY: signal 0 only checks that the pid exists.
-            let alive = unsafe { libc::kill(pid, 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-            if !alive {
-                return true;
+    impl Drop for Stray {
+        fn drop(&mut self) {
+            if std::thread::panicking() && !self.seen_gone.get() {
+                // SAFETY: a plain syscall on a pid this test started and has not seen gone.
+                unsafe { libc::kill(self.pid, libc::SIGKILL) };
             }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A file a command creates when it is ready, removed when the test ends.
+    struct Marker(PathBuf);
+
+    impl Marker {
+        fn new(name: &str) -> Self {
+            let file = format!("sirio-shell-run-{}-{name}", std::process::id());
+            Self(std::env::temp_dir().join(file))
+        }
+    }
+
+    impl Drop for Marker {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// A command that moves out of the shell's process group into one of its own, stays in the
+    /// shell's session (it does not call `setsid`: what stays in the session is what a stop must
+    /// reach), and then sleeps; `timeout` does exactly this under a shell. It prints its pid, then
+    /// creates `mark`. `None` when there is neither perl nor python3 to do it with.
+    fn own_group_sleeper(mark: &Path) -> Option<String> {
+        let has = |program: &str| {
+            Command::new(program)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let mark = mark.display();
+        if has("perl") {
+            Some(format!(
+                concat!(
+                    r#"perl -e 'setpgrp(0, 0); $| = 1; print "$$\n"; "#,
+                    r#"open(F, ">", $ARGV[0]); close(F); exec "sleep", "300"' '{mark}'"#
+                ),
+                mark = mark
+            ))
+        } else if has("python3") {
+            Some(format!(
+                concat!(
+                    r#"python3 -c 'import os, sys; os.setpgid(0, 0); "#,
+                    r#"print(os.getpid(), flush=True); open(sys.argv[1], "w").close(); "#,
+                    r#"os.execvp("sleep", ["sleep", "300"])' '{mark}'"#
+                ),
+                mark = mark
+            ))
+        } else {
+            None
         }
     }
 
@@ -119,7 +188,6 @@ mod unix {
     #[test]
     fn stdin_is_null() {
         let run = ShellRun::start("cat", &cwd()).expect("starts");
-        let _cleanup = KillOnDrop(run.pid() as i32);
         let done = finish(&run.events(), Duration::from_secs(2));
         assert_eq!((done.code, done.stopped), (Some(0), false));
     }
@@ -140,40 +208,73 @@ mod unix {
     fn stop_kills_the_whole_group() {
         let run = ShellRun::start("sleep 300 & echo $!; sleep 300", &cwd()).expect("starts");
         let events = run.events();
-        let child = read_pid(&events);
-        let _cleanup = (KillOnDrop(child), KillOnDrop(run.pid() as i32));
+        let child = Stray::new(read_pid(&events));
         run.stop();
         let done = finish(&events, Duration::from_secs(3));
         // A signal's death is the shell's own `$?`: 128 plus the signal.
         assert_eq!((done.code, done.stopped), (Some(128 + libc::SIGTERM), true));
-        assert!(gone(run.pid() as i32), "the shell is gone");
-        assert!(gone(child), "the background sleep is gone");
+        assert!(Stray::new(run.pid() as i32).is_gone(), "the shell is gone");
+        assert!(child.is_gone(), "the background sleep is gone");
     }
 
     #[test]
     fn drop_kills_the_whole_group() {
         let run = ShellRun::start("sleep 300 & echo $!; sleep 300", &cwd()).expect("starts");
         let events = run.events();
-        let child = read_pid(&events);
-        let shell = run.pid() as i32;
-        let _cleanup = (KillOnDrop(child), KillOnDrop(shell));
+        let child = Stray::new(read_pid(&events));
+        let shell = Stray::new(run.pid() as i32);
         drop(run);
         let done = finish(&events, Duration::from_secs(3));
         assert_eq!((done.code, done.stopped), (Some(128 + libc::SIGKILL), true));
-        assert!(gone(shell), "the shell is gone");
-        assert!(gone(child), "the background sleep is gone");
+        assert!(shell.is_gone(), "the shell is gone");
+        assert!(child.is_gone(), "the background sleep is gone");
     }
 
     #[test]
     fn background_job_does_not_hold_the_block() {
         let run = ShellRun::start("sleep 30 & echo $!", &cwd()).expect("starts");
         let events = run.events();
-        let _cleanup = KillOnDrop(run.pid() as i32);
+        let child = Stray::new(read_pid(&events));
         let done = finish(&events, Duration::from_secs(1));
         assert_eq!((done.code, done.stopped), (Some(0), false));
-        let child: i32 = String::from_utf8_lossy(&done.output).trim().parse().expect("a pid");
-        let _cleanup = KillOnDrop(child);
-        assert!(gone(child), "the background sleep is gone");
+        assert!(child.is_gone(), "the background sleep is gone");
+    }
+
+    #[test]
+    fn stop_reaches_a_child_in_a_group_of_its_own() {
+        let mark = Marker::new("stop");
+        let Some(sleeper) = own_group_sleeper(&mark.0) else {
+            eprintln!("SKIP: neither perl nor python3 is here to leave the shell's group");
+            return;
+        };
+        // The `; echo done` keeps the shell from running the sleeper in its own place.
+        let run = ShellRun::start(&format!("{sleeper}; echo done"), &cwd()).expect("starts");
+        let events = run.events();
+        let child = Stray::new(read_pid(&events));
+        run.stop();
+        let done = finish(&events, Duration::from_secs(3));
+        assert!(done.stopped);
+        assert!(child.is_gone(), "the child in a group of its own is gone");
+    }
+
+    #[test]
+    fn leftover_kill_reaches_a_child_in_a_group_of_its_own() {
+        let mark = Marker::new("leftover");
+        let Some(sleeper) = own_group_sleeper(&mark.0) else {
+            eprintln!("SKIP: neither perl nor python3 is here to leave the shell's group");
+            return;
+        };
+        // The shell waits for the child to be in its group, then ends with the child still running.
+        let command = format!(
+            "{sleeper} & until [ -e '{}' ]; do sleep 0.02; done; echo started",
+            mark.0.display()
+        );
+        let run = ShellRun::start(&command, &cwd()).expect("starts");
+        let events = run.events();
+        let child = Stray::new(read_pid(&events));
+        let done = finish(&events, Duration::from_millis(1500));
+        assert_eq!((done.code, done.stopped), (Some(0), false));
+        assert!(child.is_gone(), "the child in a group of its own is gone");
     }
 }
 
