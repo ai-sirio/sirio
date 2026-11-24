@@ -429,12 +429,12 @@ impl PromptInput {
 
     /// Draws a host's editor (see [`Self::custom`]) as a band across the
     /// bottom of its pane instead of a card: as wide as its parent, with a 1px
-    /// top rule in `border`, no radius, the theme's `surface` as its fill and
-    /// 12px of side padding, 10px above and 8px below. Its content sits in a
-    /// centred column at most `column` wide. The tool row never wraps: the
-    /// tools stay at the start in a group that does not shrink, and the
-    /// trailing tools and send stay at the end in a group that may shrink.
-    /// Without a host editor this does nothing.
+    /// top rule in `border` (unless [`Self::band_rule`] sets it), no radius,
+    /// the theme's `surface` as its fill and 12px of side padding, 10px above
+    /// and 8px below. Its content sits in a centred column at most `column`
+    /// wide. The tool row never wraps: the tools stay at the start in a group
+    /// that does not shrink, and the trailing tools and send stay at the end
+    /// in a group that may shrink. Without a host editor this does nothing.
     pub fn band(mut self, column: Pixels) -> Self {
         self.band = Some(column);
         self

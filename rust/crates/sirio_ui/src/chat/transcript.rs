@@ -713,6 +713,15 @@ impl Chat {
                     )
                     .into_any_element()
             }
+            Entry::Shell(block) => shell_block::render(
+                &block,
+                entry_index,
+                source_start,
+                &interaction,
+                entity.clone(),
+                tool_output_scroll,
+                theme,
+            ),
             Entry::TurnFooter(at) => {
                 let facts = div()
                     .w_full()

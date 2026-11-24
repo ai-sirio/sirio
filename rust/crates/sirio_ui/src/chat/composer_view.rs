@@ -517,6 +517,7 @@ impl Chat {
         mention_token(&self.draft, self.draft_caret).is_some()
             && !self.mention_filter.filtered().is_empty()
             && !self.recall_shown()
+            && !shell_block::shell_mode(&self.draft)
     }
 
     /// `up`: the popup's row when one is open, otherwise the history's
@@ -1000,7 +1001,21 @@ impl Chat {
                 .update(cx, |field, cx| field.set_placeholder(placeholder, cx));
         }
         let disabled = self.composer_disabled();
-        let can_send = self.can_send();
+        // A command runs whatever state the agent is in, so its Send is ready with the command
+        // typed (Enter does not ask `can_send`).
+        let shell_mode = shell_block::shell_mode(&self.draft);
+        let can_send = self.can_send()
+            || (shell_mode
+                && shell_block::shell_command(&self.draft).is_some()
+                && self.pending_question().is_none());
+        // The band's top rule is lighter and stronger while the draft is a command.
+        let band_rule = if shell_mode {
+            theme.sirio.ring
+        } else {
+            theme.ely.border
+        };
+        self.composer_row.shell_mode.set(shell_mode);
+        self.composer_row.band_rule.set(Some(band_rule));
         let entity = cx.entity();
 
         let send_entity = entity.clone();
@@ -1469,6 +1484,9 @@ impl Chat {
         })
         .band(px(BAND_COLUMN))
         .send_probe(move |bounds| send_frame.send.set(Some(bounds)));
+        if shell_mode {
+            prompt = prompt.band_rule(band_rule);
+        }
         if streaming {
             // While a turn runs the send control is stop: the same path Escape
             // takes, and it leaves the draft alone.

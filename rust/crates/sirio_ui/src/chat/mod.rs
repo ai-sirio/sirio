@@ -75,6 +75,7 @@ mod retry;
 mod reveal;
 mod visible_text;
 mod session_panel;
+mod shell_block;
 mod usage_card;
 mod widget_asks;
 pub(crate) use widget_asks::WIDGET_ASK_BASE;
@@ -319,7 +320,7 @@ fn is_aside(entry: &Entry) -> bool {
         Entry::Notice {
             kind: NoticeKind::Compaction | NoticeKind::BackgroundTask | NoticeKind::Warning,
             ..
-        }
+        } | Entry::Shell(_)
     )
 }
 
@@ -685,6 +686,10 @@ enum Entry {
         text: String,
         report: Option<sirio_chat::UsageReport>,
     },
+    /// A shell command the user ran from the composer with a `!` draft: its output and how it
+    /// ended. An aside, like a notice: a reply that is streaming keeps joining its own entry
+    /// past it.
+    Shell(shell_block::ShellBlock),
     /// A transport failure, surfaced instead of silently doing nothing.
     Error {
         message: String,
@@ -800,6 +805,9 @@ pub enum TranscriptAction {
     ToggleTurn(usize),
     /// Presses the Retry of the error row at this entry index. Refused when the row has none.
     Retry(usize),
+    /// Presses Show all / Show less on the shell block at this entry index. Refused when the entry
+    /// is not a block, or the block draws no such control.
+    ToggleShell(usize),
     /// Presses Continue, which sits on no row of the caller's choosing: refused when the last
     /// turn did not stop short, or Continue is hidden for the agent's state.
     Continue,
@@ -921,6 +929,7 @@ impl Entry {
             Self::CommandOutput { command, text, .. } => {
                 format!("{}\n{text}", command_label(command))
             }
+            Self::Shell(block) => block.plain_text(),
             Self::Error { message, .. } => message.clone(),
         }
     }
@@ -1136,6 +1145,9 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
         // The account's state at a moment in time, like a warning: restored
         // later it would state numbers that are no longer true.
         Entry::CommandOutput { .. } => None,
+        // Not stored yet: a block is kept with the turn it belongs to once its context travels
+        // with the next prompt.
+        Entry::Shell(_) => None,
         // A live request: restored tomorrow it would offer an answer to a
         // server that is no longer waiting.
         Entry::Elicitation { .. } => None,
@@ -2206,6 +2218,10 @@ pub struct Chat {
     /// transcript's Quote button sets it, replacing any held; a new or opened conversation clears
     /// it. In memory only.
     quote: Option<quote::Quote>,
+    /// The shell commands this chat is running (`!cmd` drafts), by their block's id. A run that is
+    /// dropped kills its whole session, which is how a closed tab, a new conversation and the
+    /// app's quit end a command: the chat's release and `on_app_quit` clear this map.
+    shell_runs: HashMap<u64, sirio_chat::shell::ShellRun>,
     /// Quoting asks for the composer's focus, which only a render can give: the press and the
     /// control socket's verb have no window. Read, and cleared, by the next render.
     composer_focus_wanted: bool,
@@ -2676,7 +2692,19 @@ impl Chat {
             .detach();
         // Every way of closing a chat comes to its release: no widget outlives it with an ask
         // open.
-        cx.on_release(|chat: &mut Self, cx| chat.release_widgets(cx)).detach();
+        cx.on_release(|chat: &mut Self, cx| {
+            chat.release_widgets(cx);
+            // A command does not outlive the chat it was run in.
+            chat.kill_shell_runs();
+        })
+        .detach();
+        // A quit does not release every entity, so the release above would not end the commands
+        // of a chat that is still open.
+        cx.on_app_quit(|chat: &mut Self, _| {
+            chat.kill_shell_runs();
+            std::future::ready(())
+        })
+        .detach();
 
         // A restored native chat holds the session it resumes from the
         // start: the tab strip's save reads it, and a CLI that names its
@@ -2744,6 +2772,7 @@ impl Chat {
             last_prompt: None,
             continue_reason: None,
             quote: None,
+            shell_runs: HashMap::new(),
             composer_focus_wanted: false,
             #[cfg(debug_assertions)]
             action_bounds: Rc::default(),
@@ -3573,7 +3602,11 @@ impl Chat {
         let index = self.entries.len();
         self.turn_message_ids.push(None);
         let following_tail = self.list_state.is_following_tail();
-        if !matches!(entry, Entry::Thought { .. } | Entry::Notice { .. }) {
+        // A command's block, like a notice, says nothing about the thought above it.
+        if !matches!(
+            entry,
+            Entry::Thought { .. } | Entry::Notice { .. } | Entry::Shell(_)
+        ) {
             self.settle_open_thought();
         }
         self.entries.push(entry);
@@ -4871,6 +4904,8 @@ impl Chat {
                 // A reply's length is read off its parsed text: no walk, no copy, per frame.
                 let length = match entry {
                     Entry::Assistant { document, .. } => document.text.text.len(),
+                    // The block's text is worked out when its output changes, not per frame.
+                    Entry::Shell(block) => block.plain_len(),
                     _ => entry.plain_text().len(),
                 };
                 let range = offset..offset + length;
@@ -5483,6 +5518,18 @@ impl Chat {
                 }
                 self.retry(entry, cx);
             }
+            TranscriptAction::ToggleShell(entry) => {
+                if !matches!(self.entries.get(entry), Some(Entry::Shell(_))) {
+                    return Err("surface.chat.transcript toggleShell: entry is not a shell block"
+                        .to_string());
+                }
+                if !self.toggle_shell(entry, cx) {
+                    return Err(
+                        "surface.chat.transcript toggleShell: the block has no Show all or Show less"
+                            .to_string(),
+                    );
+                }
+            }
             TranscriptAction::Continue => {
                 if self.continue_action_now() == retry::RetryAction::None {
                     return Err(format!(
@@ -5653,6 +5700,9 @@ impl Chat {
         let old_count = self.entries.len();
         // The widgets go, and their asks are denied, before the cards are cleared with the rest.
         self.close_widgets(cx);
+        // A command's block goes with the entries, and so does the command behind it: nothing
+        // would be left to stop it.
+        self.kill_shell_runs();
         self.entries.clear();
         self.limit_card = None;
         self.reveal = None;
@@ -6669,6 +6719,8 @@ impl Chat {
         let old_count = self.entries.len();
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.close_widgets(cx);
+        // The blocks go with the entries, and so do the commands behind them.
+        self.kill_shell_runs();
         self.entries.clear();
         self.limit_card = None;
         self.reveal = None;
@@ -6790,6 +6842,12 @@ impl Chat {
         // composer out of service entirely — no send, no queueing — until
         // it is answered from its own card in the transcript.
         if self.pending_question().is_some() {
+            return;
+        }
+        // A draft that starts with `!` is a command, whatever the agent is doing: it never
+        // queues, never waits for `can_send` and never reaches the agent as a prompt.
+        if shell_block::shell_mode(&self.draft) {
+            self.run_shell_draft(cx);
             return;
         }
         // D-CHAT-03: Enter while a turn runs queues the draft for the next
@@ -7422,7 +7480,9 @@ impl Chat {
             self.mention_candidates.clear();
             self.mention_filter = Filter::new(Vec::new());
             cx.notify();
-        } else {
+        } else if !self.stop_running_shells(cx) {
+            // The first Escape ends the commands and leaves a turn that is streaming alone; the
+            // next one, with no command running, ends the turn.
             self.cancel_turn(cx);
         }
     }
@@ -7439,8 +7499,9 @@ impl Chat {
             }
             self.last_slash_token = slash;
         }
-        // A prompt ↑ brought back opens no popup: its tokens are history.
-        let mention = if self.recall_shown() {
+        // A prompt ↑ brought back opens no popup: its tokens are history. Nor does a command
+        // (`!git log @{u}`): it is not a prompt, and no path is lifted from it.
+        let mention = if self.recall_shown() || shell_block::shell_mode(&self.draft) {
             None
         } else {
             mention_token(&self.draft, self.draft_caret).map(|(_, token)| token.to_string())
@@ -9080,6 +9141,18 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                 );
                 row.insert("headline".into(), usage_card::headline(report, &now));
             }
+        }
+        Entry::Shell(block) => {
+            row.insert("kind".into(), "shell".into());
+            row.insert("command".into(), block.command.clone());
+            row.insert("status".into(), block.status().into());
+            if let Some(exit) = block.exit() {
+                row.insert("exit".into(), exit.to_string());
+            }
+            row.insert("sent".into(), block.sent.to_string());
+            row.insert("lines".into(), block.total_lines().to_string());
+            row.insert("expanded".into(), block.expanded.to_string());
+            row.insert("output".into(), block.drawn_output().to_string());
         }
         Entry::Error { message, .. } => {
             row.insert("kind".into(), "error".into());

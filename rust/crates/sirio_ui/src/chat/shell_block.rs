@@ -1,0 +1,843 @@
+//! The block a `!` draft makes in the transcript: the command, its output while it runs and after,
+//! and how it ended. The command itself is `sirio_chat::shell::ShellRun`; this is its place in the
+//! chat (`Entry::Shell`), the task that carries its output into the block, and the drawing.
+//!
+//! Output never reaches the UI thread byte by byte. A task on the background executor drains the
+//! run's channel, keeps the command's [`ShellOutput`] and, at most every [`REPAINT_EVERY`] (and once
+//! when the command ends), hands the block a [`ShellUpdate`]: the output as it stands, and what a
+//! frame needs of it (the folded tail and the line counts), already worked out. A frame therefore
+//! never normalises output, and a command that writes as fast as it can (`yes`) costs the UI thread
+//! one update per tick. Reading is never throttled: a slow reader would hold the command back
+//! through the full pipe.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures::{FutureExt as _, StreamExt as _, select_biased};
+use gpui::{Div, Stateful};
+use sirio_chat::shell::output::ShellOutput;
+use sirio_chat::shell::{ShellEvent, ShellRun};
+
+use super::*;
+use ely_gpui_component::buttons::{Button, ButtonVariant};
+use ely_gpui_component::motion::Spinner;
+use ely_gpui_component::theme::ControlSize;
+
+/// How many lines a block shows folded: the last ones.
+pub(super) const FOLD_LINES: usize = 40;
+
+/// The least time between two updates of a running block's output on screen.
+const REPAINT_EVERY: Duration = Duration::from_millis(100);
+
+/// The tallest the expanded body grows before it scrolls.
+const EXPANDED_MAX_HEIGHT: f32 = 360.0;
+
+/// The most characters of a command a tooltip shows.
+const TOOLTIP_CHARS: usize = 2_000;
+
+/// What the next process-wide id is.
+static NEXT_SHELL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A block's identity for as long as the process runs: the entry's index can move, this does not.
+pub(super) fn next_shell_id() -> u64 {
+    NEXT_SHELL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether `draft` is in command mode: its first character is `!`. Leading whitespace does not
+/// count, so ` !important` is an ordinary prompt.
+pub(super) fn shell_mode(draft: &str) -> bool {
+    draft.starts_with('!')
+}
+
+/// The command a command-mode draft runs: what follows the `!`, as typed. `None` when that is
+/// blank (a bare `!`) or the draft is not in command mode.
+pub(super) fn shell_command(draft: &str) -> Option<&str> {
+    let command = draft.strip_prefix('!')?;
+    (!command.trim().is_empty()).then_some(command)
+}
+
+/// Where a block stands.
+#[derive(Clone, Debug)]
+pub(super) enum ShellState {
+    Running {
+        started: Instant,
+    },
+    Finished {
+        /// The shell's exit status; a signal's death is `128 + signal`. `None` for a command that
+        /// never started.
+        exit: Option<i32>,
+        /// The user stopped it (Stop, Esc), or the chat went away under it.
+        stopped: bool,
+        /// The command could not start (`Could not run: …`).
+        failed: bool,
+        duration_ms: u64,
+    },
+}
+
+/// How a command ended, as the task that watches it reports it.
+#[derive(Clone, Copy, Debug)]
+struct ShellExit {
+    code: Option<i32>,
+    stopped: bool,
+    duration_ms: u64,
+}
+
+/// What the block is handed, at most every [`REPAINT_EVERY`] and when the command ends.
+pub(super) struct ShellUpdate {
+    output: Arc<ShellOutput>,
+    /// The last [`FOLD_LINES`] lines.
+    folded: String,
+    kept_lines: usize,
+    total_lines: u64,
+    exit: Option<ShellExit>,
+}
+
+/// One shell command as the transcript holds it. Cheap to clone: a frame clones the entry it draws.
+#[derive(Clone, Debug)]
+pub(super) struct ShellBlock {
+    pub(super) id: u64,
+    /// What the user typed after the `!`, as typed.
+    pub(super) command: String,
+    /// The output as of the last update. Not drawn directly: see `drawn`.
+    output: Arc<ShellOutput>,
+    pub(super) state: ShellState,
+    /// The agent has been given this block with a prompt. Always false until the carry exists.
+    pub(super) sent: bool,
+    pub(super) expanded: bool,
+    /// The last [`FOLD_LINES`] lines of `output`, as the last update brought them.
+    folded: SharedString,
+    /// What the body draws: `folded`, or every line kept while `expanded`. Worked out when the
+    /// output or `expanded` changes, never in a frame.
+    drawn: SharedString,
+    kept_lines: usize,
+    total_lines: u64,
+    /// Stop has been pressed: a command that is on its way out is not one Escape stops again.
+    stop_asked: bool,
+}
+
+impl ShellBlock {
+    fn with_output(command: String, output: ShellOutput, state: ShellState) -> Self {
+        let folded = SharedString::from(output.tail(FOLD_LINES));
+        Self {
+            id: next_shell_id(),
+            command,
+            kept_lines: output.kept_lines(),
+            total_lines: output.total_lines(),
+            output: Arc::new(output),
+            state,
+            sent: false,
+            expanded: false,
+            drawn: folded.clone(),
+            folded,
+            stop_asked: false,
+        }
+    }
+
+    /// A command that has just been started and has printed nothing yet.
+    pub(super) fn running(command: String) -> Self {
+        Self::with_output(
+            command,
+            ShellOutput::default(),
+            ShellState::Running {
+                started: Instant::now(),
+            },
+        )
+    }
+
+    /// A command that could not start: a finished block with no exit status, whose only line says
+    /// why.
+    pub(super) fn could_not_start(command: String, error: &std::io::Error) -> Self {
+        Self::with_output(
+            command,
+            ShellOutput::from_text(&format!("Could not run: {error}"), 1),
+            ShellState::Finished {
+                exit: None,
+                stopped: false,
+                failed: true,
+                duration_ms: 0,
+            },
+        )
+    }
+
+    pub(super) fn is_finished(&self) -> bool {
+        matches!(self.state, ShellState::Finished { .. })
+    }
+
+    /// When a running command was started.
+    fn started(&self) -> Option<Instant> {
+        match self.state {
+            ShellState::Running { started } => Some(started),
+            ShellState::Finished { .. } => None,
+        }
+    }
+
+    /// What the body draws, which the read row reports as the block's `output`.
+    pub(super) fn drawn_output(&self) -> &str {
+        &self.drawn
+    }
+
+    /// Every line the command produced (the lines dropped past the memory cap included).
+    pub(super) fn total_lines(&self) -> u64 {
+        self.total_lines
+    }
+
+    /// The shell's exit status, once it has one.
+    pub(super) fn exit(&self) -> Option<i32> {
+        match self.state {
+            ShellState::Finished { exit, .. } => exit,
+            ShellState::Running { .. } => None,
+        }
+    }
+
+    /// `running`, `exited`, `stopped` or `failed`, for the read row.
+    pub(super) fn status(&self) -> &'static str {
+        match self.state {
+            ShellState::Running { .. } => "running",
+            ShellState::Finished { failed: true, .. } => "failed",
+            ShellState::Finished { stopped: true, .. } => "stopped",
+            ShellState::Finished { .. } => "exited",
+        }
+    }
+
+    /// The label of the control under the body, `None` when the block has nothing more to show.
+    /// Compared with saturation: the kept lines can be one more than the command's (a marker, an
+    /// unfinished line), and a restored block can have kept fewer than it produced.
+    pub(super) fn fold_control(&self) -> Option<String> {
+        let dropped = self.total_lines.saturating_sub(self.kept_lines as u64) > 0;
+        if self.kept_lines <= FOLD_LINES && !dropped {
+            return None;
+        }
+        Some(if self.expanded {
+            "Show less".to_string()
+        } else {
+            format!("Show all {} lines", self.total_lines)
+        })
+    }
+
+    /// Takes an update from the task that watches the command. Returns whether the command ended.
+    pub(super) fn apply(&mut self, update: ShellUpdate) -> bool {
+        self.output = update.output;
+        self.folded = update.folded.into();
+        self.kept_lines = update.kept_lines;
+        self.total_lines = update.total_lines;
+        let ended = update.exit.is_some();
+        if let Some(exit) = update.exit {
+            self.state = ShellState::Finished {
+                exit: exit.code,
+                stopped: exit.stopped,
+                failed: false,
+                duration_ms: exit.duration_ms,
+            };
+        }
+        self.refresh_drawn();
+        ended
+    }
+
+    /// Flips between the folded tail and everything kept.
+    pub(super) fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+        self.refresh_drawn();
+    }
+
+    fn refresh_drawn(&mut self) {
+        self.drawn = if self.expanded {
+            SharedString::from(self.output.text())
+        } else {
+            self.folded.clone()
+        };
+    }
+
+    /// `exit 3 · 0.4s`, `Stopped · 2.0s` or just `0.4s`: what the footer says of how it ended.
+    /// `None` while it runs and for a command that never started.
+    fn footer_text(&self) -> Option<String> {
+        let ShellState::Finished {
+            exit,
+            stopped,
+            failed,
+            duration_ms,
+        } = self.state
+        else {
+            return None;
+        };
+        if failed {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if stopped {
+            parts.push("Stopped".to_string());
+        } else if let Some(code) = exit.filter(|code| *code != 0) {
+            parts.push(format!("exit {code}"));
+        }
+        parts.push(duration_text(duration_ms));
+        Some(parts.join(" · "))
+    }
+
+    /// The block as the transcript's selection reads it (`Entry::plain_text`): the command, the
+    /// body, the footer's words. What a copy takes, and the offset space the drawn text sits in.
+    pub(super) fn plain_text(&self) -> String {
+        let mut text = format!("! {}", self.command);
+        if !self.drawn.is_empty() {
+            text.push('\n');
+            text.push_str(&self.drawn);
+        }
+        if let Some(footer) = self.footer_text() {
+            text.push('\n');
+            text.push_str(&footer);
+        }
+        text
+    }
+
+    /// `plain_text().len()`, for the per-frame sum of the transcript's offsets.
+    pub(super) fn plain_len(&self) -> usize {
+        let mut len = 2 + self.command.len();
+        if !self.drawn.is_empty() {
+            len += 1 + self.drawn.len();
+        }
+        if let Some(footer) = self.footer_text() {
+            len += 1 + footer.len();
+        }
+        len
+    }
+}
+
+/// `412ms`, `3.1s`, `5m 02s`.
+fn duration_text(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let seconds = ms / 1000;
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+/// The command on one line, for the header: its lines trimmed and joined by `↵`.
+fn header_line(command: &str) -> String {
+    command
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ↵ ")
+}
+
+/// The command as a tooltip shows it: all of it, within [`TOOLTIP_CHARS`].
+fn tooltip_text(command: &str) -> String {
+    let mut shown: String = command.chars().take(TOOLTIP_CHARS).collect();
+    if shown.len() < command.len() {
+        shown.push('…');
+    }
+    shown
+}
+
+/// What stands between a command's output and the block that shows it. Everything here runs on the
+/// background executor.
+struct Pump {
+    output: ShellOutput,
+    /// Output has arrived that no update has carried to the block yet.
+    dirty: bool,
+    /// When the last update went.
+    sent: Instant,
+    started: Instant,
+    exit: Option<ShellExit>,
+}
+
+impl Pump {
+    fn new(started: Instant) -> Self {
+        Self {
+            output: ShellOutput::default(),
+            dirty: false,
+            // The first output is shown at once.
+            sent: started.checked_sub(REPAINT_EVERY).unwrap_or(started),
+            started,
+            exit: None,
+        }
+    }
+
+    fn take(&mut self, event: ShellEvent) {
+        match event {
+            ShellEvent::Output(bytes) => self.output.push(&bytes),
+            ShellEvent::Exited { code, stopped } => {
+                self.output.finish();
+                self.exit = Some(ShellExit {
+                    code,
+                    stopped,
+                    duration_ms: self.started.elapsed().as_millis() as u64,
+                });
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Whether an update should go now: something is waiting, and the command ended or the last
+    /// update is old enough.
+    fn due(&self) -> bool {
+        self.dirty && (self.exit.is_some() || self.sent.elapsed() >= REPAINT_EVERY)
+    }
+
+    /// How long until the output that is waiting is due.
+    fn wait(&self) -> Duration {
+        REPAINT_EVERY.saturating_sub(self.sent.elapsed())
+    }
+
+    fn update(&mut self) -> ShellUpdate {
+        self.dirty = false;
+        self.sent = Instant::now();
+        ShellUpdate {
+            folded: self.output.tail(FOLD_LINES),
+            kept_lines: self.output.kept_lines(),
+            total_lines: self.output.total_lines(),
+            output: Arc::new(self.output.clone()),
+            exit: self.exit,
+        }
+    }
+}
+
+impl Chat {
+    /// Enter in command mode: runs what follows the `!` and clears the draft. A bare `!` changes
+    /// nothing. Whatever state the agent is in does not matter, and a held quote and attached
+    /// images stay for the next prompt.
+    pub(super) fn run_shell_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = shell_command(&self.draft).map(str::to_owned) else {
+            return;
+        };
+        self.remember_prompt();
+        self.accepted_mentions.clear();
+        self.reset_composer_popups();
+        self.set_composer_text("", cx);
+        self.start_shell(command, cx);
+    }
+
+    /// Starts `command` in the chat's working directory and puts its block in the transcript. A
+    /// command that cannot start is a finished block that says why.
+    pub(super) fn start_shell(&mut self, command: String, cx: &mut Context<Self>) {
+        let run = match ShellRun::start(&command, &self.agent_cwd) {
+            Ok(run) => run,
+            Err(error) => {
+                self.push_entry(Entry::Shell(ShellBlock::could_not_start(command, &error)));
+                cx.notify();
+                return;
+            }
+        };
+        let block = ShellBlock::running(command);
+        let id = block.id;
+        let started = block.started().unwrap_or_else(Instant::now);
+        let events = run.events();
+        self.shell_runs.insert(id, run);
+        self.push_entry(Entry::Shell(block));
+
+        let executor = cx.background_executor().clone();
+        let (updates, mut arrived) = futures::channel::mpsc::unbounded::<ShellUpdate>();
+        let pump = cx.background_spawn(async move {
+            let mut pump = Pump::new(started);
+            loop {
+                // The next event, or, while output waits for its turn, the moment that turn comes.
+                let event = if pump.dirty {
+                    let next = events.recv().fuse();
+                    let turn = executor.timer(pump.wait()).fuse();
+                    futures::pin_mut!(next, turn);
+                    select_biased! {
+                        event = next => Some(event),
+                        () = turn => None,
+                    }
+                } else {
+                    Some(events.recv().await)
+                };
+                match event {
+                    Some(Ok(event)) => pump.take(event),
+                    // The channel closed with no end event: the command is gone all the same.
+                    Some(Err(_)) => pump.take(ShellEvent::Exited {
+                        code: None,
+                        stopped: false,
+                    }),
+                    None => {}
+                }
+                // Everything already queued, so the command is never held back by this task. A
+                // command that never stops writing still gets its updates: the turn is checked
+                // between events.
+                while pump.exit.is_none() {
+                    if pump.due() && updates.unbounded_send(pump.update()).is_err() {
+                        return;
+                    }
+                    let Ok(event) = events.try_recv() else { break };
+                    pump.take(event);
+                }
+                if pump.due() && updates.unbounded_send(pump.update()).is_err() {
+                    return;
+                }
+                if pump.exit.is_some() {
+                    return;
+                }
+            }
+        });
+        // Only the weak handle goes in: a closed chat is released, and with it the run.
+        cx.spawn(async move |this, cx| {
+            let _pump = pump;
+            while let Some(update) = arrived.next().await {
+                let ended = update.exit.is_some();
+                if this
+                    .update(cx, |chat, cx| chat.apply_shell_update(id, update, cx))
+                    .is_err()
+                    || ended
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The task's update reaches the block. A block that is gone (a new conversation) is ignored.
+    fn apply_shell_update(&mut self, id: u64, update: ShellUpdate, cx: &mut Context<Self>) {
+        let ended = update.exit.is_some();
+        if let Some(index) = self.shell_index(id)
+            && let Entry::Shell(block) = &mut self.entries[index]
+        {
+            block.apply(update);
+            self.remeasure_entry(index);
+            self.clamp_transcript_selection();
+        }
+        if ended {
+            // The run is over: dropping it has nothing left to kill.
+            self.shell_runs.remove(&id);
+        }
+        cx.notify();
+    }
+
+    /// Where the block with this id is in the transcript.
+    fn shell_index(&self, id: u64) -> Option<usize> {
+        self.entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Shell(block) if block.id == id))
+    }
+
+    /// Escape: asks every command of this chat that is still running to end. Returns whether there
+    /// was one, so that the turn is left alone. A command that was already asked to stop and is
+    /// on its way out is not running as far as the next Escape goes.
+    pub(super) fn stop_running_shells(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut asked = false;
+        for index in 0..self.entries.len() {
+            let Entry::Shell(block) = &mut self.entries[index] else {
+                continue;
+            };
+            if block.is_finished() || block.stop_asked {
+                continue;
+            }
+            if let Some(run) = self.shell_runs.get(&block.id) {
+                run.stop();
+                block.stop_asked = true;
+                asked = true;
+            }
+        }
+        if asked {
+            cx.notify();
+        }
+        asked
+    }
+
+    /// The Stop button of one block.
+    pub(super) fn stop_shell(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(run) = self.shell_runs.get(&id) {
+            run.stop();
+        }
+        if let Some(index) = self.shell_index(id)
+            && let Entry::Shell(block) = &mut self.entries[index]
+        {
+            block.stop_asked = true;
+        }
+        cx.notify();
+    }
+
+    /// Show all / Show less on the block at transcript row `entry`. Returns whether the row has
+    /// that control.
+    pub(super) fn toggle_shell(&mut self, entry: usize, cx: &mut Context<Self>) -> bool {
+        let Some(Entry::Shell(block)) = self.entries.get_mut(entry) else {
+            return false;
+        };
+        if block.fold_control().is_none() {
+            return false;
+        }
+        block.toggle_expanded();
+        self.remeasure_entry(entry);
+        self.clamp_transcript_selection();
+        cx.notify();
+        true
+    }
+
+    /// The press of the control, which knows the block by its id.
+    fn toggle_shell_block(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self.shell_index(id) {
+            self.toggle_shell(index, cx);
+        }
+    }
+
+    /// Kills every command this chat is running. A `ShellRun` that is dropped kills its whole
+    /// session and never waits.
+    pub(super) fn kill_shell_runs(&mut self) {
+        self.shell_runs.clear();
+    }
+}
+
+/// The key of a block's expanded well in `Chat::tool_output_scroll`.
+pub(super) fn well_key(entry: usize) -> String {
+    format!("shell-output-{entry}")
+}
+
+/// The text of the transcript's selection, from a string that is shared and not copied per frame.
+fn selectable(
+    text: SharedString,
+    id: String,
+    source_start: usize,
+    interaction: &TranscriptInteraction,
+    theme: &Theme,
+) -> AnyElement {
+    let range = source_start..source_start + text.len();
+    TranscriptSelectableText::new(
+        ElementId::Name(id.into()),
+        StyledText::new(text),
+        range,
+        interaction.clone(),
+        theme.ely.active,
+        Vec::new(),
+    )
+    .into_any_element()
+}
+
+/// Draws a block: the header (the command, and while it runs a spinner and Stop), the output in a
+/// box, and under it the fold control and the footer. The output goes through the transcript's
+/// selection, at the offsets `ShellBlock::plain_text` gives it, and nothing in it is clickable.
+pub(super) fn render(
+    block: &ShellBlock,
+    index: usize,
+    source_start: usize,
+    interaction: &TranscriptInteraction,
+    chat: Entity<Chat>,
+    scrolls: &HashMap<String, ScrollHandle>,
+    theme: &Theme,
+) -> AnyElement {
+    let typography = theme.typography;
+    let id = block.id;
+    let running = !block.is_finished();
+    let header_len = 2 + block.command.len();
+    let body = block.drawn_output();
+    let body_start = source_start + header_len + 1;
+    let footer_start = body_start + if body.is_empty() { 0 } else { body.len() + 1 };
+
+    let stop_chat = chat.clone();
+    let header = div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .id(("shell-header", index))
+                .debug_selector(move || format!("shell-header-{index}"))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .font_family(typography.code_family)
+                .text_size(typography.footnote)
+                .text_color(theme.ely.fg)
+                .tooltip(crate::controls::tooltip(tooltip_text(&block.command)))
+                .child(format!("! {}", header_line(&block.command))),
+        )
+        .when(running, |row| {
+            row.child(
+                Spinner::new(("shell-spinner", index))
+                    .size(ely_gpui_component::theme::IconSize::Xs),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .debug_selector(move || format!("shell-stop-{index}"))
+                    .child(
+                        Button::new(("shell-stop", index), "Stop")
+                            .variant(ButtonVariant::Secondary)
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                stop_chat.update(cx, |chat, cx| chat.stop_shell(id, cx));
+                            }),
+                    ),
+            )
+        });
+
+    // The text, in the code font, one column per character: a long line scrolls sideways instead
+    // of wrapping into the next.
+    let text = (!body.is_empty()).then(|| {
+        div()
+            .id(("shell-body", index))
+            .debug_selector(move || format!("shell-body-{index}"))
+            .overflow_x_scroll()
+            // A vertical wheel over the block keeps scrolling the transcript.
+            .restrict_scroll_to_axis()
+            .whitespace_nowrap()
+            .font_family(typography.code_family)
+            .text_size(typography.footnote)
+            .text_color(theme.ely.fg_muted)
+            .child(selectable(
+                block.drawn.clone(),
+                format!("shell-text-{index}"),
+                body_start,
+                interaction,
+                theme,
+            ))
+    });
+    let well = text.map(|text| {
+        if !block.expanded {
+            return text.into_any_element();
+        }
+        // Everything kept can be a great deal: it scrolls inside a box of its own, which holds the
+        // wheel while it has room to move and lets it through at its edges.
+        let mut well = div()
+            .id(("shell-well", index))
+            .max_h(px(EXPANDED_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .child(text);
+        if let Some(handle) = scrolls.get(&well_key(index)) {
+            let handle = handle.clone();
+            well = well.track_scroll(&handle).on_scroll(move |event, _, cx| {
+                let delta_y = event.delta.pixel_delta(px(20.0)).y;
+                if tool_calls::tool_output_consumes_scroll(
+                    handle.offset().y,
+                    handle.max_offset().y,
+                    delta_y,
+                ) {
+                    cx.stop_propagation();
+                }
+            });
+        }
+        well.into_any_element()
+    });
+    let has_body = well.is_some();
+    let boxed = (has_body || !running).then(|| {
+        div()
+            .w_full()
+            .rounded(theme.radii.code_block)
+            .bg(theme.ely.surface)
+            .border_1()
+            .border_color(theme.ely.border)
+            .px(px(12.0))
+            .py(px(8.0))
+            .when_some(well, |boxed, well| boxed.child(well))
+            .when(!has_body, |boxed| {
+                boxed.child(
+                    div()
+                        .font_family(typography.code_family)
+                        .text_size(typography.footnote)
+                        .text_color(theme.ely.fg_subtle)
+                        .child("(no output)"),
+                )
+            })
+    });
+
+    let control = block.fold_control();
+    let footer = block.footer_text();
+    let has_footer = footer.is_some();
+    let ShellState::Finished {
+        exit,
+        stopped,
+        failed,
+        ..
+    } = block.state
+    else {
+        return div()
+            .id(("shell-block", index))
+            .debug_selector(move || format!("shell-block-{index}"))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(header)
+            .children(boxed)
+            .when_some(control, |column, label| {
+                column.child(fold_row(index, id, label, chat, None, theme))
+            })
+            .into_any_element();
+    };
+    // A command that failed to start or ended non-zero is marked in the danger colour, one that
+    // ended well in the success colour, and one that was stopped is neither.
+    let (glyph, tone) = if stopped {
+        (Icon::XCircle, theme.ely.fg_subtle)
+    } else if failed || exit.is_some_and(|code| code != 0) {
+        (Icon::XCircle, theme.ely.danger)
+    } else {
+        (Icon::Check, theme.ely.success)
+    };
+    let status = div()
+        .id(("shell-footer", index))
+        .debug_selector(move || format!("shell-footer-{index}"))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(typography.caption2)
+        .text_color(theme.ely.fg_subtle)
+        .child(IconElement::new(glyph, IconSize::XSmall).text_color(tone))
+        .children(footer.map(|footer| {
+            selectable(
+                SharedString::from(footer),
+                format!("shell-footer-text-{index}"),
+                footer_start,
+                interaction,
+                theme,
+            )
+        }))
+        .when(!block.sent, |status| {
+            // After the words of how it ended, a separator; after the mark alone, nothing.
+            status
+                .when(has_footer, |status| status.child(div().child("·")))
+                .child(div().child("goes with your next message"))
+        });
+    div()
+        .id(("shell-block", index))
+        .debug_selector(move || format!("shell-block-{index}"))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(header)
+        .children(boxed)
+        .child(fold_row(index, id, control.unwrap_or_default(), chat, Some(status), theme))
+        .into_any_element()
+}
+
+/// The row under the body: the fold control on the left (when there is one), the footer on the
+/// right.
+fn fold_row(
+    index: usize,
+    id: u64,
+    label: String,
+    chat: Entity<Chat>,
+    status: Option<Stateful<Div>>,
+    _theme: &Theme,
+) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .child(div().flex_none().debug_selector(move || format!("shell-fold-{index}")).when(
+            !label.is_empty(),
+            |slot| {
+                slot.child(
+                    Button::new(("shell-fold", index), label)
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            chat.update(cx, |chat, cx| chat.toggle_shell_block(id, cx));
+                        }),
+                )
+            },
+        ))
+        .children(status)
+        .into_any_element()
+}

@@ -160,6 +160,13 @@ impl Chat {
     /// dell'entry: senza handle la well non può trattenere la wheel e
     /// l'evento ribolle anche alla lista (doppio scroll).
     pub(crate) fn ensure_tool_output_scroll_for_entry(&mut self, entry_index: usize) {
+        // A shell block's expanded well. Looked at before the entry is cloned.
+        if let Some(Entry::Shell(_)) = self.entries.get(entry_index) {
+            self.tool_output_scroll
+                .entry(super::shell_block::well_key(entry_index))
+                .or_insert_with(ScrollHandle::new);
+            return;
+        }
         let Some(entry) = self.entries.get(entry_index).cloned() else {
             return;
         };
