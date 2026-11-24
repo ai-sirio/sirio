@@ -17,7 +17,7 @@ set -eEuo pipefail
 # Scenarios (each starts a fresh Sirio; the names are the ones --only takes). Those marked * run for claude and for opencode,
 # because what they judge crosses the transport (how a prompt reaches the agent, what a Stop does to a turn, a restored
 # chat); retry and hand_back are the Retry of one transport each (claude resends, opencode hands the message back); fold,
-# cap, forged, lifetime, band and cannot_start do not touch the transport and run for claude only:
+# cap, forged, lifetime, band, cannot_start, stubborn and offline do not touch the transport and run for claude only:
 #   run*         `!printf 'a\nb\n'; exit 3` is a block with the output a, b, exit 3 and not sent, and the agent heard nothing;
 #                `!cat` ends with exit 0 within 3 s (and the command's stdin is /dev/null); `!echo "$$ $(ps -o sid= -p $$)"`
 #                prints two equal numbers: the shell leads a session of its own, with no controlling terminal
@@ -32,6 +32,11 @@ set -eEuo pipefail
 #                stopped block's footer reads `Stopped` in the transcript's own text (`transcriptText`); a second
 #                Escape stops the turn (claude: a second turn held at a gate nobody releases ends and never answers; opencode: the
 #                stub logs one `session/cancel`)
+#   stubborn     a command that ignores SIGTERM (`trap '' TERM; echo $$; sleep 300`) in a chat whose turn is held: the first Escape
+#                leaves it running, a second one kills it at once and the turn goes on; an Escape after the block reads stopped
+#                ends the turn
+#   offline      in a chat whose agent died, an ordinary draft is still refused, `!echo offline` typed with the X server's keys is
+#                kept, and Enter runs it
 #   fold         `!seq 1 5000` has 5000 lines and draws the last 40 (4961 to 5000); toggleShell expands it to all 5000 lines,
 #                from 1, and folds it back
 #   cap          `!seq 1 5000`, `!seq 1 6000`, then `go`: the prompt holds at most 30,000 characters of output in all, the
@@ -81,7 +86,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,71p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,76p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

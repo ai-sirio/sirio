@@ -478,9 +478,21 @@ impl Chat {
         self.refresh_token_popups(cx);
     }
 
+    /// Whether a disabled composer keeps the edit that made its draft `content`: only a command
+    /// (spec 5.1, "the agent's state does not matter"). A command needs no agent, so an offline or
+    /// unconfigured chat takes a draft that starts with `!`, and the edit that clears one. A draft
+    /// that waits on a question is out of service whatever it says (`send` refuses it too), and
+    /// every other edit is still refused (F-CHAT-05).
+    fn keeps_edit_while_disabled(&self, content: &str) -> bool {
+        self.pending_question().is_none()
+            && (shell_block::shell_mode(content)
+                || (shell_block::shell_mode(&self.draft) && content.is_empty()))
+    }
+
     /// The observer: runs after every content or caret change in the field.
     /// A disabled composer refuses edits by putting the last accepted draft
-    /// back (`offline_enter_never_discards_the_typed_draft`).
+    /// back (`offline_enter_never_discards_the_typed_draft`), except those
+    /// that make it a command (`keeps_edit_while_disabled`).
     pub(crate) fn reread_composer(&mut self, cx: &mut Context<Self>) {
         // The blink and every caret move notify, so most calls end at this
         // comparison, with nothing read out of the field.
@@ -491,7 +503,10 @@ impl Chat {
             }
             (SharedString::from(field.text().to_owned()), field.cursor())
         };
-        if self.composer_disabled() && content != self.draft {
+        if self.composer_disabled()
+            && content != self.draft
+            && !self.keeps_edit_while_disabled(&content)
+        {
             let last = self.draft.to_string();
             self.composer_field
                 .update(cx, |field, cx| field.reset_text(last, cx));
@@ -1000,10 +1015,11 @@ impl Chat {
             self.composer_field
                 .update(cx, |field, cx| field.set_placeholder(placeholder, cx));
         }
-        let disabled = self.composer_disabled();
-        // A command runs whatever state the agent is in, so its Send is ready with the command
-        // typed (Enter does not ask `can_send`).
+        // A command runs whatever state the agent is in: while the draft is one, the field is not
+        // drawn as disabled (it takes edits, `keeps_edit_while_disabled`), and its Send is ready
+        // with the command typed (Enter does not ask `can_send`).
         let shell_mode = shell_block::shell_mode(&self.draft);
+        let disabled = self.composer_disabled() && !(shell_mode && self.pending_question().is_none());
         let can_send = self.can_send()
             || (shell_mode
                 && shell_block::shell_command(&self.draft).is_some()

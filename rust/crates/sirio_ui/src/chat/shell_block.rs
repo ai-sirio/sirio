@@ -33,6 +33,11 @@ const REPAINT_EVERY: Duration = Duration::from_millis(100);
 /// The tallest the expanded body grows before it scrolls.
 const EXPANDED_MAX_HEIGHT: f32 = 360.0;
 
+/// How many lines an expanded block draws while its command still runs: the last ones. Everything kept
+/// (up to 1 MiB, a hundred thousand lines or more) is laid out again with every update, which stalls the
+/// window; once the command has ended the block draws everything it kept, which is laid out once.
+const LIVE_LINES: usize = 1_000;
+
 /// The most characters of a command a tooltip shows.
 const TOOLTIP_CHARS: usize = 2_000;
 
@@ -88,6 +93,8 @@ pub(super) struct ShellUpdate {
     output: Arc<ShellOutput>,
     /// The last [`FOLD_LINES`] lines.
     folded: String,
+    /// The last [`LIVE_LINES`] lines.
+    live: String,
     kept_lines: usize,
     total_lines: u64,
     exit: Option<ShellExit>,
@@ -107,8 +114,10 @@ pub(super) struct ShellBlock {
     pub(super) expanded: bool,
     /// The last [`FOLD_LINES`] lines of `output`, as the last update brought them.
     folded: SharedString,
-    /// What the body draws: `folded`, or every line kept while `expanded`. Worked out when the
-    /// output or `expanded` changes, never in a frame.
+    /// The last [`LIVE_LINES`] lines, as the last update brought them.
+    live: SharedString,
+    /// What the body draws: `folded`; while `expanded`, `live` for a command that runs, and every line
+    /// kept for one that ended. Worked out when the output or `expanded` changes, never in a frame.
     drawn: SharedString,
     kept_lines: usize,
     total_lines: u64,
@@ -129,6 +138,7 @@ impl ShellBlock {
             sent: false,
             expanded: false,
             drawn: folded.clone(),
+            live: folded.clone(),
             folded,
             stop_asked: false,
         }
@@ -211,7 +221,9 @@ impl ShellBlock {
         Some(if self.expanded {
             "Show less".to_string()
         } else {
-            format!("Show all {} lines", self.total_lines)
+            // The kept lines can be one more than the command's (a marker, an unfinished line), and
+            // all of them are drawn.
+            format!("Show all {} lines", self.total_lines.max(self.kept_lines as u64))
         })
     }
 
@@ -219,6 +231,7 @@ impl ShellBlock {
     pub(super) fn apply(&mut self, update: ShellUpdate) -> bool {
         self.output = update.output;
         self.folded = update.folded.into();
+        self.live = update.live.into();
         self.kept_lines = update.kept_lines;
         self.total_lines = update.total_lines;
         let ended = update.exit.is_some();
@@ -241,14 +254,16 @@ impl ShellBlock {
     }
 
     fn refresh_drawn(&mut self) {
-        self.drawn = if self.expanded {
+        self.drawn = if !self.expanded {
+            self.folded.clone()
+        } else if self.is_finished() {
             SharedString::from(self.output.text())
         } else {
-            self.folded.clone()
+            self.live.clone()
         };
     }
 
-    /// `exit 3 · 0.4s`, `Stopped · 2.0s` or just `0.4s`: what the footer says of how it ended.
+    /// `exit 0 · 0.4s`, `exit 3 · 0.4s` or `Stopped · 2.0s`: what the footer says of how it ended.
     /// `None` while it runs and for a command that never started.
     fn footer_text(&self) -> Option<String> {
         let ShellState::Finished {
@@ -266,7 +281,7 @@ impl ShellBlock {
         let mut parts = Vec::new();
         if stopped {
             parts.push("Stopped".to_string());
-        } else if let Some(code) = exit.filter(|code| *code != 0) {
+        } else if let Some(code) = exit {
             parts.push(format!("exit {code}"));
         }
         parts.push(duration_text(duration_ms));
@@ -387,6 +402,7 @@ impl Pump {
         self.sent = Instant::now();
         ShellUpdate {
             folded: self.output.tail(FOLD_LINES),
+            live: self.output.tail(LIVE_LINES),
             kept_lines: self.output.kept_lines(),
             total_lines: self.output.total_lines(),
             output: Arc::new(self.output.clone()),
@@ -447,9 +463,10 @@ impl Chat {
                 };
                 match event {
                     Some(Ok(event)) => pump.take(event),
-                    // The channel closed with no end event: the command is gone all the same.
+                    // The channel closed with no end event: the command is gone all the same, and the
+                    // runner's own "the system could not say how it ended" is -1.
                     Some(Err(_)) => pump.take(ShellEvent::Exited {
-                        code: None,
+                        code: Some(-1),
                         stopped: false,
                     }),
                     None => {}
@@ -475,7 +492,12 @@ impl Chat {
         // Only the weak handle goes in: a closed chat is released, and with it the run.
         cx.spawn(async move |this, cx| {
             let _pump = pump;
-            while let Some(update) = arrived.next().await {
+            while let Some(mut update) = arrived.next().await {
+                // What piled up while the UI was busy: only the newest says where the output stands,
+                // and the one that ends the command is always the last.
+                while let Ok(newer) = arrived.try_recv() {
+                    update = newer;
+                }
                 let ended = update.exit.is_some();
                 if this
                     .update(cx, |chat, cx| chat.apply_shell_update(id, update, cx))
@@ -514,28 +536,33 @@ impl Chat {
             .rposition(|entry| matches!(entry, Entry::Shell(block) if block.id == id))
     }
 
-    /// Escape: asks every command of this chat that is still running to end. Returns whether there
-    /// was one, so that the turn is left alone. A command that was already asked to stop and is
-    /// on its way out is not running as far as the next Escape goes.
+    /// Escape: ends every command of this chat that is still running. Returns whether there was
+    /// one, so that the turn is left alone: a command that has been asked to stop is running until
+    /// its block reads stopped, and that can take 2 s (SIGTERM, then SIGKILL). An Escape that comes
+    /// then is for the command, and kills it at once. Only an Escape with no command running ends
+    /// the turn.
     pub(super) fn stop_running_shells(&mut self, cx: &mut Context<Self>) -> bool {
-        let mut asked = false;
-        for index in 0..self.entries.len() {
-            let Entry::Shell(block) = &mut self.entries[index] else {
-                continue;
-            };
-            if block.is_finished() || block.stop_asked {
-                continue;
-            }
-            if let Some(run) = self.shell_runs.get(&block.id) {
-                run.stop();
-                block.stop_asked = true;
-                asked = true;
+        if self.shell_runs.is_empty() {
+            return false;
+        }
+        for (id, run) in &self.shell_runs {
+            let block = self.entries.iter_mut().rev().find_map(|entry| match entry {
+                Entry::Shell(block) if block.id == *id => Some(block),
+                _ => None,
+            });
+            match block {
+                // The first Escape, or the first since the block's own Stop: SIGTERM, and SIGKILL
+                // after 2 s.
+                Some(block) if !block.stop_asked => {
+                    run.stop();
+                    block.stop_asked = true;
+                }
+                // It was asked already and is still here: it ignored the SIGTERM.
+                _ => run.kill(),
             }
         }
-        if asked {
-            cx.notify();
-        }
-        asked
+        cx.notify();
+        true
     }
 
     /// The Stop button of one block.
@@ -757,7 +784,7 @@ pub(super) fn render(
             .child(header)
             .children(boxed)
             .when_some(control, |column, label| {
-                column.child(fold_row(index, id, label, chat, None, theme))
+                column.child(fold_row(index, id, label, chat, None))
             })
             .into_any_element();
     };
@@ -805,7 +832,7 @@ pub(super) fn render(
         .gap(px(6.0))
         .child(header)
         .children(boxed)
-        .child(fold_row(index, id, control.unwrap_or_default(), chat, Some(status), theme))
+        .child(fold_row(index, id, control.unwrap_or_default(), chat, Some(status)))
         .into_any_element()
 }
 
@@ -817,7 +844,6 @@ fn fold_row(
     label: String,
     chat: Entity<Chat>,
     status: Option<Stateful<Div>>,
-    _theme: &Theme,
 ) -> AnyElement {
     div()
         .w_full()

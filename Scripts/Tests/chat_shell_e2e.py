@@ -6,7 +6,7 @@ Everything here runs against real, isolated debug Sirio instances on the script'
 A scenario is a function that raises `Fail` at its first failed check; the run reports it and goes on with the next one.
 A scenario that runs for two agents runs each to its end and fails with what both found, whether an agent's run ended in a
 failed check or in an error. run, carry, stop and restart run for claude and for opencode (what they judge crosses the
-transport); retry is claude's Retry and hand_back opencode's; fold, cap, forged, lifetime, band and cannot_start do not
+transport); retry is claude's Retry and hand_back opencode's; fold, cap, forged, lifetime, band, cannot_start, stubborn and offline do not
 touch the transport and run for claude only.
 
 What the scenarios read is the debug readout of `surface.chat.read`: per shell block a row `{kind: "shell", command,
@@ -431,6 +431,100 @@ def stop_for(scn, agent):
 @scenario
 def scenario_stop(scn):
     each_agent(scn, ("claude", "opencode"), stop_for)
+
+
+# ---------------------------------------------------------------- stubborn
+
+
+@scenario
+def scenario_stubborn(scn):
+    """A command that ignores SIGTERM is still running after the Escape that stopped it, for the 2 s the runner waits before its
+    SIGKILL. An Escape in that window is for the command (spec 5.5: the turn is stopped only "with no command running"): it
+    kills the command at once and leaves the turn alone; only an Escape after the block reads stopped ends the turn."""
+    need = checker(scn, "claude")
+    w = World(scn, "claude")
+    shell_pid = None
+    try:
+        w.start()
+        w.open_chat("claude")
+        w.send("ok hold")
+        w.wait("the turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
+        # The shell ignores SIGTERM, and so does the `sleep` it starts (a signal ignored at exec stays ignored).
+        shell(w, "trap '' TERM; echo $$; sleep 300")
+        r = w.wait("a block shows the shell's pid", lambda r: newest(r)[1] and newest(r)[1].get("output", "").strip().isdigit(), timeout=15)
+        shell_pid = int(newest(r)[1]["output"])
+
+        first = w.escape()
+        r = w.read()
+        need(newest(r)[1].get("status") == "running" and alive(shell_pid),
+             "control: the first Escape asked the command to stop, and it ignores that: its block still reads running and the shell lives",
+             f"status {newest(r)[1].get('status')!r}, {time.time() - first:.1f} s after the key", read=r)
+
+        second = w.escape()
+        r = w.wait("the second Escape kills the command", lambda r: newest(r)[1].get("status") == "stopped", timeout=3)
+        need(newest(r)[1].get("status") == "stopped" and r["status"] == "streaming",
+             "an Escape while the command is dying is for the command: it is killed at once and reads stopped, and the turn goes on",
+             f"block {newest(r)[1].get('status')!r}, chat {r['status']!r}, {time.time() - second:.1f} s after the second key, "
+             f"{time.time() - first:.1f} s after the first", read=r)
+        left, members = leftovers([shell_pid], shell_pid, second)
+        need(not left and not members, "the shell and its session are gone",
+             f"still alive {left}, session {members}", read=r)
+        time.sleep(1.0)
+        r = w.read()
+        need(r["status"] == "streaming",
+             "a second later the turn is still streaming: the Escapes were all the command's",
+             f"status {r['status']!r}", read=r)
+
+        w.escape()
+        r = w.wait("an Escape with no command running stops the turn", lambda r: r["status"] != "streaming", timeout=10)
+        need(r["status"] != "streaming" and len(shell_rows(r)) == 1,
+             "an Escape after the block reads stopped ends the turn", f"status {r['status']!r}", read=r)
+    finally:
+        if shell_pid:
+            kill_session(shell_pid)
+        teardown(w)
+
+
+# ---------------------------------------------------------------- offline
+
+
+@scenario
+def scenario_offline(scn):
+    """A command does not need an agent (spec 5.1): in a chat whose agent died, the composer still refuses an ordinary draft
+    (F-CHAT-05), but `!` can be typed and Enter runs it. Typed and pressed as a user does, through the X server."""
+    need = checker(scn, "claude")
+    w = World(scn, "claude")
+    try:
+        w.start()
+        w.open_chat("claude")
+        w.send("die")
+        r = w.wait("the agent dies and the chat is offline", lambda r: error_row(r) is not None and r["status"] != "streaming",
+                   timeout=30)
+        prompts = len(w.prompts())
+
+        w.type_text("abc")
+        time.sleep(0.5)
+        r = w.read()
+        need(r["composerText"] == "",
+             "control: an offline composer still refuses an ordinary draft (F-CHAT-05): what was typed is put back",
+             f"composer {r['composerText']!r}, status {r['status']!r}", read=r)
+
+        w.type_text("!echo offline")
+        r = w.wait("the command stays in the composer", lambda r: r["composerText"] == "!echo offline", timeout=5)
+        need(r["composerText"] == "!echo offline" and truthy(r["composerRow"].get("shellMode")),
+             "an offline composer keeps a draft that starts with `!`, and is in command mode",
+             f"composer {r['composerText']!r}, shellMode {r['composerRow'].get('shellMode')!r}", read=r)
+
+        w.press_enter()
+        r = w.wait("the command runs", lambda r: shell_rows(r) and settled(newest(r)[1]), timeout=15)
+        row = newest(r)[1]
+        need(row.get("command") == "echo offline" and row.get("output") == "offline" and row.get("status") == "exited"
+             and r["composerText"] == "" and len(w.prompts()) == prompts,
+             "Enter in the offline chat runs the command: its block shows `offline`, the composer is empty and the agent heard nothing",
+             f"command {row.get('command')!r}, output {row.get('output')!r}, status {row.get('status')!r}, composer {r['composerText']!r}",
+             read=r)
+    finally:
+        teardown(w)
 
 
 # ---------------------------------------------------------------- fold

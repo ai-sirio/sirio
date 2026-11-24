@@ -480,6 +480,20 @@ class World:
         time.sleep(0.3)
         return pressed
 
+    def type_text(self, text):
+        """Types `text` into the composer as a user does: a click on its field (so that the keys land there), then the X
+        server's keys, one every 40 ms."""
+        field = self.read()["composerRow"]["field"]
+        press(self.window, field[0] + field[2] / 2, field[1] + field[3] / 2, hold=0.1, settle=0.1)
+        time.sleep(0.3)
+        x("type", "--delay", "40", text)
+        time.sleep(0.3)
+
+    def press_enter(self):
+        """A real Enter, which goes to the composer that `type_text` or `escape` last clicked."""
+        x("key", "Return")
+        time.sleep(0.3)
+
     def retry_refusal(self, entry):
         """The sentence the socket refuses a Retry with, or None when it was accepted."""
         try:
