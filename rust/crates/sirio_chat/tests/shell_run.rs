@@ -112,6 +112,14 @@ mod unix {
         }
     }
 
+    impl Stray {
+        /// Kills the process: for one that is out of everyone's reach but the test's.
+        fn kill(&self) {
+            // SAFETY: a plain syscall on a pid this test started and has just seen alive.
+            unsafe { libc::kill(self.pid, libc::SIGKILL) };
+        }
+    }
+
     impl Drop for Stray {
         fn drop(&mut self) {
             if std::thread::panicking() && !self.seen_gone.get() {
@@ -168,6 +176,26 @@ mod unix {
                 ),
                 mark = mark
             ))
+        } else {
+            None
+        }
+    }
+
+    /// What puts a command in a session of its own, as a daemon does: `setsid`, or perl where there
+    /// is none (macOS). `None` when neither is here.
+    fn detach_prefix() -> Option<&'static str> {
+        let has = |program: &str, flag: &str| {
+            Command::new(program)
+                .arg(flag)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if has("setsid", "--version") {
+            Some("setsid")
+        } else if has("perl", "--version") {
+            Some("perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die' --")
         } else {
             None
         }
@@ -255,6 +283,40 @@ mod unix {
         let done = finish(&events, Duration::from_secs(3));
         assert!(done.stopped);
         assert!(child.is_gone(), "the child in a group of its own is gone");
+    }
+
+    #[test]
+    fn a_stranger_that_keeps_writing_does_not_hold_the_block() {
+        let mark = Marker::new("stranger");
+        let Some(detach) = detach_prefix() else {
+            eprintln!("SKIP: neither setsid nor perl is here to start a session");
+            return;
+        };
+        // A writer in a session of its own is out of reach of the sweep and holds the pipe for
+        // good, saying something every 0.1 s. It tells its pid through a file, because the pipe
+        // is shared; the shell waits for that, then ends.
+        let command = format!(
+            "{detach} sh -c 'echo $$ > \"$0\"; while :; do echo x; sleep 0.1; done' '{mark}' & \
+             until [ -s '{mark}' ]; do sleep 0.02; done; echo hi",
+            mark = mark.0.display()
+        );
+        let run = ShellRun::start(&command, &cwd()).expect("starts");
+        let events = run.events();
+        let deadline = Instant::now() + GUARD;
+        let stranger = loop {
+            match std::fs::read_to_string(&mark.0).ok().and_then(|text| text.trim().parse().ok()) {
+                Some(pid) => break Stray::new(pid),
+                None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                None => panic!("the stranger never told its pid"),
+            }
+        };
+        let done = finish(&events, Duration::from_secs(4));
+        assert_eq!((done.code, done.stopped), (Some(0), false));
+        let text = String::from_utf8_lossy(&done.output);
+        assert!(text.contains("hi\n"), "the shell's own output is there: {text:?}");
+        // Not ours to sweep: it is still writing, and it is the test's to kill.
+        stranger.kill();
+        assert!(stranger.is_gone(), "the stranger is gone");
     }
 
     #[test]

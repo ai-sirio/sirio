@@ -10,7 +10,8 @@
 //! On Unix the shell is a session leader, and "the command" is every process of that session: a
 //! program the shell runs can leave the shell's process group for one of its own (coreutils
 //! `timeout` does) and stay in the session. Only a program that starts a session of its own, as a
-//! daemon does, is out of reach.
+//! daemon does, is out of reach; a command finishes when its shell exits, so the block ends without
+//! waiting for one, even when it keeps the pipe open and keeps writing to it.
 //!
 //! The channel is bounded, so a consumer that is slower than a command (`yes`) holds the command
 //! back through the full pipe instead of growing memory without limit. The same bound means a
@@ -40,11 +41,17 @@ const QUEUE: usize = 32;
 /// the leftover is killed.
 const GRACE: Duration = Duration::from_millis(200);
 
-/// How long the reader may sit in `read` without a byte arriving, after the leftover is killed,
-/// before the block ends without it. A process outside the session (a daemon that called `setsid`)
-/// can hold the pipe open for good, and says nothing. A reader that is getting somewhere (bytes
-/// arriving, or chunks going to a consumer that is behind) is never cut off.
+/// How long the reader has, after the leftover is killed, to reach the end of the pipe. A process
+/// outside the session (a daemon that called `setsid`) can hold the pipe open for good, silent or
+/// not, and a command finishes when its shell exits: the block ends without waiting for it. Time
+/// the reader spends handing a chunk to a consumer that is behind is not counted, so the tail of
+/// the output (at most one pipe buffer and the chunk in hand) reaches a slow consumer.
 const DRAIN: Duration = Duration::from_secs(2);
+
+/// The most the reader may read, after the leftover is killed, before the block ends without it:
+/// what bounds a stranger that writes fast while the consumer is slow, when the clock above is
+/// paused. Far above what a pipe buffer holds.
+const DRAIN_BYTES: u64 = 1024 * 1024;
 
 /// How often the waiter looks at what the reader is doing while it waits for it.
 const DRAIN_STEP: Duration = Duration::from_millis(50);
@@ -128,7 +135,8 @@ impl ShellRun {
     ///
     /// The shell has no stdin, `TERM=dumb` and no git prompt. On Unix it leads a session of its own
     /// (so it has no controlling terminal to open `/dev/tty` on, and the group is `pid`'s); on
-    /// Windows it runs in a job object that kills what is in it when it closes.
+    /// Windows it runs in a job object that kills what is in it when it closes (or, if the job
+    /// could not be made, on its own: a stop then reaches the shell only).
     ///
     /// # Errors
     /// When the pipe, the process or its threads cannot be created: the shell is missing, `cwd` is
@@ -140,8 +148,8 @@ impl ShellRun {
         let outbox = Arc::new(Outbox {
             events: events_tx,
             sealed: Mutex::new(false),
-            progress: AtomicU64::new(0),
-            reading: AtomicBool::new(false),
+            read_bytes: AtomicU64::new(0),
+            sending: AtomicBool::new(false),
         });
         let (reader_done, reader_ended) = mpsc::channel();
         let (handoff, handoff_rx) = mpsc::channel::<(Child, Arc<Shared>)>();
@@ -235,7 +243,8 @@ impl ShellRun {
     }
 
     /// Asks the command to end: SIGTERM to its whole session, and SIGKILL after 2 s if the shell
-    /// has not ended by then. On Windows the job is terminated at once. Never waits.
+    /// has not ended by then. On Windows the job is terminated at once (the shell alone, for a run
+    /// that has no job). Never waits.
     pub fn stop(&self) {
         let mut life = self.shared.life();
         if life.finished {
@@ -258,8 +267,9 @@ impl Drop for ShellRun {
         let mut life = self.shared.life();
         if !life.finished {
             life.stopped = true;
-            // On Windows this is `TerminateJobObject`, not left to the job's last handle closing:
-            // the waiter thread holds a copy of the handle.
+            // On Windows this is `TerminateJobObject` (`TerminateProcess` on the shell for a run
+            // without a job), not left to the job's last handle closing: the waiter thread holds
+            // a copy of the handle.
             self.shared.signal(&life, Signal::Kill);
         }
     }
@@ -518,10 +528,10 @@ struct Outbox {
     events: Sender<ShellEvent>,
     /// True once `Exited` is on its way; held by the reader across a send.
     sealed: Mutex<bool>,
-    /// Counts what the reader gets done: a read that returned bytes, a send that completed.
-    progress: AtomicU64,
-    /// The reader is inside `read`, waiting for the pipe: not behind a consumer, not working.
-    reading: AtomicBool,
+    /// How many bytes the reader has taken out of the pipe.
+    read_bytes: AtomicU64,
+    /// The reader is handing a chunk to the consumer, and may be held up by it.
+    sending: AtomicBool,
 }
 
 impl Outbox {
@@ -529,11 +539,14 @@ impl Outbox {
     /// the reader goes on draining the pipe, so a process that outlived the block (and still holds
     /// the pipe) does not die of a broken pipe at its next write.
     fn output(&self, chunk: Vec<u8>) {
+        self.sending.store(true, Ordering::SeqCst);
         let sealed = self.sealed.lock().unwrap_or_else(PoisonError::into_inner);
         if !*sealed {
             // An error is a consumer that left; the command goes on all the same.
             let _ = self.events.send_blocking(ShellEvent::Output(chunk));
         }
+        drop(sealed);
+        self.sending.store(false, Ordering::SeqCst);
     }
 
     /// Queues the last event and closes the channel behind it. Waits for a chunk that is being
@@ -550,15 +563,11 @@ impl Outbox {
 fn read_output(mut pipe: io::PipeReader, outbox: &Outbox, _done: mpsc::Sender<()>) {
     let mut buffer = vec![0u8; CHUNK];
     loop {
-        outbox.reading.store(true, Ordering::SeqCst);
-        let read = pipe.read(&mut buffer);
-        outbox.reading.store(false, Ordering::SeqCst);
-        match read {
+        match pipe.read(&mut buffer) {
             Ok(0) => return,
             Ok(read) => {
-                outbox.progress.fetch_add(1, Ordering::SeqCst);
+                outbox.read_bytes.fetch_add(read as u64, Ordering::SeqCst);
                 outbox.output(buffer[..read].to_vec());
-                outbox.progress.fetch_add(1, Ordering::SeqCst);
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => return,
@@ -572,23 +581,26 @@ fn reader_ended(reader: &mpsc::Receiver<()>, within: Duration) -> bool {
     matches!(reader.recv_timeout(within), Err(RecvTimeoutError::Disconnected))
 }
 
-/// Waits for the reader thread to end, for as long as it is getting somewhere: bytes arriving from
-/// the pipe, or chunks going to a consumer that is behind (however long that takes). What ends the
-/// wait early is a reader that has sat in `read` for `silence` with nothing arriving, which is a
-/// process outside the session that holds the pipe and says nothing.
-fn wait_for_reader(reader: &mpsc::Receiver<()>, outbox: &Outbox, silence: Duration) {
-    let mut seen = outbox.progress.load(Ordering::SeqCst);
-    let mut silent_since: Option<Instant> = None;
+/// Waits for the reader thread to end, up to the first of: its end (the pipe's), [`DRAIN`] of
+/// wall clock that the reader did not spend handing a chunk to the consumer, and [`DRAIN_BYTES`]
+/// read since `read_before`. A command finishes when its shell exits, so a process that outlived
+/// the kill and holds the pipe (and may keep writing to it) does not hold the block.
+fn wait_for_reader(reader: &mpsc::Receiver<()>, outbox: &Outbox, read_before: u64) {
+    let mut left = DRAIN;
+    let mut last = Instant::now();
     loop {
         // The reader never sends: its end is its sender being dropped.
         if !matches!(reader.recv_timeout(DRAIN_STEP), Err(RecvTimeoutError::Timeout)) {
             return;
         }
-        let progress = outbox.progress.load(Ordering::SeqCst);
-        if progress != seen || !outbox.reading.load(Ordering::SeqCst) {
-            seen = progress;
-            silent_since = None;
-        } else if silent_since.get_or_insert_with(Instant::now).elapsed() >= silence {
+        let now = Instant::now();
+        let step = now.duration_since(last);
+        last = now;
+        if !outbox.sending.load(Ordering::SeqCst) {
+            left = left.saturating_sub(step);
+        }
+        let read = outbox.read_bytes.load(Ordering::SeqCst).saturating_sub(read_before);
+        if left.is_zero() || read >= DRAIN_BYTES {
             return;
         }
     }
@@ -605,8 +617,9 @@ fn wait_for_shell(
     // A stop that comes after the shell ended on its own does not relabel it.
     let stopped = shared.life().stopped;
     reader_ended(reader, GRACE);
+    let read_before = outbox.read_bytes.load(Ordering::SeqCst);
     let status = shared.end(&mut child);
-    wait_for_reader(reader, outbox, DRAIN);
+    wait_for_reader(reader, outbox, read_before);
     outbox.finish(ShellEvent::Exited {
         code: Some(exit_code(status)),
         stopped,
