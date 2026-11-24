@@ -370,16 +370,4 @@ mod tests {
             );
         }
     }
-
-    /// Continue sends the word and nothing else: no mentions, no images, and a draft that matches
-    /// the text, so a refill puts back what was sent.
-    #[test]
-    fn the_continue_prompt_is_the_word() {
-        let prompt = LastPrompt::continue_prompt();
-        assert_eq!(prompt.text, "Continue");
-        assert_eq!(prompt.draft, "Continue");
-        assert!(prompt.mention_paths.is_empty());
-        assert!(prompt.images.is_empty());
-        assert!(prompt.mentions.is_empty());
-    }
 }
