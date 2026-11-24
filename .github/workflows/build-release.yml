@@ -680,9 +680,10 @@ jobs:
       # in-app update to the count of fresh installs, so each installer is
       # uploaded twice and the manifest names the copy. The bytes are identical:
       # the hash and the signature match both files, and the updater, which
-      # checks only the bytes, needs no change. The copies stay out of
-      # artifacts/ because the sign and verify steps map that directory to
-      # platform keys by extension, and each key must appear once.
+      # checks only the bytes, needs no change. The sign and verify steps map
+      # update-artifacts/ to platform keys by extension, and each key must
+      # appear once there, so the copies live apart from the installers in
+      # artifacts/.
       - name: Copy each installer for the updater
         run: |
           mkdir -p update-artifacts

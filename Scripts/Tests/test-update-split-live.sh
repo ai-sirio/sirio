@@ -105,9 +105,10 @@ case "$CHANNEL" in
   nightly|stable) ;;
   *) echo "unknown channel '$CHANNEL': expected nightly or stable" >&2; usage ;;
 esac
-case "$POLL_WINDOW" in
-  ''|*[!0-9]*|0) fail "SIRIO_UPDATE_SPLIT_WINDOW must be a number of seconds above 0, not '$POLL_WINDOW'" ;;
-esac
+# A whole number of seconds from 1, with no leading zero: bash reads 010 as octal
+# and 08 as an error, and 0 or 00 would poll once and fail after the download.
+[[ $POLL_WINDOW =~ ^[1-9][0-9]*$ ]] \
+  || fail "SIRIO_UPDATE_SPLIT_WINDOW must be a whole number of seconds from 1, with no leading zero, not '$POLL_WINDOW'"
 if [ -z "$OUT_DIR" ]; then
   OUT_DIR="$REPO_ROOT/artifacts/update-split-$(date +%Y%m%d-%H%M%S)-$$"
 fi

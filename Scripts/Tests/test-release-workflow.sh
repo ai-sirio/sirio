@@ -233,13 +233,21 @@ UNDRAFT_LINE=$(line_of 'gh release edit "$TAG" --draft=false' "$BUILD")
 # manifest names. So each installer is uploaded twice, and the manifest names
 # the copy: a manifest that named the installers would add every in-app update
 # to the count of fresh installs. The copies are made before the release is
-# created, so both files go up together, and only the sign and verify loops walk
-# them -- one loop each, so each platform key appears once and from the copy.
+# created, so both files go up together. Four places read update-artifacts: the
+# create call uploads and labels the copies, the attach check requires them on
+# the release, and the sign and verify loops, one loop each, map them to
+# platform keys, so each key appears once and from the copy. The create call and
+# the attach check are pinned below: without them the manifest names a copy that
+# was never uploaded, and every install gets a 404.
 COPY_LINE=$(line_of 'name: Copy each installer for the updater' "$BUILD")
 [ -n "$COPY_LINE" ] || fail "publish must copy each installer for the updater"
 [ "$COPY_LINE" -lt "$CREATE_LINE" ] || fail "the update copies must exist before the release is created"
 [ "$(grep -cF 'for artifact in update-artifacts/*' "$BUILD")" -eq 2 ] \
   || fail "the manifest must name the -update copies, so GitHub counts updates apart from installs"
+grep -qF 'gh release create "$TAG" "${UPLOADS[@]}"' "$BUILD" \
+  || fail "the release must be created with the installers and their -update copies (\"\${UPLOADS[@]}\"), or the manifest names a 404"
+grep -qF '{ ls artifacts; ls update-artifacts; }' "$BUILD" \
+  || fail "the attach check must list the -update copies as well as the installers, or the manifest can name a copy that is not on the release"
 
 # Re-signing the same bytes yields the same manifest; that is "already
 # published", not a failed commit. A rejected push is rebased and retried.
