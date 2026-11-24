@@ -4,7 +4,10 @@
 Everything here runs against real, isolated debug Sirio instances on the script's private Xvfb; the harness
 (chat_e2e_harness.py, shared with the other chat E2Es) holds the `World` that starts one and the helpers around it.
 A scenario is a function that raises `Fail` at its first failed check; the run reports it and goes on with the next one.
-A scenario that runs for two agents runs each to its end and fails with what both found.
+A scenario that runs for two agents runs each to its end and fails with what both found, whether an agent's run ended in a
+failed check or in an error. run, carry, stop and restart run for claude and for opencode (what they judge crosses the
+transport); retry is claude's Retry and hand_back opencode's; fold, cap, forged, lifetime, band and cannot_start do not
+touch the transport and run for claude only.
 
 What the scenarios read is the debug readout of `surface.chat.read`: per shell block a row `{kind: "shell", command,
 status: running|exited|stopped|failed, exit, sent: true|false, lines, expanded, output}` (`output` is what the block
@@ -23,12 +26,13 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 # `python3 -I` leaves the script's own directory off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chat_e2e_harness import (  # noqa: E402
-    OUT, Fail, World, alive, assistant_rows, error_row, main, scenario, shell_rows, teardown, user_texts,
+    MARKER, OUT, Fail, World, alive, assistant_rows, error_row, main, scenario, shell_rows, teardown, user_texts,
 )
 
 # ---------------------------------------------------------------- what the agent reads
@@ -57,13 +61,17 @@ def checker(scn, agent):
 
 def each_agent(scn, agents, body):
     """Runs `body(scn, agent)` for each agent to its end, and fails with every agent's first failure: a failing claude
-    run does not hide what opencode does."""
+    run does not hide what opencode does, whether it ended in a failed check or in an error of the harness or of the
+    socket (the traceback of one is printed)."""
     failures = []
     for agent in agents:
         try:
             body(scn, agent)
         except Fail as failure:
             failures.append(f"[{agent}] {failure}")
+        except Exception as error:
+            traceback.print_exc()
+            failures.append(f"[{agent}] {error!r}")
     if failures:
         raise Fail(" || ".join(failures))
 
@@ -147,22 +155,30 @@ def session_members(sid):
 
 
 def kill_session(sid):
-    """What a failing run leaves behind must not run for 300 s: SIGKILL to the session's members."""
+    """SIGKILL to the members of the session `sid` that this run started, which a failed check leaves running for 300 s. The
+    run's own `sweep()` reaps them at the end of the scenario all the same (a command's environment carries the run's marker),
+    so this only does it at once. `sid` is a pid read from a block's output and may be stale: a process is killed only when
+    its environment carries the run's marker, as `kill_stub` requires, so a reused pid never takes an unrelated session."""
+    marker = MARKER.encode() + b"\0"
     for pid in session_members(sid):
         try:
-            os.kill(pid, signal.SIGKILL)
+            if marker in Path(f"/proc/{pid}/environ").read_bytes():
+                os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
 
 
-def still_alive(pids, timeout=3.0):
-    """The pids of `pids` that still run after up to `timeout` seconds. A process that has been killed is a zombie for a
-    moment before it is reaped, and `alive` does not count one, so this is polled and never a single look."""
-    deadline = time.time() + timeout
+def leftovers(pids, sid, since, seconds=3.0):
+    """What still runs `seconds` after `since`: the (pids, session members) of `pids` and of the session `sid`, polled until
+    both are empty or the window ends. `since` is the time just before the action that ends the command (the key, the
+    tab's close, the quit), so the window is the one the spec gives and not a later one. A killed process is a zombie for a
+    moment before it is reaped, and `alive` does not count one, which is why this is polled and never a single look."""
+    deadline = since + seconds
     while True:
         left = [pid for pid in pids if alive(pid)]
-        if not left or time.time() > deadline:
-            return left
+        members = session_members(sid)
+        if (not left and not members) or time.time() > deadline:
+            return left, members
         time.sleep(0.1)
 
 
@@ -269,18 +285,18 @@ def carry_for(scn, agent):
              "` !hi` (a space first) goes to the agent as a prompt, and runs nothing",
              f"prompt {prompt!r}, blocks {len(shell_rows(r))} (was {blocks}), user rows {user_texts(r)}", read=r)
 
-        # ---- check 8: a slash command goes without the context, which stays pending
-        if agent == "claude":
-            run_block(w, "echo pend")
-            prompt, r = send_and_read(w, "/compact", "`/compact`")
-            index, row = newest(r)
-            need(prompt == "/compact" and "<bash-input>" not in prompt,
-                 "with a block pending, `/compact` reaches the agent alone, without the context", f"prompt {prompt!r}", read=r)
-            need(row.get("command") == "echo pend" and row.get("sent") == "false",
-                 "the block that `/compact` did not carry is still pending", f"sent {row.get('sent')!r}", read=r)
-            prompt, r = send_and_read(w, "after", "`after`")
-            need(prompt == prompt_with([block("echo pend", "pend")], "after") and newest(r)[1].get("sent") == "true",
-                 "the next ordinary prompt carries the block that stayed pending", f"prompt {prompt!r}", read=r)
+        # ---- check 8: a slash command goes without the context, which stays pending (`/compact` is one by the rule the quote
+        # uses, `is_slash_command`, and both stub agents answer it as any other prompt)
+        run_block(w, "echo pend")
+        prompt, r = send_and_read(w, "/compact", "`/compact`")
+        index, row = newest(r)
+        need(prompt == "/compact" and "<bash-input>" not in prompt,
+             "with a block pending, `/compact` reaches the agent alone, without the context", f"prompt {prompt!r}", read=r)
+        need(row.get("command") == "echo pend" and row.get("sent") == "false",
+             "the block that `/compact` did not carry is still pending", f"sent {row.get('sent')!r}", read=r)
+        prompt, r = send_and_read(w, "after", "`after`")
+        need(prompt == prompt_with([block("echo pend", "pend")], "after") and newest(r)[1].get("sent") == "true",
+             "the next ordinary prompt carries the block that stayed pending", f"prompt {prompt!r}", read=r)
     finally:
         teardown(w)
 
@@ -293,45 +309,80 @@ def scenario_carry(scn):
 # ---------------------------------------------------------------- stop
 
 
-@scenario
-def scenario_stop(scn):
-    need = checker(scn, "claude")
-    w = World(scn, "claude")
+def stop_for(scn, agent):
+    need = checker(scn, agent)
+    w = World(scn, agent)
     shell_pid = None
     try:
         w.start()
-        w.open_chat("claude")
-        # A turn held at its gate streams for as long as the scenario wants, so that "the turn goes on" does not race a clock.
-        w.send("ok hold")
-        w.wait("the held turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
+        w.open_chat(agent)
+        # A turn that stays in flight on its own, whatever the clock: claude's is held at its gate (`ok hold`, released by the
+        # scenario), opencode's is the stub's `slow`, which streams until the client's `session/cancel` and logs a `cancel` record.
+        w.send("ok hold" if agent == "claude" else "slow")
+        w.wait("the turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
         shell_pid, child_pid = start_sleepers(w)
         members = session_members(shell_pid)
         need(shell_pid in members and child_pid in members and len(members) >= 2,
              "control: the command's session holds the shell and its background `sleep` before the Stop (a command runs "
              "while a turn streams)", f"shell {shell_pid}, child {child_pid}, session {members}")
 
-        w.escape()
-        r = w.wait("the first Escape stops the block", lambda r: newest(r)[1] and newest(r)[1].get("status") == "stopped", timeout=3)
+        # One 3 s window, from the key: the block says stopped and the whole session is gone within it.
+        pressed = w.escape()
+        r = w.wait("the first Escape stops the block", lambda r: newest(r)[1] and newest(r)[1].get("status") == "stopped",
+                   timeout=max(0.2, pressed + 3 - time.time()))
         need(newest(r)[1].get("status") == "stopped", "Escape in the composer stops the running command: the block reads stopped",
-             f"status {newest(r)[1].get('status')!r}", read=r)
-        left = still_alive([shell_pid, child_pid])
-        need(not left and not session_members(shell_pid),
-             "the shell and the background child are both gone within 3 s: the whole session was stopped",
-             f"still alive {left}, session {session_members(shell_pid)}", read=r)
-        time.sleep(1.0)  # a turn that the first Escape wrongly stopped would have ended by now
-        r = w.read()
-        need(r["status"] == "streaming" and newest(r)[1].get("status") == "stopped",
-             "the first Escape left the turn streaming: it stops the command first", f"status {r['status']!r}", read=r)
-        w.capture("stop-stopped")
+             f"status {newest(r)[1].get('status')!r}, {time.time() - pressed:.1f} s after the key", read=r)
+        left, members = leftovers([shell_pid, child_pid], shell_pid, pressed)
+        need(not left and not members,
+             "the shell, the background child and the rest of the session are all gone within 3 s of the Escape",
+             f"still alive {left}, session {members}, {time.time() - pressed:.1f} s after the key", read=r)
+        w.capture(f"stop-stopped-{agent}")
 
-        w.escape()
-        r = w.wait("the second Escape stops the turn", lambda r: r["status"] != "streaming", timeout=10)
-        need(r["status"] != "streaming" and len(shell_rows(r)) == 1,
-             "a second Escape, with no command running, stops the turn as it always did", f"status {r['status']!r}", read=r)
+        if agent == "claude":
+            # The held turn goes on: released, it answers `ok` (a turn the first Escape had interrupted never does).
+            w.release_gate(1)
+            r = w.wait("the released turn answers", lambda r: idle(r) and any(a["text"] == "ok" for _, a in assistant_rows(r)),
+                       timeout=30)
+            need(newest(r)[1].get("status") == "stopped",
+                 "the first Escape left the turn alone: the held turn, once released, answered `ok`",
+                 f"replies {[a['text'] for _, a in assistant_rows(r)]}", read=r)
+            # A second turn, held at a gate nobody releases: only the Escape can end it.
+            w.send("ok hold")
+            w.wait("the second held turn is streaming", lambda r: r["status"] == "streaming", timeout=20)
+            replies = len([1 for _, a in assistant_rows(w.read()) if a["text"] == "ok"])
+            w.escape()
+            r = w.wait("the second Escape stops the turn", lambda r: r["status"] != "streaming", timeout=10)
+            after = len([1 for _, a in assistant_rows(r) if a["text"] == "ok"])
+            need(len(shell_rows(r)) == 1 and after == replies,
+                 "a second Escape, with no command running, stops the turn: it was held at a gate nobody released, and it never answered",
+                 f"status {r['status']!r}, `ok` replies {replies} then {after}", read=r)
+        else:
+            # `slow` keeps streaming (its text grows) and has heard no cancel until the second Escape.
+            def streamed(r):
+                return sum(len(a["text"]) for _, a in assistant_rows(r))
+
+            first = w.read()
+            time.sleep(0.8)
+            second = w.read()
+            need(second["status"] == "streaming" and streamed(second) > streamed(first) and not w.records("cancel"),
+                 "the first Escape left the turn streaming: its reply grows and the agent heard no `session/cancel`",
+                 f"status {second['status']!r}, reply {streamed(first)} then {streamed(second)} characters, cancels {w.records('cancel')}",
+                 read=second)
+            w.escape()
+            r = w.wait("the second Escape stops the turn", lambda r: r["status"] != "streaming" and len(w.records("cancel")) == 1,
+                       timeout=10)
+            need(len(w.records("cancel")) == 1 and len(shell_rows(r)) == 1,
+                 "a second Escape, with no command running, stops the turn: the agent heard one `session/cancel`",
+                 f"status {r['status']!r}, cancels {w.records('cancel')}", read=r)
     finally:
         if shell_pid:
             kill_session(shell_pid)
         teardown(w)
+
+
+@scenario
+def scenario_stop(scn):
+    each_agent(scn, ("claude", "opencode"), stop_for)
 
 
 # ---------------------------------------------------------------- fold
@@ -406,12 +457,17 @@ def scenario_cap(scn):
              f"prompt of {len(prompt)} characters", read=r)
         need(len(bodies) == 2 and bodies[1] == newer,
              "the newest block is kept whole: the budget goes to it first", f"newest body of {len(bodies[-1])} characters", read=r)
+        # What room is left is cut as a head, a marker and a tail (spec 5.4: "its first third and its last two thirds"; where the
+        # third falls, by a character, is the product's to round).
         room = BUDGET - len(newer)
-        head, tail = room // 3, room - room // 3
-        cut = f"{older[:head]}\n[… {len(older) - room} characters omitted …]\n{older[-tail:]}"
-        need(bodies[0] == cut,
-             "the older block keeps what room is left: its first third and its last two thirds, with the number of characters omitted",
-             f"room {room}, older body of {len(bodies[0])} characters", read=r)
+        cut = re.fullmatch(r"(.*?)\n\[… (\d+) characters omitted …\]\n(.*)", bodies[0], re.S) if bodies else None
+        head, omitted, tail = cut.groups() if cut else ("", "", "")
+        need(cut is not None and older.startswith(head) and older.endswith(tail) and abs(len(head) - room / 3) <= 1
+             and len(head) + len(tail) == room and omitted == str(len(older) - room),
+             "the older block keeps what room is left: a first third (within a character of room/3) and the rest as its tail, "
+             "with the number of characters omitted between them",
+             f"room {room}, head {len(head)}, tail {len(tail)}, omitted {omitted!r}, older body of {len(bodies[0]) if bodies else 0} characters",
+             read=r)
     finally:
         teardown(w)
 
@@ -464,11 +520,12 @@ def scenario_lifetime(scn):
         need(alive(shell_pid) and alive(child_pid), "control: the shell and its background `sleep` run before the tab is closed",
              f"shell {shell_pid} alive={alive(shell_pid)}, child {child_pid} alive={alive(child_pid)}")
         position = closed.tab_positions("chat")[0]
+        began = time.time()  # the window of 3 s starts at the close
         closed.ctl("surface", "tabs", "close", str(position), "--confirm")
-        left = still_alive([shell_pid, child_pid])
-        need(not left and not session_members(shell_pid),
-             "closing the tab ends the shell and its background child within 3 s",
-             f"tab {position} closed; still alive {left}, session {session_members(shell_pid)}")
+        left, members = leftovers([shell_pid, child_pid], shell_pid, began)
+        need(not left and not members,
+             "closing the tab ends the shell, its background child and the rest of the session within 3 s of the close",
+             f"tab {position} closed; still alive {left}, session {members}, {time.time() - began:.1f} s after the close")
         closed.keep_artifacts()
         closed.quit()
 
@@ -479,11 +536,12 @@ def scenario_lifetime(scn):
         sessions.append(shell_pid)
         need(alive(shell_pid) and alive(child_pid), "control: the shell and its background `sleep` run before the app quits",
              f"shell {shell_pid} alive={alive(shell_pid)}, child {child_pid} alive={alive(child_pid)}")
+        began = time.time()  # the window of 3 s starts at the quit command, not when the app has gone
         quit_.quit()
-        left = still_alive([shell_pid, child_pid])
-        need(not left and not session_members(shell_pid),
-             "quitting the app ends the shell and its background child within 3 s",
-             f"still alive {left}, session {session_members(shell_pid)}")
+        left, members = leftovers([shell_pid, child_pid], shell_pid, began)
+        need(not left and not members,
+             "quitting the app ends the shell, its background child and the rest of the session within 3 s of the quit",
+             f"still alive {left}, session {members}, {time.time() - began:.1f} s after the quit")
     finally:
         for sid in sessions:
             kill_session(sid)
@@ -493,20 +551,20 @@ def scenario_lifetime(scn):
 # ---------------------------------------------------------------- restart
 
 
-@scenario
-def scenario_restart(scn):
-    need = checker(scn, "claude")
-    w = World(scn, "claude")
+def restart_for(scn, agent):
+    need = checker(scn, agent)
+    w = World(scn, agent)
     try:
         w.start()
-        w.open_chat("claude")
+        w.open_chat(agent)
         run_block(w, "echo kept")
         w.quit()
         w.start()
         w.reopen_chat()
-        r = w.read()
+        # The restored transcript is drawn a moment after the chat is back: wait for the block, then judge it.
+        r = w.wait("the restored chat holds the block", lambda r: (newest(r)[1] or {}).get("command") == "echo kept", timeout=15)
         index, row = newest(r)
-        need(row is not None and row.get("command") == "echo kept" and row.get("output") == "kept"
+        need(row.get("command") == "echo kept" and row.get("output") == "kept"
              and row.get("status") == "exited" and row.get("exit") == "0",
              "after a restart the finished block is back, with its command, its output and its exit",
              f"blocks {[(i, x.get('command'), x.get('status'), x.get('output')) for i, x in shell_rows(r)]}", read=r)
@@ -519,6 +577,11 @@ def scenario_restart(scn):
              f"sent {newest(r)[1].get('sent')!r}", read=r)
     finally:
         teardown(w)
+
+
+@scenario
+def scenario_restart(scn):
+    each_agent(scn, ("claude", "opencode"), restart_for)
 
 
 # ---------------------------------------------------------------- retry

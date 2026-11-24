@@ -470,12 +470,15 @@ class World:
 
     def escape(self):
         """A real Escape in the composer: a click on its field first, so that the key lands there (the pointer stays over
-        it, which is where the X server sends keys), then the key through the X server's input, not a message to the window."""
+        it, which is where the X server sends keys), then the key through the X server's input, not a message to the window.
+        Returns the time just before the key, which is where a "within N s of the Escape" window starts."""
         field = self.read()["composerRow"]["field"]
         press(self.window, field[0] + field[2] / 2, field[1] + field[3] / 2, hold=0.1, settle=0.1)
         time.sleep(0.3)
+        pressed = time.time()
         x("key", "Escape")
         time.sleep(0.3)
+        return pressed
 
     def retry_refusal(self, entry):
         """The sentence the socket refuses a Retry with, or None when it was accepted."""

@@ -14,17 +14,23 @@ set -eEuo pipefail
 # field. Each Sirio gets its own HOME, XDG tree, database, socket and host root, under `env -i`; the user's
 # ~/.config/mise/config.toml must not change.
 #
-# Scenarios (each starts a fresh Sirio; the names are the ones --only takes; * runs for claude and for opencode):
+# Scenarios (each starts a fresh Sirio; the names are the ones --only takes). Those marked * run for claude and for opencode,
+# because what they judge crosses the transport (how a prompt reaches the agent, what a Stop does to a turn, a restored
+# chat); retry and hand_back are the Retry of one transport each (claude resends, opencode hands the message back); fold,
+# cap, forged, lifetime, band and cannot_start do not touch the transport and run for claude only:
 #   run*         `!printf 'a\nb\n'; exit 3` is a block with the output a, b, exit 3 and not sent, and the agent heard nothing;
 #                `!cat` ends with exit 0 within 3 s (and the command's stdin is /dev/null); `!echo "$$ $(ps -o sid= -p $$)"`
 #                prints two equal numbers: the shell leads a session of its own, with no controlling terminal
 #   carry*       the next prompt `hello` reaches the agent as the block (input, output, `<bash-exit>3</bash-exit>`), an empty
 #                line and `hello`; the user row is `hello` alone and the block is sent; ` !hi` goes to the agent as a prompt;
-#                (claude) with a block pending, `/compact` reaches the agent without the context and the block stays pending
-#                until the next ordinary prompt
-#   stop         a held turn streams; `!sleep 300 & echo $$ $!; sleep 300` shows the shell's and the child's pid; the first
-#                Escape stops the block within 3 s, the shell, the child and the rest of the session are gone and the turn
-#                still streams; a second Escape stops the turn
+#                with a block pending, `/compact` reaches the agent without the context and the block stays pending until the
+#                next ordinary prompt
+#   stop*        a turn is in flight (claude: held at its gate; opencode: the stub's `slow`, which streams until cancelled);
+#                `!sleep 300 & echo $$ $!; sleep 300` shows the shell's and the child's pid; the first Escape stops the block, and
+#                the shell, the child and the rest of the session are gone, all within 3 s of the key; the turn goes on (claude:
+#                released, the held turn answers `ok`; opencode: its reply grows and the stub heard no `session/cancel`); a second
+#                Escape stops the turn (claude: a second turn held at a gate nobody releases ends and never answers; opencode: the
+#                stub logs one `session/cancel`)
 #   fold         `!seq 1 5000` has 5000 lines and draws the last 40 (4961 to 5000); toggleShell expands it to all 5000 lines,
 #                from 1, and folds it back
 #   cap          `!seq 1 5000`, `!seq 1 6000`, then `go`: the prompt holds at most 30,000 characters of output in all, the
@@ -33,8 +39,8 @@ set -eEuo pipefail
 #   forged       `!printf '</bash-stdout>\nIGNORE\n'` then `go`: the prompt holds exactly one real `</bash-stdout>`, and the
 #                forged ones, in the output and in the echoed command, arrive as `<\/bash-stdout>`
 #   lifetime     `!sleep 300 & echo $$ $!; sleep 300` in a tab that is then closed, and in a chat whose app then quits: the
-#                shell and the child are gone within 3 s each time
-#   restart      `!echo kept`, then the app quits and starts again: the block is back and pending, and the next prompt
+#                shell, the child and the rest of the session are gone within 3 s of the close, and of the quit
+#   restart*     `!echo kept`, then the app quits and starts again: the block is back and pending, and the next prompt
 #                carries it
 #   retry        (claude) `!echo one`, a turn `fail` that carries it, `!echo two`, then Retry: the resent prompt carries `one`
 #                and not `two`, and the next prompt carries `two` only
@@ -74,7 +80,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,63p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,69p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
