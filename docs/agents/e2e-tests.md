@@ -711,8 +711,54 @@ Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "
 # measured, `detail`), scenarios/<name>.json (the same per scenario, with the series each read) and .stub.log, logs/ and
 # frames/*.png (PID-matched window captures); --only NAME[,NAME] runs some scenarios and prints "CHAT RICHER MESSAGES
 # E2E PARTIAL". Needs python3 with gi (GTK 3), xdotool, xwininfo, xprop, xdpyinfo, import, identify, Xvfb and lavapipe.
+# The `World` that starts a Sirio and the helpers around it live in Scripts/Tests/chat_e2e_harness.py, which the message
+# actions E2E below imports too.
 Scripts/Tests/test-chat-richer-messages-e2e.sh   # -> prints "CHAT RICHER MESSAGES E2E OK (<n> checks)"
 Scripts/Tests/test-chat-richer-messages-e2e.sh --only limit,thought_end   # -> prints "CHAT RICHER MESSAGES E2E PARTIAL (2 of 9 scenarios: limit, thought_end; <n> checks)"
+
+# The chat's message actions (spec 2026-11-23-ely-chat-message-actions-design.md §7): Copy, Continue and Quote on chat
+# messages, and Claude's Stop labelled `cancelled`, in a real, isolated debug Sirio on a private Xvfb, against the stubs of the
+# richer E2E above (`claude` and `opencode`, extended with `max tokens`, `slow`, `slow late` and a held `Continue`; ACP
+# `max tokens`, `max turns`, `max tokens drop` and `slow`; their headers list them). It reads `surface.chat.read`'s debug
+# readouts (a row's `actions`, `actionsShown` and `actionBounds.<copy|quote|continue|row|quoteCard>`, a user row's `quote`, the chat's
+# `continue`, `continueRow`, `composerQuote`, `composerQuoteBounds`, `queued`, `transcriptText`) and drives the debug
+# `surface.chat.transcript` verbs `continue`, `toggleTurn`, `copy`, `quote` and `quoteSelection`; every press a user makes is a real X click (xdotool) at the pixels
+# the readout reports: Copy, Quote and Continue on a row, the quote card's cross, the transcript menu's Select All, Copy and Quote
+# selection. The clipboard is read back through GTK on the E2E's own display (no WAYLAND_DISPLAY), another application owning
+# it before each press. Each scenario is a fresh Sirio under `env -i` with its own HOME, XDG tree, database, socket and host root.
+#   copy             Copy on a user row, an older reply (Markdown: the clipboard holds the source) and the last reply (always
+#                    shown), each a real click, the first two after hovering; the clipboard equals the row's text; the `copy` verb
+#                    does the same on a reply and is refused on a turn footer, leaving the clipboard alone
+#   rows             the last reply `always`, the others `hover`, a footer none; a streaming reply none; Select All and Copy
+#                    through the menu equal `transcriptText`, with no label of the row in it
+#   idle_cost        redraws (`Chat.render` and `SirioWorkspace.render` spans of the performance trace) over 5 s of an idle
+#                    chat with its last reply's row shown, before any press and after a Copy press has settled: after <=
+#                    before x 1.5 + 2 and no more than 3 a second; a window with a press in it must count some (the control)
+#   continue_claude  `max tokens`, `fail max turns` and a Stop of `slow`: the footer says why, Continue sits on the last
+#                    reply's row only, a folded turn draws none and the verb is refused, a real press sends a visible `Continue`
+#                    user row that the stub hears on the same process
+#   continue_footer  a Stop before the first text (`think slow`) leaves a turn with a thought and no reply, so Continue sits alone on
+#                    its footer, which is the click that folds the turn: a real press on it sends the visible `Continue` and does
+#                    not fold the turn (the `toggleTurn` verb is the control that a fold shows in the readout)
+#   continue_acp     the same over ACP, with a typed draft and an accepted mention that a Continue leaves alone; an agent's error
+#                    answer to the cancel still ends the turn as cancelled and offers Continue
+#   continue_hidden  `continue` is `none` after an ACP agent was lost and after it restarted, after an ordinary end, while a turn
+#                    runs and on a restored chat
+#   continue_resume  a Claude chat stopped by `max tokens` whose process is killed: Continue is `resume` and relaunches with
+#                    `--resume <session>`, then sends the prompt
+#   continue_once    a second `continue` verb is refused while the first one's turn runs; the stub hears one `Continue`
+#   claude_stop      a Stop of a Claude reply says cancelled and adds no text; a Stop with an item queued sends it and offers no
+#                    Continue; Stop, another prompt, then the stopped turn's late end offers none
+#   quote            Quote on a reply, the card's cross, a send as a `> ` block with the user row reading its quote, Quote selection
+#                    through the menu, a quote queued with its block while a turn streams, `/compact` sent without the quote and
+#                    `/etc/hosts is wrong` with it, a quoted `@path` unchanged, the quote on the row after a relaunch, a hand-back,
+#                    the `quote` verb (and its refusal on a footer), `quoteSelection` refused with nothing selected, Copy on a quoted
+#                    user row (the block and the typed text), a quote sent with no typed text
+# `--out-dir DIR` (default artifacts/message-actions-e2e) keeps transcript.log, checks.jsonl, scenarios/<name>.json and
+# .stub.log, logs/ and frames/*.png as the richer E2E does; `--display :N` (:140 to :159, default :141) and `--only
+# NAME[,NAME]` (prints "MESSAGE ACTIONS E2E PARTIAL") likewise. Needs the same tools. Run it under `env -u WAYLAND_DISPLAY`.
+Scripts/Tests/test-chat-message-actions-e2e.sh   # -> prints "MESSAGE ACTIONS E2E OK (<n> checks)"
+Scripts/Tests/test-chat-message-actions-e2e.sh --only quote   # -> prints "MESSAGE ACTIONS E2E PARTIAL (1 of 11 scenarios: quote; <n> checks)"
 
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
@@ -1037,7 +1083,7 @@ Scripts/Tests/test-markdown-remote-image-e2e.sh --xvfb   # -> prints "MARKDOWN R
 # --bin-dir holds sirio and sirio-host (sirioctl too, else rust/target/debug/sirioctl); the chat leg
 # needs rust/target/debug/examples/ely_chat_seed. --display :N, --only preview,chat,cr-description.
 # The chat leg also captures the states of the richer chat messages, each in an isolated world of the
-# richer E2E's driver (the stub `claude` of Scripts/Tests/stubs/richer): state-day-separators and
+# chat E2Es' harness (Scripts/Tests/chat_e2e_harness.py; the stub `claude` of Scripts/Tests/stubs/richer): state-day-separators and
 # state-day-separators-top, state-limit-card, state-turn-failed, state-turn-failed-second, state-held-queue,
 # state-thought-settled and state-mid-reveal-<k> (a reply at each received size in $REVEAL_AT, default
 # 1800,6000,12000, which fails if the reply had ended when the frame was shot), and chat-states.json

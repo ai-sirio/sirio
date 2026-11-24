@@ -1214,8 +1214,13 @@ pub mod request {
 
     /// Debug-only `surface.chat.transcript {surfaceId, action, pixels?, turn?, entry?}`: scrolls a
     /// chat's transcript (`scrollBy`, by `pixels`), folds or unfolds a closed turn (`toggleTurn`,
-    /// by the turn's footer index `turn`), as the wheel and the turn's row do, or presses the
-    /// Retry of an error row (`retry`, by the row's index `entry`).
+    /// by the turn's footer index `turn`), as the wheel and the turn's row do, presses the
+    /// Retry of an error row (`retry`, by the row's index `entry`), presses Continue
+    /// (`continue`, which sits on no row of the caller's choosing), copies a message row's text as
+    /// its Copy does (`copy`, by the row's index `entry`; it writes the clipboard itself, with no
+    /// Copy button and no check mark), presses Quote on a message row (`quote`, by `entry`), or
+    /// picks Quote selection from the transcript's menu (`quoteSelection`, which quotes what is
+    /// selected and is refused when nothing is selected within one entry).
     pub fn chat_transcript(
         surface_id: &str,
         action: &str,

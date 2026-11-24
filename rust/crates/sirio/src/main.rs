@@ -4027,10 +4027,27 @@ impl ControlHandler for AppControlHandler {
                             }
                         }
                     }
+                    Some("continue") => TranscriptAction::Continue,
+                    Some("quoteSelection") => TranscriptAction::QuoteSelection,
+                    Some(verb @ ("copy" | "quote")) => {
+                        match request.params.get("entry").map(|entry| entry.parse::<usize>()) {
+                            Some(Ok(entry)) if verb == "copy" => TranscriptAction::Copy(entry),
+                            Some(Ok(entry)) => TranscriptAction::Quote(entry),
+                            _ => {
+                                return ControlResponse::failure(
+                                    &request.id,
+                                    format!(
+                                        "surface.chat.transcript {verb} requires a numeric entry"
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.chat.transcript requires action scrollBy, toggleTurn or retry",
+                            "surface.chat.transcript requires action scrollBy, toggleTurn, retry, \
+                             continue, copy, quote or quoteSelection",
                         );
                     }
                 };
@@ -25853,6 +25870,26 @@ impl SirioWorkspace {
             "daySeparators".to_string(),
             sirio_control::protocol::rows::encode(&snapshot.day_separators),
         ));
+        // Debug builds only: what Continue does now (`none`, `resend` or `resume`) and the
+        // transcript row that carries it, absent when none does.
+        #[cfg(debug_assertions)]
+        {
+            fields.push(("continue".to_string(), snapshot.continue_action));
+            if let Some(row) = snapshot.continue_row {
+                fields.push(("continueRow".to_string(), row.to_string()));
+            }
+            // The quote held for the next prompt, absent when none is, and where its card was
+            // painted (`[x, y, width, height]` in window pixels, absent when none is drawn).
+            if let Some(quote) = snapshot.composer_quote {
+                fields.push(("composerQuote".to_string(), quote));
+            }
+            if let Some(bounds) = snapshot.composer_quote_bounds {
+                fields.push((
+                    "composerQuoteBounds".to_string(),
+                    serde_json::to_string(&bounds).unwrap_or_default(),
+                ));
+            }
+        }
         fields
     }
 

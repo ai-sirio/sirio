@@ -137,8 +137,8 @@ impl Fold {
     }
 
     /// The worker wrote an `interrupt` (a Stop). The `result` that closes the turn then in flight
-    /// is a stopped turn's: it keeps the events of a turn that ended (`TurnEnded`, and its text as
-    /// a reply), not a failure's, whatever its subtype and text say. The real CLI answers an
+    /// is a stopped turn's: it ends as `TurnEnded { stop_reason: "Cancelled" }` with no text drawn
+    /// from it, not as a failure, whatever its subtype and text say. The real CLI answers an
     /// interrupt with `error_during_execution`, `is_error` and no text, so no string in the
     /// result tells a Stop from a failure; only the worker knows it asked.
     ///
@@ -958,10 +958,16 @@ impl Fold {
     fn apply_result(&mut self, result: ResultPayload) -> Vec<ChatEvent> {
         let mut events = Vec::new();
         let local_command_text = self.local_command_text.take();
-        let stop_reason = stop_reason_label(&result);
         // A Stop's result closes the turn it interrupted, once, and a prompt that waited for it
         // begins its own turn now, without the mark.
         let stopped = std::mem::take(&mut self.interrupted);
+        // A stopped turn ends as ACP's does, whatever subtype or stop reason the CLI wrote
+        // (the real one writes `error_during_execution`), so the footer says it was cancelled.
+        let stop_reason = if stopped {
+            "Cancelled".to_string()
+        } else {
+            stop_reason_label(&result)
+        };
         // A result that closed no prompt of ours closes a turn the CLI started on its own (a
         // background agent's wake): there is no prompt to retry.
         let prompted = match result.queued_turn_count {
@@ -984,14 +990,17 @@ impl Fold {
         };
         // The sentence of a turn that failed, which ends it in place of `TurnEnded`.
         let mut failure = None;
+        // A stopped turn's result text is the CLI's sentence about the Stop, not the agent's
+        // reply, so none is drawn.
         if result.is_error
+            && !stopped
             && let Some(text) = result.result.clone().filter(|text| !text.is_empty())
             && local_command_text.as_deref() != Some(text.as_str())
         {
             // The user must see why a turn failed. The alternative — a bare
             // footer saying "ended" — is the exact silent failure this
             // transcript is responsible for not producing.
-            if prompted && !stopped && fails_the_turn(&result.subtype) {
+            if prompted && fails_the_turn(&result.subtype) {
                 failure = Some(text);
             } else {
                 events.push(ChatEvent::AgentMessageChunk(text));
@@ -1073,10 +1082,16 @@ fn fails_the_turn(subtype: &str) -> bool {
 /// turn has to arrive under the same words or every abnormal end silently
 /// renders as an ordinary one.
 fn stop_reason_label(result: &ResultPayload) -> String {
-    let raw = result
-        .stop_reason
-        .as_deref()
-        .unwrap_or(result.subtype.as_str());
+    // The turn limit ends a turn whose last message asked for a tool, so its `stop_reason` can
+    // read `tool_use`: the subtype is what says the turn hit the limit.
+    let raw = if result.subtype == "error_max_turns" {
+        "error_max_turns"
+    } else {
+        result
+            .stop_reason
+            .as_deref()
+            .unwrap_or(result.subtype.as_str())
+    };
     match raw {
         "cancelled" | "canceled" | "interrupted" => "Cancelled",
         "refusal" | "refused" => "Refusal",
@@ -1490,6 +1505,25 @@ mod tests {
             ChatEvent::AgentMessageChunk("Reached the turn limit".into())
         );
         assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
+    }
+
+    /// The turn limit ends a turn whose last message asked for a tool, so the CLI can write
+    /// `stop_reason: "tool_use"` beside the `error_max_turns` subtype. The subtype names the
+    /// end: read from the stop reason alone, this turn would be labelled an ordinary one and
+    /// the transcript would offer nothing to pick it up from.
+    #[test]
+    fn a_turn_that_hit_the_limit_is_labelled_so_whatever_its_stop_reason_says() {
+        let mut fold = Fold::new();
+        let events = fold.apply(parse(json!({
+            "type": "result", "subtype": "error_max_turns", "is_error": true,
+            "stop_reason": "tool_use", "result": "Reached the turn limit"
+        })));
+        assert_eq!(
+            events.last(),
+            Some(&ChatEvent::TurnEnded {
+                stop_reason: "MaxTurnRequests".into()
+            })
+        );
     }
 
     #[test]
@@ -2120,15 +2154,47 @@ mod tests {
             .any(|event| matches!(event, ChatEvent::TurnFailed { .. }))
     }
 
+    fn cancelled() -> ChatEvent {
+        ChatEvent::TurnEnded {
+            stop_reason: "Cancelled".into(),
+        }
+    }
+
+    fn has_reply_chunk(events: &[ChatEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, ChatEvent::AgentMessageChunk(_)))
+    }
+
     #[test]
-    fn a_stopped_turns_result_keeps_the_events_of_a_turn_that_ended() {
+    fn a_stopped_turn_ends_cancelled_with_no_text_from_the_cli() {
+        // The real CLI's answer to an interrupt, as captured: it carries no `result` text.
+        let captured = parse(
+            serde_json::from_str(include_str!(
+                "../../../sirio_claude/tests/fixtures/trace_result_interrupted.json"
+            ))
+            .expect("the capture is JSON"),
+        );
+        let mut fold = Fold::new();
+        fold.turn_started();
+        fold.interrupt_sent();
+        let events = fold.apply(captured);
+        assert!(!is_failure(&events), "a Stop is not a failure: {events:?}");
+        assert!(!has_reply_chunk(&events), "{events:?}");
+        assert_eq!(events.last(), Some(&cancelled()));
+    }
+
+    #[test]
+    fn a_stopped_turns_result_text_is_not_reply_text() {
+        // A CLI that does word its interrupt ("Interrupted by user") still has said nothing the
+        // model did: the sentence is no part of the transcript.
         let mut fold = Fold::new();
         fold.turn_started();
         fold.interrupt_sent();
         let events = fold.apply(interrupted_result());
         assert!(!is_failure(&events), "a Stop is not a failure: {events:?}");
-        assert!(events.contains(&ChatEvent::AgentMessageChunk("Interrupted by user".into())));
-        assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
+        assert!(!has_reply_chunk(&events), "{events:?}");
+        assert_eq!(events.last(), Some(&cancelled()));
     }
 
     #[test]

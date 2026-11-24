@@ -11,13 +11,21 @@
 #   fail hold          `fail`, each of its turns waiting for its gate ($SIRIO_FIXTURE_GATE.<n>, n = how often the
 #                      text was sent) before it fails or answers
 #   fail max turns     an `error_max_turns` result: the reply text and footer of today, no error row
+#   max tokens         a reply cut mid-sentence and a result with `stop_reason: "max_tokens"` (not an error): the
+#                      turn ends at the token limit
+#   slow               a reply of 40 pieces 0.2 s apart (8 s), so that a Stop lands in the middle of it; the Stop
+#                      is answered at once in the captured shape (no text, `terminal_reason: aborted_streaming`)
+#   slow late          `slow`, but the answer to a Stop waits for the file $SIRIO_FIXTURE_GATE.late: the stopped
+#                      turn's late end, held back while another prompt is sent
 #   think slow         a thinking block that closes, a 2 s wait, then the text
 #   die                streams a partial reply and exits; the next `die` answers `recovered`
 #   limit rejected     a rejected rate-limit event (resetsAt from $SIRIO_FIXTURE_LIMIT_FILE) and a failed turn;
 #                      the next one answers `recovered`; `limit rejected hold` waits for its gate first
 #   limit event        the same event and a turn that succeeds: a limit with no failed turn
 #   replyfile          the text of $SIRIO_FIXTURE_REPLY_FILE in one chunk
-#   anything else      answers `ok`; ` hold` after any prompt makes it wait for its gate
+#   anything else      answers `ok`; ` hold` after any prompt makes it wait for its gate. A `Continue` waits for
+#                      its gate too while the file $SIRIO_FIXTURE_GATE.hold-continue exists (the prompt a Continue
+#                      sends is that one word, which cannot be suffixed)
 # Every call is recorded in $SIRIO_STUB_LOG as `claude<TAB>pid<TAB>arguments`, and the fixture records every start
 # and every prompt in the same file with the pid (see richer_log).
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

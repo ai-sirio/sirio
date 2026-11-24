@@ -275,10 +275,11 @@ def text(chunk):
     })
 
 
-def result(subtype="success", is_error=False, text_body="Done.", queued=0, **extra):
+def result(subtype="success", is_error=False, text_body="Done.", queued=0, stop_reason=None, **extra):
     """A turn's `result`. `queued` is its `queued_turn_count`, which the real CLI always writes:
     the user's sends it has read and not yet run. This fixture answers a prompt before it reads
-    the next, so that is 0 unless a mode says otherwise; `None` leaves the field out."""
+    the next, so that is 0 unless a mode says otherwise; `None` leaves the field out. `stop_reason`
+    is the result's own (`max_tokens`, say); left out, it is `end_turn`, or `cancelled` for an error."""
     if queued is not None:
         extra = {**extra, "queued_turn_count": queued}
     send({
@@ -287,7 +288,7 @@ def result(subtype="success", is_error=False, text_body="Done.", queued=0, **ext
         "subtype": subtype,
         "is_error": is_error,
         "result": text_body,
-        "stop_reason": "end_turn" if not is_error else "cancelled",
+        "stop_reason": stop_reason or ("end_turn" if not is_error else "cancelled"),
         "total_cost_usd": 0.01,
         "modelUsage": {
             "claude-fable-5-1": {
@@ -1136,7 +1137,6 @@ def trace_result(cost, started, interrupted=False):
         "is_error": interrupted,
         "duration_ms": int((time.time() - started) * 1000),
         "num_turns": 1,
-        "result": "Interrupted by user" if interrupted else "Done.",
         "stop_reason": None if interrupted else "end_turn",
         "total_cost_usd": TRACE_COST["total"],
         "modelUsage": usage,
@@ -1145,7 +1145,10 @@ def trace_result(cost, started, interrupted=False):
         "uuid": trace_uuid(),
     }
     if interrupted:
+        # The shape the real CLI captured for a Stop: no `result` text at all.
         body["terminal_reason"] = "aborted_streaming"
+    else:
+        body["result"] = "Done."
     send(body)
 
 
@@ -2698,11 +2701,11 @@ def cli_notices_prompt(message):
 # again. `unasked interrupt` is a result that reads like a Stop's (`error_during_execution`,
 # "Interrupted by user") that nobody asked for. `hold` streams a word and waits for the
 # `interrupt` request, then answers it the way the real CLI does: `error_during_execution`,
-# `is_error`, no stop reason. `hold late` is `hold` with the answer owed: the CLI winds the
-# stopped turn down after Stop freed the composer, so the stopped turn's result is written only
-# when the next prompt arrives, ahead of that prompt's own result. Any other prompt is an
-# ordinary answer, so a test can tell the client is still usable after a failure. The results
-# carry no `stop_reason`, as the CLI's own failures do.
+# `is_error`, no stop reason and no text. `hold late` is `hold` with the answer owed: the CLI
+# winds the stopped turn down after Stop freed the composer, so the stopped turn's result is
+# written only when the next prompt arrives, ahead of that prompt's own result. Any other
+# prompt is an ordinary answer, so a test can tell the client is still usable after a failure.
+# The results carry no `stop_reason`, as the CLI's own failures do.
 # Every result carries `queued_turn_count`, the prompts read and not yet run, as the real CLI's
 # do: `hold late`'s stopped result says 1 (the prompt that made it due is read and waits).
 # `hold late bare` is `hold late` with that field left out, the shape of an older or synthetic
@@ -2737,8 +2740,10 @@ def with_queued(line, queued):
 
 
 def interrupted_result(queued=0):
+    """The answer to a Stop, in the shape the real CLI captured: no `result` text, no stop reason,
+    `terminal_reason` `aborted_streaming`."""
     send(with_queued({"type": "result", "subtype": "error_during_execution", "is_error": True,
-                      "result": "Interrupted by user", "stop_reason": None,
+                      "stop_reason": None, "terminal_reason": "aborted_streaming",
                       "session_id": SESSION_ID, "uuid": trace_uuid()}, queued))
 
 
@@ -2923,6 +2928,10 @@ RICHER_PARTIAL = (
     "- the first point, written out\n- the second point\n\n"
     "The next step is"
 )
+# What `max tokens` writes before the model runs out of room, and the chunks of `slow` (40 of them, 0.2 s apart).
+RICHER_CUT = "The answer is long, so it is cut off right in the middle of a sen"
+RICHER_SLOW_CHUNKS = [f"slow reply part {number}. " for number in range(1, 41)]
+RICHER_SLOW_PAUSE = 0.2
 
 
 def richer_log(kind, text=""):
@@ -2996,10 +3005,23 @@ def richer_wait(seconds):
     return not RICHER_STOP.wait(seconds)
 
 
+def richer_gate_file(name):
+    """The path of the gate file `name` ($SIRIO_FIXTURE_GATE.<name>), None when the run names no gate."""
+    base = os.environ.get("SIRIO_FIXTURE_GATE")
+    return f"{base}.{name}" if base else None
+
+
+def richer_wait_for_file(path, seconds=120):
+    """Holds until `path` exists, however a Stop came in meanwhile (`richer_wait` returns at once after one, which is
+    no wait for the file); gives up after `seconds`."""
+    deadline = time.time() + seconds
+    while path and not os.path.exists(path) and time.time() < deadline:
+        time.sleep(0.05)
+
+
 def richer_gate(number):
     """Holds until the gate file of this prompt's number exists; False when a Stop came in."""
-    base = os.environ.get("SIRIO_FIXTURE_GATE")
-    path = f"{base}.{number}" if base else None
+    path = richer_gate_file(number)
     while path and not os.path.exists(path):
         if not richer_wait(0.05):
             return False
@@ -3064,8 +3086,11 @@ def richer_turn(prompt):
     number = richer_seen(prompt) + 1
     richer_log("prompt", prompt)
     RICHER_STOP.clear()
-    hold = prompt.endswith(" hold")
-    base = prompt[: -len(" hold")] if hold else prompt
+    # `<prompt> hold` waits for its gate; so does a `Continue` while the file $SIRIO_FIXTURE_GATE.hold-continue exists
+    # (the turn a Continue starts has the text `Continue`, which the E2E cannot suffix).
+    held_continue = prompt == "Continue" and os.path.exists(richer_gate_file("hold-continue") or "")
+    hold = prompt.endswith(" hold") or held_continue
+    base = prompt[: -len(" hold")] if prompt.endswith(" hold") else prompt
     requesting()
     if base in ("showcase", "showcase slow", "showcase x8", "compact"):
         body = {"showcase x8": richer_showcase_x8, "compact": richer_compact}.get(base, richer_showcase)()
@@ -3094,6 +3119,26 @@ def richer_turn(prompt):
         richer_open_text("msg_max")
         richer_delta("Working on it.")
         failure_result("error_max_turns", "Reached the turn limit")
+    elif base == "max tokens":
+        # The reply is cut where the model ran out of room: a closed text block, a message that stopped at the limit
+        # and a result that says so (not an error: the turn ended, short).
+        richer_open_text("msg_cut")
+        for piece in richer_chunks(RICHER_CUT, 3):
+            richer_delta(piece)
+        richer_block(0, "content_block_stop")
+        trace_assistant("msg_cut", {"type": "text", "text": RICHER_CUT})
+        message_end(stop_reason="max_tokens")
+        result(text_body=RICHER_CUT, stop_reason="max_tokens")
+    elif base in ("slow", "slow late"):
+        # A reply that streams for 8 s, so that a Stop lands in the middle of it. `slow late` answers the Stop only once
+        # the file $SIRIO_FIXTURE_GATE.late exists: the stopped turn's late end, which a scenario holds back to send
+        # another prompt in between.
+        if not richer_stream("msg_slow", RICHER_SLOW_CHUNKS, RICHER_SLOW_PAUSE):
+            if base == "slow late":
+                richer_wait_for_file(richer_gate_file("late"))
+            richer_interrupted()
+            return
+        result()
     elif base == "think slow":
         message_start("msg_think")
         richer_block(0, "content_block_start", content_block={"type": "thinking", "thinking": "", "signature": ""})
@@ -3314,8 +3359,7 @@ def main():
                     HOLDING_LATE.clear()
                     STOPPED_RESULT_OWED.set()
                 if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):
-                    result(subtype="error_during_execution", is_error=True,
-                           text_body="Interrupted by user")
+                    interrupted_result()
                     send_flush_and_exit()
             elif subtype == "set_permission_mode":
                 control_response(request_id, {"mode": request.get("mode")})

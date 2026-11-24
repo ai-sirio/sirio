@@ -703,7 +703,7 @@ use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
-    chat::{Attachment, AttachmentChip, PromptInput},
+    chat::{Attachment, AttachmentChip, PromptInput, QuoteReply},
     menus::Hang,
     primitives::{Icon, IconName},
     theme::{ActiveTheme as _, ControlSize, IconSize, Radius, TextSize},
@@ -719,6 +719,30 @@ pub(super) const FIELD_PAD_Y: f32 = 5.0;
 /// opened them, and this keeps one opened on the first row above the band
 /// instead of over its rule.
 const SHELL_TOP_INSET: f32 = 1.0 + BAND_TOP_PAD;
+
+/// What a queued item shows of its text. An item that opens with a quote block (`split_quote`,
+/// the rule the transcript's user row follows) shows the quote as Ely's card and the typed text
+/// below it, not the block's `>` lines; any other item is its text on one ellipsized line.
+fn queued_body(index: usize, text: &str) -> AnyElement {
+    let (quoted, rest) = quote::split_quote(text);
+    let Some(quoted) = quoted else {
+        return EllipsisTooltip::new(("queue-tooltip", index), text.to_string()).into_any_element();
+    };
+    div()
+        .flex()
+        .flex_col()
+        .child(QuoteReply::new(
+            ("queue-quote", index),
+            quote::READ_BACK_AUTHOR,
+            quote::card_line(&quoted),
+        ))
+        .children(
+            (!rest.trim().is_empty()).then(|| {
+                EllipsisTooltip::new(("queue-tooltip", index), rest.to_string())
+            }),
+        )
+        .into_any_element()
+}
 
 /// What the chip calls an attached picture: the kind of file it will be sent as.
 fn attachment_chip_name(mime_type: &str) -> String {
@@ -875,10 +899,7 @@ impl Chat {
                                         .min_w_0()
                                         .text_size(label_size)
                                         .text_color(fg)
-                                        .child(EllipsisTooltip::new(
-                                            ("queue-tooltip", index),
-                                            text.clone(),
-                                        )),
+                                        .child(queued_body(index, text)),
                                 )
                                 .child(
                                     div()
@@ -1320,6 +1341,45 @@ impl Chat {
                 }))
         });
 
+        // The message held to be quoted by the next prompt: Ely's card over the field, with its
+        // ✕. Ely draws the first line of what it is given, so it is given the quote as one short
+        // line (`card_line`): a reply quoted whole is not copied into every frame, and the card
+        // shows where the line is cut. It sits beside the field, never in it, and what it says is
+        // not selectable text.
+        let quote_card = self.quote.as_ref().map(|quote| {
+            let remove_entity = entity.clone();
+            let card = div()
+                .id("composer-quote")
+                .debug_selector(|| "composer-quote".into())
+                .relative()
+                .min_w_0()
+                .child(
+                    QuoteReply::new(
+                        "composer-quote-card",
+                        quote.author.clone(),
+                        quote::card_line(&quote.text),
+                    )
+                    .on_remove(move |window, cx| {
+                        remove_entity.update(cx, |chat, cx| {
+                            chat.quote = None;
+                            chat.composer_field
+                                .read(cx)
+                                .focus_handle(cx)
+                                .focus(window, cx);
+                            cx.notify();
+                        });
+                    }),
+                );
+            // Where the card is painted, for the control socket's `composerQuoteBounds`.
+            #[cfg(debug_assertions)]
+            let card = card.child(super::message_actions::probe(
+                &entity,
+                super::message_actions::COMPOSER_QUOTE,
+                "composerQuote",
+            ));
+            card
+        });
+
         // The field is Ely's raw `TextInput`: it paints text, selection and
         // caret and no frame or fill, so the shell's themed surface shows
         // through (`PromptInput::custom`) and the shell is the one frame the
@@ -1388,6 +1448,9 @@ impl Chat {
             prompt = prompt.busy(move |_, cx| {
                 stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
             });
+        }
+        if let Some(card) = quote_card {
+            prompt = prompt.above(card);
         }
         if let Some(chips) = attachment_chips {
             prompt = prompt.above(chips);

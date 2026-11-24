@@ -51,7 +51,18 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                                     with a JSON-RPC error: the late end of a stopped turn (the log gets a
                                     `cancel` line when the notification arrives and a `cancel_answered`
                                     line once the error is written);
+                     `max tokens`   streams a cut reply and answers stopReason `max_tokens`;
+                     `max turns`    answers stopReason `max_turn_requests`;
+                     `max tokens drop`  `max tokens`, then the agent closes its stdin and writes a line that is not
+                                    JSON, and exits: the client's error reply to that line cannot be written, which is
+                                    how the chat learns the agent is gone with nothing in flight (an exit alone is
+                                    not noticed);
+                     `slow`         streams a piece every 0.2 s until `session/cancel`, then answers stopReason
+                                    `cancelled` (the log gets a `cancel` line);
                      anything else  answers `reply ok`.
+                   A prompt that opens with a quote block (`> ` lines and an empty line, what Quote puts at its
+                   head) picks its turn by the text after the block; the log keeps the whole text, and the
+                   prompt's `blocks` (each block's type and, for a link, its uri or name).
   ely-catalogue    Like `composer`, with every catalogue an agent can report: three
                    session modes, models with long names, four effort levels and
                    an 85% context fill. The native pass over the chat's popups.
@@ -93,6 +104,7 @@ Wire shapes mirror the sirio_acp integration fixture (acp_fixture.py).
 import json
 import os
 import sys
+import threading
 import time
 
 
@@ -534,6 +546,55 @@ def richer_seen(text):
 # -32000 is the wire code `sirio_acp` reads as "authentication required": a failed prompt must not use it.
 INTERNAL_ERROR = -32603
 RICHER_PARTIAL = ["I started on it. Here is **what I found** so far:\n\n", "- the first point\n- the second\n\n", "The next step is"]
+# What `max tokens` writes before the model runs out of room.
+RICHER_CUT = "The answer is long, so it is cut off right in the middle of a sen"
+
+
+def richer_base(text):
+    """The text that picks the turn: the prompt without the quote block at its head (`> ` lines, then an empty line)."""
+    if text.startswith(">") and "\n\n" in text:
+        return text.split("\n\n", 1)[1]
+    return text
+
+
+def richer_blocks(params):
+    """The prompt's blocks for the log: each one's type and, for a link, its uri or name."""
+    blocks = []
+    for block in params.get("prompt", []):
+        entry = {"type": block.get("type")}
+        for key in ("uri", "name"):
+            if key in block:
+                entry[key] = block[key]
+        blocks.append(entry)
+    return blocks
+
+
+def richer_slow(request, text):
+    """Streams a piece every 0.2 s (for up to a minute) until the client's `session/cancel`, which it answers
+    `cancelled`. The pieces come from a thread so that the one reading stdin can block on the notification, as
+    `cancel fail` does."""
+    stop = threading.Event()
+
+    def stream():
+        for number in range(1, 301):
+            if stop.is_set():
+                return
+            message_chunk(f"slow reply part {number}. ")
+            stop.wait(0.2)
+
+    thread = threading.Thread(target=stream, daemon=True)
+    thread.start()
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            stop.set()
+            return
+        if json.loads(line).get("method") == "session/cancel":
+            richer_log("cancel", {"text": text})
+            break
+    stop.set()
+    thread.join()
+    response(request["id"], {"stopReason": "cancelled"})
 
 
 def richer_prompt(request):
@@ -542,17 +603,37 @@ def richer_prompt(request):
         block.get("text", "") for block in params.get("prompt", []) if block.get("type") == "text"
     ).strip()
     number = richer_seen(text) + 1
-    richer_log("prompt", {"text": text, "sessionId": params.get("sessionId")})
-    if text == "fail prompt" and number == 1:
+    richer_log("prompt", {"text": text, "sessionId": params.get("sessionId"), "blocks": richer_blocks(params)})
+    base = richer_base(text)
+    if base == "fail prompt" and number == 1:
         for piece in RICHER_PARTIAL:
             message_chunk(piece)
         error(request["id"], "the prompt failed", code=INTERNAL_ERROR)
-    elif text == "die" and number == 1:
+    elif base == "die" and number == 1:
         for piece in RICHER_PARTIAL:
             message_chunk(piece)
         sys.stdout.flush()
         os._exit(17)
-    elif text == "cancel fail":
+    elif base == "max tokens":
+        message_chunk(RICHER_CUT)
+        response(request["id"], {"stopReason": "max_tokens"})
+    elif base == "max tokens drop":
+        message_chunk(RICHER_CUT)
+        response(request["id"], {"stopReason": "max_tokens"})
+        # An agent that goes away with nothing pending is not noticed. A line the protocol layer cannot read is: it
+        # answers it with an error written to our stdin, and that write is what fails. With stdin closed first it fails
+        # whenever it happens, not only when it falls after our exit.
+        os.close(sys.stdin.fileno())
+        sys.stdout.write("not json at all\n")
+        sys.stdout.flush()
+        time.sleep(2)
+        os._exit(1)
+    elif base == "max turns":
+        message_chunk("Working on it.")
+        response(request["id"], {"stopReason": "max_turn_requests"})
+    elif base == "slow":
+        richer_slow(request, text)
+    elif base == "cancel fail":
         for piece in RICHER_PARTIAL:
             message_chunk(piece)
         while True:
@@ -564,7 +645,7 @@ def richer_prompt(request):
                 error(request["id"], "the prompt was cancelled", code=INTERNAL_ERROR)
                 richer_log("cancel_answered", {"text": text, "code": INTERNAL_ERROR})
                 break
-    elif text in ("fail prompt", "die"):
+    elif base in ("fail prompt", "die"):
         message_chunk("recovered")
         response(request["id"], {"stopReason": "end_turn"})
     else:

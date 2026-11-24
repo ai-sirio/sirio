@@ -70,6 +70,10 @@ impl Chat {
         let link = self.transcript_menu_link.as_deref();
         let items = TranscriptContextItem::ALL
             .into_iter()
+            .chain(
+                self.quote_selection_available()
+                    .then_some(TranscriptContextItem::QuoteSelection),
+            )
             .chain(link.into_iter().flat_map(|_| TranscriptContextItem::LINK));
         let menu = items.fold(Menu::new(), |menu, item| {
             let entity = entity.clone();

@@ -65,10 +65,12 @@ mod limit_card;
 mod limit_notice;
 pub(crate) mod list_scroll;
 mod menus;
+mod message_actions;
 mod mode_cycle;
 mod prompt_history;
 pub use prompt_history::PromptRecord;
 mod question_dock;
+mod quote;
 mod retry;
 mod reveal;
 mod visible_text;
@@ -747,6 +749,20 @@ pub struct ChatControlSnapshot {
     /// row between them would move every position the readouts and `retry { entry }` name.
     #[cfg(debug_assertions)]
     pub day_separators: Vec<BTreeMap<String, String>>,
+    /// Debug builds only: what Continue does now (`RetryAction::wire`, `none` when it has no
+    /// button), and the transcript row that carries it, `None` when none does.
+    #[cfg(debug_assertions)]
+    pub continue_action: String,
+    #[cfg(debug_assertions)]
+    pub continue_row: Option<usize>,
+    /// Debug builds only: the text of the quote held for the next prompt, `None` when none is.
+    #[cfg(debug_assertions)]
+    pub composer_quote: Option<String>,
+    /// Debug builds only: where the last paint drew the composer's quote card, as
+    /// `[x, y, width, height]` in window pixels; `None` while none is drawn. The card's ✕ is Ely's
+    /// and cannot be measured on its own: it is the last part of this box, at its right edge.
+    #[cfg(debug_assertions)]
+    pub composer_quote_bounds: Option<[f32; 4]>,
     /// The effort level in force, by its wire value: what the chip names and the list
     /// marks. `None` when the session advertised no effort, or no level is reported.
     pub effort: Option<String>,
@@ -783,6 +799,18 @@ pub enum TranscriptAction {
     ToggleTurn(usize),
     /// Presses the Retry of the error row at this entry index. Refused when the row has none.
     Retry(usize),
+    /// Presses Continue, which sits on no row of the caller's choosing: refused when the last
+    /// turn did not stop short, or Continue is hidden for the agent's state.
+    Continue,
+    /// Presses Copy on the message row at this entry index: puts on the clipboard what the row's
+    /// Copy takes. Refused when the row draws no action row.
+    Copy(usize),
+    /// Presses Quote on the message row at this entry index, as a click does. Refused when the row
+    /// draws no action row.
+    Quote(usize),
+    /// Picks Quote selection from the transcript's menu: quotes what is selected. Refused, with the
+    /// reason, when the menu would not offer it.
+    QuoteSelection,
 }
 
 /// What the debug control verb does to the effort chip's list.
@@ -817,7 +845,7 @@ impl Entry {
             Self::Thought { text, .. } => text.clone(),
             // The page's text, not the markdown source: it is what the
             // reader sees, selects and copies (`reply_body`).
-            // The hover Copy control is the way to the source.
+            // The row's Copy button is the way to the source.
             Self::Assistant { document, .. } => document.text.text.clone(),
             Self::ToolCall {
                 title,
@@ -1519,13 +1547,6 @@ struct TranscriptSelection {
     head_entry: Option<usize>,
 }
 
-/// The assistant-response copy affordance currently showing its short-lived
-/// confirmation. Code blocks own their own copy state.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CopyTarget {
-    Assistant(usize),
-}
-
 /// The composer's secondary-click menu, in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerContextItem {
@@ -1562,6 +1583,9 @@ impl ComposerContextItem {
 enum TranscriptContextItem {
     Copy,
     SelectAll,
+    /// Over a selection that lies in one message: holds it as the quote of the next prompt.
+    /// Offered by `quote_selection_available`, so it is not in `ALL`.
+    QuoteSelection,
     /// Over a link of a reply: opens it as a click would.
     OpenLink,
     /// Over a link of a reply: puts its address on the clipboard.
@@ -1577,6 +1601,7 @@ impl TranscriptContextItem {
         match self {
             Self::Copy => "Copy",
             Self::SelectAll => "Select All",
+            Self::QuoteSelection => "Quote selection",
             Self::OpenLink => "Open link",
             Self::CopyLink => "Copy link address",
         }
@@ -1586,6 +1611,7 @@ impl TranscriptContextItem {
         match self {
             Self::Copy => "copy",
             Self::SelectAll => "select-all",
+            Self::QuoteSelection => "quote-selection",
             Self::OpenLink => "open-link",
             Self::CopyLink => "copy-link",
         }
@@ -2170,6 +2196,23 @@ pub struct Chat {
     /// Set by every send, cleared by the end of the turn it started and by Stop; a failure or a
     /// lost client leaves it.
     last_prompt: Option<retry::LastPrompt>,
+    /// Why the last turn stopped short, when Continue can pick it up (token limit, turn limit, a
+    /// Stop). Set by the turn's end (`settle_turn`); cleared by a failure, by the next prompt, by
+    /// a new process and by a new or opened conversation. In memory only: a restored chat has none.
+    continue_reason: Option<retry::ContinueReason>,
+    /// The message the user chose to quote, held for the next prompt (`quote_message`). The
+    /// transcript's Quote button sets it, replacing any held; a new or opened conversation clears
+    /// it. In memory only.
+    quote: Option<quote::Quote>,
+    /// Quoting asks for the composer's focus, which only a render can give: the press and the
+    /// control socket's verb have no window. Read, and cleared, by the next render.
+    composer_focus_wanted: bool,
+    /// Debug builds only: where the last paint drew each action button, by transcript row and
+    /// button (`copy`, `quote` or `continue`, and `row` for the action row's own place, painted
+    /// even when the row is hidden), as `[x, y, width, height]` in window pixels.
+    /// Cleared as the chat renders and refilled by each button painted, like `transcript_links`.
+    #[cfg(debug_assertions)]
+    action_bounds: Rc<RefCell<BTreeMap<(usize, &'static str), [f32; 4]>>>,
     /// Stop ended a turn whose own end has not arrived yet. Set by `cancel_turn`, settled by the
     /// next turn end (`TurnEnded` or `TurnFailed`) and by a new process or conversation. While it
     /// is set, a `TurnFailed` with no turn of ours streaming is ACP's error answer to the prompt
@@ -2309,7 +2352,6 @@ pub struct Chat {
     /// wrong for a chat restored with turns the trace never saw. Dropped with
     /// the entries it counts.
     trace_users: BTreeMap<usize, usize>,
-    copied_target: Option<CopyTarget>,
     edit_summaries: BTreeMap<usize, EditSummaryState>,
     /// When each live tool call started, by protocol id, so its first
     /// terminal status can store the elapsed time on the entry. Consumed on
@@ -2384,7 +2426,7 @@ pub struct Chat {
     /// The transcript's secondary-click Copy / Select All menu, at the
     /// window point it was opened from. The transcript previously had no
     /// secondary-click handling at all, so agent output could only be
-    /// copied through the hover Copy control or the Ctrl/Cmd-C chord.
+    /// copied through a message's Copy button or the Ctrl/Cmd-C chord.
     transcript_context_menu: Popup<gpui::Point<Pixels>>,
     /// Overflow menu (Follow Edited Files / New Conversation / Chat History).
     overflow_open: bool,
@@ -2698,6 +2740,11 @@ impl Chat {
             queue_held: false,
             limit_card: None,
             last_prompt: None,
+            continue_reason: None,
+            quote: None,
+            composer_focus_wanted: false,
+            #[cfg(debug_assertions)]
+            action_bounds: Rc::default(),
             stop_end_pending: false,
             after_connect: None,
             connecting: false,
@@ -2740,7 +2787,6 @@ impl Chat {
             folded_turns: BTreeSet::new(),
             trace: TraceStore::default(),
             trace_users: BTreeMap::new(),
-            copied_target: None,
             edit_summaries: BTreeMap::new(),
             tool_started: HashMap::new(),
             pending_subagents: HashMap::new(),
@@ -4418,7 +4464,11 @@ impl Chat {
                     });
                 }
             }
-            sirio_chat::ChatEvent::TurnEnded { stop_reason } => self.end_turn(&stop_reason, cx),
+            sirio_chat::ChatEvent::TurnEnded { stop_reason } => self.end_turn(
+                &stop_reason,
+                retry::ContinueReason::from_stop_reason(&stop_reason),
+                cx,
+            ),
             // A failed turn ends in place of `TurnEnded`: its error row, the turn settled, and the
             // queue held. The agent is up, so unlike a `TransportError` the client stays.
             sirio_chat::ChatEvent::TurnFailed {
@@ -4613,7 +4663,16 @@ impl Chat {
     /// (`TurnFailed`): settles the live reply and thought, states why the turn stopped and
     /// persists the transcript. What follows is not shared: a finished turn sends the next
     /// queued item (`end_turn`), a failed one holds the queue (`fail_turn`).
-    fn settle_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+    ///
+    /// `continue_reason` is why the turn stopped short, when Continue can pick it up: `None` for
+    /// every other end.
+    fn settle_turn(
+        &mut self,
+        stop_reason: &str,
+        continue_reason: Option<retry::ContinueReason>,
+        cx: &mut Context<Self>,
+    ) {
+        self.continue_reason = continue_reason;
         self.settle_open_thought();
         self.reread_plain_replies();
         self.finish_reply();
@@ -4642,14 +4701,28 @@ impl Chat {
         }
     }
 
-    /// `TurnEnded`: the turn is over, whether it completed or was cancelled.
-    fn end_turn(&mut self, stop_reason: &str, cx: &mut Context<Self>) {
+    /// `TurnEnded`: the turn is over, whether it completed or was cancelled. `continue_reason`
+    /// is as in `settle_turn`.
+    fn end_turn(
+        &mut self,
+        stop_reason: &str,
+        continue_reason: Option<retry::ContinueReason>,
+        cx: &mut Context<Self>,
+    ) {
         // Stop clears `streaming` at once, and the end of the stopped turn arrives later: that end
         // (like a turn the CLI started on its own) is not the end of a turn of ours.
         let ended_our_turn = self.streaming;
+        // A prompt sent after the Stop, before the stopped turn's late end arrived, is streaming
+        // now: this end belongs to the stopped turn, not to the turn that runs, which has not
+        // stopped short. Continue must not be offered over it.
+        let continue_reason = if self.stop_end_pending && ended_our_turn {
+            None
+        } else {
+            continue_reason
+        };
         // Whatever this end is, a Stop's end is no longer pending after it.
         self.stop_end_pending = false;
-        self.settle_turn(stop_reason, cx);
+        self.settle_turn(stop_reason, continue_reason, cx);
         if ended_our_turn {
             // Answered: nothing is left to resend, and a hold is over.
             self.last_prompt = None;
@@ -4679,7 +4752,10 @@ impl Chat {
         // is the late end of a stopped turn, as a late `TurnEnded` is: no error row, no hold, and
         // the live agent is not offered a restart.
         if !self.streaming && self.stop_end_pending {
-            self.end_turn(stop_reason, cx);
+            // The agent's error answer carries its own stop reason ("Error"), which says nothing of
+            // the Stop: the turn is a stopped one, so it ends as one (the footer says "cancelled")
+            // and Continue picks it up as after a clean Stop.
+            self.end_turn("Cancelled", Some(retry::ContinueReason::Stopped), cx);
             return;
         }
         // Any other failure is a real one, shown whether or not a turn streams: with none, a late
@@ -4699,7 +4775,8 @@ impl Chat {
         if resendable {
             self.cover_with_limit_card(self.entries.len() - 1);
         }
-        self.settle_turn(stop_reason, cx);
+        // The failure's row has the Retry, whatever stop reason the failure carried: no Continue.
+        self.settle_turn(stop_reason, None, cx);
         self.queue_held = true;
         cx.emit(ChatEvent::TurnEnded);
     }
@@ -4734,6 +4811,27 @@ impl Chat {
             && self.pending_question().is_none()
     }
 
+    /// The text of the quote held for the next prompt, `None` when none is held or it is only
+    /// whitespace: `join_quote` writes no block for such a quote, so it makes no prompt.
+    fn quote_text(&self) -> Option<&str> {
+        self.quote
+            .as_ref()
+            .map(|quote| quote.text.as_str())
+            .filter(|text| !text.trim().is_empty())
+    }
+
+    /// The held quote for a prompt whose typed text is `typed`. `None` for a slash command
+    /// (`quote::is_slash_command`; a path that starts with `/` is text): the agent reads a command
+    /// at the head of the prompt, and a block there would make it a message. The command goes as
+    /// it is typed and the quote stays held for the next prompt.
+    fn quote_for(&self, typed: &str) -> Option<&str> {
+        if quote::is_slash_command(typed) {
+            None
+        } else {
+            self.quote_text()
+        }
+    }
+
     fn can_send(&self) -> bool {
         // F-CHAT-05: an unresolved permission/plan question must block Send
         // in its own right, not merely ride along with `streaming` (a
@@ -4744,7 +4842,10 @@ impl Chat {
         // same contract row: the reference disables Send while disconnected
         // too, it just never needed a separate flag for it because
         // `.disabled(!canInteract)` covers the whole editor at once.
-        self.accepts_sends() && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
+        self.accepts_sends()
+            && (!self.draft.trim().is_empty()
+                || !self.attachments.is_empty()
+                || self.quote_text().is_some())
     }
 
     /// Whether the row at `index` has text in the transcript's copy: the error row a limit card
@@ -4988,14 +5089,31 @@ impl Chat {
     }
 
     /// Puts a message that could not be sent back in the composer. Whatever
-    /// the user has typed stays, below the message.
+    /// the user has typed stays, below the message. A quote at the head of the
+    /// message goes back to the composer's quote card, unless the composer holds
+    /// one already: that one stays, and the message keeps its block in the field,
+    /// so neither is lost.
     fn restore_held_text(&mut self, held: &str, cx: &mut Context<Self>) {
         let typed = self.draft_text();
-        let text = if typed.trim().is_empty() {
+        let (quote, held) = if self.quote_text().is_none() {
+            quote::split_quote(held)
+        } else {
+            (None, held)
+        };
+        // A message that was a quote alone has nothing to put above what was typed.
+        let text = if held.is_empty() {
+            typed
+        } else if typed.trim().is_empty() {
             held.to_string()
         } else {
             format!("{held}\n\n{typed}")
         };
+        if let Some(text) = quote {
+            self.quote = Some(quote::Quote {
+                author: quote::READ_BACK_AUTHOR.to_string(),
+                text,
+            });
+        }
         self.set_composer_text(text, cx);
         cx.notify();
     }
@@ -5202,6 +5320,12 @@ impl Chat {
         } else {
             "idle"
         };
+        // What each row draws as actions, decided once for the whole readout.
+        #[cfg(debug_assertions)]
+        let (actions_frame, turn_roles) = (
+            self.actions_frame(),
+            turn_row_roles(&self.entries, &self.folded_turns),
+        );
         ChatControlSnapshot {
             status: status.to_string(),
             composer_text: self.draft.to_string(),
@@ -5223,6 +5347,8 @@ impl Chat {
                     #[cfg(debug_assertions)]
                     self.reveal_columns(index, &mut row);
                     #[cfg(debug_assertions)]
+                    self.action_columns(index, &actions_frame, &turn_roles, &mut row);
+                    #[cfg(debug_assertions)]
                     entry_time_columns(entry, &mut row);
                     #[cfg(not(debug_assertions))]
                     let _ = index;
@@ -5240,6 +5366,18 @@ impl Chat {
             transcript_text_rows: transcript_text_row_boxes(&self.transcript_links.borrow()),
             #[cfg(debug_assertions)]
             day_separators: self.day_separator_rows(),
+            #[cfg(debug_assertions)]
+            continue_action: self.continue_action_now().wire().to_string(),
+            #[cfg(debug_assertions)]
+            continue_row: self.continue_row(),
+            #[cfg(debug_assertions)]
+            composer_quote: self.quote.as_ref().map(|quote| quote.text.clone()),
+            #[cfg(debug_assertions)]
+            composer_quote_bounds: self
+                .action_bounds
+                .borrow()
+                .get(&(message_actions::COMPOSER_QUOTE, "composerQuote"))
+                .copied(),
             effort: self
                 .effort
                 .as_ref()
@@ -5342,6 +5480,38 @@ impl Chat {
                     return Err(format!("surface.chat.transcript retry: {why}"));
                 }
                 self.retry(entry, cx);
+            }
+            TranscriptAction::Continue => {
+                if self.continue_action_now() == retry::RetryAction::None {
+                    return Err(format!(
+                        "surface.chat.transcript continue: {}",
+                        self.continue_refusal()
+                    ));
+                }
+                // The same row the readout reads: a button the user cannot see is not pressed.
+                if !self.continue_drawn() {
+                    return Err("surface.chat.transcript continue: the turn is folded".to_string());
+                }
+                self.continue_turn(cx);
+            }
+            TranscriptAction::Copy(entry) => {
+                self.require_message_row("copy", entry)?;
+                // What Ely's Copy writes when pressed, from the text it was given.
+                let text = self.message_text(entry).unwrap_or_default().to_string();
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            TranscriptAction::Quote(entry) => {
+                self.require_message_row("quote", entry)?;
+                self.quote_message(entry, cx);
+            }
+            TranscriptAction::QuoteSelection => {
+                // The menu's own rule: a verb that quotes what the menu would not offer is a lie.
+                if !self.quote_selection_available() {
+                    return Err("surface.chat.transcript quoteSelection: nothing is selected \
+                         within one entry"
+                        .to_string());
+                }
+                self.quote_selection(cx);
             }
         }
         Ok(())
@@ -5507,6 +5677,11 @@ impl Chat {
             }
         }
         self.has_completed_turn = !self.entries.is_empty();
+        // A past session's transcript is a restored one: it has no Continue, and the message held
+        // for quoting belonged to the one that went.
+        self.continue_reason = None;
+        self.quote = None;
+        self.composer_focus_wanted = false;
         self.history_open = false;
         cx.notify();
     }
@@ -5606,7 +5781,15 @@ impl Chat {
     /// `None` rather than offering the agent's words as the user's.
     pub fn first_user_prompt(&self) -> Option<String> {
         self.entries.iter().find_map(|entry| match entry {
-            Entry::User { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            // A prompt that opens with a quote is named by what was typed after it, or by the
+            // quote when nothing was.
+            Entry::User { text, .. } if !text.trim().is_empty() => {
+                let (quoted, rest) = quote::split_quote(text);
+                match quoted {
+                    Some(quoted) if rest.trim().is_empty() => Some(quoted),
+                    _ => Some(rest.to_string()),
+                }
+            }
             _ => None,
         })
     }
@@ -5647,28 +5830,6 @@ impl Chat {
         if let Some(selected) = self.selected_transcript_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(selected));
         }
-    }
-
-    /// Copies a local transcript fragment and gives just that control a
-    /// brief acknowledgement. The delayed clear is deliberately keyed to
-    /// the target, so a second click cannot have its confirmation cleared by
-    /// the first click's already-scheduled timer.
-    fn copy_local_text(&mut self, target: CopyTarget, text: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.copied_target = Some(target.clone());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(2))
-                .await;
-            let _ = this.update(cx, |chat, cx| {
-                if chat.copied_target.as_ref() == Some(&target) {
-                    chat.copied_target = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     fn request_edit_revert(&mut self, entry: usize, path: PathBuf, cx: &mut Context<Self>) {
@@ -6286,6 +6447,7 @@ impl Chat {
         match item {
             TranscriptContextItem::Copy => self.copy_transcript(&CopyTranscript, window, cx),
             TranscriptContextItem::SelectAll => self.select_all_transcript(cx),
+            TranscriptContextItem::QuoteSelection => self.quote_selection(cx),
             TranscriptContextItem::OpenLink => {
                 if let Some(link) = self.transcript_menu_link.take() {
                     self.open_reply_link(&link, cx);
@@ -6528,6 +6690,9 @@ impl Chat {
         self.streaming = false;
         // The old conversation's prompt and hold are not the new one's: a resend must never reach it.
         self.last_prompt = None;
+        self.continue_reason = None;
+        self.quote = None;
+        self.composer_focus_wanted = false;
         self.stop_end_pending = false;
         self.queue_held = false;
         self.after_connect = None;
@@ -6644,14 +6809,25 @@ impl Chat {
         if !self.can_send() {
             return;
         }
-        let (text, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
-        let draft = self.draft.to_string();
+        // Only the typed part is read for mentions: the quote is not typed text, and an `@path` in
+        // it stays the words that were quoted. It goes ahead of what is lifted. `draft` is what a
+        // hand-back puts back: the block and the field as typed. A slash command takes no quote
+        // (`quote_for`), and the quote stays held.
+        let (typed, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let quote = self.quote_for(&typed);
+        let text = quote::join_quote(quote, &typed);
+        let draft = quote::join_quote(quote, &self.draft);
+        let quoted = quote.is_some();
         let mentions = self.accepted_mentions.clone();
         self.remember_prompt();
         let images = std::mem::take(&mut self.attachments);
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
+        // The quote is in the prompt now: it is not the next one's.
+        if quoted {
+            self.quote = None;
+        }
         self.submit_prompt(
             retry::LastPrompt {
                 text,
@@ -6701,6 +6877,8 @@ impl Chat {
         self.last_prompt = Some(last);
         // Any prompt is the user's move after a failure: the queue waits on this turn instead.
         self.queue_held = false;
+        // The next turn is under way: the one that stopped short is no longer the last.
+        self.continue_reason = None;
         self.push_entry(Entry::User {
             text: text.clone(),
             at: Some(chrono::Local::now()),
@@ -6769,17 +6947,28 @@ impl Chat {
 
     /// D-CHAT-03: while a turn streams, a send commits the draft as a new
     /// entry at the back of the queue. Mirrors `send`'s consumption of the
-    /// composer; an empty draft commits nothing and leaves the queue as
-    /// it was.
+    /// composer, the held quote included; an empty draft with no quote
+    /// commits nothing and leaves the queue as it was.
     fn commit_queued_item(&mut self, cx: &mut Context<Self>) {
-        if self.draft.trim().is_empty() && self.attachments.is_empty() {
+        if self.draft.trim().is_empty()
+            && self.attachments.is_empty()
+            && self.quote_text().is_none()
+        {
             return;
         }
-        let (text, _) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        // As in `send`: the quote joins the typed part after the mentions are lifted from it, and a
+        // slash command goes without it, the quote still held.
+        let (typed, _) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let quote = self.quote_for(&typed);
+        let text = quote::join_quote(quote, &typed);
+        let quoted = quote.is_some();
         self.remember_prompt();
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
+        if quoted {
+            self.quote = None;
+        }
         self.queue.push_back(text);
         cx.notify();
     }
@@ -7305,6 +7494,10 @@ impl Chat {
         self.after_connect = after;
         // The process that was asked to stop a turn is replaced: its answer never comes.
         self.stop_end_pending = false;
+        // A new process is a new session as far as Continue goes: an ACP restart has no
+        // conversation to continue. Continue's own resume passes here too, and is spent by it: the
+        // prompt it resends is already held (`continue_turn`).
+        self.continue_reason = None;
 
         // The client and the pump that read it are replaced below, so a turn
         // still open here would never hear of its end.
@@ -7645,8 +7838,24 @@ impl Chat {
             retry::RetryAction::Relaunch => self.start_connection(cx),
             retry::RetryAction::Resend => {
                 self.dismiss_error(index, cx);
-                self.resend_last_prompt(cx);
+                self.dispatch_resend(action, cx);
             }
+            retry::RetryAction::ResumeThenResend | retry::RetryAction::RelaunchToComposer => {
+                if failed_turn_row {
+                    self.dismiss_error(index, cx);
+                }
+                self.dispatch_resend(action, cx);
+            }
+        }
+    }
+
+    /// Sends the held prompt again, the way `action` says (see [`retry::retry_action`]): on the
+    /// same client (`Resend`), on a relaunch that resumes the conversation (`ResumeThenResend`) or
+    /// on one that hands the prompt back to the composer (`RelaunchToComposer`). The one dispatch
+    /// Retry and Continue share. Any other action sends nothing.
+    fn dispatch_resend(&mut self, action: retry::RetryAction, cx: &mut Context<Self>) {
+        match action {
+            retry::RetryAction::Resend => self.resend_last_prompt(cx),
             retry::RetryAction::ResumeThenResend | retry::RetryAction::RelaunchToComposer => {
                 let resume = match (action, &self.agent_session_id) {
                     (retry::RetryAction::ResumeThenResend, Some(session)) => Some(session.clone()),
@@ -7659,16 +7868,100 @@ impl Chat {
                     }
                     (launch, _) => launch,
                 });
-                if failed_turn_row {
-                    self.dismiss_error(index, cx);
-                }
                 let after = match resume {
                     Some(session) => retry::AfterConnect::Resend { session },
                     None => retry::AfterConnect::Composer,
                 };
                 self.connect(launch, Some(after), cx);
             }
+            retry::RetryAction::None | retry::RetryAction::Relaunch => {}
         }
+    }
+
+    /// Continue: sends `Continue` as the next turn of a chat whose last turn stopped short, by
+    /// the path Retry takes for the same state (`continue_action_now`). Does nothing when there is
+    /// nothing to continue.
+    fn continue_turn(&mut self, cx: &mut Context<Self>) {
+        let action = self.continue_action_now();
+        if action == retry::RetryAction::None {
+            return;
+        }
+        self.last_prompt = Some(retry::LastPrompt::continue_prompt());
+        self.dispatch_resend(action, cx);
+    }
+
+    /// Whether the client a turn ran on is still there. Retry reads a failed turn's row as a loss
+    /// when it is not (`retry_action_at`), and Continue reads a cut-short turn the same way
+    /// (`continue_action_raw`): one rule, so a change to it moves both.
+    fn retry_client_up(&self) -> bool {
+        self.client.is_some()
+    }
+
+    /// What Continue would do on the live state, before any refusal: `retry::continue_action`.
+    fn continue_action_raw(&self) -> retry::RetryAction {
+        retry::continue_action(
+            self.continue_reason,
+            self.retry_client_up(),
+            self.agent_launch
+                .as_ref()
+                .is_some_and(LaunchSpec::resumes_on_retry),
+            self.agent_session_id.is_some(),
+        )
+    }
+
+    /// What Continue does now; `None` when it has no button. That is when `retry_refusal` would
+    /// refuse the action (a turn is running, the agent is connecting) and when the queue is held.
+    fn continue_action_now(&self) -> retry::RetryAction {
+        let action = self.continue_action_raw();
+        if self.queue_held || self.retry_refusal(action).is_some() {
+            retry::RetryAction::None
+        } else {
+            action
+        }
+    }
+
+    /// Why Continue does nothing now, for the socket: the state that stops it, in Retry's words
+    /// where it has them, else that there is no turn to continue. The state is read first and on
+    /// its own: a running turn, a connecting agent and a held queue have no reason to continue
+    /// (`submit_prompt` and `fail_turn` clear it), and the cause is still the thing to say.
+    fn continue_refusal(&self) -> &'static str {
+        if self.streaming {
+            retry::TURN_RUNNING
+        } else if self.connecting {
+            retry::CONNECTING
+        } else if self.queue_held {
+            retry::QUEUE_HELD
+        } else if self.continue_reason.is_some()
+            && self.continue_action_raw() == retry::RetryAction::None
+        {
+            // A turn stopped short, and the agent is gone with no relaunch that resumes it (ACP).
+            retry::NOT_CONNECTED
+        } else {
+            "no turn to continue"
+        }
+    }
+
+    /// The transcript row that carries Continue: the last reply of the last turn, or, when that
+    /// turn has none (it stopped during a tool call), the last turn's footer. `None` when Continue
+    /// has no button.
+    fn continue_row(&self) -> Option<usize> {
+        if self.continue_action_now() == retry::RetryAction::None {
+            return None;
+        }
+        let turn_start = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::User { .. }))
+            .map_or(0, |user| user + 1);
+        self.entries[turn_start..]
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Assistant { .. }))
+            .map(|reply| turn_start + reply)
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .rposition(|entry| matches!(entry, Entry::TurnFooter(_)))
+            })
     }
 
     /// Why Retry would do nothing on a row whose action is `action`, `None` when it acts. A resend
@@ -7677,16 +7970,14 @@ impl Chat {
     fn retry_refusal(&self, action: retry::RetryAction) -> Option<&'static str> {
         match action {
             retry::RetryAction::None => Some("entry has no Retry"),
-            retry::RetryAction::Resend if self.streaming => Some("a turn is running"),
-            retry::RetryAction::Resend if self.client.is_none() => {
-                Some("the agent is not connected")
-            }
+            retry::RetryAction::Resend if self.streaming => Some(retry::TURN_RUNNING),
+            retry::RetryAction::Resend if !self.retry_client_up() => Some(retry::NOT_CONNECTED),
             retry::RetryAction::Relaunch
             | retry::RetryAction::ResumeThenResend
             | retry::RetryAction::RelaunchToComposer
                 if self.connecting =>
             {
-                Some("the agent is connecting")
+                Some(retry::CONNECTING)
             }
             _ => None,
         }
@@ -7740,8 +8031,19 @@ impl Chat {
         // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
         // relaunch of an agent that is up.
         self.retire_failed_turn_retries();
-        let text = if self.draft.trim().is_empty() && self.attachments.is_empty() {
-            self.set_composer_text(last.draft, cx);
+        // A held quote is the user's composing, as a typed draft is: the prompt does not go over it.
+        let text = if self.draft.trim().is_empty()
+            && self.attachments.is_empty()
+            && self.quote_text().is_none()
+        {
+            // The block at the head of the draft goes back as the quote card, the rest in the field.
+            let (quoted, rest) = quote::split_quote(&last.draft);
+            let rest = rest.to_string();
+            self.quote = quoted.map(|text| quote::Quote {
+                author: quote::READ_BACK_AUTHOR.to_string(),
+                text,
+            });
+            self.set_composer_text(rest, cx);
             self.reset_composer_popups();
             self.accepted_mentions = last.mentions;
             self.attachments = last.images;
@@ -7771,7 +8073,7 @@ impl Chat {
         }
         // A resend needs the client the turn failed on: a failed turn's row whose client has
         // gone since is a loss like any other.
-        let kind = if *kind == ErrorKind::TurnFailed && self.client.is_none() {
+        let kind = if *kind == ErrorKind::TurnFailed && !self.retry_client_up() {
             ErrorKind::Connection
         } else {
             *kind
@@ -8936,6 +9238,13 @@ impl Render for Chat {
         }
         // The responses painted from here on refill it.
         self.transcript_links.borrow_mut().clear();
+        // So do the action buttons.
+        #[cfg(debug_assertions)]
+        self.action_bounds.borrow_mut().clear();
+        // Quoting asked for the composer's focus: this render has the window to give it in.
+        if std::mem::take(&mut self.composer_focus_wanted) {
+            cx.defer_in(window, |chat, window, cx| chat.focus_composer(window, cx));
+        }
         // Fetched fresh every frame from the global, so a change of
         // appearance is picked up without the chat surface holding a stale
         // copy — never `Theme::dark()`, never a field.
@@ -8956,6 +9265,8 @@ impl Render for Chat {
         // row — segmenting the transcript is O(entries), and the virtualizer
         // calls its row processor separately for every visible index.
         let turn_roles = turn_row_roles(&self.entries, &self.folded_turns);
+        // Likewise which rows draw an action row, and the one that draws it always.
+        let actions_frame = self.actions_frame();
         let transcript_focus = self.transcript_focus.clone();
         // The answer field's caret, resolved before the tree is built so the
         // card and the composer agree within one frame.
@@ -9131,7 +9442,8 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                                             |entry| {
                                                                 Chat::render_entry(entry, transcript::TranscriptRowContext {
     index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
-    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    focus: transcript_focus.clone(), source_start,
+    actions: this.entries.get(entry_index).and_then(|real| actions_frame.row(entry_index, real)),
     edit_summary: None, thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
     day_heading: None, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
@@ -9281,7 +9593,8 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                         };
                                         let body = Chat::render_entry(entry, transcript::TranscriptRowContext {
     index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
-    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    focus: transcript_focus.clone(), source_start,
+    actions: this.entries.get(entry_index).and_then(|real| actions_frame.row(entry_index, real)),
     edit_summary: this.edit_summaries.get(&entry_index).cloned(), thought_streaming: this.thought_is_streaming(entry_index),
     thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
     day_heading, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
@@ -9641,8 +9954,12 @@ fn turn_is_foldable(turns: &[TurnSegment], position: usize) -> bool {
 fn turn_label(entries: &[Entry], turn: &TurnSegment) -> String {
     for index in turn.start..=turn.end {
         if let Some(Entry::User { text, .. }) = entries.get(index) {
-            let line = text.lines().next().unwrap_or(text.as_str());
-            return line.chars().take(TURN_LABEL_MAX_CHARS).collect();
+            // A prompt that opens with a quote is labelled by what was typed after it, or by the
+            // quote's first line when nothing was: not by the block's `>` markers.
+            return quote::headline(text)
+                .chars()
+                .take(TURN_LABEL_MAX_CHARS)
+                .collect();
         }
     }
     "Turn".to_string()
@@ -12163,53 +12480,6 @@ two"
             "the turn footer is laid out in the drawn transcript"
         );
         assert!(cx.debug_bounds("chat-status").is_some());
-    }
-
-    /// F-CHAT-29: hovering an assistant response reveals a local Copy control;
-    /// its click writes the response and replaces its label with a checkmark.
-    #[gpui::test]
-    async fn assistant_response_copy_writes_text_and_confirms(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(crate::ely::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.push_entry(Entry::Assistant {
-                text: "copy this assistant response".into(),
-                document: parse_chat_markdown("copy this assistant response"),
-                stream: None,
-            });
-            chat
-        });
-        refresh_frame(cx);
-
-        let response = cx
-            .debug_bounds("assistant-response-0")
-            .expect("assistant response is drawn");
-        cx.simulate_mouse_move(response.center(), None, Modifiers::none());
-        cx.run_until_parked();
-
-        let copy = cx
-            .debug_bounds("assistant-copy-0")
-            .expect("hovering an assistant response reveals Copy");
-        cx.simulate_click(copy.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(
-            cx.cx.read_from_clipboard().and_then(|item| item.text()),
-            Some("copy this assistant response".into()),
-            "Copy writes only the assistant response"
-        );
-        assert!(
-            cx.debug_bounds("assistant-copy-confirmed-0").is_some(),
-            "the clicked Copy control visibly acknowledges success"
-        );
-        let _ = chat;
     }
 
     /// F-CHAT-30: a fenced code block exposes a local Copy control whose
@@ -22014,8 +22284,8 @@ two"
 
     /// The assistant's rendered markdown is part of the transcript's one
     /// selection: a drag across it selects its visible text, and the copy
-    /// reads that text — not the markdown source, which is what the hover
-    /// Copy control is for.
+    /// reads that text — not the markdown source, which is what the
+    /// message's Copy button is for.
     #[gpui::test]
     async fn dragging_across_an_assistant_response_selects_its_visible_text(
         cx: &mut TestAppContext,
@@ -22045,8 +22315,8 @@ two"
             .expect("the response is drawn");
         let y = response.top() + px(8.0);
         let start = point(response.left() + px(1.0), y);
-        // Well past the short paragraph's last glyph, and well short of the
-        // hover Copy control at the response's far right.
+        // Well past the short paragraph's last glyph, on its first line: the
+        // action row sits below the reply, out of the drag's way.
         let end = point(response.left() + px(250.0), y);
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());

@@ -14,7 +14,7 @@ use sirio_theme::Theme;
 use super::*;
 use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::chat::{
-    DateSeparator, MessageAvatar, MessageBubble, MessageFooter, MessageHeader, Role,
+    DateSeparator, MessageAvatar, MessageBubble, MessageFooter, MessageHeader, QuoteReply, Role,
 };
 use ely_gpui_component::theme::ControlSize;
 
@@ -64,7 +64,9 @@ pub(super) struct TranscriptRowContext<'a> {
     pub chat: Entity<Chat>,
     pub focus: FocusHandle,
     pub source_start: usize,
-    pub copied_target: Option<CopyTarget>,
+    /// What the row draws as actions (`message_actions`), decided from the transcript's own entry:
+    /// the entry drawn here has lost its stream. `None` draws none.
+    pub actions: Option<message_actions::RowActions>,
     pub edit_summary: Option<EditSummaryState>,
     pub thought_streaming: bool,
     pub thought_scroll: &'a HashMap<usize, thought::ThoughtScroll>,
@@ -100,7 +102,7 @@ impl Chat {
             chat: entity,
             focus: transcript_focus,
             source_start,
-            copied_target,
+            actions,
             edit_summary,
             thought_streaming,
             thought_scroll,
@@ -139,20 +141,102 @@ impl Chat {
         let is_notice = matches!(entry, Entry::Notice { .. });
         let body = match entry {
             Entry::User { text, .. } => {
+                // What Copy takes, built once and only for a row that has the action row: one
+                // copy of the whole text, made from the borrow.
+                let copy_text = matches!(actions, Some(message_actions::RowActions::Message { .. }))
+                    .then(|| SharedString::from(text.as_str()));
+                // A prompt that starts with a quote block draws it as a card above the rest
+                // (`split_quote`, the rule every reader of a user text shares). The row's text in
+                // the transcript's offset space is still the whole `text`, block included: the
+                // rest is its tail, so it is drawn where its bytes are, and a drag or Select All
+                // reads the same bytes it highlights. Copy keeps taking the whole text.
+                let (quoted, rest_len) = {
+                    let (quoted, rest) = quote::split_quote(&text);
+                    (quoted, rest.len())
+                };
+                let rest_start = text.len() - rest_len;
+                let rest_at = source_start + rest_start;
+                // The text is moved into its element when no quote leaves it whole; with one, only
+                // the tail is copied.
+                let rest = if quoted.is_some() {
+                    text[rest_start..].to_string()
+                } else {
+                    text
+                };
+                // A prompt that is a quote alone (nothing after it, or only whitespace) has no text
+                // to draw; any other is drawn, empty or not, as it always was.
+                let draws_rest = !(quoted.is_some() && rest.trim().is_empty());
+                let card = quoted.map(|quoted| {
+                    message_actions::measured(
+                        QuoteReply::new(
+                            (id.clone(), "quote-card"),
+                            quote::READ_BACK_AUTHOR,
+                            // One short line: Ely draws the first line it is given. `split_quote`
+                            // rebuilt the whole quote for this frame; the card keeps only its head.
+                            quote::card_line(&quoted),
+                        ),
+                        &entity,
+                        entry_index,
+                        "quoteCard",
+                        Some("message-quote-card"),
+                    )
+                });
+                let rest = draws_rest.then(|| {
+                    Self::render_plain_text(
+                        rest,
+                        theme,
+                        format!("user-entry-{entry_index}"),
+                        rest_at,
+                        Some(&interaction),
+                    )
+                });
                 let bubble = div()
                     .w_full()
                     .min_w_0()
                     .debug_selector(move || format!("user-bubble-{entry_index}"))
                     .child(
-                        MessageBubble::new(Role::User).child(Self::render_plain_text(
-                            text,
-                            theme,
-                            format!("user-entry-{entry_index}"),
-                            source_start,
-                            Some(&interaction),
-                        )),
+                        MessageBubble::new(Role::User)
+                            .children(card)
+                            .children(rest),
                     )
                     .into_any_element();
+                // The action row is the bubble's sibling, under it and to the right like the
+                // bubble: never inside the selectable text, and the bubble's own box stays the
+                // bubble's. The group holds both, so the pointer going from the text to the row
+                // keeps it shown.
+                let bubble = match (actions, copy_text) {
+                    (
+                        Some(message_actions::RowActions::Message {
+                            shown,
+                            continue_here,
+                        }),
+                        Some(copy_text),
+                    ) => {
+                        let hover_group = format!("user-message-{entry_index}");
+                        div()
+                            .id(("user-message", entry_index))
+                            .group(hover_group.clone())
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(bubble)
+                            .child(div().w_full().flex().justify_end().child(
+                                message_actions::render_message_actions(
+                                    id.clone(),
+                                    entry_index,
+                                    copy_text,
+                                    shown,
+                                    continue_here,
+                                    entity.clone(),
+                                    hover_group.into(),
+                                ),
+                            ))
+                            .into_any_element()
+                    }
+                    _ => bubble,
+                };
                 // The heading row belongs to the `User` entry's row, so no
                 // extra list index is needed: it sits above the question.
                 match day_heading {
@@ -167,44 +251,25 @@ impl Chat {
                 }
             }
             Entry::Assistant { text, document, .. } => {
-                let target = CopyTarget::Assistant(entry_index);
-                let copied = copied_target.as_ref() == Some(&target);
                 let hover_group = format!("assistant-response-{entry_index}");
-                let copy_entity = entity.clone();
-                let copy_target = target.clone();
-                let copy_text = text;
-                let mut copy = div()
-                    .id(("assistant-copy", entry_index))
-                    .debug_selector(move || format!("assistant-copy-{entry_index}"))
-                    .px(px(7.0))
-                    .py(px(4.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.ely.surface)
-                    .text_size(typography.footnote)
-                    .text_color(theme.ely.fg_subtle)
-                    .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(theme.sirio.overlay))
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        copy_entity.update(cx, |chat, cx| {
-                            chat.copy_local_text(copy_target.clone(), copy_text.clone(), cx);
-                        });
-                    });
-                if copied {
-                    copy = copy.child(
-                        div()
-                            .id(("assistant-copy-confirmed", entry_index))
-                            .debug_selector(move || {
-                                format!("assistant-copy-confirmed-{entry_index}")
-                            })
-                            .child("Copied ✓"),
-                    );
-                } else {
-                    copy = copy
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .child("Copy");
-                }
+                // Under the reply, in the bubble's footer: a sibling of the selectable body.
+                let footer = match actions {
+                    Some(message_actions::RowActions::Message {
+                        shown,
+                        continue_here,
+                    }) => Some(
+                        MessageFooter::new().child(message_actions::render_message_actions(
+                            id.clone(),
+                            entry_index,
+                            text.into(),
+                            shown,
+                            continue_here,
+                            entity.clone(),
+                            hover_group.clone().into(),
+                        )),
+                    ),
+                    _ => None,
+                };
                 div()
                     .id(("assistant-response", entry_index))
                     .group(hover_group)
@@ -242,7 +307,7 @@ impl Chat {
                                         source_start,
                                     )),
                             )
-                            .footer(MessageFooter::new().child(copy)),
+                            .when_some(footer, |bubble, footer| bubble.footer(footer)),
                     )
                     .child(
                         div()
@@ -648,12 +713,31 @@ impl Chat {
                     )
                     .into_any_element()
             }
-            Entry::TurnFooter(at) => div()
-                .w_full()
-                .flex()
-                .justify_center()
-                .child(MessageFooter::new().fact(at))
-                .into_any_element(),
+            Entry::TurnFooter(at) => {
+                let facts = div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(MessageFooter::new().fact(at));
+                match actions {
+                    // A turn with no reply to carry Continue (it stopped during a tool call):
+                    // the footer draws it alone, under the time.
+                    Some(message_actions::RowActions::ContinueOnly) => div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1()
+                        .child(facts)
+                        .child(message_actions::render_lone_continue(
+                            id.clone(),
+                            entry_index,
+                            entity.clone(),
+                        ))
+                        .into_any_element(),
+                    _ => facts.into_any_element(),
+                }
+            }
             Entry::Notice { text, kind } => {
                 let selector = kind.selector();
                 match kind {
