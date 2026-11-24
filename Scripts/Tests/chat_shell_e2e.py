@@ -297,6 +297,25 @@ def carry_for(scn, agent):
         prompt, r = send_and_read(w, "after", "`after`")
         need(prompt == prompt_with([block("echo pend", "pend")], "after") and newest(r)[1].get("sent") == "true",
              "the next ordinary prompt carries the block that stayed pending", f"prompt {prompt!r}", read=r)
+
+        # ---- a block that Escape stopped is pending like any other, and the agent is told it was stopped (Escape in an idle chat
+        # ends the commands: there is no turn for it to stop)
+        count = len(shell_rows(r))
+        shell(w, "sleep 300")
+        w.wait("the long command is running",
+               lambda r: len(shell_rows(r)) > count and shell_rows(r)[count][1].get("status") == "running", timeout=10)
+        w.escape()
+        r = w.wait("Escape stops the long command", lambda r: len(shell_rows(r)) > count and settled(shell_rows(r)[count][1]),
+                   timeout=10)
+        stopped = shell_rows(r)[count][1]
+        need(stopped.get("status") == "stopped" and stopped.get("sent") == "false",
+             "Escape stopped `!sleep 300`: its block reads stopped, and is pending",
+             f"status {stopped.get('status')!r}, sent {stopped.get('sent')!r}", read=r)
+        prompt, r = send_and_read(w, "after stop", "`after stop`")
+        need(prompt == prompt_with([block("sleep 300", stopped.get("output", ""), "stopped")], "after stop")
+             and shell_rows(r)[count][1].get("sent") == "true",
+             "the block that Escape stopped reaches the agent with the next prompt, marked `<bash-exit>stopped</bash-exit>`, and is sent",
+             f"prompt {prompt!r}, sent {shell_rows(r)[count][1].get('sent')!r}", read=r)
     finally:
         teardown(w)
 
@@ -332,6 +351,15 @@ def stop_for(scn, agent):
                    timeout=max(0.2, pressed + 3 - time.time()))
         need(newest(r)[1].get("status") == "stopped", "Escape in the composer stops the running command: the block reads stopped",
              f"status {newest(r)[1].get('status')!r}, {time.time() - pressed:.1f} s after the key", read=r)
+        # The drawn footer says so too. What the harness reads of what the transcript draws is `transcriptText`, the whole transcript
+        # as the selection's offset space has it: a block's text there is its command, its body and its footer, each at the offset
+        # it is drawn at (the plain-text parts of a card are painted by the transcript's selection, and the painted-text readout
+        # holds only Markdown bodies). So this is the selection's copy of the footer, not a capture of its pixels.
+        text = r["transcript_text"]
+        at = text.find("! " + SLEEPERS)
+        need(at >= 0 and re.search(r"\nStopped · \d", text[at:]) is not None,
+             "the stopped block's footer, in the transcript's own text, reads `Stopped` and the time it ran",
+             f"block text {text[at:at + 400]!r}" if at >= 0 else "the block's command is not in the transcript's text", read=r)
         left, members = leftovers([shell_pid, child_pid], shell_pid, pressed)
         need(not left and not members,
              "the shell, the background child and the rest of the session are all gone within 3 s of the Escape",
@@ -349,14 +377,13 @@ def stop_for(scn, agent):
                  "the first Escape left the turn alone: the held turn, once released, answered `ok` and ended",
                  f"replies {[a['text'] for _, a in assistant_rows(r)]}, status {r['status']!r}", read=r)
 
-            # The stopped block is pending (spec 5.4): the next prompt carries it, with `<bash-exit>stopped</bash-exit>`. A plain
-            # prompt that the stub answers at once, so that nothing waits on a clock; the block's output is what the readout draws.
+            # A plain prompt that the stub answers at once, so that nothing waits on a clock. The stopped block is pending (spec
+            # 5.4), so where the next prompt carries it, this one does, and the second `ok hold` below goes out plain: what the
+            # prompt carries is the `carry` scenario's check (the stopped block, `<bash-exit>stopped</bash-exit>`), not this one's.
             prompt, r = send_and_read(w, "go", "`go`")
-            index, row = newest(r)
-            need(prompt == prompt_with([block(SLEEPERS, row.get("output", ""), "stopped")], "go")
-                 and "<bash-exit>stopped</bash-exit>" in prompt and row.get("sent") == "true",
-                 "the block that Escape stopped reaches the agent with the next prompt, marked `<bash-exit>stopped</bash-exit>`, and is sent",
-                 f"prompt {prompt!r}, sent {row.get('sent')!r}", read=r)
+            need(prompt.endswith("go") and user_texts(r)[-1] == "go",
+                 "`go` reaches the agent as a prompt, and its turn ends",
+                 f"prompt {prompt!r}, user rows {user_texts(r)}", read=r)
 
             # A second turn, held at a gate nobody releases: only the Escape can end it. The stub numbers a gate by how often it has
             # read the same whole prompt, so this one must go out plain (the stopped block went with `go`): `ok hold` is then

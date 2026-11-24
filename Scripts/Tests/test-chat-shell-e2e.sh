@@ -24,11 +24,12 @@ set -eEuo pipefail
 #   carry*       the next prompt `hello` reaches the agent as the block (input, output, `<bash-exit>3</bash-exit>`), an empty
 #                line and `hello`; the user row is `hello` alone and the block is sent; ` !hi` goes to the agent as a prompt;
 #                with a block pending, `/compact` reaches the agent without the context and the block stays pending until the
-#                next ordinary prompt
+#                next ordinary prompt; a block that Escape stopped goes with the next prompt, marked `<bash-exit>stopped</bash-exit>`
 #   stop*        a turn is in flight (claude: held at its gate; opencode: the stub's `slow`, which streams until cancelled);
 #                `!sleep 300 & echo $$ $!; sleep 300` shows the shell's and the child's pid; the first Escape stops the block, and
 #                the shell, the child and the rest of the session are gone, all within 3 s of the key; the turn goes on (claude:
-#                released, the held turn answers `ok`; opencode: its reply grows and the stub heard no `session/cancel`); a second
+#                released, the held turn answers `ok`; opencode: its reply grows and the stub heard no `session/cancel`), and the
+#                stopped block's footer reads `Stopped` in the transcript's own text (`transcriptText`); a second
 #                Escape stops the turn (claude: a second turn held at a gate nobody releases ends and never answers; opencode: the
 #                stub logs one `session/cancel`)
 #   fold         `!seq 1 5000` has 5000 lines and draws the last 40 (4961 to 5000); toggleShell expands it to all 5000 lines,
