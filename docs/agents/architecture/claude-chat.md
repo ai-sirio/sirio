@@ -595,7 +595,8 @@ finished reply has a row of actions under it, built in Sirio from Ely's parts wi
 `MessageActions` for Copy (the entry's `text`: a reply's Markdown source, a user message as sent with its quote
 block), an Ely `IconButton` for Quote, and Ely's `continue_button`. `ActionsFrame::row` is the one place that
 decides what a row draws; the drawn row, the socket's readout and its verbs all read it. The row under the last
-reply is always drawn once its turn is over; every other row is drawn on hover (`group_hover`) and keeps its
+reply of the transcript is always drawn once its turn is over (so, after a Stop before any reply, an older
+turn's reply stays drawn beside the footer's lone Continue); every other row is drawn on hover (`group_hover`) and keeps its
 space when hidden, so hovering moves nothing. A reply that is still streaming has none, and a folded turn stands
 in for itself with one row that has none. The row is a sibling of a message's selectable text, never inside it,
 and it animates only for a press (Ely's `CopyButton` runs once per press): the `idle_cost` scenario is what
@@ -642,8 +643,11 @@ agent gets the same text either way.
 
 **The debug surface of the actions** (debug builds only; a release build serves none of it).
 `surface.chat.transcript` has the verbs `copy` and `quote` (by `entry`), `continue` (no entry: Continue is on at
-most one row) and `quoteSelection`. Each is refused, with the reason, when the row or the menu would not offer it,
-and a verb never presses a button nobody can see (a folded turn refuses `continue`). `surface.chat.read` gives, per
+most one row) and `quoteSelection`. Each is refused, with the reason, when the row or the menu would not offer it.
+`quote`, `continue` and `quoteSelection` run the click's handler; `copy` writes the clipboard itself and skips Ely's
+`CopyButton` (no check-mark). A verb does not check that a button is visible: `copy` and `quote` accept a row shown
+on hover whose buttons are hidden, or scrolled off screen; what is refused is a row that draws no such action (a
+folded turn's) and a Continue that is not offered or not drawn. `surface.chat.read` gives, per
 row, `actions` (`copy`, `quote`, `continue`, comma-joined), `actionsShown` (`always`, `hover` or `none`),
 `actionBounds.<copy|quote|continue|row|quoteCard>` (`[x, y, width, height]` of what the last paint drew: a hover
 row paints no button until the pointer is over it, and `row` is always given) and a user row's `quote`; and for

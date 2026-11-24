@@ -146,7 +146,10 @@ these either: `Thought`, `ToolCall`, `Notice`, `Error` and the others keep what 
 - **Continue**, only on the row where §5.3 puts it.
 
 **When it shows:**
-- The row under the **last** `Assistant` entry of the transcript is always visible, once its turn is over.
+- The row under the **last** `Assistant` entry of the transcript is always visible, once its turn is over. As built
+  that is the last reply of the whole transcript, not of the last turn: when the last turn has no reply (a Stop before
+  the first text), the row falls on an older turn's reply, and two rows are drawn always, that one and the footer's
+  lone Continue. Left as it is (a follow-up, §8).
 - Every other row is invisible until its message is hovered, through `group_hover`, as today's Copy is.
 - An invisible row keeps its space, so hovering does not move the transcript.
 - The row is outside the selectable text of its message, so selection, Select All and Ctrl+C are unchanged.
@@ -213,7 +216,9 @@ row whose prompt is the `Continue` prompt:
 - the client is gone otherwise (ACP): `RelaunchToComposer`. Continue is **hidden** in this case: an ACP chat that has
   lost its process would restart without the conversation.
 
-  Hiding it here also keeps `RelaunchToComposer` out of Continue's reach entirely.
+  Hiding it here keeps `RelaunchToComposer` out of Continue's own decision, with one way in as built: an idle ACP
+  agent whose process died unnoticed still has a client, so Continue is offered as `Resend`. Its write fails, and the
+  error row's Retry, with `Continue` as the prompt it holds, relaunches to the composer and hands `Continue` back there.
 
 Continue is also hidden whenever `retry_refusal` would refuse the action: a turn is running, or the agent is
 connecting. It is hidden too when the queue is held, which a failed turn sets and which clears the reason anyway.
@@ -306,13 +311,17 @@ the row shows, so the E2E asserts what is drawn, not only what an action maps to
 `continueRow` (the row that carries it); for the composer, the quote held (`composerQuote`) and where its card was
 painted (`composerQuoteBounds`).
 
-**`surface.chat.transcript`** gains four verbs, each of which runs the same handler as the click and is refused with the
-reason when the row, or the menu, does not offer the action:
+**`surface.chat.transcript`** gains four verbs, each refused with the reason when the row, or the menu, does not offer the
+action. `quote`, `continue` and `quoteSelection` run the handler the click (or the menu item) runs. `copy` writes the
+entry's text to the clipboard itself and skips Ely's `CopyButton`, so a verb shows no check-mark confirmation:
 - `action=copy entry=N` and `action=quote entry=N`;
 - `action=continue`, which takes no entry: Continue is on at most one row;
 - `action=quoteSelection`, for the current selection.
 
-A verb never presses a button nobody can see: while Continue's turn is folded, `continue` is refused.
+As built, a verb does not check that a button is visible. `copy` and `quote` accept any row that draws Copy and Quote
+(`require_message_row`), including a row shown on hover whose buttons are hidden and a row scrolled off screen. What is
+refused is a row that draws no such action (a folded turn's rows among them) and, for `continue`, a Continue that is not
+offered or not drawn (its turn folded).
 
 Release builds serve none of these. `served::served_methods(debug)` stays the one list.
 
@@ -344,8 +353,12 @@ before the code:
   - a round-trip of the head block;
   - an empty quoted line, `>` with and without a space, a `>` block not followed by an empty line;
   - a text that is all quote, CRLF, a quote inside the text rather than at its head.
-- **Continue's decision:** it is shown and with which action for each reason × client up or gone × resumes × session
-  known × streaming × connecting × queue held, and cleared on each of the events listed in §5.3.
+- **Continue's decision:** `continue_action` is tested over each reason × client up or gone × resumes on retry × session
+  known, and `ContinueReason::from_stop_reason` over the stop reasons that offer it (`retry.rs`). The rest is proven by
+  the E2E, not by a unit: Continue is offered nowhere after an ordinary end and on a restored chat (`continue_hidden`)
+  and while a turn runs (`continue_hidden`, `continue_once`, `claude_stop`), and a new connection clears the reason
+  (`continue_hidden`, an ACP agent after its restart). Not tested at all: a failed turn clearing it, the agent connecting, the queue held, a new
+  conversation and an opened past session.
 
 The Claude Stop fix changes `a_stopped_turns_result_keeps_the_events_of_a_turn_that_ended` to assert the new
 behaviour: `Cancelled`, no chunk.
@@ -363,7 +376,9 @@ captures. Scenarios:
 3. **Continue on each reason:**
    - a stub turn ending in `MaxTokens`, one in `MaxTurnRequests`, and a Stop, for Claude and for ACP;
    - Continue shows on the last reply only and sends a visible "Continue" user row;
-   - the stub log shows the prompt in the same session.
+   - the stub log shows the prompt in the same session;
+   - Continue alone on a footer: a Stop before the first text leaves a turn with a thought and no reply, and a real press
+     on the footer's Continue (which sits inside the click that folds the turn) sends `Continue` and does not fold it.
 4. **Continue's absences:**
    - not after an ordinary end;
    - not while a turn runs;
@@ -384,8 +399,11 @@ captures. Scenarios:
    and after a Copy press has settled, in the same build: after is at most 1.5 times before plus 2, and neither is more
    than 3 a second. This catches an Ely animation that loops. It compares nothing with a build of main.
 
-**Captures:** before and after, light and dark, of a transcript with the rows, a hovered row, Continue, and a quote in
-the composer and in a sent row. They are taken with `Scripts/capture-markdown-surfaces.sh` or the E2E's own captures.
+**Captures:** before and after, light and dark, of a transcript with the rows, a hovered row, Continue (on a reply's row
+and alone on a footer), and a quote in the composer and in a sent row. As built they were taken by a local driver over
+the E2E's harness (`chat_e2e_harness.py`), which is not in the repo, the "before" set from a build of `origin/main`. They
+are local evidence attached to the PR description and cannot be re-run from the repo; what the repo re-runs is the
+E2E's own captures (`frames/` of its artifact).
 
 **Hand checks owed on macOS and Windows** (listed in the PR body):
 - the hover row;
@@ -415,6 +433,9 @@ the composer and in a sent row. They are taken with `Scripts/capture-markdown-su
   the next prompt runs, is in the same family (it takes the real-error path: a Retry row over a live turn). Fixing it
   takes a count of pending ends, which reworks main's Stop logic beyond this delivery; it is filed as an issue when
   the PR opens.
+- **The always-drawn row can fall on an older turn** (a follow-up). `ActionsFrame` takes the last `Assistant` entry of the
+  transcript, so after a Stop before the first text the older turn's last reply stays drawn always beside the footer's
+  lone Continue (§5.1). Moving it to the last turn's own reply, or to none, is a change of `always_row`.
 - **Hover rows on every message** add elements to each drawn row. The list is culled, and the E2E's idle-cost scenario
   and the delivery-1 benches cover the frame.
 
