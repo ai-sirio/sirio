@@ -412,8 +412,8 @@ pub enum ChatEntry {
     /// refusing the whole transcript.
     ///
     /// A shell block (`kind` `"shell"`) is stored as a notice too, with the
-    /// run in `shell` and `text` as the plain one-line summary an older build
-    /// draws: that build ignores the key it does not know.
+    /// run in `shell` and `text` as the plain text an older build draws in
+    /// place of the block: that build ignores the key it does not know.
     Notice {
         text: String,
         kind: String,
@@ -435,8 +435,10 @@ pub struct ChatShellRun {
     pub output: String,
     /// How many lines the command printed in all, kept or not.
     pub total_lines: u64,
-    /// The shell's exit status (`128 + signal` when a signal ended it), or
-    /// `None` when the system could not say how it ended or it never started.
+    /// The shell's exit status. `None` only when the command could not start
+    /// (`stopped` is then false): a run that started always has one. A
+    /// signal's death is `128 + signal`, and `-1` means the system could not
+    /// say how the shell ended.
     pub exit: Option<i32>,
     /// Whether the user stopped the command.
     pub stopped: bool,
