@@ -9,6 +9,7 @@ talks to a network or reads the user's configuration.
 
 import json
 import os
+import re
 import unicodedata
 import queue
 import sys
@@ -3082,10 +3083,24 @@ def richer_limit_epoch():
         return int(handle.read().strip())
 
 
+# The shell blocks (`!cmd` in the chat) that a prompt carries ahead of the user's text, in Claude Code's tags: one or more
+# `<bash-input>..</bash-input>\n<bash-stdout>..</bash-stdout>\n` (and a `<bash-exit>..</bash-exit>\n` when the exit is not
+# 0) and an empty line after them. Output and command arrive with the four tag names neutralised, so the first closing tag
+# of each block is the real one.
+RICHER_SHELL_CONTEXT = re.compile(
+    r"\A(?:<bash-input>.*?</bash-input>\n<bash-stdout>.*?</bash-stdout>\n(?:<bash-exit>[^<\n]*</bash-exit>\n)?)+\n?", re.S)
+
+
+def without_shell_context(prompt):
+    """The prompt less the shell blocks at its head: the text that picks the turn."""
+    return RICHER_SHELL_CONTEXT.sub("", prompt, count=1)
+
+
 def richer_turn(prompt):
-    number = richer_seen(prompt) + 1
-    richer_log("prompt", prompt)
+    number = richer_seen(prompt) + 1  # counted on the whole prompt: a retry resends it, shell blocks included
+    richer_log("prompt", prompt)  # the whole prompt, which is what the E2E reads
     RICHER_STOP.clear()
+    prompt = without_shell_context(prompt)  # the turn is picked on the user's text alone
     # `<prompt> hold` waits for its gate; so does a `Continue` while the file $SIRIO_FIXTURE_GATE.hold-continue exists
     # (the turn a Continue starts has the text `Continue`, which the E2E cannot suffix).
     held_continue = prompt == "Continue" and os.path.exists(richer_gate_file("hold-continue") or "")

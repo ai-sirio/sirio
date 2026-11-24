@@ -121,6 +121,7 @@ Wire shapes mirror the sirio_acp integration fixture (acp_fixture.py).
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -710,8 +711,23 @@ RICHER_PARTIAL = ["I started on it. Here is **what I found** so far:\n\n", "- th
 RICHER_CUT = "The answer is long, so it is cut off right in the middle of a sen"
 
 
+# The shell blocks (`!cmd` in the chat) that a prompt carries at its head, in Claude Code's tags: one or more
+# `<bash-input>..</bash-input>\n<bash-stdout>..</bash-stdout>\n` (and a `<bash-exit>..</bash-exit>\n` when the exit is not
+# 0) and an empty line after them. Output and command arrive with the four tag names neutralised, so the first closing tag
+# of each block is the real one. They come before the quote block.
+RICHER_SHELL_CONTEXT = re.compile(
+    r"\A(?:<bash-input>.*?</bash-input>\n<bash-stdout>.*?</bash-stdout>\n(?:<bash-exit>[^<\n]*</bash-exit>\n)?)+\n?", re.S)
+
+
+def without_shell_context(text):
+    """The prompt less the shell blocks at its head."""
+    return RICHER_SHELL_CONTEXT.sub("", text, count=1)
+
+
 def richer_base(text):
-    """The text that picks the turn: the prompt without the quote block at its head (`> ` lines, then an empty line)."""
+    """The text that picks the turn: the prompt without the shell blocks and the quote block at its head (`> ` lines,
+    then an empty line)."""
+    text = without_shell_context(text)
     if text.startswith(">") and "\n\n" in text:
         return text.split("\n\n", 1)[1]
     return text

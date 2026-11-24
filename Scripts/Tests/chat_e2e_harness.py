@@ -1,5 +1,6 @@
-"""The harness of the chat end-to-end tests: test-chat-richer-messages-e2e.sh (chat_richer_messages_e2e.py) and
-test-chat-message-actions-e2e.sh (chat_message_actions_e2e.py) both import it, and each registers its own scenarios.
+"""The harness of the chat end-to-end tests: test-chat-richer-messages-e2e.sh (chat_richer_messages_e2e.py),
+test-chat-message-actions-e2e.sh (chat_message_actions_e2e.py) and test-chat-shell-e2e.sh (chat_shell_e2e.py) all import
+it, and each registers its own scenarios.
 
 Everything here runs against real, isolated debug Sirio instances on the script's private Xvfb. A
 `World` is one such instance with its own HOME, XDG tree, database, control socket and host root, started
@@ -56,6 +57,7 @@ def log(message):
 
 DETAIL_KEYS = ("id", "status", "errorKind", "retry", "coveredBy", "phase", "resetsAt", "live", "shownBytes", "at",
                "durationMs", "actions", "actionsShown", "quote")
+SHELL_KEYS = ("command", "exit", "sent", "lines", "expanded")  # a shell block's columns (`!cmd`), besides `status`
 
 
 def compact(r):
@@ -70,6 +72,10 @@ def compact(r):
         if text is not None:
             entry["text"] = text if len(text) <= 80 else f"{text[:80]}... ({len(text.encode())} bytes)"
         entry.update({key: row[key] for key in DETAIL_KEYS if key in row})
+        if row.get("kind") == "shell":
+            entry.update({key: row[key] for key in SHELL_KEYS if key in row})
+            output = row.get("output", "")  # thousands of lines at times: its two ends
+            entry["output"] = output if len(output) <= 80 else f"{output[:40]}...{output[-30:]} ({len(output)} chars)"
         entry.update({key: value for key, value in row.items() if key.startswith("actionBounds.")})
         rows.append(entry)
     out = {"status": r.get("status"), "queue": r.get("queue"), "held": r.get("held"), "heldLine": r.get("held_line"),
@@ -78,6 +84,9 @@ def compact(r):
     out.update({key: r[key] for key in ("continue", "continueRow", "composerQuote", "composerQuoteBounds") if key in r})
     if r.get("separators"):
         out["daySeparators"] = r["separators"]
+    composer_row = r.get("composerRow") or {}
+    if "shellMode" in composer_row or "bandRule" in composer_row:  # the chat shell E2E's command mode, when the build reports it
+        out["composerCommandMode"] = {key: composer_row[key] for key in ("shellMode", "bandRule", "band") if key in composer_row}
     return out
 
 
@@ -455,6 +464,19 @@ class World:
     def retry(self, entry):
         self.rpc("surface.chat.transcript", surfaceId=self.surface, action="retry", entry=str(entry))
 
+    def toggle_shell(self, entry):
+        """The debug press of a shell block's Show all / Show less (`toggleShell`, as `toggleTurn` is for a turn's fold)."""
+        self.rpc("surface.chat.transcript", surfaceId=self.surface, action="toggleShell", entry=str(entry))
+
+    def escape(self):
+        """A real Escape in the composer: a click on its field first, so that the key lands there (the pointer stays over
+        it, which is where the X server sends keys), then the key through the X server's input, not a message to the window."""
+        field = self.read()["composerRow"]["field"]
+        press(self.window, field[0] + field[2] / 2, field[1] + field[3] / 2, hold=0.1, settle=0.1)
+        time.sleep(0.3)
+        x("key", "Escape")
+        time.sleep(0.3)
+
     def retry_refusal(self, entry):
         """The sentence the socket refuses a Retry with, or None when it was accepted."""
         try:
@@ -527,9 +549,11 @@ def brief(r):
         return json.dumps(r)[:300]
     rows = []
     for index, row in enumerate(r["rows"]):
-        text = (row.get("text") or "").replace("\n", " ")[:40]
-        extra = "".join(f" {key}={row[key]}" for key in ("errorKind", "retry", "coveredBy", "phase", "live", "shownBytes")
-                        if key in row)
+        text = (row.get("text") or row.get("command") or "").replace("\n", " ")[:40]
+        keys = ("errorKind", "retry", "coveredBy", "phase", "live", "shownBytes")
+        if row.get("kind") == "shell":
+            keys += ("status", "exit", "sent")
+        extra = "".join(f" {key}={row[key]}" for key in keys if key in row)
         rows.append(f"{index}:{row.get('kind')}{extra}:{text!r}")
     return json.dumps({"status": r.get("status"), "queue": r.get("queue"), "held": r.get("held"),
                        "heldLine": r.get("held_line"), "composer": r.get("composerText"), "rows": rows})[:900]
@@ -540,6 +564,11 @@ def brief(r):
 
 def rows_of(r, kind):
     return [(index, row) for index, row in enumerate(r["rows"]) if row.get("kind") == kind]
+
+
+def shell_rows(r):
+    """The (index, row) of every shell block (`!cmd` in the chat), oldest first."""
+    return rows_of(r, "shell")
 
 
 def error_row(r):
