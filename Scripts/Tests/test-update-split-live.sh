@@ -27,11 +27,18 @@ set -euo pipefail
 #      newer. The artifact entries stay untouched, and they are the only part the
 #      manifest signs, so the production keys still verify the real download.
 #      Nightly passes on "DOWNLOAD ready"; stable downloads during the check and
-#      passes on "CHECK Ready". An "APPLY err" after that is expected: the probe
-#      does not run from an install, so applying refuses and nothing is installed.
-#   5. The copy's counter rises by one, polled every 30 s for up to 15 min (GitHub
+#      passes on "CHECK Ready". The probe is started without APPIMAGE, the variable
+#      that would let it swap an AppImage, so applying refuses and nothing is
+#      installed; the script requires that refusal (nightly: exit 14 and "APPLY err
+#      Sirio is not running from an install directory"; stable: the probe's exit 10
+#      on a ready download, which never reaches applying). Just before the download,
+#      which cannot be undone, it reads GitHub's rate limit and stops unless what is
+#      left covers every poll of stage 5 and a margin of 5.
+#   5. The copy's counter rises by one, polled every 60 s for up to 30 min (GitHub
 #      updates counters late: a hand run saw one move after 10 minutes), while the
-#      installer's counter stays where stage 3 read it.
+#      installer's counter stays where stage 3 read it. A failed API read is retried,
+#      and the last one's HTTP status and message go into the FAIL line, so rate
+#      limiting never reads as a slow counter.
 #
 # It publishes nothing and touches no installed copy, but the download in stage 4
 # is real: it adds one to the counter of this machine's copy, and it runs against
@@ -42,8 +49,8 @@ set -euo pipefail
 # Needs SIRIO_RELEASE_ACCEPTED_KEYS, the keys the release binaries accept
 # (gh variable get SIRIO_RELEASE_ACCEPTED_KEYS -R ai-sirio/sirio), cargo, curl,
 # python3 and network access. GITHUB_TOKEN, when set, is sent to the GitHub API
-# for its rate limit; without it, the 15 minutes of polling can exhaust the
-# anonymous one.
+# for its rate limit; the anonymous one (60 calls an hour) is checked before the
+# download and may not cover the window.
 #
 # Like test-update-e2e.sh, it builds the probe with SIRIO_RELEASE_CHANNEL and
 # friends set, so the next ordinary cargo build re-compiles the crates that read
@@ -53,6 +60,8 @@ set -euo pipefail
 #   --channel  the manifest to check (default nightly)
 #   --out-dir  where update-split.json is written, on success only
 #              (default artifacts/update-split-<stamp>-<pid>)
+#   SIRIO_UPDATE_SPLIT_WINDOW  how long stage 5 polls, in seconds (default 1800)
+#   SIRIO_UPDATE_SPLIT_PORT    the loopback port of the manifest (default 38710)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -69,8 +78,8 @@ URL_RE='^https://github\.com/ai-sirio/sirio/releases/download/([^/]+)/([^/]+)$'
 # by side; a busy one fails loudly below.
 PORT="${SIRIO_UPDATE_SPLIT_PORT:-38710}"
 VERSION="99.0.0"
-POLL_SECONDS=30
-POLL_WINDOW=900
+POLL_SECONDS=60
+POLL_WINDOW="${SIRIO_UPDATE_SPLIT_WINDOW:-1800}"
 
 CHANNEL=nightly
 OUT_DIR=""
@@ -95,6 +104,9 @@ done
 case "$CHANNEL" in
   nightly|stable) ;;
   *) echo "unknown channel '$CHANNEL': expected nightly or stable" >&2; usage ;;
+esac
+case "$POLL_WINDOW" in
+  ''|*[!0-9]*|0) fail "SIRIO_UPDATE_SPLIT_WINDOW must be a number of seconds above 0, not '$POLL_WINDOW'" ;;
 esac
 if [ -z "$OUT_DIR" ]; then
   OUT_DIR="$REPO_ROOT/artifacts/update-split-$(date +%Y%m%d-%H%M%S)-$$"
@@ -145,13 +157,55 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# GET $1 from the GitHub API, the body on stdout. A failure returns 1 with the reason
+# on stderr: "HTTP <status>: <the API's message>" for any answer but 200 (a rate
+# limit says so there), curl's own message when nothing answered.
 api_get() {
-  if [ -n "${GITHUB_TOKEN:-}" ]; then
-    curl -fsS --max-time 30 -H 'Accept: application/vnd.github+json' \
-      -H "Authorization: Bearer $GITHUB_TOKEN" "$API$1"
-  else
-    curl -fsS --max-time 30 -H 'Accept: application/vnd.github+json' "$API$1"
+  local code
+  code=$(curl -sS --max-time 30 -o "$WORK/api-body" -w '%{http_code}' \
+    -H 'Accept: application/vnd.github+json' \
+    ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "$API$1") || return 1
+  if [ "$code" != 200 ]; then
+    echo "HTTP $code: $(api_message <"$WORK/api-body")" >&2
+    return 1
   fi
+  cat "$WORK/api-body"
+}
+
+# The "message" of a GitHub error body, or the start of whatever the body is.
+api_message() {
+  "$PYTHON" -c '
+import json, sys
+body = sys.stdin.read()
+try:
+    print(json.loads(body).get("message") or body[:200])
+except Exception:
+    print(body[:200] or "no message")
+' | tr -d '\r'
+}
+
+# Reads release $1 into $WORK/release.json. On failure API_ERROR holds the reason.
+API_ERROR=""
+read_release() {
+  if api_get "/repos/ai-sirio/sirio/releases/tags/$1" >"$WORK/release.json" 2>"$WORK/api-error"; then
+    return 0
+  fi
+  API_ERROR=$(api_error)
+  return 1
+}
+
+# The reason api_get left in $WORK/api-error, on one line.
+api_error() {
+  tr '\r\n' '  ' <"$WORK/api-error" | sed 's/ *$//'
+}
+
+# "<core calls left><TAB><when the quota resets>", from /rate_limit on stdin.
+rate_limit() {
+  "$PYTHON" -c '
+import json, sys, time
+core = json.load(sys.stdin)["resources"]["core"]
+print("%d\t%s" % (core["remaining"], time.strftime("%H:%M:%SZ", time.gmtime(core["reset"]))))
+' | tr -d '\r'
 }
 
 # JSON is read from stdin, so no path crosses into a native python on Windows.
@@ -218,8 +272,8 @@ while IFS=$'\t' read -r platform url; do
     || fail "stage 2: $url for $platform is not an ai-sirio/sirio release download URL"
   if [ -z "$TAG" ]; then
     TAG="${BASH_REMATCH[1]}"
-    api_get "/repos/ai-sirio/sirio/releases/tags/$TAG" >"$WORK/release.json" \
-      || fail "stage 2: could not read release $TAG from the GitHub API"
+    read_release "$TAG" \
+      || fail "stage 2: could not read release $TAG from the GitHub API: $API_ERROR"
   elif [ "${BASH_REMATCH[1]}" != "$TAG" ]; then
     fail "stage 2: the manifest names two releases, $TAG and ${BASH_REMATCH[1]} ($url for $platform)"
   fi
@@ -288,8 +342,8 @@ PROBE="$TARGET_DIR/debug/examples/update_probe$EXE"
 # --- 3. the counters before the download ------------------------------------
 
 echo "stage 3: the $PLATFORM counters of release $TAG before the download"
-api_get "/repos/ai-sirio/sirio/releases/tags/$TAG" >"$WORK/release.json" \
-  || fail "stage 3: could not read release $TAG from the GitHub API"
+read_release "$TAG" \
+  || fail "stage 3: could not read release $TAG from the GitHub API: $API_ERROR"
 row=$(asset_row "$INSTALLER" <"$WORK/release.json") \
   || fail "stage 3: release $TAG is not a list of assets"
 INSTALL_BEFORE="${row##*$'\t'}"
@@ -300,11 +354,25 @@ UPDATE_BEFORE="${row##*$'\t'}"
   || fail "stage 3: release $TAG lost $INSTALLER or $COPY"
 echo "  $INSTALLER: $INSTALL_BEFORE downloads, $COPY: $UPDATE_BEFORE ($(date -u +%H:%M:%SZ))"
 
+# The download below cannot be undone, so the quota that stage 5 polls with is
+# checked first: one read a tick, the first at once, and a margin of 5. Without
+# this a rate limited poll would only fail after the download had been spent.
+POLLS=$(( (POLL_WINDOW + POLL_SECONDS - 1) / POLL_SECONDS + 1 ))
+NEEDED=$((POLLS + 5))
+api_get /rate_limit >"$WORK/rate-limit.json" 2>"$WORK/api-error" \
+  || fail "stage 3: could not read GitHub's rate limit before the download: $(api_error)"
+row=$(rate_limit <"$WORK/rate-limit.json") \
+  || fail "stage 3: GitHub's rate limit answer has no resources.core"
+REMAINING="${row%$'\t'*}"
+echo "  GitHub allows $REMAINING more API calls until ${row##*$'\t'}; polling for ${POLL_WINDOW}s needs $NEEDED ($POLLS reads and a margin of 5)"
+[ "$REMAINING" -ge "$NEEDED" ] \
+  || fail "stage 3: GitHub allows $REMAINING more API calls until ${row##*$'\t'}, and polling for ${POLL_WINDOW}s needs $NEEDED ($POLLS reads and a margin of 5); set GITHUB_TOKEN, shorten SIRIO_UPDATE_SPLIT_WINDOW or wait"
+
 # --- 4. the compiled updater downloads what the live manifest names ---------
 
 echo "stage 4: the probe checks and downloads against the live manifest served as $VERSION"
 set +e
-PROBE_OUT=$("$PROBE" "$(winpath "$STAGING")" 2>&1)
+PROBE_OUT=$(env -u APPIMAGE "$PROBE" "$(winpath "$STAGING")" 2>&1)
 PROBE_CODE=$?
 set -e
 PROBE_OUT=$(printf '%s' "$PROBE_OUT" | tr -d '\r')
@@ -331,35 +399,64 @@ expect_prefix() {
 # makes it look like something else.
 expect_line "CHANNEL $CHANNEL"
 expect_line "MANIFEST_URL $MANIFEST_URL"
+# Nightly checks, then downloads, then refuses to apply outside an install (exit 14),
+# which is the one outcome that leaves every installed copy alone: the probe swaps
+# whatever file APPIMAGE names, so "APPLY ok" would be a failure, not a pass.
+# Stable's check downloads and returns Ready, which the probe reports with exit 10
+# before it reaches applying.
 if [ "$CHANNEL" = nightly ]; then
   expect_line "ARTIFACT_URL $COPY_URL"
   expect_prefix "DOWNLOAD ready "
+  expect_prefix "APPLY err Sirio is not running from an install directory"
+  [ "$PROBE_CODE" = 14 ] || { dump_probe; fail "stage 4: expected exit 14 (applying refused outside an install), got $PROBE_CODE"; }
 else
   expect_prefix "CHECK Ready"
+  [ "$PROBE_CODE" = 10 ] || { dump_probe; fail "stage 4: expected exit 10 (a ready download, reported before applying), got $PROBE_CODE"; }
 fi
 echo "  the probe downloaded and verified $COPY ($(date -u +%H:%M:%SZ))"
 
 # --- 5. the copy's counter rises, the installer's does not ------------------
 
-echo "stage 5: waiting for the counter of $COPY to pass $UPDATE_BEFORE (every ${POLL_SECONDS}s, up to $((POLL_WINDOW / 60)) min)"
+echo "stage 5: waiting for the counter of $COPY to pass $UPDATE_BEFORE (window ${POLL_WINDOW}s, one read every ${POLL_SECONDS}s)"
 DEADLINE=$((SECONDS + POLL_WINDOW))
 UPDATE_AFTER=""
 INSTALL_AFTER=""
+READS=0
+READ_FAILURES=0
+LAST_ERROR=""
 while :; do
-  if api_get "/repos/ai-sirio/sirio/releases/tags/$TAG" >"$WORK/release.json" 2>/dev/null \
-    && row=$(asset_row "$COPY" <"$WORK/release.json") && [ -n "$row" ]; then
-    UPDATE_AFTER="${row##*$'\t'}"
-    row=$(asset_row "$INSTALLER" <"$WORK/release.json") || row=""
-    INSTALL_AFTER="${row##*$'\t'}"
-    echo "  $COPY: $UPDATE_AFTER, $INSTALLER: $INSTALL_AFTER ($(date -u +%H:%M:%SZ))"
-    if [ "$UPDATE_AFTER" -ge $((UPDATE_BEFORE + 1)) ]; then
-      break
+  READS=$((READS + 1))
+  TICK_FAILED=yes
+  if read_release "$TAG"; then
+    row=$(asset_row "$COPY" <"$WORK/release.json") || row=""
+    if [ -n "$row" ]; then
+      TICK_FAILED=no
+      UPDATE_AFTER="${row##*$'\t'}"
+      row=$(asset_row "$INSTALLER" <"$WORK/release.json") || row=""
+      INSTALL_AFTER="${row##*$'\t'}"
+      echo "  $COPY: $UPDATE_AFTER, $INSTALLER: $INSTALL_AFTER ($(date -u +%H:%M:%SZ))"
+      if [ "$UPDATE_AFTER" -ge $((UPDATE_BEFORE + 1)) ]; then
+        break
+      fi
+    else
+      API_ERROR="release $TAG no longer lists $COPY"
     fi
-  else
-    echo "  the release could not be read ($(date -u +%H:%M:%SZ)); trying again"
+  fi
+  if [ "$TICK_FAILED" = yes ]; then
+    READ_FAILURES=$((READ_FAILURES + 1))
+    LAST_ERROR="$API_ERROR"
+    echo "  the release could not be read ($LAST_ERROR) ($(date -u +%H:%M:%SZ)); trying again"
   fi
   if [ "$SECONDS" -ge "$DEADLINE" ]; then
-    fail "stage 5: after $((POLL_WINDOW / 60)) minutes the counter of $COPY reads '${UPDATE_AFTER:-unread}', still not above $UPDATE_BEFORE"
+    # The reason belongs in the line: a rate limit or a 404 must not read as lag.
+    FAILED_READS=""
+    if [ "$READ_FAILURES" -gt 0 ]; then
+      FAILED_READS="; $READ_FAILURES of $READS reads failed, the last with: $LAST_ERROR"
+    fi
+    if [ "$TICK_FAILED" = yes ]; then
+      fail "stage 5: the last read of release $TAG failed, so the counter of $COPY is unknown (last seen '${UPDATE_AFTER:-never read}', before the download $UPDATE_BEFORE)${FAILED_READS}"
+    fi
+    fail "stage 5: after ${POLL_WINDOW}s the counter of $COPY reads '$UPDATE_AFTER', still not above $UPDATE_BEFORE${FAILED_READS}"
   fi
   sleep "$POLL_SECONDS"
 done

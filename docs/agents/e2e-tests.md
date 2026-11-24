@@ -27,10 +27,15 @@ Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
 # each installer beside its copy, the copy labelled "Sirio <version> for <OS>, used by in-app
 # updates". Stage 3: this machine's installer and copy counters. Stage 4: update_probe, built like
 # test-update-e2e.sh builds it but with the production keys, downloads from that manifest served
-# over loopback as version 99.0.0 ("DOWNLOAD ready" on nightly, "CHECK Ready" on stable; the
-# "APPLY err" after it is expected). Stage 5: the GitHub API, polled every 30 s for up to 15 min,
-# shows the copy's counter up by one and the installer's where stage 3 read it. The download is
-# real, so a run adds one to that copy's counter, and it needs SIRIO_RELEASE_ACCEPTED_KEYS
+# over loopback as version 99.0.0 ("DOWNLOAD ready" on nightly, "CHECK Ready" on stable). The
+# probe runs without APPIMAGE, so applying refuses and no installed copy is touched, and the
+# script requires that refusal (nightly: exit 14 and "APPLY err Sirio is not running from an
+# install directory"; stable: exit 10). Just before the download, which cannot be undone, the
+# script reads GitHub's rate limit and stops unless it covers every poll and a margin of 5.
+# Stage 5: the GitHub API, polled every 60 s for SIRIO_UPDATE_SPLIT_WINDOW seconds (default
+# 1800), shows the copy's counter up by one and the installer's where stage 3 read it; a failed
+# read is retried and its HTTP status and message go into the FAIL line. The download is real,
+# so a run adds one to that copy's counter, and it needs SIRIO_RELEASE_ACCEPTED_KEYS
 # (gh variable get SIRIO_RELEASE_ACCEPTED_KEYS -R ai-sirio/sirio). --channel nightly|stable
 # (default nightly); --out-dir DIR keeps update-split.json (channel, tag, platform, urls, labels,
 # the counters before and after, the probe's output), written on success only; GITHUB_TOKEN, when
