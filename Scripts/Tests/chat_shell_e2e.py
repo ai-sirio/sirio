@@ -125,6 +125,29 @@ def last_prompt(w):
     return prompts[-1][1] if prompts else None
 
 
+# What a block's footer says while the agent has not been given it (spec 5.3). It is part of the block's text in the
+# transcript, as the footer's other words are, so the readout of `transcriptText` shows whether it is drawn.
+CAPTION = "goes with your next message"
+
+
+def block_text(r, command):
+    """The block's text as the transcript's own text has it (`transcriptText`: each row's text, rows set apart by an empty
+    line): from its `! command` line to that empty line, its footer included. None when no block of that command is there.
+    The commands these scenarios run print no empty line, so the first empty line ends the block."""
+    text = r["transcript_text"]
+    at = text.find("! " + command)
+    if at < 0:
+        return None
+    end = text.find("\n\n", at)
+    return text[at:] if end < 0 else text[at:end]
+
+
+def captioned(r, command):
+    """Whether the block's footer, in the transcript's text, carries the caption."""
+    shown = block_text(r, command)
+    return shown is not None and CAPTION in shown
+
+
 def send_and_read(w, text, what):
     """Sends `text` as a prompt and waits until the agent has read it and the turn has ended: its prompt, and the read."""
     count = len(w.prompts())
@@ -260,7 +283,10 @@ def carry_for(scn, agent):
     try:
         w.start()
         w.open_chat(agent)
-        run_block(w, command)
+        r, index, row = run_block(w, command)
+        need(captioned(r, command),
+             "control: the finished block's footer says `goes with your next message`, in the transcript's text, before it is sent",
+             f"block text {block_text(r, command)!r}", read=r)
 
         # ---- check 2: the next prompt carries the block, then the text
         prompt, r = send_and_read(w, "hello", "`hello`")
@@ -277,6 +303,9 @@ def carry_for(scn, agent):
         need(row is not None and row.get("sent") == "true",
              "the block has been sent: it lost its `goes with your next message` state",
              f"sent {(row or {}).get('sent')!r}", read=r)
+        need(block_text(r, command) is not None and not captioned(r, command),
+             "the block's footer no longer says `goes with your next message`, in the transcript's text",
+             f"block text {block_text(r, command)!r}", read=r)
 
         # ---- check 8: a draft with a leading space is a prompt
         blocks = len(shell_rows(r))
@@ -787,11 +816,48 @@ def restart_for(scn, agent):
              f"blocks {[(i, x.get('command'), x.get('status'), x.get('output')) for i, x in shell_rows(r)]}", read=r)
         need(row.get("sent") == "false", "the block that was never sent is pending again after the restart",
              f"sent {row.get('sent')!r}", read=r)
+        need(captioned(r, "echo kept"),
+             "the restored block's footer says `goes with your next message` again, in the transcript's text",
+             f"block text {block_text(r, 'echo kept')!r}", read=r)
         prompt, r = send_and_read(w, "go", "`go`")
         need(prompt == prompt_with([block("echo kept", "kept")], "go"),
              "the next prompt after the restart carries the restored block", f"prompt {prompt!r}", read=r)
         need(newest(r)[1].get("sent") == "true", "the restored block is sent once the prompt carried it",
              f"sent {newest(r)[1].get('sent')!r}", read=r)
+        need(block_text(r, "echo kept") is not None and not captioned(r, "echo kept"),
+             "the restored block's footer no longer says `goes with your next message` once it is sent",
+             f"block text {block_text(r, 'echo kept')!r}", read=r)
+
+        # ---- a block the agent was given is stored as its fold, and is never carried twice. `seq 1 100` is sent with a turn that
+        # is still in flight when the app quits (that turn has no footer, so it is lost, but the block was saved as sent the moment
+        # the prompt carried it); `echo kept` went with a turn that ended, and is saved inside it.
+        run_block(w, "seq 1 100")
+        count = len(w.prompts())
+        w.send("ok hold" if agent == "claude" else "slow")
+        wait_prompts(w, count + 1, "the agent reads the turn that carries `seq 1 100`")
+        w.wait("that turn is in flight", lambda r: r["status"] == "streaming", timeout=20)
+        w.quit()
+        w.start()
+        w.reopen_chat()
+        r = w.wait("the restored chat holds both blocks", lambda r: len(shell_rows(r)) == 2, timeout=15)
+        (_, kept), (_, hundred) = shell_rows(r)
+        fold = "\n".join(str(n) for n in range(61, 101))
+        need(kept.get("command") == "echo kept" and kept.get("sent") == "true" and kept.get("output") == "kept"
+             and hundred.get("command") == "seq 1 100" and hundred.get("sent") == "true" and hundred.get("status") == "exited"
+             and hundred.get("exit") == "0",
+             "after a second restart both blocks are back, and both are sent: the one that went with a turn that ended, and the one "
+             "whose turn was lost",
+             f"blocks {[(x.get('command'), x.get('status'), x.get('sent')) for _, x in shell_rows(r)]}", read=r)
+        need(hundred.get("output") == fold and hundred.get("lines") == "100",
+             "the block that was sent keeps its fold alone: the last 40 of its 100 lines, and it still says it had 100",
+             f"lines {hundred.get('lines')!r}, output {hundred.get('output')!r}", read=r)
+        need(not captioned(r, "echo kept") and not captioned(r, "seq 1 100") and user_texts(r) == ["go"],
+             "neither block says `goes with your next message`, and the turn that never ended is not in the restored chat",
+             f"user rows {user_texts(r)}, blocks {[block_text(r, c) for c in ('echo kept', 'seq 1 100')]}", read=r)
+        prompt, r = send_and_read(w, "again", "`again`")
+        need(prompt == "again",
+             "the next prompt carries nothing: a block that was sent is not carried again after a restart",
+             f"prompt {prompt!r}", read=r)
     finally:
         teardown(w)
 
@@ -856,17 +922,19 @@ def scenario_hand_back(scn):
         wait_prompts(w, count + 1, "the agent reads `die`")
         r = w.wait("the lost agent is an error row", lambda r: error_row(r) is not None and r["status"] != "streaming", timeout=30)
         index, row = error_row(r)
-        need(row.get("retry") == "composer" and newest(r)[1].get("sent") == "true",
-             "the agent died on the prompt that carried the block: its Retry hands the message back, and the block went with it",
-             f"retry {row.get('retry')!r}, sent {newest(r)[1].get('sent')!r}", read=r)
+        need(row.get("retry") == "composer" and newest(r)[1].get("sent") == "true" and not captioned(r, "echo back"),
+             "the agent died on the prompt that carried the block: its Retry hands the message back, and the block went with it "
+             "(no caption)",
+             f"retry {row.get('retry')!r}, sent {newest(r)[1].get('sent')!r}, block text {block_text(r, 'echo back')!r}", read=r)
         prompts = w.prompts()
         w.retry(index)
         r = w.wait("the relaunched agent is connected, with the message back in the composer",
                    lambda r: r["composerText"] == "die" and idle(r) and error_row(r) is None, timeout=40)
         time.sleep(1.5)  # a prompt that the hand-back wrongly sent would be in the stub's log by now
-        need(w.prompts() == prompts and newest(r)[1].get("sent") == "false",
-             "the message is back in the composer, nothing was sent, and the block is pending again",
-             f"composer {r['composerText']!r}, sent {newest(r)[1].get('sent')!r}, prompts {w.prompts()}", read=r)
+        need(w.prompts() == prompts and newest(r)[1].get("sent") == "false" and captioned(r, "echo back"),
+             "the message is back in the composer, nothing was sent, and the block is pending again, with its caption",
+             f"composer {r['composerText']!r}, sent {newest(r)[1].get('sent')!r}, prompts {w.prompts()}, "
+             f"block text {block_text(r, 'echo back')!r}", read=r)
         prompt, r = send_and_read(w, "again", "`again`")
         need(prompt == prompt_with([block("echo back", "back")], "again") and newest(r)[1].get("sent") == "true",
              "the next send carries `back` again", f"prompt {prompt!r}", read=r)

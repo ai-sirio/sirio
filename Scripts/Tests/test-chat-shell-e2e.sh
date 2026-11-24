@@ -22,7 +22,8 @@ set -eEuo pipefail
 #                `!cat` ends with exit 0 within 3 s (and the command's stdin is /dev/null); `!echo "$$ $(ps -o sid= -p $$)"`
 #                prints two equal numbers: the shell leads a session of its own, with no controlling terminal
 #   carry*       the next prompt `hello` reaches the agent as the block (input, output, `<bash-exit>3</bash-exit>`), an empty
-#                line and `hello`; the user row is `hello` alone and the block is sent; ` !hi` goes to the agent as a prompt;
+#                line and `hello`; the user row is `hello` alone and the block is sent, and its footer, in the transcript's text,
+#                says `goes with your next message` before the send and no longer after it; ` !hi` goes to the agent as a prompt;
 #                with a block pending, `/compact` reaches the agent without the context and the block stays pending until the
 #                next ordinary prompt; a block that Escape stopped goes with the next prompt, marked `<bash-exit>stopped</bash-exit>`
 #   stop*        a turn is in flight (claude: held at its gate; opencode: the stub's `slow`, which streams until cancelled);
@@ -48,12 +49,14 @@ set -eEuo pipefail
 #                forged ones, in the output and in the echoed command, arrive as `<\/bash-stdout>`
 #   lifetime     `!sleep 300 & echo $$ $!; sleep 300` in a tab that is then closed, and in a chat whose app then quits: the
 #                shell, the child and the rest of the session are gone within 3 s of the close, and of the quit
-#   restart*     `!echo kept`, then the app quits and starts again: the block is back and pending, and the next prompt
-#                carries it
+#   restart*     `!echo kept`, then the app quits and starts again: the block is back and pending, its footer says `goes with
+#                your next message` again, and the next prompt carries it (and the caption goes); then `!seq 1 100` is sent with a
+#                turn that is still in flight at a second quit: both blocks come back as sent, `seq 1 100` with its last 40 lines
+#                and still 100 lines, the unfinished turn is gone, and the next prompt carries nothing
 #   retry        (claude) `!echo one`, a turn `fail` that carries it, `!echo two`, then Retry: the resent prompt carries `one`
 #                and not `two`, and the next prompt carries `two` only
 #   hand_back    (opencode) `!echo back`, a turn the agent dies on, then Retry: the message is back in the composer, the block
-#                is pending again and the next send carries it
+#                is pending again, with its caption, and the next send carries it
 #   band         the composer reports command mode and another colour of the band's rule for `!ls` than for `ls`, and the
 #                two frames differ at the band's top edge (ImageMagick) and nowhere 4 px inside it
 #   cannot_start a world whose $SHELL does not exist: `!echo x` is a block that failed and says `Could not run: ...`
@@ -88,7 +91,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,78p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,81p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

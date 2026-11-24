@@ -1013,6 +1013,15 @@ fn rewind_report_text(
     text
 }
 
+/// Whether restored entries hold a turn. A group of shell blocks alone is not one: the chat it
+/// came from had run commands and no turn, and reads idle, as it did before the restart.
+fn holds_a_turn(entries: &[Entry]) -> bool {
+    entries.iter().any(|entry| !matches!(entry, Entry::Shell(_)))
+}
+
+/// The stored `kind` of a shell block's notice (spec 5.6).
+const SHELL_NOTICE_KIND: &str = "shell";
+
 fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
     match entry {
         Entry::User { text, at } => Some(ChatEntry::UserMessage {
@@ -1145,9 +1154,17 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
         // The account's state at a moment in time, like a warning: restored
         // later it would state numbers that are no longer true.
         Entry::CommandOutput { .. } => None,
-        // Not stored yet: a block is kept with the turn it belongs to once its context travels
-        // with the next prompt.
-        Entry::Shell(_) => None,
+        // A block is a notice older builds can read (spec 5.6): `text` is what they draw, `shell`
+        // the run a newer build restores. One that still runs has no exit to store: it is saved
+        // when it finishes.
+        Entry::Shell(block) => {
+            let run = block.stored()?;
+            Some(ChatEntry::Notice {
+                text: shell_block::ShellBlock::fallback_text(&run),
+                kind: SHELL_NOTICE_KIND.to_string(),
+                shell: Some(run),
+            })
+        }
         // A live request: restored tomorrow it would offer an answer to a
         // server that is no longer waiting.
         Entry::Elicitation { .. } => None,
@@ -1361,6 +1378,13 @@ fn restored_entry_with(
             approval: None,
         },
         ChatEntry::TurnFooter { text } => Entry::TurnFooter(text),
+        // A block restores as itself, folded, with what it kept. One with no run (a build that
+        // re-saved it as a plain note) restores as that note.
+        ChatEntry::Notice {
+            kind,
+            shell: Some(run),
+            ..
+        } if kind == SHELL_NOTICE_KIND => Entry::Shell(shell_block::ShellBlock::restored(run)),
         ChatEntry::Notice { text, kind, .. } => Entry::Notice {
             text,
             // A kind written by a newer build restores as the plainest of
@@ -4956,6 +4980,20 @@ impl Chat {
                 }
             }
         }
+        // What follows the last footer is a turn in flight and is dropped, except for the blocks
+        // that lead it: commands run before the turn began (and the ones it carried) are the
+        // user's, and are kept as a group of their own. A block run during the turn sits behind
+        // its first entry and is lost with it. A block that still runs is not in `current` yet.
+        let leading = current
+            .iter()
+            .take_while(|entry| {
+                matches!(entry, ChatEntry::Notice { shell: Some(_), .. })
+            })
+            .count();
+        if leading > 0 {
+            current.truncate(leading);
+            turns.push(ChatTurn { entries: current });
+        }
         ChatTranscript {
             tab_id: tab_id.to_string(),
             turns,
@@ -5623,7 +5661,7 @@ impl Chat {
                 self.push_entry(entry);
             }
         }
-        self.has_completed_turn = !self.entries.is_empty();
+        self.has_completed_turn = holds_a_turn(&self.entries);
         self.seed_prompt_history();
     }
 
@@ -5728,7 +5766,7 @@ impl Chat {
                 self.push_entry(entry);
             }
         }
-        self.has_completed_turn = !self.entries.is_empty();
+        self.has_completed_turn = holds_a_turn(&self.entries);
         // A past session's transcript is a restored one: it has no Continue, and the message held
         // for quoting belonged to the one that went.
         self.continue_reason = None;
@@ -6892,6 +6930,9 @@ impl Chat {
         if quoted {
             self.quote = None;
         }
+        // The commands that finished since the last prompt go ahead of it, unless it is a slash
+        // command. Decided on what was typed: the quote is not part of it.
+        let shell = self.carry_shell_context(&typed);
         self.submit_prompt(
             retry::LastPrompt {
                 text,
@@ -6899,6 +6940,7 @@ impl Chat {
                 images,
                 draft,
                 mentions,
+                shell,
             },
             cx,
         );
@@ -6913,6 +6955,7 @@ impl Chat {
         images: Vec<ImageAttachment>,
         cx: &mut Context<Self>,
     ) {
+        let shell = self.carry_shell_context(&text);
         self.submit_prompt(
             retry::LastPrompt {
                 draft: text.clone(),
@@ -6920,6 +6963,7 @@ impl Chat {
                 mention_paths,
                 images,
                 mentions: Vec::new(),
+                shell,
             },
             cx,
         );
@@ -6933,11 +6977,17 @@ impl Chat {
         // A failed turn's row is Retry for that turn only: with another prompt in flight it would
         // send the wrong one.
         self.retire_failed_turn_retries();
+        // The user's row and everything that reads what was typed see `last.text`; only the agent
+        // is told of the commands, ahead of it and set off by an empty line.
         let (text, mention_paths, images) = (
             last.text.clone(),
             last.mention_paths.clone(),
             last.images.clone(),
         );
+        let wire = match &last.shell {
+            Some(carry) => format!("{}\n\n{text}", carry.text),
+            None => text.clone(),
+        };
         self.last_prompt = Some(last);
         // Any prompt is the user's move after a failure: the queue waits on this turn instead.
         self.queue_held = false;
@@ -6957,7 +7007,7 @@ impl Chat {
         }
         if let Some(client) = &self.client
             && let Err(error) =
-                client.prompt_content(text, mention_paths, images, self.agent_cwd.clone())
+                client.prompt_content(wire, mention_paths, images, self.agent_cwd.clone())
         {
             self.lose_client(cx);
             // The CLI that said it was running is gone.
@@ -7953,7 +8003,11 @@ impl Chat {
         if action == retry::RetryAction::None {
             return;
         }
-        self.last_prompt = Some(retry::LastPrompt::continue_prompt());
+        // Continue is a fresh prompt: the commands that finished since the last one go with it. A
+        // Retry that replays it sends exactly this, and a hand-back puts them back in pending.
+        let mut last = retry::LastPrompt::continue_prompt();
+        last.shell = self.carry_shell_context(retry::CONTINUE_PROMPT);
+        self.last_prompt = Some(last);
         self.dispatch_resend(action, cx);
     }
 
@@ -8095,6 +8149,12 @@ impl Chat {
         let Some(last) = self.last_prompt.take() else {
             return;
         };
+        // The context it carried never reached an agent that has the conversation: its blocks are
+        // pending again, with their caption, for the next prompt from the composer. Whether the
+        // prompt itself comes back below or not.
+        if let Some(carry) = &last.shell {
+            self.release_shell_carry(carry);
+        }
         // The prompt is gone from Retry's reach: a failed turn's row would read as a plain
         // relaunch of an agent that is up.
         self.retire_failed_turn_retries();

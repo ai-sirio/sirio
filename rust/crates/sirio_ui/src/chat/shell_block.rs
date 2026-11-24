@@ -16,8 +16,10 @@ use std::time::{Duration, Instant};
 
 use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{Div, Stateful};
+use sirio_chat::shell::context::{CONTEXT_OUTPUT_BUDGET, ShellRecord, cap_output};
 use sirio_chat::shell::output::ShellOutput;
 use sirio_chat::shell::{ShellEvent, ShellRun};
+use sirio_persistence::ChatShellRun;
 
 use super::*;
 use ely_gpui_component::buttons::{Button, ButtonVariant};
@@ -26,6 +28,12 @@ use ely_gpui_component::theme::ControlSize;
 
 /// How many lines a block shows folded: the last ones.
 pub(super) const FOLD_LINES: usize = 40;
+
+/// The most a block the agent has been given stores of its output: its fold, and no more than this.
+pub(super) const STORED_SENT_BYTES: usize = 8 * 1024;
+
+/// What the footer says while the agent has not been given the block.
+const CAPTION: &str = "goes with your next message";
 
 /// The least time between two updates of a running block's output on screen.
 const REPAINT_EVERY: Duration = Duration::from_millis(100);
@@ -109,7 +117,7 @@ pub(super) struct ShellBlock {
     /// The output as of the last update. Not drawn directly: see `drawn`.
     output: Arc<ShellOutput>,
     pub(super) state: ShellState,
-    /// The agent has been given this block with a prompt. Always false until the carry exists.
+    /// The agent has been given this block with a prompt (a restored block keeps what it was).
     pub(super) sent: bool,
     pub(super) expanded: bool,
     /// The last [`FOLD_LINES`] lines of `output`, as the last update brought them.
@@ -270,8 +278,10 @@ impl ShellBlock {
         };
     }
 
-    /// `exit 0 · 0.4s`, `exit 3 · 0.4s` or `Stopped · 2.0s`: what the footer says of how it ended.
-    /// `None` while it runs and for a command that never started.
+    /// What the footer says: how it ended (`exit 0 · 0.4s`, `exit 3 · 0.4s`, `Stopped · 2.0s`), then
+    /// `goes with your next message` while the agent has not been given the block. It is text the
+    /// user reads, so it is part of the block's selectable text. `None` while the command runs, and
+    /// for a command that never started once its block has been sent.
     fn footer_text(&self) -> Option<String> {
         let ShellState::Finished {
             exit,
@@ -282,17 +292,93 @@ impl ShellBlock {
         else {
             return None;
         };
-        if failed {
-            return None;
-        }
         let mut parts = Vec::new();
-        if stopped {
-            parts.push("Stopped".to_string());
-        } else if let Some(code) = exit {
-            parts.push(format!("exit {code}"));
+        if !failed {
+            if stopped {
+                parts.push("Stopped".to_string());
+            } else if let Some(code) = exit {
+                parts.push(format!("exit {code}"));
+            }
+            parts.push(duration_text(duration_ms));
         }
-        parts.push(duration_text(duration_ms));
-        Some(parts.join(" · "))
+        if !self.sent {
+            parts.push(CAPTION.to_string());
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+
+    /// The block as the agent is told of it: the command, everything its output kept, and how it
+    /// ended. `None` while the command runs, which is not pending yet. The exit is the runner's
+    /// own: `None` only for a command that never started, so `<bash-exit>` reads `not run` for that
+    /// one and for no other.
+    pub(super) fn record(&self) -> Option<ShellRecord> {
+        let ShellState::Finished { exit, stopped, .. } = self.state else {
+            return None;
+        };
+        Some(ShellRecord {
+            command: self.command.clone(),
+            output: self.output.text(),
+            exit,
+            stopped,
+        })
+    }
+
+    /// The block as the transcript stores it (spec 5.6). An unsent block stores what it would
+    /// send: its output, cut to the context budget. A sent block stores only its fold, the last
+    /// [`FOLD_LINES`] lines and at most [`STORED_SENT_BYTES`]. `None` while the command runs: a
+    /// run that started but has not ended has no exit to store, and is saved when it finishes.
+    pub(super) fn stored(&self) -> Option<ChatShellRun> {
+        let ShellState::Finished {
+            exit,
+            stopped,
+            duration_ms,
+            ..
+        } = self.state
+        else {
+            return None;
+        };
+        let output = if self.sent {
+            last_bytes(self.output.tail(FOLD_LINES), STORED_SENT_BYTES)
+        } else {
+            cap_output(&self.output.text(), CONTEXT_OUTPUT_BUDGET)
+        };
+        Some(ChatShellRun {
+            command: self.command.clone(),
+            output,
+            total_lines: self.output.total_lines(),
+            exit,
+            stopped,
+            duration_ms,
+            sent: self.sent,
+        })
+    }
+
+    /// What an older build draws in place of the block: `! {command}` and the stored output.
+    pub(super) fn fallback_text(run: &ChatShellRun) -> String {
+        if run.output.is_empty() {
+            format!("! {}", run.command)
+        } else {
+            format!("! {}\n{}", run.command, run.output)
+        }
+    }
+
+    /// A block as the transcript stored it: finished, folded, with what it kept of its output. The
+    /// stored text is read again as untrusted. A command that had no exit and was not stopped never
+    /// started.
+    pub(super) fn restored(run: ChatShellRun) -> Self {
+        let output = ShellOutput::from_text(&run.output, run.total_lines);
+        let mut block = Self::with_output(
+            run.command,
+            output,
+            ShellState::Finished {
+                failed: run.exit.is_none() && !run.stopped,
+                exit: run.exit,
+                stopped: run.stopped,
+                duration_ms: run.duration_ms,
+            },
+        );
+        block.sent = run.sent;
+        block
     }
 
     /// The block as the transcript's selection reads it (`Entry::plain_text`): the command, the
@@ -321,6 +407,27 @@ impl ShellBlock {
         }
         len
     }
+}
+
+/// `text` cut to its last `max` bytes: on a character boundary, and at a line start when that
+/// loses no more than the first, partly cut line.
+fn last_bytes(text: String, max: usize) -> String {
+    if text.len() <= max {
+        return text;
+    }
+    let mut cut = text.len() - max;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let kept = &text[cut..];
+    // The cut may have fallen inside a line: its rest is not a line, unless it is all there is.
+    if text.as_bytes()[cut - 1] != b'\n'
+        && let Some(newline) = kept.find('\n')
+        && newline + 1 < kept.len()
+    {
+        return kept[newline + 1..].to_string();
+    }
+    kept.to_string()
 }
 
 /// `412ms`, `3.1s`, `5m 02s`.
@@ -440,6 +547,8 @@ impl Chat {
             Ok(run) => run,
             Err(error) => {
                 self.push_entry(Entry::Shell(ShellBlock::could_not_start(command, &error)));
+                // It is finished already: saved like any block that ends.
+                self.persist_settled_transcript();
                 cx.notify();
                 return;
             }
@@ -522,16 +631,23 @@ impl Chat {
     /// The task's update reaches the block. A block that is gone (a new conversation) is ignored.
     fn apply_shell_update(&mut self, id: u64, update: ShellUpdate, cx: &mut Context<Self>) {
         let ended = update.exit.is_some();
+        let mut applied = false;
         if let Some(index) = self.shell_index(id)
             && let Entry::Shell(block) = &mut self.entries[index]
         {
             block.apply(update);
             self.remeasure_entry(index);
             self.clamp_transcript_selection();
+            applied = true;
         }
         if ended {
-            // The run is over: dropping it has nothing left to kill.
-            self.shell_runs.remove(&id);
+            // The run is over: dropping it has nothing left to kill. One that is no longer in the
+            // map was killed by the chat itself (a quit, a new conversation): that end is not the
+            // user's, and a command that was running when the app quit is not saved (spec 5.6).
+            let own_end = self.shell_runs.remove(&id).is_some();
+            if applied && own_end {
+                self.persist_settled_transcript();
+            }
         }
         cx.notify();
     }
@@ -624,6 +740,64 @@ impl Chat {
         if let Some(index) = self.shell_index(id) {
             self.toggle_shell(index, cx);
         }
+    }
+
+    /// The context a prompt typed as `typed` carries (spec 5.4): every block that has finished and
+    /// has not been sent, oldest first, in Claude Code's tags. They are marked sent, which takes
+    /// their caption away, and the transcript is saved so that a restart does not send them twice.
+    /// `None` when nothing is pending, and for a slash command, which the agent reads at the head
+    /// of the prompt: those blocks stay pending. A block that still runs is not pending yet.
+    pub(super) fn carry_shell_context(&mut self, typed: &str) -> Option<retry::ShellCarry> {
+        if quote::is_slash_command(typed) {
+            return None;
+        }
+        let (mut ids, mut records) = (Vec::new(), Vec::new());
+        for entry in &self.entries {
+            if let Entry::Shell(block) = entry
+                && !block.sent
+                && let Some(record) = block.record()
+            {
+                ids.push(block.id);
+                records.push(record);
+            }
+        }
+        if ids.is_empty() {
+            return None;
+        }
+        let text = sirio_chat::shell::context::context_for(&records);
+        self.mark_shell_sent(&ids, true);
+        self.persist_settled_transcript();
+        Some(retry::ShellCarry { ids, text })
+    }
+
+    /// The prompt that carried these blocks did not reach an agent that has them (a hand-back):
+    /// they are pending again, with their caption, and the transcript says so.
+    pub(super) fn release_shell_carry(&mut self, carry: &retry::ShellCarry) {
+        if self.mark_shell_sent(&carry.ids, false) {
+            self.persist_settled_transcript();
+        }
+    }
+
+    /// Sets `sent` on the blocks with these ids. Returns whether any block changed. The footer's
+    /// words change with it, so the rows are measured again and a selection is kept inside the text.
+    fn mark_shell_sent(&mut self, ids: &[u64], sent: bool) -> bool {
+        let mut changed = Vec::new();
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if let Entry::Shell(block) = entry
+                && ids.contains(&block.id)
+                && block.sent != sent
+            {
+                block.sent = sent;
+                changed.push(index);
+            }
+        }
+        for &index in &changed {
+            self.remeasure_entry(index);
+        }
+        if !changed.is_empty() {
+            self.clamp_transcript_selection();
+        }
+        !changed.is_empty()
     }
 
     /// Kills every command this chat is running. A `ShellRun` that is dropped kills its whole
@@ -790,7 +964,6 @@ pub(super) fn render(
 
     let control = block.fold_control();
     let footer = block.footer_text();
-    let has_footer = footer.is_some();
     let ShellState::Finished {
         exit,
         stopped,
@@ -840,13 +1013,7 @@ pub(super) fn render(
                 interaction,
                 theme,
             )
-        }))
-        .when(!block.sent, |status| {
-            // After the words of how it ended, a separator; after the mark alone, nothing.
-            status
-                .when(has_footer, |status| status.child(div().child("·")))
-                .child(div().child("goes with your next message"))
-        });
+        }));
     div()
         .id(("shell-block", index))
         .debug_selector(move || format!("shell-block-{index}"))
