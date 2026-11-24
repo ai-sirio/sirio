@@ -12,6 +12,7 @@ use std::path::Path;
 
 mod chat;
 mod claude;
+pub mod shell;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
 pub use claude::{
