@@ -167,6 +167,9 @@ pub(crate) struct RowFrame {
     pub mode_icon: Cell<Option<&'static str>>,
     /// Whether the last render wrapped the pill in the bypass warning.
     pub mode_danger: Cell<bool>,
+    /// The word the last render built the effort chip with; `None` when it drew
+    /// no chip, or a chip of bars alone.
+    pub effort_label: RefCell<Option<String>>,
     /// The rows of ⋯ the last render built, while the menu is open.
     pub menu: RefCell<Option<Vec<MenuRow>>>,
 }
@@ -234,6 +237,9 @@ pub struct ComposerSnapshot {
     pub mode_icon: Option<&'static str>,
     /// Whether the pill was drawn as the bypass warning.
     pub mode_danger: bool,
+    /// The word the effort chip was built with (a narrow pane may clip it);
+    /// `None` when it drew no chip, or a chip of bars alone.
+    pub effort_label: Option<String>,
     /// The ⋯ trigger.
     pub overflow_button: Option<[f32; 4]>,
     /// The rows ⋯ drew, in order; `None` while it is closed.
@@ -359,6 +365,7 @@ impl Chat {
                 .collect(),
             mode_icon: frame.mode_icon.get(),
             mode_danger: frame.mode_danger.get(),
+            effort_label: frame.effort_label.borrow().clone(),
             overflow_button: boxed(frame.overflow_button.get()),
             menu: frame.menu.borrow().clone(),
             picker: self.open_picker_name(),

@@ -94,6 +94,7 @@ pub use session_panel::{
 };
 use composer_view::{
     TokenPopup, assemble_prompt, effort_target, mention_token, normalized_record, slash_token,
+    starts_on_high,
 };
 pub use question_dock::ElicitationAct;
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
@@ -6699,8 +6700,9 @@ impl Chat {
         self.has_completed_turn = false;
         self.transcript_selection = None;
         self.clear_persisted_transcript();
-        // The next conversation starts on High again, whatever this one
-        // chose, and its agent is asked afresh.
+        // The next conversation starts again where its agent starts (High,
+        // for the agents that start there), whatever this one chose, and its
+        // agent is asked afresh.
         self.effort_user_choice = None;
         self.effort_auto_attempt = None;
         self.effort_auto_budget = EFFORT_AUTO_REQUESTS;
@@ -6724,11 +6726,13 @@ impl Chat {
     // --- Effort levels (F-CHAT-17) ---
 
     /// Asks the agent for the level this chat should be on, when it is not
-    /// on it: the user's own pick if the agent offers it, else High. Every
-    /// automatic request goes through `effort_auto_attempt`, so an agent that
-    /// answers with the report that prompted the request is asked once and
-    /// then left where it is, and spends `effort_auto_budget`, so one that
-    /// answers with a new report each time is left after a few.
+    /// on it: the user's own pick if the agent offers it, else High for the
+    /// agents that start there (`starts_on_high`; the others are left on the
+    /// level they report). Every automatic request goes through
+    /// `effort_auto_attempt`, so an agent that answers with the report that
+    /// prompted the request is asked once and then left where it is, and
+    /// spends `effort_auto_budget`, so one that answers with a new report
+    /// each time is left after a few.
     fn ask_for_the_effort_target(&mut self, ladder: Vec<String>, cx: &mut Context<Self>) {
         let Some(effort) = &self.effort else {
             return;
@@ -6738,6 +6742,7 @@ impl Chat {
             current.as_deref(),
             &effort.choices,
             self.effort_user_choice.as_deref(),
+            starts_on_high(self.agent_id.as_deref()),
         ) else {
             // The agent is where the chat wants it, so what moves it away
             // later is a new event and gets its own request. An agent that
@@ -18139,8 +18144,9 @@ two"
             .collect()
     }
 
-    /// A chat on Claude Code starts on High like any other: the CLI is told
-    /// `effortLevel: "high"` once, on the wire, and the chip settles on it.
+    /// A chat on Claude Code starts on High like every agent that starts
+    /// there: the CLI is told `effortLevel: "high"` once, on the wire, and the
+    /// chip settles on it.
     #[gpui::test]
     async fn a_native_claude_chat_starts_on_high(cx: &mut TestAppContext) {
         let dir = TempDir::new();

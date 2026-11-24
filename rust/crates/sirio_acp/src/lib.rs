@@ -35,7 +35,7 @@ use sirio_chat_vocab::{
     ModelCatalog, ModelOption, PermissionOption, PlanEntryInfo, TimeoutOperation,
     ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo, parse_permission_question,
 };
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -809,6 +809,12 @@ fn run_connection(
         let last_effort: Arc<Mutex<Option<EffortOption>>> = Arc::new(Mutex::new(None));
         let last_effort_for_notifications = Arc::clone(&last_effort);
         let last_effort_for_session = Arc::clone(&last_effort);
+        // Raised at session start when the agent's modes are a copy of its
+        // effort selector (see `modes_mirror_effort`). No mode catalog is made
+        // for such a session, by any of the writers of the cell.
+        let modes_mirrored = Arc::new(AtomicBool::new(false));
+        let modes_mirrored_for_notifications = Arc::clone(&modes_mirrored);
+        let modes_mirrored_for_session = Arc::clone(&modes_mirrored);
         let shutdown_ack = Arc::clone(&shutdown_ack_for_connection);
         let child_for_prompt = Arc::clone(&child_for_connection);
         let outgoing = futures::sink::unfold(stdin, |mut writer, line: String| async move {
@@ -830,7 +836,9 @@ fn run_connection(
                     // update into an `ChatEvent`, so `AcpClient::mode_catalog`
                     // is already current by the time a caller reacts to that
                     // event (F-CHAT-15).
-                    if let SessionUpdate::ConfigOptionUpdate(ref update) = notification.update
+                    let modes_mirrored = modes_mirrored_for_notifications.load(Ordering::Acquire);
+                    if !modes_mirrored
+                        && let SessionUpdate::ConfigOptionUpdate(ref update) = notification.update
                         && let Some(catalog) =
                             mode_catalog_from_options(Some(&update.config_options))
                         && let Ok(mut guard) = mode_catalog_for_notifications.lock()
@@ -843,7 +851,9 @@ fn run_connection(
                     {
                         *guard = Some(effort);
                     }
-                    if let SessionUpdate::CurrentModeUpdate(ref update) = notification.update {
+                    if !modes_mirrored
+                        && let SessionUpdate::CurrentModeUpdate(ref update) = notification.update
+                    {
                         apply_current_mode(
                             &mode_catalog_for_notifications,
                             update.current_mode_id.to_string(),
@@ -991,8 +1001,15 @@ fn run_connection(
                 {
                     *guard = Some(effort.clone());
                 }
+                let mirrored = session
+                    .modes
+                    .as_ref()
+                    .is_some_and(|state| modes_mirror_effort(state, effort.as_ref()));
+                modes_mirrored_for_session.store(mirrored, Ordering::Release);
                 if let Ok(mut catalog) = mode_catalog_for_session.lock() {
-                    if let Some(state) = &session.modes {
+                    if mirrored {
+                        *catalog = None;
+                    } else if let Some(state) = &session.modes {
                         *catalog = Some(mode_catalog_from_state(state));
                     } else if let Some(fallback) =
                         mode_catalog_from_options(session.config_options.as_ref())
@@ -1236,6 +1253,7 @@ fn run_connection(
                         Command::SetConfigOption { option_id, value } => {
                             let event_tx = connection_events.clone();
                             let mode_catalog_for_config = Arc::clone(&mode_catalog_for_session);
+                            let modes_mirrored_for_config = Arc::clone(&modes_mirrored_for_session);
                             let last_effort_for_config = Arc::clone(&last_effort);
                             let requested_option = option_id.clone();
                             connection
@@ -1247,10 +1265,12 @@ fn run_connection(
                                 .on_receiving_result(move |result| async move {
                                     match result {
                                         Ok(response) => {
-                                            if let Some(catalog) = mode_catalog_from_options(Some(
-                                                &response.config_options,
-                                            )) && let Ok(mut guard) =
-                                                mode_catalog_for_config.lock()
+                                            if !modes_mirrored_for_config.load(Ordering::Acquire)
+                                                && let Some(catalog) = mode_catalog_from_options(
+                                                    Some(&response.config_options),
+                                                )
+                                                && let Ok(mut guard) =
+                                                    mode_catalog_for_config.lock()
                                             {
                                                 *guard = Some(catalog);
                                             }
@@ -1297,6 +1317,7 @@ fn run_connection(
                         Command::SetMode(mode_id) => {
                             let event_tx = connection_events.clone();
                             let mode_catalog_for_result = Arc::clone(&mode_catalog_for_session);
+                            let modes_mirrored_for_result = Arc::clone(&modes_mirrored_for_session);
                             let confirmed_mode_id = mode_id.clone();
                             connection
                                 .send_request(SetSessionModeRequest::new(
@@ -1313,10 +1334,12 @@ fn run_connection(
                                         // a `CurrentModeUpdate` push resolves
                                         // authoritatively when it arrives.
                                         Ok(_response) => {
-                                            apply_current_mode(
-                                                &mode_catalog_for_result,
-                                                confirmed_mode_id,
-                                            );
+                                            if !modes_mirrored_for_result.load(Ordering::Acquire) {
+                                                apply_current_mode(
+                                                    &mode_catalog_for_result,
+                                                    confirmed_mode_id,
+                                                );
+                                            }
                                         }
                                         Err(error) => {
                                             let _ = event_tx
@@ -1686,11 +1709,18 @@ fn model_catalog_from_options(options: Option<&Vec<SessionConfigOption>>) -> Opt
 }
 
 /// Extracts the effort-level selector from a session configuration option
-/// list: the select whose id is `effort` (or whose category tag reads
-/// `effort`, as OpenCode reports it).
+/// list: the select whose id is `effort`, or whose category is ACP's own
+/// `thought_level` (codex-acp names it `reasoning_effort`, pi-acp
+/// `thought_level`, OpenCode 2 `effort`), or whose category tag reads
+/// `effort`, as OpenCode 1 reports it. The option keeps its own id, which is
+/// the one a change is sent back under.
 fn effort_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<EffortOption> {
     let option = options?.iter().find(|option| {
         option.id.to_string() == "effort"
+            || matches!(
+                &option.category,
+                Some(SessionConfigOptionCategory::ThoughtLevel)
+            )
             || matches!(&option.category, Some(SessionConfigOptionCategory::Other(category)) if category == "effort")
     })?;
     let SessionConfigKind::Select(select) = &option.kind else {
@@ -1712,10 +1742,32 @@ fn effort_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<Eff
             .into_iter()
             .map(|choice| EffortChoice {
                 value: choice.value.to_string(),
-                name: choice.name,
+                name: level_name(&option.name, choice.name),
             })
             .collect(),
     })
+}
+
+/// The name a level is shown under. An agent may repeat its selector's own
+/// name before each level (pi-acp sends "Thinking: low" under the option
+/// "Thinking"): that prefix is dropped, as is the space after the colon. A
+/// prefix with nothing after it leaves the name as sent. Every level's first
+/// letter is raised, so omp's raw ids ("medium") read as codex-acp's own names
+/// do ("Medium").
+fn level_name(option_name: &str, name: String) -> String {
+    let rest = name
+        .strip_prefix(option_name)
+        .and_then(|rest| rest.strip_prefix(": "));
+    let shown = match rest {
+        Some(rest) if rest.trim().is_empty() => return name,
+        Some(rest) => rest.trim(),
+        None => name.as_str(),
+    };
+    let mut chars = shown.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => name,
+    }
 }
 
 /// Extracts the session-mode selector from a session configuration option
@@ -1768,6 +1820,37 @@ fn mode_catalog_from_state(state: &SessionModeState) -> ModeCatalog {
             .collect(),
         config_option_id: None,
     }
+}
+
+/// Whether the session's modes are a copy of its effort selector, so the
+/// effort chip is shown alone.
+///
+/// pi-acp publishes its thinking levels twice in `session/new`: as ACP session
+/// modes and as the `thought_level` option, with the same values. A mode pill
+/// over the first undoes the chip over the second: a pick goes out as
+/// `session/set_mode`, the agent answers with a config update, and the chat's
+/// effort rule asks for another level. Modes that name exactly the ids the
+/// effort selector offers (in any order) are that copy; Codex's modes sit next
+/// to levels that are not them, and an effort option that offers nothing
+/// mirrors nothing.
+fn modes_mirror_effort(modes: &SessionModeState, effort: Option<&EffortOption>) -> bool {
+    let Some(effort) = effort else {
+        return false;
+    };
+    if effort.choices.is_empty() {
+        return false;
+    }
+    let levels: HashSet<String> = effort
+        .choices
+        .iter()
+        .map(|choice| choice.value.clone())
+        .collect();
+    let ids: HashSet<String> = modes
+        .available_modes
+        .iter()
+        .map(|mode| mode.id.to_string())
+        .collect();
+    ids == levels
 }
 
 /// Updates the live mode-catalog cell's current selection in place, from
@@ -2175,6 +2258,37 @@ mod tests {
         );
     }
 
+    // A level is shown under its own name: a selector's name repeated before it is
+    // dropped, and the first letter is raised whatever the name's origin, so omp's raw
+    // id "medium" reads as codex-acp's own "Medium". Every other name is kept as sent.
+    #[test]
+    fn level_names_read_as_their_level() {
+        let rows = [
+            ("Thinking", "Thinking: low", "Low"),
+            ("Thinking", "Thinking: xhigh", "Xhigh"),
+            ("Thinking", "medium", "Medium"),
+            ("Thinking", "xhigh", "Xhigh"),
+            ("Reasoning effort", "Low", "Low"),
+            ("Effort", "Extra high", "Extra high"),
+            ("Thinking", "Off", "Off"),
+            ("Effort", "extra high", "Extra high"),
+            ("Effort", "Thinking: low", "Thinking: low"),
+            ("Thinking", "Thinking:low", "Thinking:low"),
+            ("Thinking", "Thinking: ", "Thinking: "),
+            ("Thinking", "", ""),
+        ];
+        let mut wrong = Vec::new();
+        for (option_name, name, expected) in rows {
+            let shown = level_name(option_name, name.to_string());
+            if shown != expected {
+                wrong.push(format!(
+                    "row option {option_name:?}, name {name:?}: expected {expected:?}, got {shown:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "level names read wrong:\n{}", wrong.join("\n"));
+    }
+
     #[test]
     fn mode_catalog_from_options_extracts_opencode_mode() {
         let options = vec![
@@ -2231,6 +2345,80 @@ mod tests {
         assert!(mode_catalog_from_options(Some(&options)).is_none());
         assert!(mode_catalog_from_options(None).is_none());
         assert!(mode_catalog_from_options(Some(&Vec::new())).is_none());
+    }
+
+    fn mode_state(ids: &[&str]) -> SessionModeState {
+        SessionModeState::new(
+            ids[0].to_string(),
+            ids.iter()
+                .map(|id| {
+                    agent_client_protocol::schema::v1::SessionMode::new(
+                        id.to_string(),
+                        id.to_string(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn effort_of(values: &[&str]) -> EffortOption {
+        EffortOption {
+            option_id: "thought_level".into(),
+            name: None,
+            current_value: values.first().map(|value| (*value).to_string()),
+            choices: values
+                .iter()
+                .map(|value| EffortChoice {
+                    value: (*value).to_string(),
+                    name: (*value).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Modes are the effort selector's copy only when both name the same set of
+    /// ids: pi-acp publishes its thinking levels both ways, Codex's modes sit
+    /// next to levels that are not them, and an effort option that offers
+    /// nothing mirrors nothing.
+    #[test]
+    fn modes_mirror_effort_only_when_both_name_the_same_ids() {
+        let pi_levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
+
+        // pi-acp's own shape
+        assert!(modes_mirror_effort(
+            &mode_state(&pi_levels),
+            Some(&effort_of(&pi_levels))
+        ));
+        // the same ids in another order
+        assert!(modes_mirror_effort(
+            &mode_state(&["xhigh", "high", "medium", "low", "minimal", "off"]),
+            Some(&effort_of(&pi_levels))
+        ));
+        // modes a strict subset of the levels
+        assert!(!modes_mirror_effort(
+            &mode_state(&["off", "minimal", "low"]),
+            Some(&effort_of(&pi_levels))
+        ));
+        // modes a strict superset of the levels
+        assert!(!modes_mirror_effort(
+            &mode_state(&["off", "minimal", "low", "medium", "high", "xhigh", "plan"]),
+            Some(&effort_of(&pi_levels))
+        ));
+        // Codex: real modes next to reasoning levels
+        assert!(!modes_mirror_effort(
+            &mode_state(&["read-only", "agent", "agent-full-access"]),
+            Some(&effort_of(&["low", "medium", "high", "xhigh", "ultra"]))
+        ));
+        // no effort option at all
+        assert!(!modes_mirror_effort(&mode_state(&pi_levels), None));
+        // an effort option with no choices, next to no modes
+        let no_modes = SessionModeState::new("none", Vec::new());
+        assert!(!modes_mirror_effort(&no_modes, Some(&effort_of(&[]))));
+        // levels with no modes to copy them
+        assert!(!modes_mirror_effort(
+            &no_modes,
+            Some(&effort_of(&pi_levels))
+        ));
     }
 
     #[test]

@@ -601,8 +601,32 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_cl
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
 # effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
 # Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
-# Five scenarios need a display (composer_keys, reduced_motion and unfocused_spinner below, and the two
-# composer_band ones after them) and are skipped under --state-only (`SKIP <name>: needs a
+# effort_codex and effort_pi run the fixture's effort-codex and effort-pi modes, the wire shapes of
+# codex-acp and pi-acp, as the `codex` and `pi` adapters (`Scenario(..., agent=...)`): the effort
+# selector arrives in the `session/new` result, tagged with ACP's `thought_level` category under the
+# id `reasoning_effort` (Codex, whose three real modes ride along) or `thought_level` (Pi, which also
+# publishes the levels as session modes and answers a pick with a `current_mode_update`). Codex and
+# Pi are reached through an installed manifest, so each scenario moves the instance's XDG_DATA_HOME
+# into its own directory and writes `sirio/agents/<registry id>/manifest.json` there, its executable
+# the --agent-proxy wrapper (the user's own agent store is never read; the manifest is kept as
+# `agent-manifest.json` beside the scenario's artifacts, and `session/new` in agent-traffic.jsonl
+# proves the run went through it). They prove the chat starts on the level its agent reports and
+# asks it for nothing at all (no `session/set_config_option` or `session/set_mode` before a pick),
+# that a pick from the list reaches the agent by that id, and by nothing else (every
+# `session/set_config_option` and `session/set_mode` the app sends is checked), that Codex's real
+# modes keep the mode pill and that Pi's modes, a copy of its levels, give none, even after the
+# agent's own `current_mode_update` for the pick (the pill checks read a painted frame: Codex's pill
+# check SKIPs under --state-only, and `effort_pi` is skipped whole, as composer_keys is, since its
+# pill is read from a painted frame too); they capture the list and the level chosen. Under a full
+# run `effort_pi` needs a display but not xdotool, since it never types. effort_pi then samples the
+# chat for about 2 s after the agent's `current_mode_update` (not one read), failing on the first
+# sample off Low, asked again (any `session/set_config_option` or `session/set_mode`), or with a mode
+# icon. effort_codex and effort_pi wait until `session/new` reaches the fixture before they send `hi`.
+# Both also read the word the effort chip drew (`effortLabel` of `composerRow`, from a painted frame,
+# so SKIPped under --state-only): Codex's chip reads "Xhigh", then "Low" after the pick; Pi's reads
+# "Medium", then "Low" (the agent's "Thinking: " prefix dropped).
+# Six scenarios need a display (effort_pi above, composer_keys, reduced_motion and unfocused_spinner
+# below, and the two composer_band ones after them) and are skipped under --state-only (`SKIP <name>: needs a
 # display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
 # Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
 # Escape, proved by a frame diff of its box against the frame before the `/`; and the composer's

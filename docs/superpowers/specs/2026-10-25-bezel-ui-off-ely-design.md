@@ -121,7 +121,9 @@ Behaviour:
 - **The chip:** it always names the current level. When the session is on Default, it reads as
   it does today for the reset value.
 - **Starting on High.** Every chat starts on High when the agent offers a level whose value is
-  `high`. Otherwise it stays on whatever the agent reports. This holds for:
+  `high`. Otherwise it stays on whatever the agent reports. Since 2026-11-24 only Claude
+  and OpenCode chats do; Codex, Pi and Oh-My-Pi start on their agent's level (see the
+  amendment below). The pieces:
   - **One place for every agent.** When an effort report arrives that is not `high` but offers
     it, `Chat` sends one `set_config_option` for it, the same request a click sends. The CLI is
     told for real, and the chip names the effort the agent actually runs at.
@@ -131,13 +133,31 @@ Behaviour:
   - **ACP agents** (Codex, OpenCode, Pi, Oh-My-Pi): the request is `session/set_config_option`.
   - **No loops:** an agent that answers with another level is asked once, not again. The guard
     is the last automatic request's ladder and reported level.
-- **Scope of a choice:** it holds for that chat only. The next new chat starts on High again.
+  - **Amended 2026-11-24 (Enzo's call):** Codex and Pi chats do not start on High. They start
+    on the level their agent reports (Codex's `model_reasoning_effort`, Pi's thinking level),
+    and Sirio asks them for a level only when the user picks one, which, as below, it asks of
+    a later model too. For them this replaces the High of the three bullets below: a new or a
+    restored chat starts on the agent's level, and a model switch keeps the user's pick when
+    the new model offers it, else takes what the agent reports. Oh-My-Pi follows the same rule
+    (Enzo's call too, the same day: its chip is new with this change; not yet seen live).
+    Claude and OpenCode keep the High start. The same day an ACP effort selector became
+    recognised by ACP's own `thought_level` category (codex-acp names it `reasoning_effort`,
+    pi-acp `thought_level`, Oh-My-Pi's option is "Thinking"), so
+    Codex, Pi and Oh-My-Pi have a chip at all; and when a session's modes are a copy of its
+    effort levels, as pi-acp publishes them, the chat shows the effort chip alone, with no
+    mode pill. A level whose name repeats its selector's name, as pi-acp's "Thinking: low"
+    under "Thinking" does, reads without that prefix, and every level's first letter is raised,
+    so Oh-My-Pi's raw ids ("medium") read as codex-acp's own names do ("Medium") (Enzo's
+    calls, the same day).
+- **Scope of a choice:** it holds for that chat only. The next new chat starts on High again
+  (on the agent's level for Codex, Pi and Oh-My-Pi).
   Effort is not persisted today, and this change does not start persisting it.
 - **A restored chat** (reconnected after a restart) also starts on High, since nothing
-  remembered its level (*Claude's call*).
+  remembered its level (*Claude's call*); a Codex, Pi or Oh-My-Pi one on its agent's level.
 - **Switching model inside a chat** (*Claude's call*):
   - a level the user chose stays if the new model offers it;
-  - otherwise the chat goes to High if offered, else to what the agent reports;
+  - otherwise the chat goes to High if offered, else to what the agent reports (Codex, Pi and
+    Oh-My-Pi: straight to what the agent reports);
   - a model without effort (Haiku) hides the chip, as today.
 
 Removed with the slider: `effort_stop_share`, `effort_fraction_for_stop`,
@@ -301,7 +321,8 @@ changes (*Claude's call*):
 - The stepped bar counts only the advertised levels, without Default and Ultracode. Ultracode
   carries "+ workflow" instead.
 - Choosing a level closes the list.
-- A restored chat starts on High. A model switch keeps a chosen level if the new model has it.
+- A restored chat starts on High (Codex, Pi and Oh-My-Pi: on the agent's level, since
+  2026-11-24). A model switch keeps a chosen level if the new model has it.
 - Enzo decided (2026-10-25, "Aspetto di Ely") that a piece Ely has a component for takes Ely's
   look. From that, my calls: icons become Ely's Lucide icons; bars over a `ScrollHandle` become
   Ely's bar, while the bars Sirio computes itself stay Sirio's; Ghost/Prominent buttons map to
