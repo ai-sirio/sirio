@@ -51,27 +51,43 @@ fn opens_block_tag(after_lt: &str) -> bool {
     })
 }
 
-/// `output` cut to `room` characters.
+/// What stands before and after the count in the line that says how much was cut.
+const MARKER_OPEN: &str = "\n[… ";
+const MARKER_CLOSE: &str = " characters omitted …]\n";
+
+/// How many decimal digits `n` has.
+fn digits(n: usize) -> usize {
+    n.checked_ilog10().map_or(1, |log| log as usize + 1)
+}
+
+/// `output` cut to `room` characters, marker included.
 ///
-/// An output within `room` comes back whole. Otherwise the first `room / 3` and the last
-/// `room - room / 3` characters stay, joined by a line saying how many were left out, and with no
-/// room at all one line says how long the output was. Cuts fall on character boundaries.
+/// An output within `room` comes back whole. Otherwise the first third and the last two thirds of
+/// what is left of `room` once the line that says how many characters were left out has been paid
+/// for stay, joined by that line, so the result never holds more than `room` characters and a
+/// capped text is capped again unchanged: a restored block that is capped to be saved or sent
+/// keeps the count of what the original lost. A room that cannot hold the line and something
+/// besides it gets one line saying how long the output was (that line is not charged to it).
+/// Cuts fall on character boundaries.
 pub fn cap_output(output: &str, room: usize) -> String {
     let total = output.chars().count();
     if total <= room {
         return output.to_string();
     }
-    if room == 0 {
+    // The count has at most as many digits as the length: reserve them all.
+    let marker = MARKER_OPEN.chars().count() + digits(total) + MARKER_CLOSE.chars().count();
+    if room <= marker {
         return format!("[output omitted, {total} characters]");
     }
-    let head = room / 3;
-    let tail = room - head;
+    let kept = room - marker;
+    let head = kept / 3;
+    let tail = kept - head;
     let head_end = byte_offset_of_char(output, head);
     let tail_start = byte_offset_of_char(output, total - tail);
     format!(
-        "{}\n[… {} characters omitted …]\n{}",
+        "{}{MARKER_OPEN}{}{MARKER_CLOSE}{}",
         &output[..head_end],
-        total - room,
+        total - kept,
         &output[tail_start..]
     )
 }
@@ -85,14 +101,14 @@ fn byte_offset_of_char(text: &str, n: usize) -> usize {
 /// trailing newline (the caller joins it to the prompt with a blank line).
 ///
 /// The output budget is [`CONTEXT_OUTPUT_BUDGET`] for the whole prompt and is spent newest first,
-/// each block taking up to what remains. The command and the exit line are never charged to it.
+/// each block taking up to what remains, the line that says what was cut from it included. The
+/// command and the exit line are never charged to it.
 pub fn context_for(records: &[ShellRecord]) -> String {
     let mut remaining = CONTEXT_OUTPUT_BUDGET;
     let mut blocks: Vec<String> = Vec::with_capacity(records.len());
     for record in records.iter().rev() {
-        let used = record.output.chars().count().min(remaining);
         let output = cap_output(&record.output, remaining);
-        remaining -= used;
+        remaining = remaining.saturating_sub(output.chars().count());
         blocks.push(block_for(record, &output));
     }
     blocks.reverse();
@@ -178,6 +194,40 @@ mod tests {
         let s = "é😀".repeat(20_000);
         let capped = cap_output(&s, 1_000);
         assert!(capped.chars().count() < 1_100); // no panic, char-based
+    }
+
+    /// `(characters kept, the count the marker states)` of a capped text.
+    fn kept_and_stated(capped: &str) -> (usize, usize) {
+        let open = capped.find(MARKER_OPEN).expect("a marker");
+        let after_open = open + MARKER_OPEN.len();
+        let close = capped[after_open..].find(MARKER_CLOSE).expect("a closed marker") + after_open;
+        let stated: usize = capped[after_open..close].parse().expect("a count");
+        let kept = capped[..open].chars().count() + capped[close + MARKER_CLOSE.len()..].chars().count();
+        (kept, stated)
+    }
+
+    #[test]
+    fn capping_twice_is_capping_once() {
+        // What a restored block does: the text it stored is capped again to send it, and again to save it.
+        let ascii = (1..=200_000).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let wide = "é😀日本語 ".repeat(40_000);
+        for (text, room) in [(ascii.as_str(), 30_000), (wide.as_str(), 30_000), (ascii.as_str(), 5_000), (wide.as_str(), 700)] {
+            let once = cap_output(text, room);
+            assert!(once.chars().count() <= room, "{} characters in a room of {room}", once.chars().count());
+            assert_eq!(cap_output(&once, room), once, "a second cap changed a text that already fits");
+        }
+    }
+
+    #[test]
+    fn the_marker_counts_what_the_original_lost_and_the_budget_holds_the_marker() {
+        let wide = "é😀日本語 ".repeat(40_000);
+        let total = wide.chars().count();
+        let once = cap_output(&wide, 30_000);
+        let (kept, stated) = kept_and_stated(&once);
+        assert_eq!(stated, total - kept, "the count is what the cut removed from the original");
+        // Capped again, the original count is still the one the marker states.
+        let (kept_again, stated_again) = kept_and_stated(&cap_output(&once, 30_000));
+        assert_eq!((kept_again, stated_again), (kept, stated));
     }
 
     #[test]
