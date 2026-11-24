@@ -480,14 +480,29 @@ class World:
         time.sleep(0.3)
         return pressed
 
-    def type_text(self, text):
-        """Types `text` into the composer as a user does: a click on its field (so that the keys land there), then the X
-        server's keys, one every 40 ms."""
+    def click_composer(self):
+        """A real click on the composer's field, so that the keys that follow land there (and the caret is where the click
+        puts it: at the end of a short draft)."""
         field = self.read()["composerRow"]["field"]
         press(self.window, field[0] + field[2] / 2, field[1] + field[3] / 2, hold=0.1, settle=0.1)
         time.sleep(0.3)
+
+    def type_keys(self, text):
+        """Types `text` with the X server's keys, one every 40 ms, where the focus is (see `click_composer`)."""
         x("type", "--delay", "40", text)
         time.sleep(0.3)
+
+    def type_text(self, text):
+        """Types `text` into the composer as a user does: a click on its field, then the keys."""
+        self.click_composer()
+        self.type_keys(text)
+
+    def key(self, name):
+        """One real key of the X server (`Escape`, `Home`, `BackSpace`), with no click and no wait after it. Returns the time
+        just before it."""
+        pressed = time.time()
+        x("key", name)
+        return pressed
 
     def press_enter(self):
         """A real Enter, which goes to the composer that `type_text` or `escape` last clicked."""

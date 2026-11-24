@@ -121,8 +121,13 @@ pub(super) struct ShellBlock {
     drawn: SharedString,
     kept_lines: usize,
     total_lines: u64,
-    /// Stop has been pressed: a command that is on its way out is not one Escape stops again.
+    /// The command has been asked to stop (the block's Stop, or Escape): the next Escape kills it at
+    /// once instead of asking again.
     stop_asked: bool,
+    /// Escape has killed it. A command that survives a SIGKILL (a process in uninterruptible sleep)
+    /// does not count as running for the next Escape, which then reaches the turn; the block reads
+    /// running until its run really ends.
+    killed: bool,
 }
 
 impl ShellBlock {
@@ -141,6 +146,7 @@ impl ShellBlock {
             live: folded.clone(),
             folded,
             stop_asked: false,
+            killed: false,
         }
     }
 
@@ -247,7 +253,8 @@ impl ShellBlock {
         ended
     }
 
-    /// Flips between the folded tail and everything kept.
+    /// Flips between the folded tail and the expanded body: everything kept once the command has
+    /// ended, its last [`LIVE_LINES`] lines while it runs.
     pub(super) fn toggle_expanded(&mut self) {
         self.expanded = !self.expanded;
         self.refresh_drawn();
@@ -536,33 +543,51 @@ impl Chat {
             .rposition(|entry| matches!(entry, Entry::Shell(block) if block.id == id))
     }
 
-    /// Escape: ends every command of this chat that is still running. Returns whether there was
-    /// one, so that the turn is left alone: a command that has been asked to stop is running until
-    /// its block reads stopped, and that can take 2 s (SIGTERM, then SIGKILL). An Escape that comes
-    /// then is for the command, and kills it at once. Only an Escape with no command running ends
-    /// the turn.
+    /// Escape: ends every command of this chat that is still running. Returns whether it acted on
+    /// one, so that the turn is left alone. A command that has been asked to stop is running until
+    /// its block reads stopped, and that can take 2 s (SIGTERM, then SIGKILL): an Escape that comes
+    /// then is for the command, and kills it at once. Once Escape has killed a command it is done
+    /// with it, so that one that survives the SIGKILL cannot keep Escape from ever stopping the
+    /// turn; its block reads running until its run really ends.
     pub(super) fn stop_running_shells(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.shell_runs.is_empty() {
-            return false;
-        }
+        let mut acted = false;
+        let mut gone = Vec::new();
         for (id, run) in &self.shell_runs {
             let block = self.entries.iter_mut().rev().find_map(|entry| match entry {
                 Entry::Shell(block) if block.id == *id => Some(block),
                 _ => None,
             });
             match block {
+                // Killed already: Escape has nothing more to do for it.
+                Some(block) if block.killed => {}
                 // The first Escape, or the first since the block's own Stop: SIGTERM, and SIGKILL
                 // after 2 s.
                 Some(block) if !block.stop_asked => {
                     run.stop();
                     block.stop_asked = true;
+                    acted = true;
                 }
                 // It was asked already and is still here: it ignored the SIGTERM.
-                _ => run.kill(),
+                Some(block) => {
+                    run.kill();
+                    block.killed = true;
+                    acted = true;
+                }
+                // A run with no block to say so: killed, and let go.
+                None => {
+                    run.kill();
+                    gone.push(*id);
+                    acted = true;
+                }
             }
         }
-        cx.notify();
-        true
+        for id in gone {
+            self.shell_runs.remove(&id);
+        }
+        if acted {
+            cx.notify();
+        }
+        acted
     }
 
     /// The Stop button of one block.

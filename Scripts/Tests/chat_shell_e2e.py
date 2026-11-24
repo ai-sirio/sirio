@@ -32,7 +32,7 @@ from pathlib import Path
 # `python3 -I` leaves the script's own directory off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chat_e2e_harness import (  # noqa: E402
-    MARKER, OUT, Fail, World, alive, assistant_rows, error_row, main, scenario, shell_rows, teardown, user_texts,
+    MARKER, OUT, Fail, World, alive, assistant_rows, error_row, log, main, scenario, shell_rows, teardown, user_texts,
 )
 
 # ---------------------------------------------------------------- what the agent reads
@@ -436,11 +436,18 @@ def scenario_stop(scn):
 # ---------------------------------------------------------------- stubborn
 
 
-@scenario
-def scenario_stubborn(scn):
-    """A command that ignores SIGTERM is still running after the Escape that stopped it, for the 2 s the runner waits before its
-    SIGKILL. An Escape in that window is for the command (spec 5.5: the turn is stopped only "with no command running"): it
-    kills the command at once and leaves the turn alone; only an Escape after the block reads stopped ends the turn."""
+# The second key goes out this soon after the first, and the block must read stopped this soon after the first: the
+# runner's own SIGKILL comes 2.0 s after the first key (`STOP_GRACE`), so a block that is stopped by 1.2 s was killed by the
+# second Escape. Measured in a green run: the second key at 0.45 s, the block stopped at 0.71 s, which leaves 0.5 s of margin
+# to the bound and 1.3 s to the runner's SIGKILL; with `kill()` doing nothing the block stopped at 2.25 s.
+STUBBORN_KILLED_WITHIN = 1.2
+# A second key later than this missed its window (a slow host): the run says nothing about the product, and is retried.
+STUBBORN_LATEST_SECOND_KEY = 0.8
+
+
+def stubborn_once(scn):
+    """One run of `stubborn`: None when it judged the product (every check passed; a failed one raises), or why it could not
+    (the host was too slow for the timing this checks), which says nothing about the product."""
     need = checker(scn, "claude")
     w = World(scn, "claude")
     shell_pid = None
@@ -455,17 +462,33 @@ def scenario_stubborn(scn):
         shell_pid = int(newest(r)[1]["output"])
 
         first = w.escape()
+        # The second key, as soon as the first has been seen to leave the command running.
         r = w.read()
-        need(newest(r)[1].get("status") == "running" and alive(shell_pid),
-             "control: the first Escape asked the command to stop, and it ignores that: its block still reads running and the shell lives",
-             f"status {newest(r)[1].get('status')!r}, {time.time() - first:.1f} s after the key", read=r)
+        running = newest(r)[1].get("status") == "running" and alive(shell_pid)
+        second = w.key("Escape")
+        if not running:
+            return f"the command was not running {time.time() - first:.1f} s after the first Escape (it ignores SIGTERM)"
+        if second - first > STUBBORN_LATEST_SECOND_KEY:
+            return f"the second Escape went out {second - first:.1f} s after the first, later than {STUBBORN_LATEST_SECOND_KEY} s"
+        need(True, "control: the first Escape asked the command to stop, and it ignores that: its block still reads running and "
+                   "the shell lives", f"the second key went out {second - first:.2f} s after the first")
 
-        second = w.escape()
-        r = w.wait("the second Escape kills the command", lambda r: newest(r)[1].get("status") == "stopped", timeout=3)
-        need(newest(r)[1].get("status") == "stopped" and r["status"] == "streaming",
-             "an Escape while the command is dying is for the command: it is killed at once and reads stopped, and the turn goes on",
-             f"block {newest(r)[1].get('status')!r}, chat {r['status']!r}, {time.time() - second:.1f} s after the second key, "
-             f"{time.time() - first:.1f} s after the first", read=r)
+        # Killed by the second Escape, not by the runner's own SIGKILL 2 s after the first.
+        stopped_at = None
+        while time.time() < first + STUBBORN_KILLED_WITHIN:
+            r = w.read()
+            if newest(r)[1].get("status") == "stopped":
+                stopped_at = time.time()
+                break
+            time.sleep(0.05)
+        if stopped_at is None:
+            r = w.wait("the block reads stopped (late)", lambda r: newest(r)[1].get("status") == "stopped", timeout=5)
+            stopped_at = time.time()
+        need(stopped_at - first <= STUBBORN_KILLED_WITHIN and r["status"] == "streaming",
+             "an Escape while the command is dying is for the command: it is killed at once (stopped within "
+             f"{STUBBORN_KILLED_WITHIN} s of the first key, well before the runner's own SIGKILL at 2 s) and the turn goes on",
+             f"block stopped {stopped_at - first:.2f} s after the first key, {stopped_at - second:.2f} s after the second; "
+             f"chat {r['status']!r}", detail={"first": 0.0, "second": second - first, "stopped": stopped_at - first}, read=r)
         left, members = leftovers([shell_pid], shell_pid, second)
         need(not left and not members, "the shell and its session are gone",
              f"still alive {left}, session {members}", read=r)
@@ -479,10 +502,26 @@ def scenario_stubborn(scn):
         r = w.wait("an Escape with no command running stops the turn", lambda r: r["status"] != "streaming", timeout=10)
         need(r["status"] != "streaming" and len(shell_rows(r)) == 1,
              "an Escape after the block reads stopped ends the turn", f"status {r['status']!r}", read=r)
+        return None
     finally:
         if shell_pid:
             kill_session(shell_pid)
         teardown(w)
+
+
+@scenario
+def scenario_stubborn(scn):
+    """A command that ignores SIGTERM is still running after the Escape that stopped it, for the 2 s the runner waits before its
+    SIGKILL. An Escape in that window is for the command (spec 5.5: the turn is stopped only "with no command running"): it
+    kills the command at once and leaves the turn alone; only an Escape after the block reads stopped ends the turn. The check
+    is about timing, so a run whose host was too slow to keep it is retried once with a new Sirio, not failed."""
+    why = None
+    for attempt in (1, 2):
+        why = stubborn_once(scn)
+        if why is None:
+            return
+        log(f"stubborn: inconclusive ({why}); " + ("running it again" if attempt == 1 else "giving up"))
+    raise Fail(f"inconclusive twice, the host is too slow for this scenario's timing: {why}")
 
 
 # ---------------------------------------------------------------- offline
@@ -523,6 +562,23 @@ def scenario_offline(scn):
              "Enter in the offline chat runs the command: its block shows `offline`, the composer is empty and the agent heard nothing",
              f"command {row.get('command')!r}, output {row.get('output')!r}, status {row.get('status')!r}, composer {r['composerText']!r}",
              read=r)
+
+        # A prose draft that was in the composer before the agent died (set here through the socket, which does not ask the
+        # editor): a `!` typed in front of it is kept, and deleted again it gives the prose back.
+        w.compose("hello offline")
+        w.wait("the prose draft is in the composer", lambda r: r["composerText"] == "hello offline", timeout=5)
+        w.click_composer()
+        w.key("Home")
+        w.type_keys("!")
+        r = w.wait("the `!` is kept in front of the prose", lambda r: r["composerText"] == "!hello offline", timeout=5)
+        need(r["composerText"] == "!hello offline" and truthy(r["composerRow"].get("shellMode")),
+             "a `!` typed in front of an offline prose draft is kept, and the draft is a command",
+             f"composer {r['composerText']!r}, shellMode {r['composerRow'].get('shellMode')!r}", read=r)
+        w.key("BackSpace")
+        r = w.wait("the `!` is deleted again", lambda r: r["composerText"] == "hello offline", timeout=5)
+        need(r["composerText"] == "hello offline" and not truthy(r["composerRow"].get("shellMode")),
+             "deleting that `!` is kept too: the prose draft is back, and it is no longer a command",
+             f"composer {r['composerText']!r}, shellMode {r['composerRow'].get('shellMode')!r}", read=r)
     finally:
         teardown(w)
 

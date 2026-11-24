@@ -478,21 +478,22 @@ impl Chat {
         self.refresh_token_popups(cx);
     }
 
-    /// Whether a disabled composer keeps the edit that made its draft `content`: only a command
-    /// (spec 5.1, "the agent's state does not matter"). A command needs no agent, so an offline or
-    /// unconfigured chat takes a draft that starts with `!`, and the edit that clears one. A draft
-    /// that waits on a question is out of service whatever it says (`send` refuses it too), and
-    /// every other edit is still refused (F-CHAT-05).
+    /// Whether a disabled composer keeps the edit that made its draft `content`: only an edit that
+    /// has a command on either side (spec 5.1, "the agent's state does not matter"). A command
+    /// needs no agent, so an offline or unconfigured chat takes a draft that starts with `!`, and
+    /// the edit that takes the `!` away again (a `!` typed in front of a prose draft can be
+    /// deleted, and the prose is back). A draft that waits on a question is out of service
+    /// whatever it says (`send` refuses it too), and every other edit is still refused (F-CHAT-05).
     fn keeps_edit_while_disabled(&self, content: &str) -> bool {
         self.pending_question().is_none()
-            && (shell_block::shell_mode(content)
-                || (shell_block::shell_mode(&self.draft) && content.is_empty()))
+            && (shell_block::shell_mode(content) || shell_block::shell_mode(&self.draft))
     }
 
     /// The observer: runs after every content or caret change in the field.
     /// A disabled composer refuses edits by putting the last accepted draft
     /// back (`offline_enter_never_discards_the_typed_draft`), except those
-    /// that make it a command (`keeps_edit_while_disabled`).
+    /// that make it a command or take it out of being one
+    /// (`keeps_edit_while_disabled`).
     pub(crate) fn reread_composer(&mut self, cx: &mut Context<Self>) {
         // The blink and every caret move notify, so most calls end at this
         // comparison, with nothing read out of the field.
