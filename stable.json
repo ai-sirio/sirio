@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.48.0",
-  "notes": "Chat replies in Sirio now show more about themselves: they appear at a steady\npace while they stream, a failed turn can be retried in place, and a usage\nlimit counts down to its reset.\n\n**Replies that stream in**\n\n- A reply appears at a steady pace as it arrives, with a caret after the last\n  word. Stopping, or the end of the turn, shows the rest at once. With the\n  system's reduced motion turned on, the reply is not paced.\n- Long replies cost much less to draw while they stream. On a 40 KiB reply,\n  each new chunk takes about a sixth of the time it did before. A reply\n  written without blank lines still costs what it did, and is drawn without\n  pacing once it grows long.\n\n**A failed turn says so, and Retry sends it again**\n\n- When a turn fails, for example because Claude is overloaded, the chat keeps\n  what had arrived and adds an error row with **Retry**. Before, Claude's\n  error was appended to the reply's text.\n- Retry sends your message again, in the same conversation when the agent\n  still has it. Before, it only restarted the agent. Only the newest failed\n  turn keeps its Retry.\n- Messages you queued behind a failed turn wait under \"Waiting: press Retry or\n  send a message.\" until you retry or send something.\n\n**Usage limits**\n\nWhen Claude's usage limit is reached, the chat shows \"Usage limit reached\"\nwith a countdown to the reset, then \"Try again\" or \"Usage limit lifted\".\n\n**Days and thoughts**\n\n- Days in the chat are marked by a separator in plain case: \"Today\",\n  \"Yesterday\", \"Friday, November 6\". They used to be uppercase headings such\n  as \"FRI 6 NOV\".\n- Claude's thinking shows its duration (\"Thought for N seconds\") from the\n  moment its thinking block ends, not when the next part of the reply starts.",
+  "version": "0.49.0",
+  "notes": "Chat messages in Sirio now have actions: you can copy any message, quote a\nreply into your next prompt, and continue a reply that was cut short.\n\n**A row of actions on each message**\n\n- Each message has a row of actions under it. The last reply always shows it;\n  other messages show it when the pointer is over them.\n- **Copy** puts the message's Markdown text on the clipboard. Your own\n  messages have Copy too.\n- Your messages are a little taller, to leave room for their row.\n\n**Quote**\n\n- **Quote** on a message puts it above the composer, and your next message\n  starts with it as a quote. To quote only part of a reply, select it and pick\n  **Quote selection** from the chat's right-click menu. The ✕ on the quote\n  removes it.\n- A command such as `/compact` is sent without the quote, which stays for your\n  next message.\n- The message you sent shows its quote as a card, also when you reopen the\n  chat.\n\n**Continue**\n\n- When a reply stops at the token limit, at the turn limit or because you\n  pressed Stop, the last reply offers **Continue**. It sends \"Continue\" as\n  your next message, in the same conversation.\n- Continue is not offered while a turn runs, in a chat reopened from history,\n  or after Codex, OpenCode, Pi or Oh-My-Pi restarted, since the agent no\n  longer has the conversation.\n\n**Stopping Claude**\n\n- A Claude turn you stop now ends as \"cancelled\". It used to read \"ended\",\n  and Claude's closing text was added to the reply.\n- A Claude turn that reaches its turn limit now says \"turn-request limit\".",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.48.0/Sirio-0.48.0.dmg",
-      "sha256": "36c176370b5001209751ccd09e6af0776aa3809f1fa87ca81c2d9dcb0f938aec",
-      "signature": "q0MhjO0GmyORGoq+EgnpJNvMFys+181ol0MdfmOaEA35prL8kIhK+gE4wbXpQ57drUC96M3kvHkocbdNRVmqCQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.49.0/Sirio-0.49.0.dmg",
+      "sha256": "0732f2c55355865a5c48dd65112571ad4517e723a60d5b66981953c1b7046372",
+      "signature": "AoO2/IbrQinyMPChmyp8YnuOCFXphY3AzbpUbzKss2t6t+ySQATq6HNACGYyesMQva/i55SUaPsOfVM8GmrTDQ=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.48.0/Sirio-0.48.0-x86_64.AppImage",
-      "sha256": "d707ba203143bf1e93e0dcdf867a5e78cfb51969c42467c6d2d53b7d33366f4c",
-      "signature": "jP9CVEyGYzi12elubWy+KZLkmOEBfPdn8JsA0bRu3L/O7bxqf+R48M3IEWvUuMQU6/shMW9wpYTElDBKssjSBg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.49.0/Sirio-0.49.0-x86_64.AppImage",
+      "sha256": "06f9e02ef9e52059910827f171f868e10bf8d51917531242f21b6330b070479b",
+      "signature": "RKdk4rVA+53GttPQ6t/FczFdxJfkFmM4T+1va9/C2m4WXZ9oVbBjzpzQsdxdul+iC+S5jypMdTTSHDKfq4y9BQ=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.48.0/SirioSetup-0.48.0.exe",
-      "sha256": "2e3ed2f5c73ce2687ef4ebf36c34f307b14a4e99c9ea1f1c345896b7a34c29c5",
-      "signature": "0+lWU5ogq0ZIpy8f3n/G6Iy26FVt99rqnxIPewI4k7VLdI/4vf5U2HAAFOobMzECk3hL5eStIfSC7zsvlDdJBQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.49.0/SirioSetup-0.49.0.exe",
+      "sha256": "8c8b012806cad154da247750b57434ae96d4eef9c37049605e1c1128e0b3f0ee",
+      "signature": "0H7+8ZiZW6QRz/HllYI/zJTDJBRQ6wa07uYaTc3pl5CeIBhWa/qdivd5PW7TvXoiMKBgSgVG9lxSdT98sFETDQ=="
     }
   }
 }
