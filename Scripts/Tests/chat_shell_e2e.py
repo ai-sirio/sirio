@@ -10,8 +10,9 @@ transport); retry is claude's Retry and hand_back opencode's; fold, cap, forged,
 touch the transport and run for claude only.
 
 What the scenarios read is the debug readout of `surface.chat.read`: per shell block a row `{kind: "shell", command,
-status: running|exited|stopped|failed, exit, sent: true|false, lines, expanded, output}` (`output` is what the block
-draws, so the last 40 lines while it is folded), and in `composerRow` `shellMode` and `bandRule`. The debug verb
+status: running|exited|stopped|failed, exit, sent: true|false, caption, lines, expanded, output}` (`output` is what the
+block draws, so the last 40 lines while it is folded; `caption` is the line `goes with your next message` it draws while it has
+not been sent, absent after), and in `composerRow` `shellMode` and `bandRule`. The debug verb
 `surface.chat.transcript action=toggleShell` presses a block's Show all / Show less; Escape is a real key of the X server.
 Commands are sent with `surface.chat.send`, which takes the path of Enter.
 
@@ -125,8 +126,9 @@ def last_prompt(w):
     return prompts[-1][1] if prompts else None
 
 
-# What a block's footer says while the agent has not been given it (spec 5.3). It is part of the block's text in the
-# transcript, as the footer's other words are, so the readout of `transcriptText` shows whether it is drawn.
+# What a block draws under its output while the agent has not been given it (spec 5.3). The caption is drawn beside the footer's
+# text and is no part of the text the transcript selects and copies, so `transcriptText` cannot show it: the read row of the
+# block reports it (`caption`), from the one function that the drawing takes it from.
 CAPTION = "goes with your next message"
 
 
@@ -142,10 +144,24 @@ def block_text(r, command):
     return text[at:] if end < 0 else text[at:end]
 
 
+def caption_of(r, command):
+    """The caption that the block of `command` draws, from its read row; None when it draws none (or there is no such row)."""
+    for _, row in shell_rows(r):
+        if row.get("command") == command:
+            return row.get("caption")
+    return None
+
+
 def captioned(r, command):
-    """Whether the block's footer, in the transcript's text, carries the caption."""
+    """Whether the block of `command` draws the caption."""
+    return caption_of(r, command) == CAPTION
+
+
+def footer_says(r, command, words):
+    """Whether the block's footer, in the transcript's own text, says `words`: how the command ended. A check that the caption is
+    gone says this too, so that it cannot pass on a footer that is gone altogether."""
     shown = block_text(r, command)
-    return shown is not None and CAPTION in shown
+    return shown is not None and words in shown
 
 
 def send_and_read(w, text, what):
@@ -284,9 +300,9 @@ def carry_for(scn, agent):
         w.start()
         w.open_chat(agent)
         r, index, row = run_block(w, command)
-        need(captioned(r, command),
-             "control: the finished block's footer says `goes with your next message`, in the transcript's text, before it is sent",
-             f"block text {block_text(r, command)!r}", read=r)
+        need(captioned(r, command) and footer_says(r, command, "exit 3"),
+             "control: the finished block draws `goes with your next message` before it is sent, and its footer says `exit 3`",
+             f"caption {caption_of(r, command)!r}, block text {block_text(r, command)!r}", read=r)
 
         # ---- check 2: the next prompt carries the block, then the text
         prompt, r = send_and_read(w, "hello", "`hello`")
@@ -303,9 +319,9 @@ def carry_for(scn, agent):
         need(row is not None and row.get("sent") == "true",
              "the block has been sent: it lost its `goes with your next message` state",
              f"sent {(row or {}).get('sent')!r}", read=r)
-        need(block_text(r, command) is not None and not captioned(r, command),
-             "the block's footer no longer says `goes with your next message`, in the transcript's text",
-             f"block text {block_text(r, command)!r}", read=r)
+        need(not captioned(r, command) and footer_says(r, command, "exit 3"),
+             "the block no longer draws `goes with your next message`, and its footer still says `exit 3`",
+             f"caption {caption_of(r, command)!r}, block text {block_text(r, command)!r}", read=r)
 
         # ---- check 8: a draft with a leading space is a prompt
         blocks = len(shell_rows(r))
@@ -345,6 +361,24 @@ def carry_for(scn, agent):
              and shell_rows(r)[count][1].get("sent") == "true",
              "the block that Escape stopped reaches the agent with the next prompt, marked `<bash-exit>stopped</bash-exit>`, and is sent",
              f"prompt {prompt!r}, sent {shell_rows(r)[count][1].get('sent')!r}", read=r)
+
+        # ---- Continue is a fresh prompt too: it carries what finished since the last prompt. A turn that stopped at the token
+        # limit offers it; the command runs after that turn, so it is pending when Continue is pressed (the socket's `continue`).
+        count = len(w.prompts())
+        w.send("max tokens")
+        wait_prompts(w, count + 1, "the agent reads `max tokens`")
+        r = w.wait("the turn that stopped at the token limit offers Continue", lambda r: idle(r) and r.get("continue") == "resend",
+                   timeout=40)
+        run_block(w, "echo c")
+        count = len(w.prompts())
+        w.rpc("surface.chat.transcript", surfaceId=w.surface, action="continue")
+        wait_prompts(w, count + 1, "the agent reads Continue")
+        r = w.wait("the Continue turn ends", lambda r: idle(r) and user_texts(r)[-1:] == ["Continue"], timeout=40)
+        need(last_prompt(w) == prompt_with([block("echo c", "c")], "Continue") and newest(r)[1].get("sent") == "true"
+             and user_texts(r)[-1] == "Continue",
+             "Continue carries the block that finished since the last prompt: the agent's prompt is the block, an empty line and "
+             "`Continue`, the user row is `Continue` alone, and the block is sent",
+             f"prompt {last_prompt(w)!r}, user rows {user_texts(r)[-2:]}, sent {newest(r)[1].get('sent')!r}", read=r)
     finally:
         teardown(w)
 
@@ -627,6 +661,24 @@ def scenario_offline(scn):
         need(r["composerText"] == "hello offline" and not truthy(r["composerRow"].get("shellMode")),
              "deleting that `!` is kept too: the prose draft is back, and it is no longer a command",
              f"composer {r['composerText']!r}, shellMode {r['composerRow'].get('shellMode')!r}", read=r)
+
+        # ---- a block run offline is saved (spec 5.6): no footer can come in a chat whose agent is gone, and the error row and the
+        # dead turn's own user row stand between the block and the last footer. The restart gives the block back, pending; the dead
+        # turn, which never closed, is not saved, as before.
+        w.quit()
+        w.start()
+        w.reopen_chat()
+        r = w.wait("the block run offline is back after a restart",
+                   lambda r: any(x.get("command") == "echo offline" for _, x in shell_rows(r)), timeout=15)
+        row = next(x for _, x in shell_rows(r) if x.get("command") == "echo offline")
+        need(row.get("output") == "offline" and row.get("status") == "exited" and row.get("sent") == "false"
+             and captioned(r, "echo offline") and footer_says(r, "echo offline", "exit 0"),
+             "the block that was run in the offline chat is back after a restart: finished, its output, pending",
+             f"status {row.get('status')!r}, output {row.get('output')!r}, sent {row.get('sent')!r}, "
+             f"caption {caption_of(r, 'echo offline')!r}", read=r)
+        need(user_texts(r) == [] and error_row(r) is None,
+             "the dead turn is not restored with it: its user row and its error row were never saved",
+             f"user rows {user_texts(r)}, error row {error_row(r)}", read=r)
     finally:
         teardown(w)
 
@@ -671,12 +723,23 @@ def scenario_fold(scn):
 # ---------------------------------------------------------------- cap
 
 BUDGET = 30_000
-OMISSION = re.compile(r"\n\[… (\d+) characters omitted …\]\n|\[output omitted, (\d+) characters\]")
 
 
 def stdout_bodies(prompt):
     """What sits between each `<bash-stdout>` and the `</bash-stdout>` that closes it, oldest block first."""
     return re.findall(r"<bash-stdout>(.*?)</bash-stdout>", prompt, re.S)
+
+
+def cut_of(body, original):
+    """What `body` says of how it cuts `original`: (head, omitted, tail) when it is its head, a marker and its tail, with the
+    marker's count what the cut removed from it; None when it is not."""
+    found = re.fullmatch(r"(.*?)\n\[… (\d+) characters omitted …\]\n(.*)", body, re.S)
+    if not found:
+        return None
+    head, omitted, tail = found.groups()
+    if original.startswith(head) and original.endswith(tail) and omitted == str(len(original) - len(head) - len(tail)):
+        return head, int(omitted), tail
+    return None
 
 
 @scenario
@@ -695,23 +758,24 @@ def scenario_cap(scn):
         bodies = stdout_bodies(prompt)
         need(len(bodies) == 2 and prompt.find("<bash-input>seq 1 5000</bash-input>") < prompt.find("<bash-input>seq 1 6000</bash-input>"),
              "the prompt carries both blocks, oldest first", f"{len(bodies)} bodies in a prompt of {len(prompt)} characters", read=r)
-        # The budget charges the output's characters: not the omission markers, not the command, not the exit line.
-        charged = [len(OMISSION.sub("", body)) for body in bodies]
-        need(sum(charged) <= BUDGET, f"the prompt holds at most {BUDGET} characters of output in all",
-             f"{charged} characters of output, {sum(charged)} in all", detail={"charged": charged}, read=r)
+        # The budget charges the output's characters and the line that says what was cut from it; not the command, not the exit
+        # line.
+        sizes = [len(body) for body in bodies]
+        need(sum(sizes) <= BUDGET, f"the prompt holds at most {BUDGET} characters of output in all, the cut's own marker included",
+             f"{sizes} characters of output, {sum(sizes)} in all", detail={"sizes": sizes}, read=r)
         need("characters omitted" in prompt, "a block was cut to fit, with the omission marker between its two parts",
              f"prompt of {len(prompt)} characters", read=r)
         need(len(bodies) == 2 and bodies[1] == newer,
              "the newest block is kept whole: the budget goes to it first", f"newest body of {len(bodies[-1])} characters", read=r)
-        # What room is left is cut as a head, a marker and a tail (spec 5.4: "its first third and its last two thirds"; where the
-        # third falls, by a character, is the product's to round).
+        # What room is left is cut as a head, a marker and a tail (spec 5.4: "its first third and its last two thirds"), the marker
+        # paid for out of that room; where the third falls, by a character, is the product's to round.
         room = BUDGET - len(newer)
-        cut = re.fullmatch(r"(.*?)\n\[… (\d+) characters omitted …\]\n(.*)", bodies[0], re.S) if bodies else None
-        head, omitted, tail = cut.groups() if cut else ("", "", "")
-        need(cut is not None and older.startswith(head) and older.endswith(tail) and abs(len(head) - room / 3) <= 1
-             and len(head) + len(tail) == room and omitted == str(len(older) - room),
-             "the older block keeps what room is left: a first third (within a character of room/3) and the rest as its tail, "
-             "with the number of characters omitted between them",
+        cut = cut_of(bodies[0], older) if bodies else None
+        head, omitted, tail = cut if cut else ("", 0, "")
+        kept = len(head) + len(tail)
+        need(cut is not None and abs(len(head) - kept / 3) <= 1 and len(bodies[0]) <= room and room - len(bodies[0]) <= 3,
+             "the older block keeps what room is left, its marker paid for out of it: a first third (within a character) and the "
+             "rest as its tail, with the number of characters omitted between them, and no more than the room",
              f"room {room}, head {len(head)}, tail {len(tail)}, omitted {omitted!r}, older body of {len(bodies[0]) if bodies else 0} characters",
              read=r)
     finally:
@@ -816,17 +880,17 @@ def restart_for(scn, agent):
              f"blocks {[(i, x.get('command'), x.get('status'), x.get('output')) for i, x in shell_rows(r)]}", read=r)
         need(row.get("sent") == "false", "the block that was never sent is pending again after the restart",
              f"sent {row.get('sent')!r}", read=r)
-        need(captioned(r, "echo kept"),
-             "the restored block's footer says `goes with your next message` again, in the transcript's text",
-             f"block text {block_text(r, 'echo kept')!r}", read=r)
+        need(captioned(r, "echo kept") and footer_says(r, "echo kept", "exit 0"),
+             "the restored block draws `goes with your next message` again, and its footer says `exit 0`",
+             f"caption {caption_of(r, 'echo kept')!r}, block text {block_text(r, 'echo kept')!r}", read=r)
         prompt, r = send_and_read(w, "go", "`go`")
         need(prompt == prompt_with([block("echo kept", "kept")], "go"),
              "the next prompt after the restart carries the restored block", f"prompt {prompt!r}", read=r)
         need(newest(r)[1].get("sent") == "true", "the restored block is sent once the prompt carried it",
              f"sent {newest(r)[1].get('sent')!r}", read=r)
-        need(block_text(r, "echo kept") is not None and not captioned(r, "echo kept"),
-             "the restored block's footer no longer says `goes with your next message` once it is sent",
-             f"block text {block_text(r, 'echo kept')!r}", read=r)
+        need(not captioned(r, "echo kept") and footer_says(r, "echo kept", "exit 0"),
+             "the restored block no longer draws `goes with your next message` once it is sent, and its footer still says `exit 0`",
+             f"caption {caption_of(r, 'echo kept')!r}, block text {block_text(r, 'echo kept')!r}", read=r)
 
         # ---- a block the agent was given is stored as its fold, and is never carried twice. `seq 1 100` is sent with a turn that
         # is still in flight when the app quits (that turn has no footer, so it is lost, but the block was saved as sent the moment
@@ -851,13 +915,41 @@ def restart_for(scn, agent):
         need(hundred.get("output") == fold and hundred.get("lines") == "100",
              "the block that was sent keeps its fold alone: the last 40 of its 100 lines, and it still says it had 100",
              f"lines {hundred.get('lines')!r}, output {hundred.get('output')!r}", read=r)
-        need(not captioned(r, "echo kept") and not captioned(r, "seq 1 100") and user_texts(r) == ["go"],
-             "neither block says `goes with your next message`, and the turn that never ended is not in the restored chat",
-             f"user rows {user_texts(r)}, blocks {[block_text(r, c) for c in ('echo kept', 'seq 1 100')]}", read=r)
+        need(not captioned(r, "echo kept") and not captioned(r, "seq 1 100") and footer_says(r, "echo kept", "exit 0")
+             and footer_says(r, "seq 1 100", "exit 0") and user_texts(r) == ["go"],
+             "neither block draws `goes with your next message` and both footers say `exit 0`, and the turn that never ended is not "
+             "in the restored chat",
+             f"user rows {user_texts(r)}, captions {[caption_of(r, c) for c in ('echo kept', 'seq 1 100')]}, "
+             f"blocks {[block_text(r, c) for c in ('echo kept', 'seq 1 100')]}", read=r)
         prompt, r = send_and_read(w, "again", "`again`")
         need(prompt == "again",
              "the next prompt carries nothing: a block that was sent is not carried again after a restart",
              f"prompt {prompt!r}", read=r)
+
+        # ---- a long block that was never sent is stored cut to the budget, and the cut is not made a second time when the
+        # restored block is sent: the marker still says what the command printed and the cut removed, not what the first cut left
+        # 30,000 lines: more than the budget, and small enough for the runner to keep all of it (it charges each line 8 bytes beyond its
+        # text to its 1 MiB, so `seq 1 100000` would already have lost lines of its own, with a marker of its own, before any cut)
+        big = "\n".join(str(n) for n in range(1, 30_001))
+        run_block(w, "seq 1 30000", end=30)
+        w.quit()
+        w.start()
+        w.reopen_chat()
+        r = w.wait("the restored chat holds the long block",
+                   lambda r: any(x.get("command") == "seq 1 30000" for _, x in shell_rows(r)), timeout=15)
+        long_row = next(x for _, x in shell_rows(r) if x.get("command") == "seq 1 30000")
+        need(long_row.get("sent") == "false" and long_row.get("lines") == "30000" and captioned(r, "seq 1 30000"),
+             "the long block is back after a restart, still pending, and still says it had 30000 lines",
+             f"sent {long_row.get('sent')!r}, lines {long_row.get('lines')!r}, caption {caption_of(r, 'seq 1 30000')!r}", read=r)
+        prompt, r = send_and_read(w, "big", "`big`")
+        bodies = stdout_bodies(prompt)
+        cut = cut_of(bodies[0], big) if len(bodies) == 1 else None
+        marker = re.search(r"\[… (\d+) characters omitted …\]", bodies[0]) if bodies else None
+        need(cut is not None and len(bodies[0]) <= BUDGET,
+             "the long block that was restored is sent cut to the budget with the true count in its marker: the characters of the "
+             "command's output that the cut removed, not what a second cut of the stored text removed",
+             f"{len(bodies)} bodies, the first of {len(bodies[0]) if bodies else 0} characters, its marker states "
+             f"{marker.group(1) if marker else None}, the output had {len(big)} characters", read=r)
     finally:
         teardown(w)
 
@@ -922,10 +1014,12 @@ def scenario_hand_back(scn):
         wait_prompts(w, count + 1, "the agent reads `die`")
         r = w.wait("the lost agent is an error row", lambda r: error_row(r) is not None and r["status"] != "streaming", timeout=30)
         index, row = error_row(r)
-        need(row.get("retry") == "composer" and newest(r)[1].get("sent") == "true" and not captioned(r, "echo back"),
+        need(row.get("retry") == "composer" and newest(r)[1].get("sent") == "true" and not captioned(r, "echo back")
+             and footer_says(r, "echo back", "exit 0"),
              "the agent died on the prompt that carried the block: its Retry hands the message back, and the block went with it "
-             "(no caption)",
-             f"retry {row.get('retry')!r}, sent {newest(r)[1].get('sent')!r}, block text {block_text(r, 'echo back')!r}", read=r)
+             "(no caption, its footer still says `exit 0`)",
+             f"retry {row.get('retry')!r}, sent {newest(r)[1].get('sent')!r}, caption {caption_of(r, 'echo back')!r}, "
+             f"block text {block_text(r, 'echo back')!r}", read=r)
         prompts = w.prompts()
         w.retry(index)
         r = w.wait("the relaunched agent is connected, with the message back in the composer",
@@ -934,7 +1028,7 @@ def scenario_hand_back(scn):
         need(w.prompts() == prompts and newest(r)[1].get("sent") == "false" and captioned(r, "echo back"),
              "the message is back in the composer, nothing was sent, and the block is pending again, with its caption",
              f"composer {r['composerText']!r}, sent {newest(r)[1].get('sent')!r}, prompts {w.prompts()}, "
-             f"block text {block_text(r, 'echo back')!r}", read=r)
+             f"caption {caption_of(r, 'echo back')!r}", read=r)
         prompt, r = send_and_read(w, "again", "`again`")
         need(prompt == prompt_with([block("echo back", "back")], "again") and newest(r)[1].get("sent") == "true",
              "the next send carries `back` again", f"prompt {prompt!r}", read=r)
