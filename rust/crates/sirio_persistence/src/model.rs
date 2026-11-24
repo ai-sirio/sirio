@@ -410,9 +410,40 @@ pub enum ChatEntry {
     /// stored spelling of how it draws, kept as a string so a build that
     /// does not know a newer one restores it as a plain note instead of
     /// refusing the whole transcript.
-    Notice { text: String, kind: String },
+    ///
+    /// A shell block (`kind` `"shell"`) is stored as a notice too, with the
+    /// run in `shell` and `text` as the plain one-line summary an older build
+    /// draws: that build ignores the key it does not know.
+    Notice {
+        text: String,
+        kind: String,
+        /// The run behind a `"shell"` notice. `None` for every other notice,
+        /// and then no `shell` key is written at all.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<ChatShellRun>,
+    },
     /// A permanent error that belongs in the restored transcript.
     Error { message: String, retryable: bool },
+}
+
+/// A shell command the user ran from a chat (`!cmd`) and what came of it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChatShellRun {
+    /// The command line as typed, without the leading `!`.
+    pub command: String,
+    /// The retained output, already cut down to what is worth keeping.
+    pub output: String,
+    /// How many lines the command printed in all, kept or not.
+    pub total_lines: u64,
+    /// The shell's exit status (`128 + signal` when a signal ended it), or
+    /// `None` when the system could not say how it ended or it never started.
+    pub exit: Option<i32>,
+    /// Whether the user stopped the command.
+    pub stopped: bool,
+    /// Wall-clock milliseconds the command ran.
+    pub duration_ms: u64,
+    /// Whether the block went to the agent with a message.
+    pub sent: bool,
 }
 
 /// One file a persisted tool call touched.

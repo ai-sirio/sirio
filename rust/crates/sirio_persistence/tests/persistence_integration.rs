@@ -9,7 +9,7 @@ use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, CLOSED_CHAT_LIMIT,
     CLOSED_CHAT_MAX_AGE_MS, CURRENT_SCHEMA_VERSION, ChangeRequestLinkRecord, ChatEntry, HandoffChoiceRecord,
     ChatPermissionOption,
-    ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn, ClosedChatSummary,
+    ChatPermissionOutcome, ChatPlanEntry, ChatShellRun, ChatToolLocation, ChatTranscript, ChatTurn, ClosedChatSummary,
     EditorCursorShape, EditorLineNumbers,
     MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, SidebarView, TabRecord,
     TabAttention, TabStateRecord, WorktreeRecord, migrate_up_to,
@@ -2666,5 +2666,171 @@ fn an_archived_tab_has_no_attention() {
             ("v".to_owned(), TabAttention::default()),
         ],
         "an open tab never written reads seen and idle; the archived one is absent"
+    );
+}
+
+/// A finished shell block: the stored shape of a `!cmd` the user ran in a chat.
+fn sample_shell_notice() -> ChatEntry {
+    ChatEntry::Notice {
+        text: "$ git status\nclean".into(),
+        kind: "shell".into(),
+        shell: Some(ChatShellRun {
+            command: "git status".into(),
+            output: "On branch main\nnothing to commit, working tree clean\n".into(),
+            total_lines: 2,
+            exit: Some(0),
+            stopped: false,
+            duration_ms: 42,
+            sent: true,
+        }),
+    }
+}
+
+/// Save `entries` as one turn of a chat tab, through the real database file.
+fn save_one_turn(db: &AppDatabase, entries: Vec<ChatEntry>) {
+    db.save_project(&sample_project("proj-1", "sirio"))
+        .expect("project");
+    db.save_worktree(&sample_worktree("wt-1", "proj-1", "main"))
+        .expect("worktree");
+    db.save_tabs("wt-1", &[sample_tab("tab-chat", "wt-1", "Chat", "chat")])
+        .expect("tab");
+    db.save_chat_transcript(&ChatTranscript {
+        tab_id: "tab-chat".into(),
+        turns: vec![ChatTurn { entries }],
+    })
+    .expect("save transcript");
+}
+
+/// The payload of the first stored turn, as the bytes an older build would read.
+fn first_turn_payload(path: &Path) -> Vec<u8> {
+    let conn = rusqlite::Connection::open(path).expect("raw open");
+    conn.query_row(
+        "SELECT payload FROM chat_turn WHERE tab_id = 'tab-chat' ORDER BY ordinal LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .expect("read the stored turn")
+}
+
+#[test]
+fn shell_notice_round_trips_through_a_saved_transcript() {
+    let dir = TempDir::new();
+    let path = dir.db_path("shell-notice");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        save_one_turn(&db, vec![sample_shell_notice()]);
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    let transcript = db
+        .load_chat_transcript("tab-chat")
+        .expect("load transcript")
+        .expect("transcript exists");
+    assert_eq!(transcript.turns.len(), 1);
+    assert_eq!(transcript.turns[0].entries, vec![sample_shell_notice()]);
+}
+
+/// The `ChatEntry` an older build knew: the same externally tagged enum, with
+/// `Notice` carrying no `shell` field. Decoding a newer transcript into it is
+/// what an older build does on opening it.
+#[derive(Debug, PartialEq, serde::Deserialize)]
+enum OldChatEntry {
+    UserMessage {
+        text: String,
+        #[serde(default)]
+        at: Option<i64>,
+    },
+    AssistantMessage {
+        text: String,
+    },
+    Thought {
+        text: String,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
+    ToolCall {
+        id: String,
+        title: String,
+        status: String,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        locations: Vec<ChatToolLocation>,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
+    Permission {
+        request_id: u64,
+        #[serde(default)]
+        title: String,
+        options: Vec<ChatPermissionOption>,
+        outcome: ChatPermissionOutcome,
+    },
+    Plan {
+        entries: Vec<ChatPlanEntry>,
+    },
+    TurnFooter {
+        text: String,
+    },
+    Notice {
+        text: String,
+        kind: String,
+    },
+    Error {
+        message: String,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct OldChatTurn {
+    entries: Vec<OldChatEntry>,
+}
+
+#[test]
+fn shell_notice_decodes_under_the_pre_change_shape() {
+    let dir = TempDir::new();
+    let path = dir.db_path("shell-notice-old");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        save_one_turn(&db, vec![sample_shell_notice()]);
+    }
+
+    let turn: OldChatTurn = serde_json::from_slice(&first_turn_payload(&path))
+        .expect("an older build must still decode a turn holding a shell block");
+    assert_eq!(
+        turn.entries,
+        vec![OldChatEntry::Notice {
+            text: "$ git status\nclean".into(),
+            kind: "shell".into(),
+        }],
+        "an older build shows the block as a plain notice with the fallback text"
+    );
+}
+
+#[test]
+fn plain_notice_json_is_unchanged() {
+    let dir = TempDir::new();
+    let path = dir.db_path("plain-notice");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        save_one_turn(
+            &db,
+            vec![ChatEntry::Notice {
+                text: "Compacted".into(),
+                kind: "compaction".into(),
+                shell: None,
+            }],
+        );
+    }
+
+    let stored: serde_json::Value =
+        serde_json::from_slice(&first_turn_payload(&path)).expect("stored turn is JSON");
+    assert_eq!(
+        stored,
+        serde_json::json!({
+            "entries": [{ "Notice": { "text": "Compacted", "kind": "compaction" } }]
+        }),
+        "a notice that is not a shell block stores exactly the keys it always did"
     );
 }

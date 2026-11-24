@@ -1127,6 +1127,7 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
         Entry::Notice { text, kind } => Some(ChatEntry::Notice {
             text: text.clone(),
             kind: kind.stored().to_string(),
+            shell: None,
         }),
         // A rewind card describes a filesystem state at a moment in time,
         // not the conversation: restoring it later would present a stale
@@ -1348,7 +1349,7 @@ fn restored_entry_with(
             approval: None,
         },
         ChatEntry::TurnFooter { text } => Entry::TurnFooter(text),
-        ChatEntry::Notice { text, kind } => Entry::Notice {
+        ChatEntry::Notice { text, kind, .. } => Entry::Notice {
             text,
             // A kind written by a newer build restores as the plainest of
             // the five rather than refusing the transcript around it.
@@ -21167,6 +21168,7 @@ two"
                 match restored_entry(ChatEntry::Notice {
                     text: "x".into(),
                     kind,
+                    shell: None,
                 }) {
                     Entry::Notice { kind, .. } => kind,
                     _ => unreachable!("a notice restores as a notice"),
