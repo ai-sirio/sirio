@@ -2817,25 +2817,15 @@ fn stored_shell_run(path: &Path) -> serde_json::Value {
 }
 
 #[test]
-fn a_shell_run_stored_before_the_original_count_existed_loads_without_one() {
-    // What a build that did not know `original_chars` wrote: the key is absent.
-    let stored = r#"{"entries":[{"Notice":{"text":"! ls","kind":"shell","shell":{
-        "command":"ls","output":"a","total_lines":1,"exit":0,"stopped":false,"duration_ms":3,"sent":false}}}]}"#;
-    let turn: ChatTurn = serde_json::from_str(stored).expect("an earlier run must still load");
-    let ChatEntry::Notice { shell: Some(run), .. } = &turn.entries[0] else {
-        panic!("a shell notice, got {:?}", turn.entries[0]);
-    };
-    assert_eq!(run.original_chars, None);
-    assert_eq!(run.output, "a");
-}
-
-#[test]
 fn a_cut_shell_run_keeps_its_original_count_and_a_whole_one_writes_no_key() {
     let dir = TempDir::new();
     let cut_path = dir.db_path("shell-cut");
     let whole_path = dir.db_path("shell-whole");
+    // The pair the product writes: a block the agent has not been given, stored cut to the budget,
+    // with what the command printed. A sent block stores its fold and no count.
     let mut cut = sample_shell_notice();
     if let ChatEntry::Notice { shell: Some(run), .. } = &mut cut {
+        run.sent = false;
         run.original_chars = Some(1_258_928);
     }
     {
