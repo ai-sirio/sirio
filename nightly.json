@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "nightly",
-  "version": "0.49.1-nightly.202611251143",
-  "notes": "Nightly tracks main. This build is commit e1cd9337d957e9a7fd63f1a3c4c73fcd2bf20e46.",
+  "version": "0.50.0-nightly.202611251419",
+  "notes": "Nightly tracks main. This build is commit bc0f6e57f6f52f3ea457e0d4c5782789b15eb1cc.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/nightly-202611251143/Sirio-0.49.1-nightly.202611251143-update.dmg",
-      "sha256": "57b6d1d281e4b751bd5d61a26151e417ef4a1fed90038019786693bd2abd2e38",
-      "signature": "6hmwTDoSFG37kycREJaBbpfEvKVU2K8dCE4NuLn5qVHDEUcK5z0ZZWm+tdGrfLZzrqVtN63oaC2NZoVhRzFKBg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/nightly-202611251419/Sirio-0.50.0-nightly.202611251419-update.dmg",
+      "sha256": "9e0d8108bea3573be182a28283e668e35847bf608f41fddc597969c4ad7c12a7",
+      "signature": "2dNP650PJBiX3t1W871N018sNLJAnjJz13wdwvKcXfBaFm4PaSYGiOVwzv6MBB6LGfTv0ZchAZ2D5jgaZJX9CQ=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/nightly-202611251143/Sirio-0.49.1-nightly.202611251143-x86_64-update.AppImage",
-      "sha256": "b8cb715955dca08a64e4e274cdc57da68753bdb8520b4edf2c4d73c6b56dc056",
-      "signature": "MZmd87MZqosa/C4x8KX3k5UBJdFGkjdCBSZaaadi/AQcev1u6Zh34JBe8tQuiiRAixN6Ne6Wo9xexeyUgmrRAg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/nightly-202611251419/Sirio-0.50.0-nightly.202611251419-x86_64-update.AppImage",
+      "sha256": "20b6564654562d11fe2d36b17ad2f1dad83983cd76628f17a6874a7bc6a4f866",
+      "signature": "7DvDzS9RHaDVhUtqdaTyky9P+wG2uf4+XtXr3u382kMTNRvplFjfpahnSWGoA+BqYNObmYQeuRi85ZLd2Xg4Aw=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/nightly-202611251143/SirioSetup-0.49.1-nightly.202611251143-update.exe",
-      "sha256": "5a2f74d1dcb54e35f234ca7b11fd6d60ac72bafb6b0c92f56ce66b1951b135b1",
-      "signature": "9iRth0ehyYhStN50J2l1iwrtqF1+MhwAG4w13YklCANvVYMDAwcYEzIXh7hWOlJ+0ogQfRm4Vg0g/JxvhsN7CQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/nightly-202611251419/SirioSetup-0.50.0-nightly.202611251419-update.exe",
+      "sha256": "56ba5b7e1f6ef296ffd6ebc739549082b85a9ec3ea2018cba75b37a0f6d95474",
+      "signature": "oSrxa8SYlRW+gtgCB7IvFyC1S+FxPh56PQ1tCHaI77+nEZ359ZPqfRGOtHJmmneGwwMY/nhxJnqj8ChvURXyAA=="
     }
   }
 }
