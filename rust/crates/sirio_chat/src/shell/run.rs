@@ -540,18 +540,18 @@ fn session_members(_sid: libc::pid_t) -> Vec<libc::pid_t> {
     Vec::new()
 }
 
-/// A failed spawn, saying what was not found. `NotFound` is one word for a shell that is missing and
-/// for a working directory that is, so the folder is looked at to tell them apart.
+/// A failed spawn, saying what was not found. On Unix the system says "No such file or directory" for
+/// a shell that is missing and for a working directory that is, so the folder is looked at first; Windows
+/// has its own word for a folder that is gone, which the same look covers.
 fn explain_spawn_error(error: io::Error, shell: &OsStr, cwd: &Path) -> io::Error {
-    if error.kind() != io::ErrorKind::NotFound {
-        return error;
-    }
-    let what = if cwd.is_dir() {
+    let what = if !cwd.exists() {
+        format!("the folder {} is gone", cwd.display())
+    } else if error.kind() == io::ErrorKind::NotFound {
         format!("the shell {} was not found", shell.to_string_lossy())
     } else {
-        format!("the folder {} is gone", cwd.display())
+        return error;
     };
-    io::Error::new(io::ErrorKind::NotFound, format!("{what} ({error})"))
+    io::Error::new(error.kind(), format!("{what} ({error})"))
 }
 
 /// Where the reader and the waiter put events, so that `Exited` is the last one.
