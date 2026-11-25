@@ -5014,12 +5014,15 @@ impl Chat {
         } else {
             current.len()
         };
-        let blocks: Vec<ChatEntry> = current
+        // One row of its own for each block: a group is kept or dropped whole when the store is over
+        // its cap, so the blocks of a long session are never lost together.
+        for block in current
             .drain(..scanned)
             .filter(|entry| matches!(entry, ChatEntry::Notice { shell: Some(_), .. }))
-            .collect();
-        if !blocks.is_empty() {
-            turns.push(ChatTurn { entries: blocks });
+        {
+            turns.push(ChatTurn {
+                entries: vec![block],
+            });
         }
         ChatTranscript {
             tab_id: tab_id.to_string(),

@@ -372,12 +372,16 @@ impl ShellBlock {
         })
     }
 
-    /// What an older build draws in place of the block: `! {command}` and the stored output.
+    /// What an older build draws in place of the block: `! {command}` and the fold of the stored output
+    /// (its last [`FOLD_LINES`] lines, at most [`STORED_SENT_BYTES`]). The output itself is stored in
+    /// `shell` and is not stored twice.
     pub(super) fn fallback_text(run: &ChatShellRun) -> String {
-        if run.output.is_empty() {
+        let lines: Vec<&str> = run.output.rsplit('\n').take(FOLD_LINES).collect();
+        let fold = last_bytes(lines.into_iter().rev().collect::<Vec<_>>().join("\n"), STORED_SENT_BYTES);
+        if fold.is_empty() {
             format!("! {}", run.command)
         } else {
-            format!("! {}\n{}", run.command, run.output)
+            format!("! {}\n{fold}", run.command)
         }
     }
 
