@@ -62,7 +62,7 @@ pub use model::{
     AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChangeRequestLinkRecord, ChatEntry,
     EditorDrawerRecord, HandoffChoiceRecord,
     ChatPermissionOption,
-    ChatPermissionOutcome, ChatPlanEntry, ChatSessionSummary, ChatToolLocation, ChatTranscript,
+    ChatPermissionOutcome, ChatPlanEntry, ChatSessionSummary, ChatShellRun, ChatToolLocation, ChatTranscript,
     ChatTurn, ClosedChatSummary, EditorCursorShape, EditorLineNumbers, MAX_CHAT_TRANSCRIPT_BYTES,
     ProjectRecord, QuarantinedRecord,
     SidebarState, SidebarView, TabAttention, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,

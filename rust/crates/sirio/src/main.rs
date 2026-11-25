@@ -4027,6 +4027,17 @@ impl ControlHandler for AppControlHandler {
                             }
                         }
                     }
+                    Some("toggleShell") => {
+                        match request.params.get("entry").map(|entry| entry.parse::<usize>()) {
+                            Some(Ok(entry)) => TranscriptAction::ToggleShell(entry),
+                            _ => {
+                                return ControlResponse::failure(
+                                    &request.id,
+                                    "surface.chat.transcript toggleShell requires a numeric entry",
+                                );
+                            }
+                        }
+                    }
                     Some("continue") => TranscriptAction::Continue,
                     Some("quoteSelection") => TranscriptAction::QuoteSelection,
                     Some(verb @ ("copy" | "quote")) => {
@@ -4046,8 +4057,8 @@ impl ControlHandler for AppControlHandler {
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.chat.transcript requires action scrollBy, toggleTurn, retry, \
-                             continue, copy, quote or quoteSelection",
+                            "surface.chat.transcript requires action scrollBy, toggleTurn, \
+                             toggleShell, retry, continue, copy, quote or quoteSelection",
                         );
                     }
                 };

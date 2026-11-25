@@ -490,6 +490,13 @@ unchanged default path are named: they ran green on this code (each alone, 1 tes
   column at most `column`, the tool row never wraps (row 40).
 - Row 38 (`ready`): in the old crate the host-supplied eligibility was the `ready` argument of
   `custom`; there is no separate `ready` method on either side. Re-applied as that argument.
+- `PromptInput::band_rule` (no checklist row; Sirio's command mode, where a draft that starts with `!`
+  is a shell command): the colour of the band's 1px top rule, `band_rule: Option<Hsla>`, drawn as
+  `unwrap_or(colors.border)`, so a host that does not call it sees the same rule as before. Without
+  `band` it does nothing. Proven: the `band` scenario of `Scripts/Tests/chat_shell_e2e.py` (`bandRule`
+  differs for `!ls` and `ls`, and the two frames differ at the band's top edge and agree 4 px inside
+  it), which ran once Sirio set the colour (Task 7a, `Scripts/Tests/test-chat-shell-e2e.sh --only
+  run,stop,fold,lifetime,band,cannot_start`: `band` 4 checks, 0 failed).
 - Outcomes: rows 33, 37 to 45 re-applied. Proofs: runs at Task 8,
   `chat::band_tests::composer_band_spans_the_chat_column_on_one_row` (rows 40, 41, 42, 43, 39),
   `chat::band_tests::narrow_row_fits_from_its_measured_minimum` (rows 40, 42),

@@ -410,9 +410,51 @@ pub enum ChatEntry {
     /// stored spelling of how it draws, kept as a string so a build that
     /// does not know a newer one restores it as a plain note instead of
     /// refusing the whole transcript.
-    Notice { text: String, kind: String },
+    ///
+    /// A shell block (`kind` `"shell"`) is stored as a notice too, with the
+    /// run in `shell` and `text` as the plain text an older build draws in
+    /// place of the block: that build ignores the key it does not know.
+    Notice {
+        text: String,
+        kind: String,
+        /// The run behind a `"shell"` notice. `None` for every other notice,
+        /// and then no `shell` key is written at all.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<ChatShellRun>,
+    },
     /// A permanent error that belongs in the restored transcript.
     Error { message: String, retryable: bool },
+}
+
+/// A shell command the user ran from a chat (`!cmd`) and what came of it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChatShellRun {
+    /// The command line as typed, without the leading `!`.
+    pub command: String,
+    /// The retained output, already cut down to what is worth keeping.
+    pub output: String,
+    /// How many lines the command printed in all, kept or not.
+    pub total_lines: u64,
+    /// The shell's exit status. `None` only when the command could not start
+    /// (`stopped` is then false): a run that started always has one. On Unix
+    /// a signal's death is `128 + signal`, as the shell's `$?` reads it; on
+    /// Windows, where Stop ends the shell with an exit code of 1, there is no
+    /// such number. `-1` means the system could not say how the shell ended
+    /// (a Windows exit of `0xFFFFFFFF` reads the same).
+    pub exit: Option<i32>,
+    /// Whether the user stopped the command.
+    pub stopped: bool,
+    /// Wall-clock milliseconds the command ran.
+    pub duration_ms: u64,
+    /// Whether the block went to the agent with a message.
+    pub sent: bool,
+    /// How many characters the block's output had before `output` was cut to what it holds,
+    /// when it was: a block the agent was never given is stored cut to the context budget, and
+    /// the text alone says only how much of it the cut removed from the stored text, never how
+    /// much the command printed. `None` when `output` is all the block kept, and then no key is
+    /// written; a run stored before this field existed has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_chars: Option<u64>,
 }
 
 /// One file a persisted tool call touched.

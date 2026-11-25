@@ -4,7 +4,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use gpui::{Bounds, Pixels, Window};
+use gpui::{Bounds, Hsla, Pixels, Window};
 use sirio_theme::Theme;
 
 use super::composer_height::{ROW_HEIGHT, field_rows};
@@ -172,6 +172,10 @@ pub(crate) struct RowFrame {
     pub effort_label: RefCell<Option<String>>,
     /// The rows of ⋯ the last render built, while the menu is open.
     pub menu: RefCell<Option<Vec<MenuRow>>>,
+    /// Whether the draft the last render drew was a command (it starts with `!`).
+    pub shell_mode: Cell<bool>,
+    /// The colour the band's top rule was drawn in by the last render; `None` before the first.
+    pub band_rule: Cell<Option<Hsla>>,
 }
 
 impl RowFrame {
@@ -249,6 +253,25 @@ pub struct ComposerSnapshot {
     pub picker: Option<&'static str>,
     /// Whether the background-task popover is drawn (A3).
     pub background_popover: bool,
+    /// Whether the draft is a command, as the last render drew it: it starts with `!`.
+    pub shell_mode: bool,
+    /// The colour of the band's top rule, as `#rrggbbaa`: lighter in command mode. `None` before
+    /// the first render.
+    pub band_rule: Option<String>,
+}
+
+/// `#rrggbbaa` for a colour: the alpha is part of what tells two rules apart (the same white at
+/// 8% and at 35%).
+pub(crate) fn rgba_hex(color: Hsla) -> String {
+    let color = gpui::Rgba::from(color);
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        channel(color.r),
+        channel(color.g),
+        channel(color.b),
+        channel(color.a)
+    )
 }
 
 fn boxed(bounds: Option<Bounds<Pixels>>) -> Option<[f32; 4]> {
@@ -370,6 +393,8 @@ impl Chat {
             menu: frame.menu.borrow().clone(),
             picker: self.open_picker_name(),
             background_popover: self.background_popover_visible(),
+            shell_mode: frame.shell_mode.get(),
+            band_rule: frame.band_rule.get().map(rgba_hex),
         }
     }
 

@@ -5,12 +5,26 @@
 use super::ErrorKind;
 use sirio_chat::ImageAttachment;
 
+/// The shell context a prompt carried (spec 5.4): the finished `!` blocks that were pending when
+/// it was sent, written in Claude Code's tags, and which blocks they were.
+#[derive(Clone, Debug)]
+pub(crate) struct ShellCarry {
+    /// The blocks, by their id, that went with the prompt: they are marked sent, and a hand-back
+    /// puts them back in pending.
+    pub(crate) ids: Vec<u64>,
+    /// What goes ahead of the prompt's text on the wire, with no trailing newline; one empty line
+    /// separates it from the text.
+    pub(crate) text: String,
+}
+
 /// The prompt of the turn in flight, kept in memory (never persisted) so that Retry can send it
 /// again.
 ///
 /// `text`, `mention_paths` and `images` are what went on the wire. `draft` and `mentions` are
 /// what refills the composer: `assemble_prompt` strips the accepted `@path` tokens from `text`,
-/// so the raw draft is kept beside it.
+/// so the raw draft is kept beside it. `shell` is the context that went ahead of `text`, kept
+/// apart from it so that the user's row, the history and every reader of what was typed stay
+/// clean; Retry resends it as it was and collects nothing new.
 #[derive(Clone, Debug)]
 pub(crate) struct LastPrompt {
     pub(crate) text: String,
@@ -18,6 +32,7 @@ pub(crate) struct LastPrompt {
     pub(crate) images: Vec<ImageAttachment>,
     pub(crate) draft: String,
     pub(crate) mentions: Vec<String>,
+    pub(crate) shell: Option<ShellCarry>,
 }
 
 /// The prompt Continue sends.
@@ -33,6 +48,7 @@ impl LastPrompt {
             images: Vec::new(),
             draft: CONTINUE_PROMPT.to_string(),
             mentions: Vec::new(),
+            shell: None,
         }
     }
 }

@@ -1220,7 +1220,8 @@ pub mod request {
     /// its Copy does (`copy`, by the row's index `entry`; it writes the clipboard itself, with no
     /// Copy button and no check mark), presses Quote on a message row (`quote`, by `entry`), or
     /// picks Quote selection from the transcript's menu (`quoteSelection`, which quotes what is
-    /// selected and is refused when nothing is selected within one entry).
+    /// selected and is refused when nothing is selected within one entry), or presses a shell
+    /// block's Show all / Show less (`toggleShell`, by the block's index `entry`).
     pub fn chat_transcript(
         surface_id: &str,
         action: &str,

@@ -630,6 +630,7 @@ async fn a_lost_acp_turn_gives_its_prompt_back_in_the_composer(cx: &mut TestAppC
                 images: vec![png()],
                 draft: "look at @src/a.rs please".into(),
                 mentions: vec!["src/a.rs".into()],
+                shell: None,
             },
             cx,
         );

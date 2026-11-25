@@ -13,8 +13,10 @@ name: macOS check
 # symbol would sail through it anyway.
 #
 # So this builds the app on the release platform's own runner, and runs the
-# one program that exercises the privacy FFI for real. It does not run the
-# test suite: Scripts/ci.sh already does, on macOS, in the release gate.
+# one program that exercises the privacy FFI for real. It runs the tests of
+# two crates, whose platform calls behave differently on macOS: sirio_privacy's
+# and the chat shell runner's (`!` commands in the chat). The rest of the test
+# suite is Scripts/ci.sh's, on macOS, in the release gate.
 #
 # It also runs the host foundation's detach probe and lifecycle E2E (spec
 # docs/superpowers/specs/2026-10-05-host-foundation-design.md §9.3): the
@@ -77,6 +79,14 @@ jobs:
       - name: Test sirio_privacy
         working-directory: rust
         run: cargo test -p sirio_privacy --locked
+
+      # The runner of the chat's `!` commands against real processes: its waitid
+      # wait (macOS reports a stop even when none was asked for; the runner re-polls),
+      # and the libproc + getsid scan of a session's members that Stop, a close
+      # and a quit end a command with. The app build above only compiles them.
+      - name: Test the chat shell runner
+        working-directory: rust
+        run: cargo test -p sirio_chat --test shell_run --locked
 
       # Reads every permission through the real TCC, CoreGraphics, HIServices
       # and AppleEvents calls. Passing means each one returned rather than
