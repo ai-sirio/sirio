@@ -4,6 +4,7 @@
 //! unfinished line until its newline comes: an escape sequence split across two reads is still
 //! removed whole. Finished lines are stored normalised.
 
+use std::borrow::Cow;
 use std::collections::{VecDeque, vec_deque};
 
 /// The most a command's output keeps in memory (and in [`ShellOutput::text`], bar its marker line).
@@ -526,6 +527,119 @@ impl ShellOutput {
             self.head_closed = true;
         }
     }
+}
+
+/// How much of an output a view of it shows (see [`ShellOutput::view`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ViewLimits {
+    /// The lines of the folded view: the last ones.
+    pub folded_lines: usize,
+    /// The most lines the expanded view holds: the last ones.
+    pub expanded_lines: usize,
+    /// The most bytes the expanded view holds. It always holds the folded view's lines, whatever
+    /// they weigh, so that expanding never shows less than folding.
+    pub expanded_bytes: usize,
+    /// The characters of a line a view shows. What a longer line has beyond them is said in
+    /// ` … {n} more characters`.
+    pub line_chars: usize,
+}
+
+/// What a block draws of an output, worked out in one pass and in the background (see
+/// [`ShellOutput::view`]). The agent is never given this: it reads the output whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutputView {
+    /// The last lines, each cut to the limit.
+    pub folded: String,
+    /// How many lines `folded` has.
+    pub folded_lines: usize,
+    /// The last lines that fit the limits, each cut to the limit.
+    pub expanded: String,
+    /// How many lines `expanded` has (the marker line included, when it is one of them).
+    pub expanded_lines: usize,
+    /// Lines the output holds that `expanded` leaves out: the command's own lines, never the
+    /// marker.
+    pub hidden_lines: u64,
+    /// Lines the command printed that the output no longer holds (the memory cap, or a restored
+    /// block's store, dropped them).
+    pub lines_not_kept: u64,
+    /// How many lines [`ShellOutput::text`] has.
+    pub kept_lines: usize,
+    /// Every line the command produced.
+    pub total_lines: u64,
+}
+
+impl ShellOutput {
+    /// What a block draws of this output: the folded and the expanded view, and how many lines each
+    /// leaves out. `expanded_lines + hidden_lines + lines_not_kept` is the command's lines, with one
+    /// less than `expanded_lines` when the marker line is one of them.
+    #[must_use]
+    pub fn view(&self, limits: ViewLimits) -> OutputView {
+        // One pass over the lines: the unfinished line is normalised once, not once per question.
+        let shown = self.shown();
+        let kept_lines = shown.count();
+        let held = self.head.len() + self.tail.len();
+        let unfinished = usize::from(shown.unfinished.is_some());
+        let (folded, folded_lines) = window(&shown, limits.folded_lines, usize::MAX, 0, limits.line_chars);
+        let (expanded, expanded_lines) = window(
+            &shown,
+            limits.expanded_lines,
+            limits.expanded_bytes,
+            limits.folded_lines,
+            limits.line_chars,
+        );
+        // A window is taken from the end: the unfinished line, the tail, then the marker, then the head.
+        let marker_shown = shown.marker.is_some() && expanded_lines > self.tail.len() + unfinished;
+        let command_lines_shown = expanded_lines - usize::from(marker_shown);
+        OutputView {
+            folded,
+            folded_lines,
+            expanded,
+            expanded_lines,
+            hidden_lines: (held + unfinished).saturating_sub(command_lines_shown) as u64,
+            lines_not_kept: self.lines_done.saturating_sub(held as u64),
+            kept_lines,
+            total_lines: self.lines_done + unfinished as u64,
+        }
+    }
+}
+
+/// The last lines of `shown`, each cut to `line_chars`, joined by `\n`, and how many they are: at
+/// most `max_lines`, and as many as fit `max_bytes`, but never fewer than `min_lines` (or one).
+fn window(
+    shown: &Shown<'_>,
+    max_lines: usize,
+    max_bytes: usize,
+    min_lines: usize,
+    line_chars: usize,
+) -> (String, usize) {
+    let mut taken: Vec<Cow<'_, str>> = Vec::new();
+    let mut bytes = 0usize;
+    for line in shown.iter().rev().take(max_lines) {
+        let line = cut_line(line, line_chars);
+        // Its own bytes, and the newline that will come between it and the line after it.
+        let cost = line.len() + usize::from(!taken.is_empty());
+        if taken.len() >= min_lines.max(1) && bytes + cost > max_bytes {
+            break;
+        }
+        bytes += cost;
+        taken.push(line);
+    }
+    taken.reverse();
+    (taken.join("\n"), taken.len())
+}
+
+/// `line` cut to its first `max_chars` characters, with ` … {n} more characters` for the `n` it has
+/// beyond them. The cut is on a character boundary and counts characters, not bytes.
+fn cut_line(line: &str, max_chars: usize) -> Cow<'_, str> {
+    // A line of `max_chars` bytes or fewer has no more characters than that.
+    if line.len() <= max_chars {
+        return Cow::Borrowed(line);
+    }
+    let Some((at, _)) = line.char_indices().nth(max_chars) else {
+        return Cow::Borrowed(line);
+    };
+    let more = line[at..].chars().count();
+    Cow::Owned(format!("{} … {more} more characters", &line[..at]))
 }
 
 #[cfg(test)]
@@ -1209,5 +1323,129 @@ mod tests {
         o.push(b"c\n");
         assert_eq!(o.text(), "a\nb\nc");
         assert_eq!(o.total_lines(), 10);
+    }
+
+    // ---- view -----------------------------------------------------------
+    //
+    // The ways a view can fail, written before the code that makes it:
+    // 1. a line of exactly the limit is cut (off by one), or one a character longer is not;
+    // 2. the cut splits a multi-byte character, or counts bytes where it says characters;
+    // 3. one line of a million characters is drawn whole (a view is bounded by characters, not only by lines);
+    // 4. the expanded view holds more than its line or byte limit, or fewer lines than the folded one;
+    // 5. a view starts at the first lines instead of the last;
+    // 6. the line that has not ended is left out of the view, or is not cut;
+    // 7. the counts do not add up: what is shown, hidden and not kept must be the command's lines, the marker not being one.
+
+    const LIMITS: ViewLimits = ViewLimits {
+        folded_lines: 40,
+        expanded_lines: 2_000,
+        expanded_bytes: 64 * 1024,
+        line_chars: 2_000,
+    };
+
+    #[test]
+    fn a_line_is_cut_to_its_characters_and_says_how_many_it_lost() {
+        let mut exact = ShellOutput::default();
+        exact.push(format!("{}\n", "é".repeat(2_000)).as_bytes());
+        assert_eq!(exact.view(LIMITS).folded, "é".repeat(2_000), "a line of the limit's length is whole");
+
+        let mut one_over = ShellOutput::default();
+        one_over.push(format!("{}\n", "é".repeat(2_001)).as_bytes());
+        assert_eq!(one_over.view(LIMITS).folded, format!("{} … 1 more characters", "é".repeat(2_000)));
+
+        let mut emoji = ShellOutput::default();
+        emoji.push(format!("{}\n", "😀".repeat(3_000)).as_bytes());
+        let view = emoji.view(LIMITS);
+        assert_eq!(view.folded, format!("{} … 1000 more characters", "😀".repeat(2_000)), "characters, not bytes");
+        assert_eq!(view.expanded, view.folded);
+    }
+
+    #[test]
+    fn one_enormous_line_is_drawn_in_a_few_thousand_characters() {
+        let mut o = ShellOutput::default();
+        o.push("x".repeat(1_000_000).as_bytes());
+        let view = o.view(LIMITS);
+        assert!(view.folded.chars().count() < 2_200 + 100, "folded {} characters", view.folded.chars().count());
+        assert!(view.expanded.chars().count() < 2_200 + 100, "expanded {} characters", view.expanded.chars().count());
+        // The line is the one kept (the cap dropped its start, and a marker line says so), cut at the limit.
+        let kept = o.text();
+        let kept_line = kept.lines().last().expect("a line");
+        let drawn = view.folded.lines().last().expect("a line");
+        assert_eq!(drawn, format!("{} … {} more characters", "x".repeat(2_000), kept_line.chars().count() - 2_000));
+    }
+
+    #[test]
+    fn the_expanded_view_is_the_last_lines_within_its_limits() {
+        let view = numbered(5_000).view(LIMITS);
+        assert_eq!(view.folded_lines, 40);
+        assert_eq!(view.folded.lines().next(), Some("line 004960"));
+        assert_eq!(view.folded.lines().last(), Some("line 004999"));
+        assert_eq!(view.expanded_lines, 2_000);
+        assert_eq!(view.expanded.lines().next(), Some("line 003000"));
+        assert_eq!(view.expanded.lines().last(), Some("line 004999"));
+        assert_eq!((view.hidden_lines, view.lines_not_kept), (3_000, 0));
+        assert_eq!((view.kept_lines, view.total_lines), (5_000, 5_000));
+    }
+
+    #[test]
+    fn the_expanded_view_stops_at_its_bytes_and_never_shows_less_than_the_fold() {
+        // 999 characters and a newline: 65 of them are 64,999 bytes, a 66th would pass the limit.
+        let mut o = ShellOutput::default();
+        for _ in 0..200 {
+            o.push(format!("{}\n", "z".repeat(999)).as_bytes());
+        }
+        let view = o.view(LIMITS);
+        assert!(view.expanded.len() <= 64 * 1024, "{} bytes", view.expanded.len());
+        assert_eq!(view.expanded_lines, 65);
+        assert_eq!(view.hidden_lines, 135);
+
+        // Lines so heavy that the limit holds fewer than the fold's 40: the fold's lines stay.
+        let mut heavy = ShellOutput::default();
+        for _ in 0..100 {
+            heavy.push(format!("{}\n", "é".repeat(2_000)).as_bytes());
+        }
+        let view = heavy.view(LIMITS);
+        assert_eq!((view.folded_lines, view.expanded_lines), (40, 40));
+        assert_eq!(view.hidden_lines, 60);
+    }
+
+    #[test]
+    fn the_line_that_has_not_ended_is_in_the_view_and_cut_too() {
+        let mut o = ShellOutput::default();
+        o.push(format!("a\n{}", "b".repeat(3_000)).as_bytes());
+        let view = o.view(LIMITS);
+        assert_eq!(view.folded, format!("a\n{} … 1000 more characters", "b".repeat(2_000)));
+        assert_eq!(view.total_lines, 2);
+    }
+
+    #[test]
+    fn what_is_shown_hidden_and_not_kept_is_what_the_command_printed() {
+        // A cap that drops lines: the view shows the last 2,000, hides some, and the store lost the rest.
+        let view = numbered(200_000).view(LIMITS);
+        assert!(!view.expanded.contains("not kept"), "the marker is far above the last 2,000 lines");
+        assert!(view.hidden_lines > 0 && view.lines_not_kept > 0);
+        assert_eq!(view.expanded_lines as u64 + view.hidden_lines + view.lines_not_kept, view.total_lines);
+        assert_eq!(view.total_lines, 200_000);
+
+        // Forty-odd lines of 40 KB: the cap leaves a few, and the marker is among the lines shown.
+        let mut few = ShellOutput::default();
+        for _ in 0..40 {
+            few.push(format!("{}\n", "y".repeat(40_000)).as_bytes());
+        }
+        let view = few.view(LIMITS);
+        assert!(view.expanded.contains("not kept"), "the marker line is in the view");
+        assert_eq!(view.hidden_lines, 0);
+        assert!(view.lines_not_kept > 0);
+        assert_eq!(view.expanded_lines as u64 - 1 + view.lines_not_kept, view.total_lines, "the marker is not one of the command's lines");
+    }
+
+    #[test]
+    fn an_empty_output_and_a_restored_one_are_counted_as_they_are() {
+        assert_eq!(ShellOutput::default().view(LIMITS), OutputView::default());
+        // A block restored from its fold: 3 lines held of the 100 the command printed.
+        let view = ShellOutput::from_text("a\nb\nc", 100).view(LIMITS);
+        assert_eq!((view.kept_lines, view.total_lines), (3, 100));
+        assert_eq!((view.folded_lines, view.expanded_lines, view.hidden_lines, view.lines_not_kept), (3, 3, 0, 97));
+        assert_eq!(view.expanded, "a\nb\nc");
     }
 }
