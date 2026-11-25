@@ -97,19 +97,25 @@ mod unix {
             Self { pid, seen_gone: Cell::new(false) }
         }
 
-        /// Whether the process is running. A zombie still answers `kill(pid, 0)` until init reaps
-        /// it, so on Linux a process `/proc` shows as a zombie does not count; elsewhere it does,
-        /// and init is given time. Seeing it gone is remembered, so a failed assertion after that
-        /// does not signal the pid.
+        /// Whether the pid still answers. A zombie does too, until its parent (or init, for an
+        /// orphan) reaps it: that is how a runner that forgets to reap the shell it started is
+        /// seen, which is why [`Self::is_gone`] uses this and not [`Self::is_running`]. Seeing
+        /// the pid gone is remembered, so a failed assertion after that does not signal it.
         fn is_alive(&self) -> bool {
             // SAFETY: signal 0 only checks that the pid exists.
             let answers = unsafe { libc::kill(self.pid, 0) } == 0
                 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-            let alive = answers && !self.is_zombie();
-            if !alive {
+            if !answers {
                 self.seen_gone.set(true);
             }
-            alive
+            answers
+        }
+
+        /// Whether the process is running: it answers and, on Linux, `/proc` does not show it as a
+        /// zombie. A process that has just been killed is a zombie within microseconds, so only
+        /// this tells a process that was left alone from one that was killed and not yet reaped.
+        fn is_running(&self) -> bool {
+            self.is_alive() && !self.is_zombie()
         }
 
         /// Whether `/proc` shows the process as dead and waiting to be reaped. The state is the
@@ -136,15 +142,17 @@ mod unix {
         fn stays_alive_for(&self, period: Duration) -> bool {
             let until = Instant::now() + period;
             while Instant::now() < until {
-                if !self.is_alive() {
+                if !self.is_running() {
                     return false;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            self.is_alive()
+            self.is_running()
         }
 
-        /// Whether the process is gone, giving init up to 2 s to reap a killed orphan.
+        /// Whether the process is gone and reaped, giving init up to 2 s to reap a killed orphan.
+        /// A zombie is not gone: a shell the runner did not reap stays one, as it is the test's own
+        /// child.
         fn is_gone(&self) -> bool {
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
