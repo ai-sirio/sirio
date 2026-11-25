@@ -17,9 +17,7 @@
 //! back through the full pipe instead of growing memory without limit. The same bound means a
 //! consumer that never drains it holds the run's threads: it is expected to drain the channel.
 
-#[cfg(unix)]
-use std::ffi::OsStr;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
