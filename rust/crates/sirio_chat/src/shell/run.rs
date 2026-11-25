@@ -506,7 +506,10 @@ fn parse_stat(stat: &str) -> Option<(libc::pid_t, libc::pid_t)> {
     Some((group, session))
 }
 
-/// macOS has no `/proc`: libproc lists the pids and `getsid` names the session of each one.
+/// macOS has no `/proc`: libproc lists the pids and `getsid` names the session of each one. As on
+/// Linux, the unreaped shell holds `sid`, and a member that exits, is reaped and has its pid reused by
+/// an unrelated process between the scan and the kill would be signalled in its place. That takes the
+/// whole pid space turning over within the milliseconds between the two, and it is accepted.
 #[cfg(target_os = "macos")]
 fn session_members(sid: libc::pid_t) -> Vec<libc::pid_t> {
     // SAFETY: with no buffer, `proc_listallpids` only says how many pids there are.

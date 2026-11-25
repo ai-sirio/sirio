@@ -436,9 +436,11 @@ pub struct ChatShellRun {
     /// How many lines the command printed in all, kept or not.
     pub total_lines: u64,
     /// The shell's exit status. `None` only when the command could not start
-    /// (`stopped` is then false): a run that started always has one. A
-    /// signal's death is `128 + signal`, and `-1` means the system could not
-    /// say how the shell ended.
+    /// (`stopped` is then false): a run that started always has one. On Unix
+    /// a signal's death is `128 + signal`, as the shell's `$?` reads it; on
+    /// Windows, where Stop ends the shell with an exit code of 1, there is no
+    /// such number. `-1` means the system could not say how the shell ended
+    /// (a Windows exit of `0xFFFFFFFF` reads the same).
     pub exit: Option<i32>,
     /// Whether the user stopped the command.
     pub stopped: bool,
