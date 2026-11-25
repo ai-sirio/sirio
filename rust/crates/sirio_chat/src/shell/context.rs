@@ -26,8 +26,9 @@ pub struct ShellRecord {
     /// How many characters the output had before `output` was cut to what it holds, when `output`
     /// already is such a cut (a block restored from a store that kept it cut). It is a fact the
     /// store carries, never read out of the text: a command can print anything. [`context_for`]
-    /// does not cut such an output a second time, which could say only what the second cut
-    /// removed of the text it was given.
+    /// cuts such an output again when the room left is smaller than it, from its stored head and
+    /// tail and with this count, so that the marker says what the command printed and not what
+    /// the second cut removed of the text it was given.
     pub cut_from: Option<usize>,
 }
 
@@ -80,20 +81,32 @@ pub fn cap_output(output: &str, room: usize) -> String {
     if total <= room {
         return output.to_string();
     }
-    // The count has at most as many digits as the length: reserve them all.
-    let marker = MARKER_OPEN.chars().count() + digits(total) + MARKER_CLOSE.chars().count();
+    cut_to_room(output, total, total, room)
+}
+
+/// `output`, which has `chars` characters and is the first and last of the `printed` the command
+/// wrote, cut to `room` characters, marker included: the first third and the last two thirds of what
+/// is left of `room` once the marker is paid for, and the marker says `printed` less what is kept.
+/// A room that cannot hold the marker and something besides it gets [`omitted_line`].
+///
+/// Called with `printed == chars` it cuts an output the command wrote. Called with more, it cuts
+/// one that was cut already to be stored: when `room` is below that text's own length, a head and
+/// a tail of the new size lie inside the old head and the old tail, and the old marker is left out.
+fn cut_to_room(output: &str, chars: usize, printed: usize, room: usize) -> String {
+    // The count has at most as many digits as `printed`: reserve them all.
+    let marker = MARKER_OPEN.chars().count() + digits(printed.max(chars)) + MARKER_CLOSE.chars().count();
     if room <= marker {
-        return omitted_line(total);
+        return omitted_line(printed);
     }
     let kept = room - marker;
     let head = kept / 3;
     let tail = kept - head;
     let head_end = byte_offset_of_char(output, head);
-    let tail_start = byte_offset_of_char(output, total - tail);
+    let tail_start = byte_offset_of_char(output, chars.saturating_sub(tail));
     format!(
         "{}{MARKER_OPEN}{}{MARKER_CLOSE}{}",
         &output[..head_end],
-        total - kept,
+        printed.saturating_sub(kept),
         &output[tail_start..]
     )
 }
@@ -114,15 +127,22 @@ fn byte_offset_of_char(text: &str, n: usize) -> usize {
 /// The output budget is [`CONTEXT_OUTPUT_BUDGET`] for the whole prompt and is spent newest first,
 /// each block taking up to what remains, the line that says what was cut from it included. The
 /// command and the exit line are never charged to it. An output that is a cut already
-/// ([`ShellRecord::cut_from`]) is never cut a second time: it goes whole when it fits what
-/// remains, and otherwise as the line that says how long the command's output was.
+/// ([`ShellRecord::cut_from`]) goes whole when it fits what remains; otherwise it is cut again
+/// from its stored head and tail, and its marker says how many characters the command printed
+/// that are not kept.
 pub fn context_for(records: &[ShellRecord]) -> String {
     let mut remaining = CONTEXT_OUTPUT_BUDGET;
     let mut blocks: Vec<String> = Vec::with_capacity(records.len());
     for record in records.iter().rev() {
         let output = match record.cut_from {
-            Some(printed) if record.output.chars().count() > remaining => omitted_line(printed),
-            Some(_) => record.output.clone(),
+            Some(printed) => {
+                let chars = record.output.chars().count();
+                if chars > remaining {
+                    cut_to_room(&record.output, chars, printed, remaining)
+                } else {
+                    record.output.clone()
+                }
+            }
             None => cap_output(&record.output, remaining),
         };
         remaining = remaining.saturating_sub(output.chars().count());
@@ -272,26 +292,93 @@ mod tests {
         assert!(context_for(&[old]).contains(&format!("<bash-stdout>{stored}</bash-stdout>")));
     }
 
+    // ---- a restored block that was cut already, cut again to a smaller room (M4) ----------------
+    //
+    // The ways the second cut can fail, written before the rule that makes it:
+    // 1. it states what it removed of the stored text (a small number) and not what the command printed;
+    // 2. it keeps a piece of the old marker, or the marker itself, so the agent reads two;
+    // 3. what it keeps is not a head and a tail of what the command printed (the old marker's room is taken into the kept thirds);
+    // 4. it is longer than the room it was given, or leaves room unused (a restored block that fits nothing sends nothing);
+    // 5. a room too small for the marker and some text sends something else than the line that says how long the output was.
+
+    /// The numbers of a cut text: how many of the command's characters it keeps, how many its marker says it lost, and whether
+    /// it holds exactly one marker.
+    fn read_cut(body: &str) -> (usize, usize, bool) {
+        let (kept, stated) = kept_and_stated(body);
+        (kept, stated, body.matches("characters omitted").count() == 1)
+    }
+
+    /// The output of the one block the context has in the tags of `record`'s command.
+    fn body_of<'a>(context: &'a str, command: &str) -> &'a str {
+        let open = format!("<bash-input>{command}</bash-input>\n<bash-stdout>");
+        let start = context.find(&open).expect("the block") + open.len();
+        context[start..].split("</bash-stdout>").next().expect("its output")
+    }
+
+    /// A block as a restart gives it back, and what its command printed.
+    fn restored_numbers() -> (ShellRecord, String) {
+        let original = (1..=200_000).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let record = ShellRecord {
+            command: "old".into(),
+            output: cap_output(&original, CONTEXT_OUTPUT_BUDGET),
+            exit: Some(0),
+            stopped: false,
+            cut_from: Some(original.chars().count()),
+        };
+        (record, original)
+    }
+
     #[test]
-    fn a_record_that_is_a_cut_already_states_what_the_command_printed_when_it_does_not_fit() {
-        let old = restored_cut(1_300_000);
-        let printed = old.cut_from.unwrap();
-        // One newer character is enough to leave it less room than its own length: it is not cut again, whose marker would state
-        // the characters of the stored text that the second cut removed, and none of the command's.
-        let text = context_for(&[old, pending("new", "x")]);
-        let body = text.split("<bash-stdout>").nth(1).unwrap().split("</bash-stdout>").next().unwrap();
-        assert_eq!(body, format!("[output omitted, {printed} characters]"));
-        assert!(!text.contains("characters omitted"));
+    fn a_cut_record_that_no_longer_fits_is_cut_again_and_counts_what_the_command_printed() {
+        let (old, original) = restored_numbers();
+        let printed = original.chars().count();
+        // One character of a newer block leaves the old one 29,999 of its 30,000.
+        let context = context_for(&[old, pending("new", "x")]);
+        let body = body_of(&context, "old");
+        let (kept, stated, one_marker) = read_cut(body);
+        assert!(one_marker, "one marker, not the old one and a new one: {body:.80}");
+        assert_eq!(stated, printed - kept, "the count is what the command printed less what is kept");
+        let (head, rest) = body.split_once("\n[… ").expect("the marker");
+        let tail = rest.split_once(" characters omitted …]\n").expect("its end").1;
+        assert!(original.starts_with(head), "the head is the start of what the command printed");
+        assert!(original.ends_with(tail), "the tail is the end of what the command printed");
+        assert!(body.chars().count() <= CONTEXT_OUTPUT_BUDGET - 1, "{} characters in a room of 29,999", body.chars().count());
+        assert!(body.chars().count() > CONTEXT_OUTPUT_BUDGET - 100, "the room is used: {} characters", body.chars().count());
+    }
+
+    #[test]
+    fn a_cut_record_cut_to_a_small_room_still_counts_what_the_command_printed() {
+        let (old, original) = restored_numbers();
+        let printed = original.chars().count();
+        // The newer block takes 25,000 of the 30,000: 5,000 are left for the old one, which holds 30,000.
+        let context = context_for(&[old, pending("new", &"z".repeat(25_000))]);
+        let body = body_of(&context, "old");
+        let (kept, stated, one_marker) = read_cut(body);
+        assert!(one_marker, "one marker: {body:.80}");
+        assert_eq!(stated, printed - kept);
+        assert!(original.starts_with(body.split_once("\n[… ").unwrap().0));
+        assert!(body.chars().count() <= 5_000 && body.chars().count() > 4_900, "{} characters", body.chars().count());
+    }
+
+    #[test]
+    fn a_cut_record_with_no_room_for_a_marker_and_some_text_says_how_long_the_command_was() {
+        let (old, original) = restored_numbers();
+        // 10 characters are left: not enough for a marker and anything beside it.
+        let context = context_for(&[old, pending("new", &"z".repeat(29_990))]);
+        assert_eq!(body_of(&context, "old"), format!("[output omitted, {} characters]", original.chars().count()));
     }
 
     #[test]
     fn a_stored_cut_with_no_recorded_original_is_cut_as_before() {
-        // Data saved before the original count existed: nothing says the output is a cut, so it is capped like any other.
+        // Data saved before the original count existed: nothing says the output is a cut, so it is capped like any other, and its
+        // marker says what that cap removed of the text it was given (what a restored cut that knows its count never does).
         let mut old = restored_cut(1_300_000);
+        let stored_chars = old.output.chars().count();
         old.cut_from = None;
         let text = context_for(&[old, pending("new", "x")]);
-        assert!(text.contains("characters omitted …]"));
         let body = text.split("<bash-stdout>").nth(1).unwrap().split("</bash-stdout>").next().unwrap();
+        let (kept, stated) = kept_and_stated(body);
+        assert_eq!(stated, stored_chars - kept, "the count is the stored text's, not the command's");
         assert!(body.chars().count() <= CONTEXT_OUTPUT_BUDGET - 1);
     }
 
