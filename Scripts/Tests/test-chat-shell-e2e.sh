@@ -8,16 +8,16 @@ set -eEuo pipefail
 # mode) and its ACP chat to the stub `opencode` (Scripts/Tests/stubs/richer/opencode, the ACP fixture in its `richer` mode).
 # Both stubs log every prompt they read, in full, to $SIRIO_STUB_LOG, and dispatch on the prompt less the shell blocks at
 # its head. It is driven over the debug control socket (`surface.chat.send` takes the path of Enter, `surface.chat.compose`
-# sets the draft) and read through `surface.chat.read`: per shell block `{kind: "shell", command, status, exit, sent, lines,
-# expanded, output}`, and in `composerRow` `shellMode` and `bandRule`. The debug verb `surface.chat.transcript` `toggleShell`
-# presses a block's Show all / Show less, and Escape is a real key of the X server (xdotool) after a click on the composer's
+# sets the draft) and read through `surface.chat.read`: per shell block `{kind: "shell", command, status, exit, sent, caption,
+# lines, control, note, expanded, output}`, and in `composerRow` `shellMode` and `bandRule`. The debug verb
+# `surface.chat.transcript` `toggleShell` presses a block's Show all / Show last / Show less, and Escape is a real key of the X server (xdotool) after a click on the composer's
 # field. Each Sirio gets its own HOME, XDG tree, database, socket and host root, under `env -i`; the user's
 # ~/.config/mise/config.toml must not change.
 #
 # Scenarios (each starts a fresh Sirio; the names are the ones --only takes). Those marked * run for claude and for opencode,
 # because what they judge crosses the transport (how a prompt reaches the agent, what a Stop does to a turn, a restored
 # chat); retry and hand_back are the Retry of one transport each (claude resends, opencode hands the message back); fold,
-# cap, forged, lifetime, band, cannot_start, stubborn and offline do not touch the transport and run for claude only:
+# budget, cap, forged, lifetime, band, cannot_start, stubborn and offline do not touch the transport and run for claude only:
 #   run*         `!printf 'a\nb\n'; exit 3` is a block with the output a, b, exit 3 and not sent, and the agent heard nothing;
 #                `!cat` ends with exit 0 within 3 s (and the command's stdin is /dev/null); `!echo "$$ $(ps -o sid= -p $$)"`
 #                prints two equal numbers: the shell leads a session of its own, with no controlling terminal
@@ -45,8 +45,15 @@ set -eEuo pipefail
 #                kept, and Enter runs it; a `!` typed in front of a prose draft is kept, and deleting it gives the prose back; the
 #                app quits and starts again: the block is back and pending, and the dead turn (its user row, its error row) is not
 #                restored
-#   fold         `!seq 1 5000` has 5000 lines and draws the last 40 (4961 to 5000); toggleShell expands it to all 5000 lines,
-#                from 1, and folds it back
+#   fold         `!seq 1 5000` has 5000 lines and draws the last 40 (4961 to 5000), its control saying `Show last 2000 lines`;
+#                toggleShell expands it to the last 2000 (3001 to 5000) with a note of the 3000 lines not shown, and folds it
+#                back; `!seq 1 100` expands whole (`Show all 100 lines`, no note); a line of 5000 characters is drawn as its
+#                first 2000 and ` … 3000 more characters`
+#   budget       what a block lays out is bounded: one line of a million characters and `yes | tr -d '\n'` (stopped with Escape)
+#                draw their first 2000 characters and a count; `!seq 1 300000` expanded after it ended, and `!seq 1 300000;
+#                sleep 6` expanded while it runs and across its end, draw the last 2000 lines with a note whose numbers add up
+#                to 300000; 200 lines of 999 characters expand to 65 lines within 64 KiB. Every read is answered meanwhile (the
+#                latencies are kept in the artifact, never judged)
 #   cap          `!seq 1 5000`, `!seq 1 6000`, then `go`: the prompt holds at most 30,000 characters of output in all (the cut's
 #                marker included), the newest block whole, the older one cut to the room left (its first third and its last two
 #                thirds, between them the number of characters omitted)
@@ -57,18 +64,22 @@ set -eEuo pipefail
 #   restart*     `!echo kept`, then the app quits and starts again: the block is back and pending, its footer says `goes with
 #                your next message` again, and the next prompt carries it (and the caption goes); then `!seq 1 100` is sent with a
 #                turn that is still in flight at a second quit: both blocks come back as sent, `seq 1 100` with its last 40 lines
-#                and still 100 lines, the unfinished turn is gone, and the next prompt carries nothing; then `!seq 1 30000`, never
-#                sent, survives a third quit and goes with the next prompt cut to the budget, its marker stating the count the cut
-#                removed from the command's output (a second cut of the stored text would state a smaller one); and `!seq 1 30500`,
-#                never sent, survives a fourth quit, then `!echo newer` takes some of the budget: the prompt carries the restored
-#                block as `[output omitted, N characters]` with N what the command printed, and `newer`
+#                and still 100 lines, with no Show all and a note of the 60 lines not kept, the unfinished turn is gone, and the
+#                next prompt carries nothing; then `!seq 1 30000`, never sent, survives a third quit, expands to its last 2000 lines
+#                with a note whose numbers add up to its 30000 lines, and goes with the next prompt cut to the budget, its marker
+#                stating the count the cut removed from the command's output (a second cut of the stored text would state a
+#                smaller one); and `!seq 1 30500`, never sent, survives a fourth quit, then `!echo newer` takes some of the budget:
+#                the prompt carries the restored block cut again from its stored head and tail, one marker, a head and a tail that
+#                are the start and the end of what the command printed, its count what the command printed less what is kept, and
+#                `newer`
 #   retry        (claude) `!echo one`, a turn `fail` that carries it, `!echo two`, then Retry: the resent prompt carries `one`
 #                and not `two`, and the next prompt carries `two` only
 #   hand_back    (opencode) `!echo back`, a turn the agent dies on, then Retry: the message is back in the composer, the block
 #                is pending again, with its caption, and the next send carries it
 #   band         the composer reports command mode and another colour of the band's rule for `!ls` than for `ls`, and the
 #                two frames differ at the band's top edge (ImageMagick) and nowhere 4 px inside it
-#   cannot_start a world whose $SHELL does not exist: `!echo x` is a block that failed and says `Could not run: ...`
+#   cannot_start a world whose $SHELL does not exist: `!echo x` is a block that failed and says `Could not run: ...`, naming
+#                the shell
 #
 # Every check prints `OK: <scenario>: [<agent>] <what>`; a failed one prints `FAIL: <scenario>: <why>`, its scenario ends there
 # (a scenario of two agents runs both and fails with what each found) and the run goes on with the next one. The run prints
@@ -100,7 +111,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY="${2:?--only needs scenario names}"; shift 2 ;;
-    -h|--help) sed -n '3,90p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,100p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

@@ -5,10 +5,11 @@
 //! Output never reaches the UI thread byte by byte. A task on the background executor drains the
 //! run's channel, keeps the command's [`ShellOutput`] and, at most every [`REPAINT_EVERY`] (and once
 //! when the command ends), hands the block a [`ShellUpdate`]: the output as it stands, and what a
-//! frame needs of it (the folded tail and the line counts), already worked out. A frame therefore
-//! never normalises output, and a command that writes as fast as it can (`yes`) costs the UI thread
-//! one update per tick. Reading is never throttled: a slow reader would hold the command back
-//! through the full pipe.
+//! frame needs of it (the folded and the expanded text, each within [`VIEW`]'s limits, and the line
+//! counts), already worked out. A frame therefore never normalises output, what a block lays out is
+//! bounded whether it runs or has ended, and a command that writes as fast as it can (`yes`) costs
+//! the UI thread one update per tick. Reading is never throttled: a slow reader would hold the
+//! command back through the full pipe.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{Div, Stateful};
 use sirio_chat::shell::context::{CONTEXT_OUTPUT_BUDGET, ShellRecord, cap_output};
-use sirio_chat::shell::output::ShellOutput;
+use sirio_chat::shell::output::{OutputView, ShellOutput, ViewLimits};
 use sirio_chat::shell::{ShellEvent, ShellRun};
 use sirio_persistence::ChatShellRun;
 
@@ -41,10 +42,17 @@ const REPAINT_EVERY: Duration = Duration::from_millis(100);
 /// The tallest the expanded body grows before it scrolls.
 const EXPANDED_MAX_HEIGHT: f32 = 360.0;
 
-/// How many lines an expanded block draws while its command still runs: the last ones. Everything kept
-/// (up to 1 MiB, a hundred thousand lines or more) is laid out again with every update, which stalls the
-/// window; once the command has ended the block draws everything it kept, which is laid out once.
-const LIVE_LINES: usize = 1_000;
+/// What a block lays out, running or ended: the last [`FOLD_LINES`] lines folded, and expanded the last
+/// 2,000 lines within 64 KiB, and in both a line shows its first 2,000 characters and says how many
+/// more it has. Everything kept (up to 1 MiB: a hundred thousand lines, or one line of nearly all of
+/// it) laid out in one text freezes the window for seconds, and again with every update while a
+/// command runs. The agent is given the output whole, never this.
+const VIEW: ViewLimits = ViewLimits {
+    folded_lines: FOLD_LINES,
+    expanded_lines: 2_000,
+    expanded_bytes: 64 * 1024,
+    line_chars: 2_000,
+};
 
 /// The most characters of a command a tooltip shows.
 const TOOLTIP_CHARS: usize = 2_000;
@@ -99,13 +107,19 @@ struct ShellExit {
 /// What the block is handed, at most every [`REPAINT_EVERY`] and when the command ends.
 pub(super) struct ShellUpdate {
     output: Arc<ShellOutput>,
-    /// The last [`FOLD_LINES`] lines.
-    folded: String,
-    /// The last [`LIVE_LINES`] lines.
-    live: String,
-    kept_lines: usize,
-    total_lines: u64,
+    /// What the output draws, within [`VIEW`], worked out where the update is made.
+    view: OutputView,
     exit: Option<ShellExit>,
+}
+
+/// How many lines of a block's output its views show and leave out (see [`OutputView`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct ViewCounts {
+    folded_lines: usize,
+    expanded_lines: usize,
+    hidden_lines: u64,
+    lines_not_kept: u64,
+    total_lines: u64,
 }
 
 /// One shell command as the transcript holds it. Cheap to clone: a frame clones the entry it draws.
@@ -114,21 +128,21 @@ pub(super) struct ShellBlock {
     pub(super) id: u64,
     /// What the user typed after the `!`, as typed.
     pub(super) command: String,
-    /// The output as of the last update. Not drawn directly: see `drawn`.
+    /// The output as of the last update. Not drawn directly: see `drawn`. The agent is given this, whole.
     output: Arc<ShellOutput>,
     pub(super) state: ShellState,
     /// The agent has been given this block with a prompt (a restored block keeps what it was).
     pub(super) sent: bool,
     pub(super) expanded: bool,
-    /// The last [`FOLD_LINES`] lines of `output`, as the last update brought them.
+    /// The last [`FOLD_LINES`] lines of `output`, each cut to its first characters, as the last update
+    /// brought them.
     folded: SharedString,
-    /// The last [`LIVE_LINES`] lines, as the last update brought them.
-    live: SharedString,
-    /// What the body draws: `folded`; while `expanded`, `live` for a command that runs, and every line
-    /// kept for one that ended. Worked out when the output or `expanded` changes, never in a frame.
+    /// The last lines that fit the expanded view's limits, cut the same way.
+    expanded_text: SharedString,
+    /// What the body draws: `folded`, or `expanded_text` while `expanded`. Chosen when the output or
+    /// `expanded` changes, never in a frame.
     drawn: SharedString,
-    kept_lines: usize,
-    total_lines: u64,
+    counts: ViewCounts,
     /// The command has been asked to stop (the block's Stop, or Escape): the next Escape kills it at
     /// once instead of asking again.
     stop_asked: bool,
@@ -144,23 +158,24 @@ pub(super) struct ShellBlock {
 
 impl ShellBlock {
     fn with_output(command: String, output: ShellOutput, state: ShellState) -> Self {
-        let folded = SharedString::from(output.tail(FOLD_LINES));
-        Self {
+        let view = output.view(VIEW);
+        let mut block = Self {
             id: next_shell_id(),
             command,
-            kept_lines: output.kept_lines(),
-            total_lines: output.total_lines(),
             output: Arc::new(output),
             state,
             sent: false,
             expanded: false,
-            drawn: folded.clone(),
-            live: folded.clone(),
-            folded,
+            folded: SharedString::default(),
+            expanded_text: SharedString::default(),
+            drawn: SharedString::default(),
+            counts: ViewCounts::default(),
             stop_asked: false,
             killed: false,
             original_chars: None,
-        }
+        };
+        block.take_view(view);
+        block
     }
 
     /// A command that has just been started and has printed nothing yet.
@@ -208,7 +223,7 @@ impl ShellBlock {
 
     /// Every line the command produced (the lines dropped past the memory cap included).
     pub(super) fn total_lines(&self) -> u64 {
-        self.total_lines
+        self.counts.total_lines
     }
 
     /// The shell's exit status, once it has one.
@@ -229,30 +244,48 @@ impl ShellBlock {
         }
     }
 
-    /// The label of the control under the body, `None` when the block has nothing more to show.
-    /// Compared with saturation: the kept lines can be one more than the command's (a marker, an
-    /// unfinished line), and a restored block can have kept fewer than it produced.
+    /// The label of the control under the body: `Show all {n} lines` when expanding shows everything the
+    /// block holds, `Show last {k} lines` when its limits leave lines out, `Show less` once expanded.
+    /// `None` when expanding would show no more than the fold does: a short output, and a block
+    /// restored after it was sent, which holds its fold alone.
     pub(super) fn fold_control(&self) -> Option<String> {
-        let dropped = self.total_lines.saturating_sub(self.kept_lines as u64) > 0;
-        if self.kept_lines <= FOLD_LINES && !dropped {
+        let counts = &self.counts;
+        if counts.expanded_lines <= counts.folded_lines {
             return None;
         }
         Some(if self.expanded {
             "Show less".to_string()
+        } else if counts.hidden_lines == 0 {
+            format!("Show all {} lines", counts.expanded_lines)
         } else {
-            // The kept lines can be one more than the command's (a marker, an unfinished line), and
-            // all of them are drawn.
-            format!("Show all {} lines", self.total_lines.max(self.kept_lines as u64))
+            format!("Show last {} lines", counts.expanded_lines)
         })
+    }
+
+    /// The quiet line above the body that says what it leaves out: `{m} earlier lines not shown` for
+    /// the lines the view's limits hide, `{m} earlier lines not kept` for the ones the memory cap or
+    /// the store dropped, both when both. It is there where the reader has nothing else that says it:
+    /// in the expanded view, and in a folded one that has no control to expand it. It is no part of
+    /// the selectable text, as the caption is not. The render and the read row take it from here.
+    pub(super) fn note(&self) -> Option<String> {
+        if !self.expanded && self.fold_control().is_some() {
+            return None;
+        }
+        let counts = &self.counts;
+        let mut parts = Vec::new();
+        if counts.hidden_lines > 0 {
+            parts.push(format!("{} earlier lines not shown", counts.hidden_lines));
+        }
+        if counts.lines_not_kept > 0 {
+            parts.push(format!("{} earlier lines not kept", counts.lines_not_kept));
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
     /// Takes an update from the task that watches the command. Returns whether the command ended.
     pub(super) fn apply(&mut self, update: ShellUpdate) -> bool {
         self.output = update.output;
-        self.folded = update.folded.into();
-        self.live = update.live.into();
-        self.kept_lines = update.kept_lines;
-        self.total_lines = update.total_lines;
+        self.take_view(update.view);
         let ended = update.exit.is_some();
         if let Some(exit) = update.exit {
             self.state = ShellState::Finished {
@@ -262,24 +295,34 @@ impl ShellBlock {
                 duration_ms: exit.duration_ms,
             };
         }
-        self.refresh_drawn();
         ended
     }
 
-    /// Flips between the folded tail and the expanded body: everything kept once the command has
-    /// ended, its last [`LIVE_LINES`] lines while it runs.
+    /// Flips between the folded tail and the expanded body.
     pub(super) fn toggle_expanded(&mut self) {
         self.expanded = !self.expanded;
         self.refresh_drawn();
     }
 
+    /// Makes what a view of the output brought the block's own.
+    fn take_view(&mut self, view: OutputView) {
+        self.counts = ViewCounts {
+            folded_lines: view.folded_lines,
+            expanded_lines: view.expanded_lines,
+            hidden_lines: view.hidden_lines,
+            lines_not_kept: view.lines_not_kept,
+            total_lines: view.total_lines,
+        };
+        self.folded = view.folded.into();
+        self.expanded_text = view.expanded.into();
+        self.refresh_drawn();
+    }
+
     fn refresh_drawn(&mut self) {
-        self.drawn = if !self.expanded {
-            self.folded.clone()
-        } else if self.is_finished() {
-            SharedString::from(self.output.text())
+        self.drawn = if self.expanded {
+            self.expanded_text.clone()
         } else {
-            self.live.clone()
+            self.folded.clone()
         };
     }
 
@@ -539,10 +582,7 @@ impl Pump {
         self.dirty = false;
         self.sent = Instant::now();
         ShellUpdate {
-            folded: self.output.tail(FOLD_LINES),
-            live: self.output.tail(LIVE_LINES),
-            kept_lines: self.output.kept_lines(),
-            total_lines: self.output.total_lines(),
+            view: self.output.view(VIEW),
             output: Arc::new(self.output.clone()),
             exit: self.exit,
         }
@@ -963,7 +1003,9 @@ pub(super) fn render(
         well.into_any_element()
     });
     let has_body = well.is_some();
-    let boxed = (has_body || !running).then(|| {
+    let note = block.note();
+    let has_note = note.is_some();
+    let boxed = (has_body || has_note || !running).then(|| {
         div()
             .w_full()
             .rounded(theme.radii.code_block)
@@ -972,8 +1014,19 @@ pub(super) fn render(
             .border_color(theme.ely.border)
             .px(px(12.0))
             .py(px(8.0))
+            .when_some(note, |boxed, note| {
+                // What the view leaves out, above it. Not selectable, as the caption is not.
+                boxed.child(
+                    div()
+                        .debug_selector(move || format!("shell-note-{index}"))
+                        .pb(px(4.0))
+                        .text_size(typography.caption2)
+                        .text_color(theme.ely.fg_subtle)
+                        .child(note),
+                )
+            })
             .when_some(well, |boxed, well| boxed.child(well))
-            .when(!has_body, |boxed| {
+            .when(!has_body && !has_note, |boxed| {
                 boxed.child(
                     div()
                         .font_family(typography.code_family)

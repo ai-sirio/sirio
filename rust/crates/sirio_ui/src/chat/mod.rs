@@ -9259,6 +9259,12 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                 row.insert("caption".into(), caption.into());
             }
             row.insert("lines".into(), block.total_lines().to_string());
+            if let Some(control) = block.fold_control() {
+                row.insert("control".into(), control);
+            }
+            if let Some(note) = block.note() {
+                row.insert("note".into(), note);
+            }
             row.insert("expanded".into(), block.expanded.to_string());
             row.insert("output".into(), block.drawn_output().to_string());
         }

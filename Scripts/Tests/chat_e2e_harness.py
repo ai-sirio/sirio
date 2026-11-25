@@ -57,7 +57,7 @@ def log(message):
 
 DETAIL_KEYS = ("id", "status", "errorKind", "retry", "coveredBy", "phase", "resetsAt", "live", "shownBytes", "at",
                "durationMs", "actions", "actionsShown", "quote")
-SHELL_KEYS = ("command", "exit", "sent", "lines", "expanded")  # a shell block's columns (`!cmd`), besides `status`
+SHELL_KEYS = ("command", "exit", "sent", "lines", "control", "note", "expanded")  # a shell block's columns (`!cmd`), besides `status`
 
 
 def compact(r):

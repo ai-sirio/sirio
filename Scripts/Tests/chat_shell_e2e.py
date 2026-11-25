@@ -6,13 +6,16 @@ Everything here runs against real, isolated debug Sirio instances on the script'
 A scenario is a function that raises `Fail` at its first failed check; the run reports it and goes on with the next one.
 A scenario that runs for two agents runs each to its end and fails with what both found, whether an agent's run ended in a
 failed check or in an error. run, carry, stop and restart run for claude and for opencode (what they judge crosses the
-transport); retry is claude's Retry and hand_back opencode's; fold, cap, forged, lifetime, band, cannot_start, stubborn and offline do not
-touch the transport and run for claude only.
+transport); retry is claude's Retry and hand_back opencode's; fold, budget, cap, forged, lifetime, band, cannot_start, stubborn and offline do
+not touch the transport and run for claude only.
 
 What the scenarios read is the debug readout of `surface.chat.read`: per shell block a row `{kind: "shell", command,
-status: running|exited|stopped|failed, exit, sent: true|false, caption, lines, expanded, output}` (`output` is what the
-block draws, so the last 40 lines while it is folded; `caption` is the line `goes with your next message` it draws while it has
-not been sent, absent after), and in `composerRow` `shellMode` and `bandRule`. The debug verb
+status: running|exited|stopped|failed, exit, sent: true|false, caption, lines, control, note, expanded, output}` (`output` is
+what the block draws: the last 40 lines while it is folded, the last 2,000 lines within 64 KiB expanded, a line cut to its first
+2,000 characters and ` … {n} more characters`; `control` is the label of its Show all / Show last / Show less button, absent when it has
+none; `note` the quiet line above the body that says how many earlier lines are not shown and not kept; `caption` is the line `goes
+with your next message` it draws while it has not been sent, absent after; `lines` is every line the command printed), and in
+`composerRow` `shellMode` and `bandRule`. The debug verb
 `surface.chat.transcript action=toggleShell` presses a block's Show all / Show less; Escape is a real key of the X server.
 Commands are sent with `surface.chat.send`, which takes the path of Enter.
 
@@ -83,6 +86,35 @@ def idle(r):
 
 def truthy(value):
     return value is True or value == "true"
+
+
+def lines_of(row):
+    """The lines of what a block draws (its read row's `output`)."""
+    return row.get("output", "").split("\n")
+
+
+def row_at(r, index):
+    """The read row at transcript row `index`."""
+    return r["rows"][index]
+
+
+def reads_for(scn, w, seconds, label):
+    """Reads the chat as fast as the socket answers, for `seconds`, and keeps in the artifact how long each answer took. The
+    numbers are recorded, never judged (a wall-clock bound is a flaky check); what is judged is that every read was answered:
+    the socket gives up on a window that does not answer for a few seconds, so an error here is a window that froze."""
+    latencies, errors = [], []
+    until = time.time() + seconds
+    while time.time() < until:
+        started = time.perf_counter()
+        try:
+            w.read()
+        except (RpcError, OSError) as error:
+            errors.append(repr(error))
+        latencies.append(round((time.perf_counter() - started) * 1000))
+    ordered = sorted(latencies)
+    summary = {"reads": len(ordered), "median_ms": ordered[len(ordered) // 2], "max_ms": ordered[-1], "errors": errors}
+    scn.keep(f"socket reads: {label}", summary)
+    return summary
 
 
 # ---------------------------------------------------------------- driving blocks
@@ -695,29 +727,162 @@ def scenario_fold(scn):
     try:
         w.start()
         w.open_chat("claude")
+        # ---- more lines than the expanded view holds: it holds the last 2,000, and says so
         r, index, row = run_block(w, "seq 1 5000")
         need(row.get("lines") == "5000" and row.get("exit") == "0", "`!seq 1 5000` is a block of 5000 lines",
              f"lines {row.get('lines')!r}, exit {row.get('exit')!r}", read=r)
-        lines = row.get("output", "").split("\n")
+        lines = lines_of(row)
         need(row.get("expanded") == "false" and len(lines) == 40 and lines[0] == "4961" and lines[-1] == "5000",
              "folded, the block draws the last 40 lines: 4961 to 5000",
              f"expanded {row.get('expanded')!r}, {len(lines)} lines from {lines[0]!r} to {lines[-1]!r}", read=r)
+        need(row.get("control") == "Show last 2000 lines" and "note" not in row,
+             "folded, its control says `Show last 2000 lines` (the expanded view holds 2000 of the 5000), and there is no note yet",
+             f"control {row.get('control')!r}, note {row.get('note')!r}", read=r)
         w.capture("fold-folded")
 
         w.toggle_shell(index)
-        r = w.wait("Show all expands the block", lambda r: shell_rows(r)[0][1].get("expanded") == "true", timeout=10)
-        row = shell_rows(r)[0][1]
-        lines = row.get("output", "").split("\n")
-        need(len(lines) == 5000 and lines[:3] == ["1", "2", "3"] and lines[-1] == "5000",
-             "expanded, the block draws all 5000 lines, from 1 to 5000",
+        r = w.wait("Show last expands the block", lambda r: row_at(r, index).get("expanded") == "true", timeout=10)
+        row = row_at(r, index)
+        lines = lines_of(row)
+        need(len(lines) == 2000 and lines[0] == "3001" and lines[-1] == "5000",
+             "expanded, the block draws the last 2000 lines, 3001 to 5000",
              f"{len(lines)} lines from {lines[0]!r} to {lines[-1]!r}", read=r)
+        need(row.get("control") == "Show less" and row.get("note") == "3000 earlier lines not shown",
+             "expanded, its control is `Show less` and a note above the body says `3000 earlier lines not shown`",
+             f"control {row.get('control')!r}, note {row.get('note')!r}", read=r)
         w.capture("fold-expanded")
 
         w.toggle_shell(index)
-        r = w.wait("Show less folds the block", lambda r: shell_rows(r)[0][1].get("expanded") == "false", timeout=10)
-        lines = shell_rows(r)[0][1].get("output", "").split("\n")
-        need(len(lines) == 40 and lines[-1] == "5000", "Show less folds it back to the last 40 lines",
-             f"{len(lines)} lines ending {lines[-1]!r}", read=r)
+        r = w.wait("Show less folds the block", lambda r: row_at(r, index).get("expanded") == "false", timeout=10)
+        row = row_at(r, index)
+        lines = lines_of(row)
+        need(len(lines) == 40 and lines[-1] == "5000" and row.get("control") == "Show last 2000 lines" and "note" not in row,
+             "Show less folds it back to the last 40 lines, with the control and no note",
+             f"{len(lines)} lines ending {lines[-1]!r}, control {row.get('control')!r}, note {row.get('note')!r}", read=r)
+
+        # ---- an output the expanded view holds whole: `Show all`, and no note
+        r, index, row = run_block(w, "seq 1 100")
+        need(row.get("control") == "Show all 100 lines" and len(lines_of(row)) == 40 and "note" not in row,
+             "`!seq 1 100` folds to 40 lines and its control says `Show all 100 lines`",
+             f"control {row.get('control')!r}, {len(lines_of(row))} lines, note {row.get('note')!r}", read=r)
+        w.toggle_shell(index)
+        r = w.wait("Show all expands the block", lambda r: row_at(r, index).get("expanded") == "true", timeout=10)
+        row = row_at(r, index)
+        lines = lines_of(row)
+        need(len(lines) == 100 and lines[0] == "1" and lines[-1] == "100" and row.get("control") == "Show less" and "note" not in row,
+             "expanded, it draws all 100 lines, 1 to 100, with `Show less` and no note: nothing is left out",
+             f"{len(lines)} lines, control {row.get('control')!r}, note {row.get('note')!r}", read=r)
+
+        # ---- a line is cut to its first 2,000 characters, and says how many it has beyond them
+        r, index, row = run_block(w, "head -c 5000 /dev/zero | tr '\\0' x")
+        need(row.get("output") == "x" * 2000 + " … 3000 more characters" and "control" not in row and "note" not in row,
+             "a line of 5000 characters is drawn as its first 2000 and ` … 3000 more characters`, with no control and no note",
+             f"output of {len(row.get('output', ''))} characters, ends {row.get('output', '')[-40:]!r}", read=r)
+    finally:
+        teardown(w)
+
+
+# ---------------------------------------------------------------- budget
+
+MORE = re.compile(r"(.)\1{1999} … (\d+) more characters")
+
+
+def budget_expand(scn, w, index, what):
+    """Presses the block's control and waits until it draws expanded. Returns the read and the block's row."""
+    w.toggle_shell(index)
+    r = w.wait(f"{what} expands", lambda r: row_at(r, index).get("expanded") == "true", timeout=30)
+    return r, row_at(r, index)
+
+
+@scenario
+def scenario_budget(scn):
+    """What a block lays out is bounded, running or ended, whatever the command prints: one line of a million characters, a line
+    that never ends, three hundred thousand lines expanded after the command ended and while it runs, and lines heavy enough to
+    reach the 64 KiB limit. The window keeps answering (every read is answered; the latencies are recorded, never judged)."""
+    need = checker(scn, "claude")
+    w = World(scn, "claude")
+    try:
+        w.start()
+        w.open_chat("claude")
+
+        # ---- one line of 1,000,000 characters, folded: its first 2,000 and the count of the rest
+        r, index, row = run_block(w, "head -c 1000000 /dev/zero | tr '\\0' x", end=30)
+        last = lines_of(row)[-1]
+        more = MORE.fullmatch(last)
+        need(row.get("lines") == "1" and more and 980_000 <= int(more.group(2)) + 2000 <= 1_000_000 and len(row.get("output", "")) < 2_400,
+             "a line of a million characters is drawn as its first 2000 characters and the count of the rest, in a few thousand "
+             "characters in all (the runner kept all but a marker's worth of it)",
+             f"lines {row.get('lines')!r}, output of {len(row.get('output', ''))} characters, last line ends {last[-40:]!r}", read=r)
+        summary = reads_for(scn, w, 3, "one line of a million characters, folded")
+        need(not summary["errors"], "the window answers while it holds that line", f"{summary}", detail=summary)
+        w.capture("budget-long-line")
+
+        # ---- a line that never ends: `yes` with no newline, 3 s, folded; the window keeps answering and Escape stops it
+        shell(w, "yes | tr -d '\\n'")
+        r = w.wait("the endless line is running and drawn", lambda r: (newest(r)[1] or {}).get("status") == "running"
+                   and MORE.fullmatch(lines_of(newest(r)[1])[-1]) is not None, timeout=20)
+        endless = len(shell_rows(r)) - 1
+        summary = reads_for(scn, w, 3, "yes | tr -d \\n, folded, running")
+        need(not summary["errors"], "the window answers while a line that never ends grows", f"{summary}", detail=summary)
+        row = newest(w.read())[1]
+        more = MORE.fullmatch(lines_of(row)[-1])
+        need(row.get("status") == "running" and more and int(more.group(2)) > 900_000 and len(row.get("output", "")) < 2_400,
+             "that block still draws its first 2000 characters and the count of the rest, a few thousand characters in all",
+             f"status {row.get('status')!r}, output of {len(row.get('output', ''))} characters", read=w.read())
+        w.escape()
+        r = w.wait("Escape stops the endless line", lambda r: (newest(r)[1] or {}).get("status") == "stopped", timeout=30)
+
+        # ---- three hundred thousand lines, expanded after the command ended
+        r, index, row = run_block(w, "seq 1 300000", end=60)
+        need(row.get("lines") == "300000" and row.get("control") == "Show last 2000 lines" and len(lines_of(row)) == 40,
+             "`!seq 1 300000` is 300000 lines, folded to 40, and its control says `Show last 2000 lines`",
+             f"lines {row.get('lines')!r}, control {row.get('control')!r}, {len(lines_of(row))} lines", read=r)
+        r, row = budget_expand(scn, w, index, "the block of `seq 1 300000`")
+        lines = lines_of(row)
+        found = re.fullmatch(r"(\d+) earlier lines not shown · (\d+) earlier lines not kept", row.get("note", ""))
+        need(len(lines) == 2000 and lines[0] == "298001" and lines[-1] == "300000" and found
+             and 2000 + int(found.group(1)) + int(found.group(2)) == 300000 and int(found.group(1)) > 0 and int(found.group(2)) > 0,
+             "expanded, it draws the last 2000 lines, 298001 to 300000, and its note says how many earlier lines are not shown "
+             "and how many were not kept: with the 2000 drawn they are the 300000 lines",
+             f"{len(lines)} lines from {lines[0]!r} to {lines[-1]!r}, note {row.get('note')!r}", read=r)
+        summary = reads_for(scn, w, 5, "seq 1 300000, expanded, ended")
+        need(not summary["errors"], "the window answers after that block expanded", f"{summary}", detail=summary)
+        w.capture("budget-seq-expanded")
+
+        # ---- the same while the command still runs, and across its end
+        count = len(shell_rows(w.read()))
+        shell(w, "seq 1 300000; sleep 6")
+        r = w.wait("the block prints its 300000 lines and runs on",
+                   lambda r: len(shell_rows(r)) > count and shell_rows(r)[count][1].get("lines") == "300000"
+                   and shell_rows(r)[count][1].get("status") == "running", timeout=60)
+        index = shell_rows(r)[count][0]
+        r, row = budget_expand(scn, w, index, "the running block")
+        lines = lines_of(row)
+        need(row.get("status") == "running" and len(lines) == 2000 and lines[-1] == "300000" and row.get("control") == "Show less"
+             and row.get("note"),
+             "expanded while the command runs, it draws the same last 2000 lines, with its control and its note",
+             f"status {row.get('status')!r}, {len(lines)} lines, note {row.get('note')!r}", read=r)
+        summary = reads_for(scn, w, 3, "seq 1 300000; sleep 6, expanded, running")
+        need(not summary["errors"], "the window answers while that block is expanded and running", f"{summary}", detail=summary)
+        r = w.wait("the command ends", lambda r: row_at(r, index).get("status") == "exited", timeout=30)
+        after = reads_for(scn, w, 4, "seq 1 300000; sleep 6, expanded, across the command's end")
+        r = w.read()
+        row = row_at(r, index)
+        lines = lines_of(row)
+        need(not after["errors"] and row.get("expanded") == "true" and len(lines) == 2000 and lines[-1] == "300000"
+             and row.get("control") == "Show less" and row.get("note"),
+             "the block that ended while expanded draws no more than it did: the same 2000 lines, and the window answered throughout",
+             f"{after}, {len(lines)} lines, control {row.get('control')!r}", detail=after, read=r)
+
+        # ---- lines heavy enough to reach the 64 KiB limit: 999 characters each, 200 lines
+        r, index, row = run_block(w, 'yes "$(head -c 999 /dev/zero | tr \'\\0\' z)" | head -n 200', end=30)
+        need(row.get("lines") == "200" and row.get("control") == "Show last 65 lines",
+             "200 lines of 999 characters fold to 40, and the expanded view holds 65 of them: its control says `Show last 65 lines`",
+             f"lines {row.get('lines')!r}, control {row.get('control')!r}", read=r)
+        r, row = budget_expand(scn, w, index, "the heavy block")
+        need(len(row.get("output", "").encode()) <= 64 * 1024 and len(lines_of(row)) == 65 and row.get("note") == "135 earlier lines not shown",
+             "expanded, it draws 65 lines within 64 KiB, and its note says `135 earlier lines not shown`",
+             f"{len(row.get('output', '').encode())} bytes, {len(lines_of(row))} lines, note {row.get('note')!r}", read=r)
     finally:
         teardown(w)
 
@@ -917,6 +1082,9 @@ def restart_for(scn, agent):
         need(hundred.get("output") == fold and hundred.get("lines") == "100",
              "the block that was sent keeps its fold alone: the last 40 of its 100 lines, and it still says it had 100",
              f"lines {hundred.get('lines')!r}, output {hundred.get('output')!r}", read=r)
+        need("control" not in hundred and hundred.get("note") == "60 earlier lines not kept",
+             "it has no Show all (nothing more is held), and a note above its fold says `60 earlier lines not kept`",
+             f"control {hundred.get('control')!r}, note {hundred.get('note')!r}", read=r)
         need(not captioned(r, "echo kept") and not captioned(r, "seq 1 100") and footer_says(r, "echo kept", "exit 0")
              and footer_says(r, "seq 1 100", "exit 0") and user_texts(r) == ["go"],
              "neither block draws `goes with your next message` and both footers say `exit 0`, and the turn that never ended is not "
@@ -943,6 +1111,23 @@ def restart_for(scn, agent):
         need(long_row.get("sent") == "false" and long_row.get("lines") == "30000" and captioned(r, "seq 1 30000"),
              "the long block is back after a restart, still pending, and still says it had 30000 lines",
              f"sent {long_row.get('sent')!r}, lines {long_row.get('lines')!r}, caption {caption_of(r, 'seq 1 30000')!r}", read=r)
+        # A restored block that was never sent has what the store kept of it, and says what it does not: expanded, it draws the last
+        # 2000 lines of that and its note counts the lines not shown (stored, not drawn) and the lines not kept (never stored).
+        index = next(i for i, x in shell_rows(r) if x.get("command") == "seq 1 30000")
+        need(long_row.get("control") == "Show last 2000 lines",
+             "the restored long block has a control to expand what the store kept of it: its last 2000 lines (it holds about 5000)",
+             f"control {long_row.get('control')!r}", read=r)
+        w.toggle_shell(index)
+        r = w.wait("the restored long block expands", lambda r: row_at(r, index).get("expanded") == "true", timeout=10)
+        row = row_at(r, index)
+        found = re.fullmatch(r"(\d+) earlier lines not shown · (\d+) earlier lines not kept", row.get("note", ""))
+        need(found and len(lines_of(row)) == 2000 and 2000 + int(found.group(1)) + int(found.group(2)) == 30_000
+             and int(found.group(2)) > 0,
+             "expanded, the restored long block draws 2000 lines and its note counts the stored lines it does not show and the "
+             "lines the store did not keep: with the 2000 drawn they are its 30000 lines",
+             f"{len(lines_of(row))} lines, note {row.get('note')!r}", read=r)
+        w.toggle_shell(index)
+        w.wait("the restored long block folds", lambda r: row_at(r, index).get("expanded") == "false", timeout=10)
         prompt, r = send_and_read(w, "big", "`big`")
         bodies = stdout_bodies(prompt)
         cut = cut_of(bodies[0], big) if len(bodies) == 1 else None
@@ -953,9 +1138,10 @@ def restart_for(scn, agent):
              f"{len(bodies)} bodies, the first of {len(bodies[0]) if bodies else 0} characters, its marker states "
              f"{marker.group(1) if marker else None}, the output had {len(big)} characters", read=r)
 
-        # ---- the same, with a command run after the restart: the restored block has less room than its own length, and it is not
-        # cut again (a second cut states what it removed of the stored text, a few dozen characters, and the first marker is lost).
-        # It goes as the line that says how long the command's output was, which the store kept for the purpose.
+        # ---- the same, with a command run after the restart: the restored block has less room than its own length, so it is cut
+        # again from its stored head and tail. Its marker states what the command printed that is not kept (the characters of
+        # `seq 1 30500`'s output, less the head and the tail the second cut keeps), not the few dozen the second cut removed of
+        # the stored text, and the old marker is not among what is kept.
         big2 = "\n".join(str(n) for n in range(1, 30_501))
         run_block(w, "seq 1 30500", end=30)
         w.quit()
@@ -965,10 +1151,17 @@ def restart_for(scn, agent):
                lambda r: any(x.get("command") == "seq 1 30500" for _, x in shell_rows(r)), timeout=15)
         run_block(w, "echo newer")
         prompt, r = send_and_read(w, "big2", "`big2`")
-        need(prompt == prompt_with([block("seq 1 30500", f"[output omitted, {len(big2)} characters]"), block("echo newer", "newer")], "big2"),
-             "with a newer block taking some of the budget, the restored long block goes as `[output omitted, N characters]` with N "
-             "the characters the command printed, never a second cut's small count",
-             f"prompt of {len(prompt)} characters, begins {prompt[:140]!r}, the output had {len(big2)} characters", read=r)
+        bodies = stdout_bodies(prompt)
+        room = BUDGET - len("newer")
+        recut = cut_of(bodies[0], big2) if len(bodies) == 2 else None
+        need(len(bodies) == 2 and bodies[1] == "newer" and recut is not None and prompt.count("characters omitted") == 1
+             and len(bodies[0]) <= room and room - len(bodies[0]) <= 3
+             and prompt == prompt_with([block("seq 1 30500", bodies[0]), block("echo newer", "newer")], "big2"),
+             "with a newer block taking some of the budget, the restored long block is cut again from its stored head and tail: one "
+             "marker, a head and a tail that are the start and the end of what the command printed, the count of characters not kept "
+             "the command's (printed less kept), and the whole of the room it was given",
+             f"{len(bodies)} bodies, the first of {len(bodies[0]) if bodies else 0} characters in a room of {room}, "
+             f"{prompt.count('characters omitted')} markers, the output had {len(big2)} characters, begins {prompt[:140]!r}", read=r)
     finally:
         teardown(w)
 
@@ -1124,8 +1317,10 @@ def scenario_cannot_start(scn):
         w.start()
         w.open_chat("claude")
         r, index, row = run_block(w, "echo x")
-        need(row.get("status") == "failed" and row.get("output", "").startswith("Could not run:"),
-             "a command whose shell is missing is a finished block that says so: failed, `Could not run: ...`",
+        need(row.get("status") == "failed" and row.get("output", "").startswith("Could not run:")
+             and "the shell /nonexistent/sh was not found" in row.get("output", ""),
+             "a command whose shell is missing is a finished block that says so: failed, `Could not run: ...`, naming the shell "
+             "(the system's own words, \"No such file or directory\", would not say whether the shell or the folder is gone)",
              f"status {row.get('status')!r}, output {row.get('output')!r}", read=r)
     finally:
         teardown(w)
