@@ -7,6 +7,8 @@ change uses.
 
 The macOS release job runs on a GitHub-hosted `macos-15`, pinned rather than `macos-latest` because the Zig 0.15.2 tarball cannot link on macOS 26 (see the Zig step in `build-release.yml`), and publishes a signed, notarized DMG beside the Linux AppImage and the Windows installer, with the signed manifest served from `dl.sirioai.app/<channel>.json`. A *stable* `v*.*.*` tag needs a hand-written `docs/release-notes/<version>.md` and a tag matching `rust/Cargo.toml` (`Scripts/check-release-version.sh` refuses otherwise).
 
+Each release carries every installer twice: `Sirio-<v>.dmg` beside `Sirio-<v>-update.dmg`, and likewise for the AppImage and the Windows installer. The manifest names the `-update` copy, so GitHub's per-asset download counters count in-app updates apart from installs. The bytes are identical, so the hashes and signatures in the manifest match both files, and the updater needs no change because it verifies the bytes and never the file name. The publish job keeps the copies in `update-artifacts/`, out of `artifacts/`, so each platform key still appears once. The sirio-website repository records the counters daily on its `stats` branch.
+
 ## Release commands
 
 ```bash

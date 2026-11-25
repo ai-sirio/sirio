@@ -675,6 +675,26 @@ jobs:
           NOTES: ${{ inputs.notes }}
         run: printf '%s\n' "$NOTES" > notes.md
 
+      # GitHub counts downloads per asset, and the updater fetches whatever the
+      # manifest names. A manifest that named the installers would add every
+      # in-app update to the count of fresh installs, so each installer is
+      # uploaded twice and the manifest names the copy. The bytes are identical:
+      # the hash and the signature match both files, and the updater, which
+      # checks only the bytes, needs no change. The sign and verify steps map
+      # update-artifacts/ to platform keys by extension, and each key must
+      # appear once there, so the copies live apart from the installers in
+      # artifacts/.
+      - name: Copy each installer for the updater
+        run: |
+          mkdir -p update-artifacts
+          for artifact in artifacts/*; do
+            name=$(basename "$artifact")
+            case "$name" in
+              *.dmg|*.AppImage|*.exe) cp "$artifact" "update-artifacts/${name%.*}-update.${name##*.}" ;;
+              *) echo "error: no update copy rule for artifact $name" >&2; exit 1 ;;
+            esac
+          done
+
       # Spec §9.1, step one: every asset is uploaded before the manifest that
       # names it exists anywhere. The release starts as a *draft*: nothing is
       # public until the artifacts have been signed and the manifest verified
@@ -685,19 +705,35 @@ jobs:
       # `--target` pins the release to the built commit, which is what
       # nightly.yml compares against to skip rebuilding a commit that already
       # has a nightly.
+      #
+      # The installers go up beside their copies for the updater, each copy
+      # labelled for what it is: someone on the Releases page who picks one
+      # gets a working installer, and the label says why it is there twice.
       - name: Create the release as a draft with every artifact
         env:
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
+          UPLOADS=(artifacts/*)
+          for copy in update-artifacts/*; do
+            case "$copy" in
+              *.dmg)      os=macOS ;;
+              *.AppImage) os=Linux ;;
+              *.exe)      os=Windows ;;
+              *)
+                echo "error: no label for update copy $copy" >&2
+                exit 1 ;;
+            esac
+            UPLOADS+=("$copy#Sirio $VERSION for $os, used by in-app updates")
+          done
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG exists; re-uploading its assets"
-            gh release upload "$TAG" artifacts/* --clobber
+            gh release upload "$TAG" "${UPLOADS[@]}" --clobber
           else
             FLAGS=()
             if [ "$PRERELEASE" = "true" ]; then
               FLAGS+=(--prerelease)
             fi
-            gh release create "$TAG" artifacts/* \
+            gh release create "$TAG" "${UPLOADS[@]}" \
               --draft \
               --target "$GITHUB_SHA" \
               --title "Sirio $VERSION" \
@@ -705,12 +741,13 @@ jobs:
               "${FLAGS[@]}"
           fi
 
-      # Every artifact built must be on the release; an asset left over from an
-      # earlier attempt is not a reason to block, because the manifest names
-      # only the files built here.
+      # Every installer and every copy built here must be on the release, since
+      # the manifest names the copies; an asset left over from an earlier attempt
+      # is not a reason to block, because the manifest names only the files
+      # built here.
       - name: Verify every artifact is attached before the manifest names it
         run: |
-          ls artifacts | sort > local-assets.txt
+          { ls artifacts; ls update-artifacts; } | sort > local-assets.txt
           gh release view "$TAG" --json assets --jq '.assets[].name' | sort > published-assets.txt
           MISSING=$(comm -23 local-assets.txt published-assets.txt)
           if [ -n "$MISSING" ]; then
@@ -723,7 +760,9 @@ jobs:
       # (`sirio_registry::current_platform_key`), mapped here from the
       # artifact each packaging script produces. An artifact this mapping does
       # not recognise fails the publish rather than being left out of the
-      # manifest silently.
+      # manifest silently. The manifest names the -update copies, so GitHub
+      # counts in-app updates apart from installs; the bytes match the
+      # installers', so the hashes and signatures are the same either way.
       - name: Sign the artifacts and write the manifest
         env:
           SIRIO_RELEASE_SIGNING_KEY: ${{ secrets.SIRIO_RELEASE_SIGNING_KEY }}
@@ -735,7 +774,7 @@ jobs:
           umask 077
           printf '%s' "$SIRIO_RELEASE_SIGNING_KEY" > signing.key
           ARGS=()
-          for artifact in artifacts/*; do
+          for artifact in update-artifacts/*; do
             case "$artifact" in
               *.dmg)      platform=darwin-aarch64 ;;
               *.AppImage) platform=linux-x86_64 ;;
@@ -760,14 +799,15 @@ jobs:
       # compiled to accept. Verifying one against the other here catches the
       # key-rotation mistake that would otherwise publish a manifest every
       # install rejects -- and, being a fail-closed rejection, one that looks
-      # exactly like an updater that never ran.
+      # exactly like an updater that never ran. It checks the -update copies,
+      # the files the manifest names and the updater downloads.
       - name: Verify the manifest against the compiled-in keys
         run: |
           KEYS=()
           for key in $SIRIO_RELEASE_ACCEPTED_KEYS; do
             KEYS+=(--pub-key "$key")
           done
-          for artifact in artifacts/*; do
+          for artifact in update-artifacts/*; do
             case "$artifact" in
               *.dmg)      platform=darwin-aarch64 ;;
               *.AppImage) platform=linux-x86_64 ;;

@@ -20,6 +20,28 @@ Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
 # --out-dir DIR, --appearance light|dark.
 Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
 
+# The split of each release's installers from the copies the update manifest names, live against
+# the published manifest: opt-in, never part of Scripts/ci.sh, and meaningful only once a release
+# with copies is published (before that it fails at stage 1, naming the installer URL). Stage 1:
+# every artifact URL in dl.sirioai.app/<channel>.json ends in -update. Stage 2: the release holds
+# each installer beside its copy, the copy labelled "Sirio <version> for <OS>, used by in-app
+# updates". Stage 3: this machine's installer and copy counters. Stage 4: update_probe, built like
+# test-update-e2e.sh builds it but with the production keys, downloads from that manifest served
+# over loopback as version 99.0.0 ("DOWNLOAD ready" on nightly, "CHECK Ready" on stable). The
+# probe runs without APPIMAGE, so applying refuses and no installed copy is touched, and the
+# script requires that refusal (nightly: exit 14 and "APPLY err Sirio is not running from an
+# install directory"; stable: exit 10). Just before the download, which cannot be undone, the
+# script reads GitHub's rate limit and stops unless it covers every poll and a margin of 5.
+# Stage 5: the GitHub API, polled every 60 s for SIRIO_UPDATE_SPLIT_WINDOW seconds (default
+# 1800), shows the copy's counter up by one and the installer's where stage 3 read it; a failed
+# read is retried and its HTTP status and message go into the FAIL line. The download is real,
+# so a run adds one to that copy's counter, and it needs SIRIO_RELEASE_ACCEPTED_KEYS
+# (gh variable get SIRIO_RELEASE_ACCEPTED_KEYS -R ai-sirio/sirio). --channel nightly|stable
+# (default nightly); --out-dir DIR keeps update-split.json (channel, tag, platform, urls, labels,
+# the counters before and after, the probe's output), written on success only; GITHUB_TOKEN, when
+# set, goes to the API for its rate limit.
+Scripts/Tests/test-update-split-live.sh   # -> prints "UPDATE SPLIT OK"
+
 # The host foundation: a real sirio-host started detached, adopted, killed
 # around, idled out and drained across a protocol major; --out-dir DIR keeps
 # every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line. Cases
