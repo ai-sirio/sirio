@@ -407,5 +407,7 @@ mod unix {
 
 #[test]
 fn missing_cwd_is_an_error() {
-    assert!(ShellRun::start("true", Path::new("/nonexistent/dir")).is_err());
+    let error = ShellRun::start("true", Path::new("/nonexistent/dir")).err().expect("a missing folder cannot be run in");
+    // The system says only "No such file or directory", which a missing shell says too: the block must say which one is missing.
+    assert!(error.to_string().contains("/nonexistent/dir"), "the error names the folder: {error}");
 }

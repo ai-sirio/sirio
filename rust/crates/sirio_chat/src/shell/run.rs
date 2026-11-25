@@ -200,7 +200,7 @@ impl ShellRun {
                 });
             }
         }
-        let child = shell_command.spawn()?;
+        let child = shell_command.spawn().map_err(|error| explain_spawn_error(error, &shell, cwd))?;
         // The command holds the parent's copies of the pipe's writer: until it is gone the reader
         // cannot see the end of the output.
         drop(shell_command);
@@ -535,6 +535,20 @@ fn session_members(sid: libc::pid_t) -> Vec<libc::pid_t> {
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn session_members(_sid: libc::pid_t) -> Vec<libc::pid_t> {
     Vec::new()
+}
+
+/// A failed spawn, saying what was not found. `NotFound` is one word for a shell that is missing and
+/// for a working directory that is, so the folder is looked at to tell them apart.
+fn explain_spawn_error(error: io::Error, shell: &OsStr, cwd: &Path) -> io::Error {
+    if error.kind() != io::ErrorKind::NotFound {
+        return error;
+    }
+    let what = if cwd.is_dir() {
+        format!("the shell {} was not found", shell.to_string_lossy())
+    } else {
+        format!("the folder {} is gone", cwd.display())
+    };
+    io::Error::new(io::ErrorKind::NotFound, format!("{what} ({error})"))
 }
 
 /// Where the reader and the waiter put events, so that `Exited` is the last one.
