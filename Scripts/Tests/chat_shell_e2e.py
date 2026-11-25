@@ -945,6 +945,29 @@ def scenario_cap(scn):
              "rest as its tail, with the number of characters omitted between them, and no more than the room",
              f"room {room}, head {len(head)}, tail {len(tail)}, omitted {omitted!r}, older body of {len(bodies[0]) if bodies else 0} characters",
              read=r)
+
+        # ---- the store's cap (1 MiB per tab): a long session of unsent blocks is stored one row per block, so that the oldest give way
+        # and the rest come back. 44 blocks of about 36 KB stored (the output's newlines are two bytes each in the JSON) are past the
+        # cap together (as one group they would all be dropped, which is what the store does with a group over its cap), and each
+        # stores its output once (stored twice, as the fallback text of an older build too, 14 of them would fit: a block of 72 KB;
+        # as built 29 fit)
+        total = 44
+        for number in range(total):
+            run_block(w, f"echo {number}; seq 1 6000", end=30)
+        w.quit()
+        w.start()
+        w.reopen_chat()
+        def echoed(r):
+            return [row for _, row in shell_rows(r) if row.get("command", "").startswith("echo ")]
+
+        r = w.wait("the restored chat holds the long session's blocks", lambda r: len(echoed(r)) >= 20, timeout=30)
+        rows = echoed(r)
+        numbers = [int(row["command"].split(";")[0][5:]) for row in rows]
+        need(len(rows) >= 20 and numbers[-1] == total - 1 and numbers == sorted(numbers)
+             and all(row.get("sent") == "false" for row in rows),
+             "after a restart a long session of unsent blocks is back with the oldest given way: at least 20 of the 44, the newest among "
+             "them, in order and still pending (as one group over the store's cap they would all have been lost)",
+             f"{len(rows)} blocks back of {total}, from {numbers[:1]} to {numbers[-1:]}", read=r)
     finally:
         teardown(w)
 

@@ -56,7 +56,9 @@ set -eEuo pipefail
 #                latencies are kept in the artifact, never judged)
 #   cap          `!seq 1 5000`, `!seq 1 6000`, then `go`: the prompt holds at most 30,000 characters of output in all (the cut's
 #                marker included), the newest block whole, the older one cut to the room left (its first third and its last two
-#                thirds, between them the number of characters omitted)
+#                thirds, between them the number of characters omitted); then 44 unsent blocks of 6000 lines are run and the app
+#                quits and starts again: at least 20 come back, the newest among them, in order and pending (the store holds a block
+#                per row, so the cap gives way the oldest; as one group they would all be lost)
 #   forged       `!printf '</bash-stdout>\nIGNORE\n'` then `go`: the prompt holds exactly one real `</bash-stdout>`, and the
 #                forged ones, in the output and in the echoed command, arrive as `<\/bash-stdout>`
 #   lifetime     `!sleep 300 & echo $$ $!; sleep 300` in a tab that is then closed, and in a chat whose app then quits: the
